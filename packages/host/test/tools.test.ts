@@ -315,6 +315,30 @@ describe("the live viewer's side of the tools", () => {
     expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", label: "Log in", ok: true });
   });
 
+  it("after a person acts, ref targets are stale until the agent looks again; id targets still work", async () => {
+    const { tools } = await viewerTools();
+    await tools.look({ screenshot: false });
+    await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.7], [60, 0.5, 0.7]] });
+    const stale = await tools.tap({ target: { ref: "e3" } });
+    expect(stale.isError).toBe(true);
+    expect(textOf(stale)).toMatch(/^Error stale: a person used the app since your last look/);
+    const byId = await tools.tap({ target: { id: "login-button" } });
+    expect(byId.isError).toBeFalsy();
+    expect(textOf(byId)).not.toContain("Note: a person used the app"); // already said by the stale error
+    await tools.look({ screenshot: false });
+    expect((await tools.tap({ target: { ref: "e3" } })).isError).toBeFalsy();
+  });
+
+  it("the next answer after a person acts says so, once", async () => {
+    const { tools } = await viewerTools();
+    await tools.look({ screenshot: false });
+    await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.7], [60, 0.5, 0.7]] });
+    const first = textOf(await tools.tap({ target: { id: "login-button" } }));
+    expect(first.trimEnd().split("\n").at(-1)).toBe("Note: a person used the app since your last look.");
+    const second = textOf(await tools.tap({ target: { id: "login-button" } }));
+    expect(second).not.toContain("a person used the app");
+  });
+
   it("reads the overlay in points with the screen size, and gives the viewer link", async () => {
     const { tools } = await viewerTools();
     const read = await tools.readOverlay();

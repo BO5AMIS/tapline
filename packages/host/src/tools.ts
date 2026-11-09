@@ -447,6 +447,10 @@ export class TaplineTools {
   private readonly listed = new Set<string>();
   /** The route of the latest element list, for recording and checking replays. */
   private lastLookRoute: string[] | undefined;
+  /** A person acted in the viewer since the agent's last full list: `{ref}` targets fail with `stale`. */
+  private personActed = false;
+  /** The next answer to the agent says a person used the app, once. */
+  private personNotePending = false;
   private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
   private replaying = false;
   /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
@@ -683,9 +687,10 @@ export class TaplineTools {
     this.listed.add(sid);
     this.lastLookRoute = tree.route?.names;
     if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
-    const lines = [
-      (askChanges ? formatChanges(tree) : null) ?? formatTree(tree, { name: session.app.name, id: session.app.id }),
-    ];
+    const changesText = askChanges ? formatChanges(tree) : null;
+    // A full list gives every ref a fresh meaning, so refs are trustworthy again.
+    if (changesText === null) this.personActed = false;
+    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [];
@@ -718,11 +723,18 @@ export class TaplineTools {
     } else {
       notes.push(`Note: screenshot failed: ${shot.error instanceof Error ? shot.error.message : String(shot.error)}`);
     }
-    lines.push(...notes);
+    lines.push(...notes, ...this.takePersonNote());
     return { content: [{ type: "text", text: lines.join("\n") }, ...content], isError: false };
   }
 
   // -- actions
+
+  /** The one-time note that a person used the app, as note lines (empty when already said). */
+  private takePersonNote(): string[] {
+    if (!this.personNotePending) return [];
+    this.personNotePending = false;
+    return ["Note: a person used the app since your last look."];
+  }
 
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
   private async act(
@@ -734,6 +746,16 @@ export class TaplineTools {
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    if (this.personActed) {
+      const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+      if (typeof target === "object" && target !== null && "ref" in target) {
+        // The error says it already, so the note isn't repeated.
+        this.personNotePending = false;
+        return fail(
+          "Error stale: a person used the app since your last look, so refs from that list may point elsewhere. Look again, or target by id, label or text.",
+        );
+      }
+    }
     let result: unknown;
     try {
       const timeoutMs = answerTimeoutMs(method, params);
@@ -754,7 +776,7 @@ export class TaplineTools {
     const settled = typeof settledMs === "number" && Number.isFinite(settledMs) && settledMs >= 0
       ? `Settled in ${(settledMs / 1000).toFixed(2)} s.`
       : undefined;
-    if (withLook === false) response = text(line);
+    if (withLook === false) response = text([line, ...this.takePersonNote()].join("\n"));
     else {
       // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
       response = await this.withLook(session, line, screenshot === true);
@@ -873,6 +895,9 @@ export class TaplineTools {
       const size = await this.screenSize(session.id);
       if (size === undefined) return { ok: false, code: "unsupported", message: "Couldn't read the screen size yet." };
       const { method, params, point } = this.mapInput(input, size);
+      // The request reaches the app from here on, whether it succeeds or is refused.
+      this.personActed = true;
+      this.personNotePending = true;
       try {
         const result = await this.host.request(method, params, { sessionId: session.id });
         return { ok: true, action: this.describeAction(method, result, point) };
