@@ -170,6 +170,51 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "compare_screen",
+    {
+      title: "Compare with a reference",
+      description:
+        "Visual regression check: the first time (or with update: true) it saves the screen as the reference picture for `name`; after that it compares the screen with it pixel by pixel and reports how much changed, where (regions in points, with the elements there), and an image of the screen with the changes in red. Keep the same width for a name.",
+      inputSchema: toolShapes.compare_screen,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => tools.compareScreen(args),
+  );
+
+  server.registerTool(
+    "filmstrip",
+    {
+      title: "Filmstrip",
+      description:
+        "Several screenshots in a row, combined into one numbered image (cheaper than separate screenshots): for animations, transitions and loading states. `press` first presses an element, then films what it sets off.",
+      inputSchema: toolShapes.filmstrip,
+    },
+    (args) => tools.filmstrip(args),
+  );
+
+  server.registerTool(
+    "record",
+    {
+      title: "Record a script",
+      description:
+        'Record a test run as a script you can replay without an AI: { action: "start", name } begins, every action after it (press, type_text, scroll, toggle, open_url, back, app_command, wait_for, wait) becomes a step, { action: "stop" } saves it. Targets are saved by testID, else label, else text (refs only work for one run). Use wait_for steps as checks. Also status and discard.',
+      inputSchema: toolShapes.record,
+    },
+    (args) => tools.record(args),
+  );
+
+  server.registerTool(
+    "replay",
+    {
+      title: "Replay a script",
+      description:
+        "Run a recorded script step by step on the connected app and report each step. It stops at the first step that fails or ends on a different screen (route) than when it was recorded. Without `name`: lists saved scripts.",
+      inputSchema: toolShapes.replay,
+    },
+    (args) => tools.replay(args),
+  );
+
+  server.registerTool(
     "wait_for",
     {
       title: "Wait for",
@@ -262,6 +307,8 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string } 
     pairImagePath: join(configDir(), `pair-${port}.png`),
     screenshots,
     screenshotDir: join(configDir(), "shots"),
+    scriptsDir: join(configDir(), "scripts"),
+    baselinesDir: join(configDir(), "baselines"),
   });
   if (screenshots === "file") log(`screenshots are saved in ${join(configDir(), "shots")} (newest 50 kept)`);
   const server = createMcpServer(tools);

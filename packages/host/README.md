@@ -12,6 +12,9 @@ Node.js 20 or later. Full setup: [docs/setup.md](../../docs/setup.md).
 | `tapline host` | the host alone, logging connections and app logs (`--scheme` also prints a pairing QR code) |
 | `tapline pair --scheme <s>` | a pairing link and QR code in the terminal |
 | `tapline info` | this computer's name and address, and the code the app needs |
+| `tapline doctor` | check Node, Tailscale, the token, ports, the Windows firewall and Metro over https |
+| `tapline dev [-- <metro command>]` | serve Metro over https in your tailnet and run Metro with `EXPO_PACKAGER_PROXY_URL` set |
+| `tapline replay <name>` | replay a recorded script without an agent (exit code 1 when a step fails) |
 | `tapline token` | print the token (only to connect without pairing, e.g. a simulator) |
 
 Options: `--port <n>` for a fixed port (or `TAPLINE_PORT`; otherwise 7210, moving up to

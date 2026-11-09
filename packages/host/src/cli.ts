@@ -1,11 +1,24 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { toString as qrText } from "qrcode";
-import { connectSnippet, hostUrl, nativeIntentSnippet, reachableHost, resolveConfig, type HostConfig } from "./config.js";
+import {
+  configDir,
+  connectSnippet,
+  hostUrl,
+  nativeIntentSnippet,
+  reachableHost,
+  resolveConfig,
+  type HostConfig,
+} from "./config.js";
+import { setUpDevServe } from "./dev.js";
+import { formatDoctor, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { TaplineHost } from "./server.js";
+import { TaplineTools } from "./tools.js";
 
 const HELP = `tapline - let agents see and drive your own app on your phone, over Tailscale
 
@@ -16,6 +29,10 @@ Commands:
   host     Run the host in the foreground and log connections and app logs
   pair     Print a pairing link and QR code for a phone (needs --scheme)
   info     Show this computer's address and how to add Tapline to an app
+  doctor   Check the setup (Node, Tailscale, token, ports, firewall, Metro over https)
+  dev      Serve Metro over https in your tailnet (iOS needs it); \`tapline dev -- <command>\`
+           also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
+  replay   Replay a recorded script without an agent: tapline replay <name>
   token    Print the token (only for connecting without pairing, e.g. a simulator)
 
 Options:
@@ -25,6 +42,10 @@ Options:
   --screenshots <inline|file>
                  For mcp: put screenshots in the tool result (default), or save them in
                  ~/.tapline/shots and return the path (or TAPLINE_SCREENSHOTS)
+  --metro-port <n>   For dev: Metro's port (default 8081)
+  --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
+  --stop             For dev: stop serving Metro
+  --wait <s>         For replay: how long to wait for the app to connect (default 60)
   -h, --help     Show this help
 
 Claude Code:  claude mcp add tapline -- tapline mcp
@@ -89,6 +110,81 @@ async function runHost(config: HostConfig, scheme: string | undefined): Promise<
   process.once("SIGTERM", stop);
 }
 
+function portOption(raw: string | undefined, name: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`${name} must be a port number, not "${raw}"`);
+  return port;
+}
+
+async function runDev(
+  values: { "metro-port"?: string; "https-port"?: string; stop?: boolean },
+  command: string[],
+): Promise<number> {
+  const metroPort = portOption(values["metro-port"], "--metro-port");
+  const httpsPort = portOption(values["https-port"], "--https-port");
+  const result = await setUpDevServe({
+    ...(metroPort !== undefined ? { metroPort } : {}),
+    ...(httpsPort !== undefined ? { httpsPort } : {}),
+    ...(values.stop === true ? { stop: true } : {}),
+  });
+  process.stdout.write(`${result.lines.join("\n")}\n`);
+  if (!result.ok) return 1;
+  const [program, ...args] = command;
+  if (program === undefined || result.url === undefined) return 0;
+  process.stdout.write(`\nRunning ${command.join(" ")} with EXPO_PACKAGER_PROXY_URL=${result.url}\n\n`);
+  return new Promise<number>((resolve) => {
+    const child = spawn(program, args, {
+      stdio: "inherit",
+      env: { ...process.env, EXPO_PACKAGER_PROXY_URL: result.url },
+      shell: process.platform === "win32", // npx and friends are .cmd files there
+    });
+    child.on("exit", (code) => resolve(code ?? 0));
+    child.on("error", (error) => {
+      process.stderr.write(`Couldn't run ${program}: ${error.message}\n`);
+      resolve(1);
+    });
+  });
+}
+
+/** Replays a script with its own host: the app must connect to it (stop agents using this port first). */
+async function runReplay(config: HostConfig, name: string, waitRaw: string | undefined): Promise<number> {
+  const waitSeconds = waitRaw === undefined ? 60 : Number(waitRaw);
+  if (!(waitSeconds > 0)) {
+    process.stderr.write("--wait is in seconds, above 0\n");
+    return 1;
+  }
+  const host = new TaplineHost({ token: config.token, port: config.port, portFallback: config.portFallback, hosts: config.hosts });
+  const result = await host.listen();
+  const port = host.boundPort() ?? config.port;
+  const url = hostUrl({ advertisedHost: reachableHost(config, result.listening) }, port);
+  const tools = new TaplineTools(host, {
+    connect: { url, name: config.name },
+    scriptsDir: join(configDir(), "scripts"),
+    baselinesDir: join(configDir(), "baselines"),
+  });
+  try {
+    process.stdout.write(`Waiting up to ${waitSeconds} s for the app to connect on port ${port} (open it on the phone)…\n`);
+    if (port !== config.port) {
+      process.stdout.write(
+        `Port ${config.port} is taken (an agent's host?). A phone reconnects to the port it paired with, so stop that agent or use its replay tool.\n`,
+      );
+    }
+    const deadline = Date.now() + waitSeconds * 1000;
+    while (host.current() === undefined && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+    if (host.current() === undefined) {
+      process.stderr.write("The app didn't connect. Is it open, with Tailscale on?\n");
+      return 1;
+    }
+    const outcome = await tools.replay({ name });
+    const textOut = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+    (outcome.isError ? process.stderr : process.stdout).write(`${textOut}\n`);
+    return outcome.isError ? 1 : 0;
+  } finally {
+    await host.close();
+  }
+}
+
 async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -98,6 +194,10 @@ async function main(argv: string[]): Promise<number> {
       host: { type: "string" },
       scheme: { type: "string" },
       screenshots: { type: "string" },
+      "metro-port": { type: "string" },
+      "https-port": { type: "string" },
+      stop: { type: "boolean" },
+      wait: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -134,6 +234,21 @@ async function main(argv: string[]): Promise<number> {
         );
       }
       return 0;
+    }
+    case "doctor": {
+      const results = await runDoctor();
+      process.stdout.write(`${formatDoctor(results)}\n`);
+      return results.some((r) => r.status === "fail") ? 1 : 0;
+    }
+    case "dev":
+      return runDev(values, positionals.slice(1));
+    case "replay": {
+      const name = positionals[1];
+      if (name === undefined) {
+        process.stderr.write("replay needs a script name: tapline replay <name>\n");
+        return 1;
+      }
+      return runReplay(await resolveConfig(options), name, values.wait);
     }
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);

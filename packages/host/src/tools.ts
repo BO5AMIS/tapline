@@ -1,9 +1,10 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
-import { annotateScreenshot } from "./annotate.js";
+import { annotateScreenshot, type ShotImage } from "./annotate.js";
+import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { describeElement, formatChanges, formatElement, formatLogs, formatTree } from "./format.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
 import {
@@ -120,6 +121,32 @@ export const toolShapes = {
     args: z.record(z.string(), z.unknown()).optional().describe("Arguments, as the command's description says"),
     look: lookField,
   },
+  compare_screen: {
+    name: z.string().describe('A name for this screen\'s reference picture, e.g. "home" or "checkout-empty"'),
+    update: z.boolean().optional().describe("Replace the saved reference with the screen as it is now"),
+    width: z
+      .number()
+      .int()
+      .min(160)
+      .max(1320)
+      .optional()
+      .describe("Screenshot width in pixels (default 600); keep it the same for a name"),
+  },
+  filmstrip: {
+    frames: z.number().int().min(2).max(9).optional().describe("How many frames (default 6)"),
+    interval_ms: z.number().int().min(0).max(2000).optional().describe("Time between frames in ms (default 250)"),
+    frame_width: z.number().int().min(100).max(400).optional().describe("Width of each frame in pixels (default 200)"),
+    press: targetField.optional().describe("Press this first, then film what it sets off (an animation, a loading state)"),
+  },
+  record: {
+    action: z
+      .enum(["start", "stop", "status", "discard"])
+      .describe("start a recording (needs name), stop and save it, see the status, or discard it"),
+    name: z.string().optional().describe("Script name for start: letters, digits, '.', '_' and '-'"),
+  },
+  replay: {
+    name: z.string().optional().describe("The script to replay; omit to list saved scripts"),
+  },
   wait_for: {
     text: z.string().optional().describe("Wait until an element whose text contains this is on screen (or gone)"),
     testID: z.string().optional().describe("Wait until the element with this testID is on screen (or gone)"),
@@ -168,6 +195,91 @@ export interface ToolsOptions {
   screenshotDir?: string;
   /** How many file-mode screenshots to keep; older ones are deleted. Default 50. */
   screenshotKeep?: number;
+  /** Where `record` saves scripts and `replay` reads them (e.g. ~/.tapline/scripts). */
+  scriptsDir?: string;
+  /** Where `compare_screen` keeps reference pictures, one folder per app (e.g. ~/.tapline/baselines). */
+  baselinesDir?: string;
+}
+
+const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
+
+/** One recorded request; `route` is the screen it ended on, `fragile` marks a target that only worked that run (a ref). */
+interface ScriptStep {
+  method: string;
+  params: Record<string, unknown>;
+  route?: string[];
+  fragile?: boolean;
+}
+
+const scriptSchema = z.object({
+  version: z.literal(1),
+  name: z.string(),
+  app: z.object({ name: z.string(), id: z.string().optional() }),
+  recordedAt: z.string(),
+  steps: z.array(
+    z.object({
+      method: z.string(),
+      params: z.record(z.string(), z.unknown()),
+      route: z.array(z.string()).optional(),
+      fragile: z.boolean().optional(),
+    }),
+  ),
+});
+type Script = z.infer<typeof scriptSchema>;
+
+/** A target that works again on a new run: testID, else label, else visible text; refs only work for the run they came from. */
+function stableParams(params: unknown, result: unknown): { params: Record<string, unknown>; fragile: boolean } {
+  const copy: Record<string, unknown> =
+    typeof params === "object" && params !== null ? { ...(params as Record<string, unknown>) } : {};
+  const target = copy["target"];
+  if (typeof target !== "object" || target === null) return { params: copy, fragile: false };
+  // A target the agent gave by testID, label, text or point already picked one element: keep it.
+  if (!("ref" in target)) return { params: copy, fragile: false };
+  const element =
+    typeof result === "object" && result !== null && "element" in result
+      ? elementSchema.safeParse((result as { element: unknown }).element)
+      : null;
+  if (element?.success) {
+    const { testID, label, text: shown } = element.data;
+    if (typeof testID === "string" && testID !== "") copy["target"] = { testID };
+    else if (typeof label === "string" && label !== "") copy["target"] = { label };
+    else if (typeof shown === "string" && shown !== "") copy["target"] = { text: shown };
+  }
+  const kept = copy["target"];
+  const fragile = typeof kept === "object" && kept !== null && "ref" in kept;
+  return { params: copy, fragile };
+}
+
+/** A short description of a step, e.g. `press testID=save` or `type "Ann" into label="Name"`. */
+function describeStep(step: ScriptStep): string {
+  const p = step.params;
+  const target = p["target"];
+  let where = "";
+  if (typeof target === "object" && target !== null) {
+    const t = target as Record<string, unknown>;
+    if (typeof t["testID"] === "string") where = `testID=${t["testID"]}`;
+    else if (typeof t["label"] === "string") where = `label=${JSON.stringify(t["label"])}`;
+    else if (typeof t["text"] === "string") where = `text=${JSON.stringify(t["text"])}`;
+    else if (typeof t["ref"] === "string") where = `ref ${t["ref"]}`;
+    else if (typeof t["x"] === "number") where = `point ${String(t["x"])},${String(t["y"])}`;
+  }
+  switch (step.method) {
+    case "sleep":
+      return `wait ${String(p["seconds"])} s`;
+    case "type":
+      return `type ${JSON.stringify(p["text"])}${where ? ` into ${where}` : ""}`;
+    case "openURL":
+      return `open ${String(p["url"])}`;
+    case "command":
+      return `command ${String(p["name"])}`;
+    case "waitFor": {
+      const what = ["text", "testID", "label"].find((key) => typeof p[key] === "string");
+      const thing = what ? `${what}=${JSON.stringify(p[what])}${p["gone"] === true ? " gone" : ""}` : "";
+      return `wait for ${[thing, p["networkIdle"] === true ? "quiet network" : ""].filter(Boolean).join(" and ")}`;
+    }
+    default:
+      return `${step.method}${where ? ` ${where}` : ""}`;
+  }
 }
 
 const commandsSchema = z.object({
@@ -253,6 +365,10 @@ export class TaplineTools {
   private readonly shotFiles: string[] = [];
   /** Sessions this agent has had an element list for (so later lists can be just the changes). */
   private readonly listed = new Set<string>();
+  /** The route of the latest element list, for recording and checking replays. */
+  private lastLookRoute: string[] | undefined;
+  private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
+  private replaying = false;
   private shotCount = 0;
   private pairWrites = 0;
 
@@ -459,6 +575,7 @@ export class TaplineTools {
     }
 
     this.listed.add(sid);
+    this.lastLookRoute = tree.route?.names;
     const lines = [`App: ${session.app.name} [${sid}]`, (askChanges ? formatChanges(tree) : null) ?? formatTree(tree)];
     const content: CallToolResult["content"] = [];
     const shot = await shotPromise;
@@ -511,9 +628,299 @@ export class TaplineTools {
       return fail(describeError(error));
     }
     const line = describe(result);
-    if (withLook === false) return text(line);
-    await sleep(this.settleMs);
-    return this.withLook(session, line);
+    let response: CallToolResult;
+    this.lastLookRoute = undefined;
+    if (withLook === false) response = text(line);
+    else {
+      await sleep(this.settleMs);
+      response = await this.withLook(session, line);
+    }
+    if (this.recording !== null && !this.replaying) {
+      const { params: stable, fragile } = stableParams(params, result);
+      const step: ScriptStep = { method, params: stable };
+      if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
+      if (fragile) step.fragile = true;
+      this.recording.steps.push(step);
+    }
+    return response;
+  }
+
+  // -- compare_screen and filmstrip
+
+  private async takeShot(sessionId: string, width: number, quality: number): Promise<ShotImage> {
+    const raw = await this.host.request("screenshot", { format: "jpg", quality, maxWidth: width }, { sessionId });
+    const parsed = screenshotResultSchema.safeParse(raw);
+    if (!parsed.success) throw new TaplineError("internal", "The app returned a screenshot the host could not read.");
+    return parsed.data;
+  }
+
+  /** Adds an image to a result: inline, or saved with its path in file mode. */
+  private deliver(sessionId: string, image: ShotImage, lines: string[], content: CallToolResult["content"]): void {
+    if (this.options.screenshots === "file") {
+      try {
+        const size = image.width !== undefined && image.height !== undefined ? ` (${image.width}x${image.height})` : "";
+        lines.push(`Image: ${this.saveShot(sessionId, image.mime, image.data)}${size}`);
+      } catch (error) {
+        lines.push(`(Image not saved: ${error instanceof Error ? error.message : String(error)})`);
+      }
+    } else content.push({ type: "image", data: image.data, mimeType: image.mime });
+  }
+
+  async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return fail(this.noAppMessage());
+    const name = args.name.trim();
+    if (!SCRIPT_NAME.test(name)) return fail("Error bad_params: name the reference with letters, digits, '.', '_' and '-'.");
+    const dir = this.options.baselinesDir;
+    if (dir === undefined) return fail("Error internal: no folder for reference pictures is configured.");
+    const appFolder = (session.app.id ?? session.app.name).replace(/[^\w.-]/g, "_");
+    const path = join(dir, appFolder, `${name}.jpg`);
+    let shot: ShotImage;
+    try {
+      shot = await this.takeShot(session.id, args.width ?? DEFAULT_SCREENSHOT_WIDTH, 0.9);
+    } catch (error) {
+      return fail(describeError(error));
+    }
+    if (args.update === true || !existsSync(path)) {
+      try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, Buffer.from(shot.data, "base64"), { mode: 0o600 });
+      } catch (error) {
+        return fail(`Error internal: couldn't save the reference: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return text(
+        `Saved the reference picture "${name}" (${shot.width ?? "?"}x${shot.height ?? "?"}) in ${path}. Next time, compare_screen { name: "${name}" } shows what changed.`,
+      );
+    }
+    let diff: DiffResult;
+    try {
+      diff = diffImages({ mime: "image/jpeg", data: readFileSync(path).toString("base64") }, shot);
+    } catch (error) {
+      return fail(
+        `Error bad_params: ${error instanceof Error ? error.message : String(error)} To start over, use update: true.`,
+      );
+    }
+    if (diff.changedPixels === 0) return text(`No visible change from the reference "${name}".`);
+
+    // Name the regions in points, with the elements they touch, from a fresh element list.
+    let scale = 1;
+    let elements: TreeResult["elements"] = [];
+    try {
+      const tree = treeResultSchema.safeParse(await this.host.request("tree", {}, { sessionId: session.id }));
+      if (tree.success && tree.data.screen) {
+        scale = diff.width / tree.data.screen.width;
+        elements = tree.data.elements;
+        this.listed.add(session.id);
+      }
+    } catch {
+      // positions stay in pixels
+    }
+    const unit = scale === 1 ? "pixels" : "points";
+    const lines = [
+      `${diff.changedPercent}% of the screen changed from the reference "${name}", in ${diff.boxes.length} region${diff.boxes.length === 1 ? "" : "s"} (${unit}):`,
+    ];
+    for (const box of diff.boxes) {
+      const b = { x: box.x / scale, y: box.y / scale, width: box.width / scale, height: box.height / scale };
+      // The smallest named elements there: a page-sized container overlaps every change.
+      const near = elements
+        .filter((e) => e.frame && e.frame.x < b.x + b.width && e.frame.x + e.frame.width > b.x && e.frame.y < b.y + b.height && e.frame.y + e.frame.height > b.y)
+        .filter((e) => (e.text ?? "") !== "" || (e.label ?? "") !== "" || (e.testID ?? "") !== "")
+        .map((e) => ({ e, area: (e.frame?.width ?? 0) * (e.frame?.height ?? 0) }))
+        .filter(({ area }) => area <= Math.max(b.width * b.height * 4, 2500))
+        .sort((x, y) => x.area - y.area)
+        .slice(0, 2)
+        .map(({ e }) => describeElement(e));
+      lines.push(
+        `- @${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}${near.length > 0 ? `: ${near.join(", ")}` : ""}`,
+      );
+    }
+    lines.push("The image shows the screen now, faded, with the changed pixels in red.");
+    const content: CallToolResult["content"] = [];
+    this.deliver(session.id, diff.image, lines, content);
+    return { content: [{ type: "text", text: lines.join("\n") }, ...content] };
+  }
+
+  async filmstrip(args: Shape<"filmstrip">): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return fail(this.noAppMessage());
+    const count = args.frames ?? 6;
+    const interval = args.interval_ms ?? 250;
+    const frameWidth = args.frame_width ?? 200;
+    const lines: string[] = [];
+    try {
+      const frames: ShotImage[] = [];
+      const started = Date.now();
+      if (args.press !== undefined) {
+        // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
+        frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+        await this.host.request("press", { target: toWireTarget(args.press) }, { sessionId: session.id });
+      }
+      for (let i = frames.length; i < count; i++) {
+        const at = Date.now();
+        frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+        const rest = interval - (Date.now() - at);
+        if (i < count - 1 && rest > 0) await sleep(rest);
+      }
+      const spacing = count > 1 ? Math.round((Date.now() - started) / count) : 0;
+      const strip = composeFilmstrip(frames, { columns: Math.min(3, count), frameWidth });
+      lines.push(
+        `Filmstrip: ${count} frames about ${spacing} ms apart, numbered in order, left to right and top to bottom${args.press !== undefined ? "; frame 1 is just before the press, the rest follow it" : ""}. Each capture takes a few hundred ms on a phone, so very quick animations fall between frames.`,
+      );
+      const content: CallToolResult["content"] = [];
+      this.deliver(session.id, strip, lines, content);
+      return { content: [{ type: "text", text: lines.join("\n") }, ...content] };
+    } catch (error) {
+      return fail(error instanceof TaplineError ? describeError(error) : `Error internal: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // -- record and replay
+
+  private scriptPath(name: string): string | null {
+    const dir = this.options.scriptsDir;
+    return dir === undefined || !SCRIPT_NAME.test(name) ? null : join(dir, `${name}.json`);
+  }
+
+  async record(args: Shape<"record">): Promise<CallToolResult> {
+    switch (args.action) {
+      case "start": {
+        const name = (args.name ?? "").trim();
+        if (this.scriptPath(name) === null) {
+          return fail("Error bad_params: give the script a name of letters, digits, '.', '_' and '-' (e.g. \"checkout\").");
+        }
+        if (this.recording !== null) return fail(`Error bad_params: already recording "${this.recording.name}"; stop it first.`);
+        const session = this.host.current();
+        if (session === undefined) return fail(this.noAppMessage());
+        this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [] };
+        return text(
+          `Recording "${name}" on ${session.app.name}. Every action from now on is a step; wait_for steps check the app is where it should be. Prefer testIDs: they replay best. Stop with record { action: "stop" }.`,
+        );
+      }
+      case "status":
+        return text(
+          this.recording === null
+            ? `Not recording.\n${this.scriptList()}`
+            : `Recording "${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
+        );
+      case "discard": {
+        const was = this.recording?.name;
+        this.recording = null;
+        return text(was === undefined ? "Not recording." : `Discarded the recording "${was}".`);
+      }
+      case "stop": {
+        const recording = this.recording;
+        if (recording === null) return fail("Error bad_params: not recording; start with record { action: \"start\", name }.");
+        const path = this.scriptPath(recording.name);
+        if (path === null) return fail("Error internal: no scripts folder is configured.");
+        const script: Script = {
+          version: 1,
+          name: recording.name,
+          app: recording.app,
+          recordedAt: new Date().toISOString(),
+          steps: recording.steps,
+        };
+        try {
+          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+          writeFileSync(path, `${JSON.stringify(script, null, 2)}\n`, { mode: 0o600 });
+        } catch (error) {
+          return fail(`Error internal: couldn't save the script: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        this.recording = null;
+        const count = script.steps.length;
+        const lines = [`Saved "${script.name}": ${count} step${count === 1 ? "" : "s"} in ${path}. Replay it with replay { name: "${script.name}" }.`];
+        script.steps.forEach((step, i) => {
+          if (step.fragile) {
+            const target = step.params["target"] as { ref?: unknown };
+            lines.push(
+              `Note: step ${i + 1} targets ref ${String(target.ref)}, which won't exist on a new run. Give that element a testID, or record it again by its text or label.`,
+            );
+          }
+        });
+        if (script.steps.some((step) => step.method === "type")) {
+          lines.push("The script keeps the text typed in it (test passwords too): keep it private.");
+        }
+        return text(lines.join("\n"));
+      }
+    }
+  }
+
+  private scriptList(): string {
+    const dir = this.options.scriptsDir;
+    if (dir === undefined || !existsSync(dir)) return "No saved scripts.";
+    const lines: string[] = [];
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json")).sort()) {
+      try {
+        const parsed = scriptSchema.safeParse(JSON.parse(readFileSync(join(dir, file), "utf8")));
+        if (!parsed.success) continue;
+        const s = parsed.data;
+        lines.push(`- ${s.name} (${s.steps.length} step${s.steps.length === 1 ? "" : "s"}, recorded ${s.recordedAt.slice(0, 10)} on ${s.app.name})`);
+      } catch {
+        // skip unreadable files
+      }
+    }
+    return lines.length === 0 ? "No saved scripts." : ["Saved scripts:", ...lines].join("\n");
+  }
+
+  async replay(args: Shape<"replay">): Promise<CallToolResult> {
+    const name = (args.name ?? "").trim();
+    if (name === "") return text(this.scriptList());
+    if (this.recording !== null) return fail(`Error bad_params: stop recording "${this.recording.name}" before replaying.`);
+    const path = this.scriptPath(name);
+    if (path === null || !existsSync(path)) return fail(`Error not_found: no script "${name}".\n${this.scriptList()}`);
+    let script: Script;
+    try {
+      const parsed = scriptSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+      if (!parsed.success) return fail(`Error bad_params: ${path} isn't a Tapline script.`);
+      script = parsed.data;
+    } catch (error) {
+      return fail(`Error internal: couldn't read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const session = this.host.current();
+    if (session === undefined) return fail(this.noAppMessage());
+
+    const started = Date.now();
+    const total = script.steps.length;
+    const lines: string[] = [];
+    const seconds = (ms: number): string => (Math.round(ms / 100) / 10).toFixed(1);
+    this.replaying = true;
+    try {
+      for (const [i, step] of script.steps.entries()) {
+        const at = Date.now();
+        const label = `${i + 1} ${describeStep(step)}`;
+        if (step.method === "sleep") {
+          const s = typeof step.params["seconds"] === "number" ? step.params["seconds"] : 0;
+          await sleep(Math.min(30, Math.max(0, s)) * 1000);
+          lines.push(`${i + 1} ✓ ${describeStep(step)} (${seconds(Date.now() - at)} s)`);
+          continue;
+        }
+        const result = await this.act(step.method, step.params, () => "", true);
+        const problem = result.isError
+          ? result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim()
+          : step.route !== undefined &&
+              this.lastLookRoute !== undefined &&
+              step.route.join(" › ") !== this.lastLookRoute.join(" › ")
+            ? `It ended on ${this.lastLookRoute.join(" › ")}; the recording ended on ${step.route.join(" › ")}.`
+            : null;
+        if (problem !== null) {
+          return fail(
+            [
+              `Replay "${script.name}" failed at step ${i + 1} of ${total}: ${describeStep(step)}`,
+              problem,
+              ...(lines.length > 0 ? ["Steps before it passed:", ...lines] : []),
+              ...(step.fragile ? ["(This step targets a ref from the recording run; give the element a testID.)"] : []),
+            ].join("\n"),
+          );
+        }
+        lines.push(`${label.replace(/^(\d+) /, "$1 ✓ ")} (${seconds(Date.now() - at)} s)`);
+      }
+    } finally {
+      this.replaying = false;
+    }
+    return text(
+      [`Replayed "${script.name}" on ${session.app.name}: ${total} of ${total} steps passed in ${seconds(Date.now() - started)} s.`, ...lines].join(
+        "\n",
+      ),
+    );
   }
 
   private async withLook(session: SessionInfo, line: string): Promise<CallToolResult> {
@@ -719,6 +1126,9 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return fail(this.noAppMessage());
     await sleep(args.seconds * 1000);
+    if (this.recording !== null && !this.replaying) {
+      this.recording.steps.push({ method: "sleep", params: { seconds: args.seconds } });
+    }
     return this.withLook(session, `Waited ${args.seconds}s.`);
   }
 }

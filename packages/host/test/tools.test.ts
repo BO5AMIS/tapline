@@ -166,6 +166,274 @@ describe("press", () => {
   });
 });
 
+describe("compare_screen and filmstrip", () => {
+  /** A 300x600 JPEG, grey, with an optional dark square at (40,40) 60x60. */
+  function picture(withSquare: boolean): string {
+    const data = Buffer.alloc(300 * 600 * 4, 200);
+    if (withSquare) {
+      for (let y = 40; y < 100; y++) {
+        for (let x = 40; x < 100; x++) {
+          const i = (y * 300 + x) * 4;
+          data[i] = 20;
+          data[i + 1] = 20;
+          data[i + 2] = 20;
+        }
+      }
+    }
+    return jpeg.encode({ data, width: 300, height: 600 }, 90).data.toString("base64");
+  }
+
+  async function screenTools(shots: string[]) {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-baselines-"));
+    let n = 0;
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "screenshot") {
+        const data = shots[Math.min(n, shots.length - 1)] ?? "";
+        n += 1;
+        return { ok: true, result: { mime: "image/jpeg", data, width: 300, height: 600 } };
+      }
+      if (req.method === "tree") {
+        return {
+          ok: true,
+          result: {
+            screen: { width: 150, height: 300, scale: 3 },
+            elements: [
+              { ref: "e1", type: "ScrollView", role: "scrollview", text: "Everything on the page", frame: { x: 0, y: 0, width: 150, height: 300 }, actions: ["scroll"] },
+              { ref: "e2", type: "Image", role: "image", label: "Avatar", text: "", frame: { x: 18, y: 18, width: 35, height: 35 }, actions: [] },
+            ],
+          },
+        };
+      }
+      return defaultHandler(req);
+    };
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, handler);
+    apps.push(app);
+    const tools = new TaplineTools(host, {
+      connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
+      settleMs: 0,
+      baselinesDir: dir,
+    });
+    return { app, tools, dir };
+  }
+
+  it("saves a baseline the first time, then reports what changed with a marked image", async () => {
+    const { tools, dir } = await screenTools([picture(false), picture(true)]);
+    try {
+      const first = textOf(await tools.compareScreen({ name: "home" }));
+      expect(first).toContain("Saved");
+      expect(existsSync(join(dir, "com.example.demo", "home.jpg"))).toBe(true);
+      const second = await tools.compareScreen({ name: "home" });
+      const text = textOf(second);
+      expect(text).toMatch(/[0-9.]+% of the screen changed/);
+      expect(text).toContain("1 region");
+      expect(text).toMatch(/@\d+,\d+ \d+x\d+/);
+      expect(text).toContain('e2 image "Avatar"'); // the smallest element there, not the page around it
+      expect(text).not.toContain("Everything on the page");
+      expect(second.content.some((block) => block.type === "image")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("says nothing changed, and update replaces the baseline", async () => {
+    const { tools, dir } = await screenTools([picture(false), picture(false), picture(true), picture(true)]);
+    try {
+      await tools.compareScreen({ name: "home" });
+      expect(textOf(await tools.compareScreen({ name: "home" }))).toContain("No visible change");
+      expect(textOf(await tools.compareScreen({ name: "home", update: true }))).toContain("Saved");
+      expect(textOf(await tools.compareScreen({ name: "home" }))).toContain("No visible change");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("filmstrip takes several frames and returns them as one image", async () => {
+    const { app, tools, dir } = await screenTools([picture(false), picture(true), picture(false)]);
+    try {
+      const result = await tools.filmstrip({ frames: 3, interval_ms: 50 });
+      expect(app.requests.filter((r) => r.method === "screenshot")).toHaveLength(3);
+      expect(result.content.filter((block) => block.type === "image")).toHaveLength(1);
+      expect(textOf(result)).toContain("3 frames");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("filmstrip can press first, to catch what the press sets off", async () => {
+    const { app, tools, dir } = await screenTools([picture(false), picture(true)]);
+    try {
+      const result = await tools.filmstrip({ frames: 3, interval_ms: 10, press: { testID: "login-button" } });
+      expect(app.requests.map((r) => r.method).slice(0, 4)).toEqual(["screenshot", "press", "screenshot", "screenshot"]);
+      expect(textOf(result)).toContain("frame 1 is just before the press");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("record and replay", () => {
+  const SAVE = { ref: "e7", type: "Pressable", role: "button", testID: "save", text: "Save", frame: null, actions: ["press"] };
+  const PAY = { ref: "e9", type: "Pressable", role: "button", label: "Pay now", text: "Pay", frame: null, actions: ["press"] };
+  const NAME = { ref: "e4", type: "TextInput", role: "textfield", text: "", value: "Ann", frame: null, actions: ["type"] };
+
+  function shop(route: string[], failOn?: string) {
+    return (req: IncomingRequest): Reply => {
+      const params = req.params as { target?: { testID?: string; label?: string; ref?: string } } | undefined;
+      if (failOn !== undefined && req.method === failOn) {
+        return { ok: false, error: { code: "not_found", message: "No element matches testID \"save\"" } };
+      }
+      switch (req.method) {
+        case "tree":
+          return { ok: true, result: { ...TREE, route: { names: route } } };
+        case "press":
+          return { ok: true, result: { element: params?.target?.testID === "save" || params?.target?.ref === "e7" ? SAVE : PAY } };
+        case "type":
+          return { ok: true, result: { element: NAME, value: "Ann" } };
+        case "waitFor":
+          return { ok: true, result: { met: true, waitedMs: 10 } };
+        default:
+          return { ok: true, result: {} };
+      }
+    };
+  }
+
+  async function shopTools(route: string[], failOn?: string) {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-scripts-"));
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, shop(route, failOn));
+    apps.push(app);
+    const tools = new TaplineTools(host, {
+      connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
+      settleMs: 0,
+      scriptsDir: dir,
+    });
+    return { app, tools, dir };
+  }
+
+  it("records actions with targets that survive a new run, and the screen each one ended on", async () => {
+    const { tools, dir } = await shopTools(["basket"]);
+    try {
+      expect(textOf(await tools.record({ action: "start", name: "checkout" }))).toContain("Recording");
+      await tools.press({ target: { ref: "e7" } });
+      await tools.press({ target: { ref: "e9" } });
+      await tools.typeText({ target: { ref: "e4" }, text: "Ann" });
+      await tools.wait({ seconds: 0.1 });
+      await tools.waitFor({ text: "Thanks", timeout: 5 });
+      await tools.look({ screenshot: false }); // not an action: not recorded
+      const stopped = textOf(await tools.record({ action: "stop" }));
+      expect(stopped).toContain("5 steps");
+      expect(stopped).toContain("step 3 targets ref e4");
+      const script = JSON.parse(readFileSync(join(dir, "checkout.json"), "utf8")) as {
+        version: number;
+        app: { name: string };
+        steps: Array<{ method: string; params: Record<string, unknown>; route?: string[] }>;
+      };
+      expect(script.version).toBe(1);
+      expect(script.app.name).toBe("Demo");
+      expect(script.steps.map((s) => [s.method, s.params])).toEqual([
+        ["press", { target: { testID: "save" } }],
+        ["press", { target: { label: "Pay now" } }],
+        ["type", { target: { ref: "e4" }, text: "Ann", replace: true, submit: false }],
+        ["sleep", { seconds: 0.1 }],
+        ["waitFor", { text: "Thanks", timeout: 5 }],
+      ]);
+      expect(script.steps[0]?.route).toEqual(["basket"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a target the agent gave by text, label or testID (it already picked one element)", async () => {
+    const { tools, dir } = await shopTools(["basket"]);
+    try {
+      await tools.record({ action: "start", name: "kept" });
+      await tools.press({ target: { text: "Pay" } }); // the element also has label "Pay now"
+      await tools.record({ action: "stop" });
+      const script = JSON.parse(readFileSync(join(dir, "kept.json"), "utf8")) as { steps: Array<{ params: unknown }> };
+      expect(script.steps[0]?.params).toEqual({ target: { text: "Pay" } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replays a script step by step and reports each one", async () => {
+    const { app, tools, dir } = await shopTools(["basket"]);
+    try {
+      await tools.record({ action: "start", name: "checkout" });
+      await tools.press({ target: { testID: "save" } });
+      await tools.waitFor({ text: "Thanks" });
+      await tools.record({ action: "stop" });
+      app.requests.length = 0;
+      const text = textOf(await tools.replay({ name: "checkout" }));
+      expect(app.requests.filter((r) => r.method !== "tree").map((r) => r.method)).toEqual(["press", "waitFor"]);
+      expect(text).toContain('Replayed "checkout"');
+      expect(text).toContain("2 of 2 steps passed");
+      expect(text).toContain("1 ✓ press testID=save");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops at the first failing step and says why", async () => {
+    const first = await shopTools(["basket"]);
+    await first.tools.record({ action: "start", name: "broken" });
+    await first.tools.press({ target: { testID: "save" } });
+    await first.tools.press({ target: { label: "Pay now" } });
+    await first.tools.record({ action: "stop" });
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, shop(["basket"], "press"));
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, settleMs: 0, scriptsDir: first.dir });
+    try {
+      const result = await tools.replay({ name: "broken" });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("failed at step 1 of 2");
+      expect(textOf(result)).toContain("not_found");
+    } finally {
+      rmSync(first.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a step that ends on a different screen than when it was recorded", async () => {
+    const first = await shopTools(["basket"]);
+    await first.tools.record({ action: "start", name: "nav" });
+    await first.tools.press({ target: { testID: "save" } });
+    await first.tools.record({ action: "stop" });
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, shop(["home"]));
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, settleMs: 0, scriptsDir: first.dir });
+    try {
+      const result = await tools.replay({ name: "nav" });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("ended on home");
+      expect(textOf(result)).toContain("recording ended on basket");
+    } finally {
+      rmSync(first.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists saved scripts, refuses bad names, and stop without start", async () => {
+    const { tools, dir } = await shopTools(["basket"]);
+    try {
+      expect((await tools.record({ action: "stop" })).isError).toBe(true);
+      expect((await tools.record({ action: "start", name: "../evil" })).isError).toBe(true);
+      await tools.record({ action: "start", name: "one" });
+      await tools.press({ target: { testID: "save" } });
+      await tools.record({ action: "stop" });
+      expect(textOf(await tools.replay({}))).toContain("one (1 step");
+      expect((await tools.replay({ name: "missing" })).isError).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("after the app went to the background", () => {
   it("tells the agent the app was put in the background, and that it reconnects when opened", async () => {
     const { app, tools } = await setup(defaultHandler)();
@@ -616,7 +884,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "logs", "reload", "wait"].sort(),
+        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "logs", "reload", "wait"].sort(),
       );
       const ok = await client.callTool({ name: "press", arguments: { target: { testID: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Pressed e3");
