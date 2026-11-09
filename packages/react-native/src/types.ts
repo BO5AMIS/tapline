@@ -96,9 +96,23 @@ export interface TreeChanges {
   moved: string[];
 }
 
+/** An alert the app showed and nobody has answered yet. */
+export interface TreeAlert {
+  kind: 'alert' | 'prompt';
+  title: string;
+  message: string | null;
+  buttons: Array<{ text: string; style: 'default' | 'cancel' | 'destructive' }>;
+  /** Tapline's in-app stand-in (its buttons are elements to press) rather than the OS alert. */
+  standIn: boolean;
+}
+
 export interface TreeResult {
   screen: ScreenInfo;
   elements: TaplineElement[];
+  /** Open alerts (Alert.alert / Alert.prompt) the app showed, oldest first. */
+  alerts?: TreeAlert[];
+  /** Network requests still running (fetch / XMLHttpRequest); absent when none. */
+  network?: { inFlight: number };
   /** The focused screen, when the app uses React Navigation (Expo Router included). */
   route?: RouteInfo;
   /** With `changes: true` and a previous tree: what changed since then. */

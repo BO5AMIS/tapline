@@ -133,7 +133,7 @@ describeIfBuilt('host <-> app over a real WebSocket, paired and driven through M
   async function waitForApp(): Promise<string> {
     for (let i = 0; i < 50; i++) {
       const apps = await mcp.call('apps');
-      if (apps.text.includes('Interop')) return apps.text;
+      if (apps.text.includes('Connected apps:') && apps.text.includes('Interop')) return apps.text;
       await sleep(100);
     }
     throw new Error('the app never connected to the host');
@@ -224,7 +224,7 @@ describeIfBuilt('host <-> app over a real WebSocket, paired and driven through M
       await sleep(200);
     });
     agent.stop();
-    for (let i = 0; i < 50 && (await mcp.call('apps')).text.includes('Interop'); i++) await sleep(100);
+    for (let i = 0; i < 50 && !(await mcp.call('apps')).text.includes('No app is connected'); i++) await sleep(100);
     agent = launch(null);
     await agent.start();
     const text = await waitForApp();

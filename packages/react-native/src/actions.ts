@@ -21,6 +21,7 @@ import {
   type Snapshot,
   type TabFound,
 } from './inspect';
+import { openAlerts } from './alerts';
 import { sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import {
@@ -355,6 +356,16 @@ function describeHit(snapshot: Snapshot, hit: Fiber): string {
  * at the centre of its visible part (Fabric's hit test). Unknown hit results let it through.
  */
 async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | null): Promise<void> {
+  // An OS alert sits on top of everything: a person has to answer it first.
+  const blocking = openAlerts().find((alert) => !alert.standIn);
+  if (blocking) {
+    const buttons = blocking.buttons.map((button) => `[${button.text}]`).join(' ');
+    throw new TaplineError(
+      'not_actionable',
+      `An alert is open: "${blocking.title}" ${buttons}. A person would have to answer it first, and Tapline can't press OS alerts: ` +
+        "ask the user to tap a button, or start Tapline with alerts: 'stand-in' so its buttons can be pressed. force: true acts anyway.",
+    );
+  }
   if (frame === null) return;
   const { width, height } = snapshot.screen;
   const left = Math.max(frame.x, 0);

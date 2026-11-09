@@ -1,6 +1,9 @@
-import { Alert, Linking } from 'react-native';
+import { Linking } from 'react-native';
 import { TaplineAgent } from './agent';
-import { installLogs, originalLog, uninstallLogs } from './logs';
+import { installAlertTracking, nativeAlert, uninstallAlertTracking } from './alerts';
+import { addLog, installLogs, originalLog, uninstallLogs } from './logs';
+import { inFlight, installNetworkTracking, onNetworkFailure, uninstallNetworkTracking } from './network';
+import { setNetworkIdleProvider } from './wait';
 import { memoryStorage, secureStoreStorage, type TaplineStorage } from './storage';
 import type { AppInfo } from './types';
 
@@ -21,9 +24,35 @@ export interface TaplineOptions {
   url?: string;
   /** The host's token, for `url` (`tapline token`). Keep it out of source files. */
   token?: string;
+  /**
+   * Alerts (Alert.alert / Alert.prompt): 'record' (default) shows them as usual and tells the
+   * agent what is open; 'stand-in' shows Tapline's own in-app version instead, whose buttons an
+   * agent can press. Tapline's own prompts always stay native.
+   */
+  alerts?: 'record' | 'stand-in';
 }
 
 let agent: TaplineAgent | null = null;
+let stopNetworkLog: (() => void) | null = null;
+
+/** Failed requests go into the app's logs, so `logs` explains a broken screen. */
+function watchNetwork(): void {
+  installNetworkTracking();
+  setNetworkIdleProvider(() => inFlight() === 0);
+  stopNetworkLog?.();
+  stopNetworkLog = onNetworkFailure((failure) => {
+    const outcome = failure.status ?? failure.error ?? 'failed';
+    const level = failure.status !== null && failure.status < 500 ? 'warn' : 'error';
+    addLog(level, `[network] ${failure.method} ${failure.url} → ${outcome}`);
+  });
+}
+
+function unwatchNetwork(): void {
+  stopNetworkLog?.();
+  stopNetworkLog = null;
+  setNetworkIdleProvider(null);
+  uninstallNetworkTracking();
+}
 
 function trimmed(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -31,7 +60,7 @@ function trimmed(value: unknown): string {
 
 function confirmWithAlert(title: string, message: string, ok: string): Promise<boolean> {
   return new Promise((resolve) => {
-    Alert.alert(
+    nativeAlert(
       title,
       message,
       [
@@ -44,7 +73,7 @@ function confirmWithAlert(title: string, message: string, ok: string): Promise<b
 }
 
 function notifyWithAlert(title: string, message: string): void {
-  Alert.alert(title, message);
+  nativeAlert(title, message);
 }
 
 /**
@@ -66,6 +95,8 @@ export function startTapline(options: TaplineOptions): void {
       storage = memoryStorage();
     }
     installLogs();
+    installAlertTracking({ standIn: options.alerts === 'stand-in' });
+    watchNetwork();
     const next = new TaplineAgent(
       { app: options.app, ...(url !== '' && token !== '' ? { direct: { url, token } } : {}) },
       { storage, linking: Linking, confirm: confirmWithAlert, notify: notifyWithAlert },
@@ -82,12 +113,18 @@ export function stopTapline(): void {
   agent = null;
   try {
     current?.stop();
-    if (current) uninstallLogs();
+    if (current) {
+      uninstallLogs();
+      uninstallAlertTracking();
+      unwatchNetwork();
+    }
   } catch {
     // ignore
   }
 }
 
+export { registerTaplineCommand } from './commands';
+export type { TaplineCommand } from './commands';
 export { isTaplineLink, parseTaplineLink } from './link';
 export type { TaplineLink } from './link';
 export { memoryStorage, secureStoreStorage } from './storage';

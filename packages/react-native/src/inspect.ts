@@ -9,6 +9,8 @@ import {
   type Fiber,
   type FiberRootLike,
 } from './fiber';
+import { openAlerts } from './alerts';
+import { inFlight } from './network';
 import { getRoots } from './register';
 import {
   TaplineError,
@@ -905,6 +907,12 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
     const params = simpleParams(current.params);
     result.route = params ? { names: current.chain, params } : { names: current.chain };
   }
+  const alerts = openAlerts();
+  if (alerts.length > 0) {
+    result.alerts = alerts.map(({ kind, title, message, buttons, standIn }) => ({ kind, title, message, buttons, standIn }));
+  }
+  const busy = inFlight();
+  if (busy > 0) result.network = { inFlight: busy };
   const routeKey = current ? `${current.chain.join('/')}#${current.key}` : '';
   if (wantChanges && lastTree !== null) result.changes = diffTrees(lastTree, byKey, routeKey);
   lastTree = { byKey, route: routeKey };

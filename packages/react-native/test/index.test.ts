@@ -1,4 +1,4 @@
-import { Linking } from 'react-native';
+import { Alert, Linking } from 'react-native';
 import { startTapline, stopTapline, type TaplineOptions } from '../src/index';
 import { getLogEntries } from '../src/logs';
 import { memoryStorage } from '../src/storage';
@@ -115,5 +115,54 @@ describe('startTapline / stopTapline', () => {
     holder.WebSocket = undefined;
     expect(() => startTapline(direct('ws://one:1'))).not.toThrow();
     await flush();
+  });
+
+  test('records alerts once started (not when off), and stopTapline puts Alert.alert back', () => {
+    const original = Alert.alert;
+    startTapline({ ...direct('ws://one:1'), enabled: false });
+    expect(Alert.alert).toBe(original);
+    startTapline(direct('ws://one:1'));
+    expect(Alert.alert).not.toBe(original);
+    stopTapline();
+    expect(Alert.alert).toBe(original);
+  });
+
+  test("alerts: 'stand-in' shows alerts in the app instead of the OS", () => {
+    const original = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+    startTapline({ ...direct('ws://one:1'), alerts: 'stand-in' });
+    Alert.alert('Delete workout?', 'Sure?');
+    expect(original).not.toHaveBeenCalled();
+  });
+
+  test('a failed network request goes into the logs', async () => {
+    class Xhr {
+      status = 0;
+      private done: Array<() => void> = [];
+      open(_method: string, _url: string): void {}
+      send(): void {}
+      addEventListener(type: string, listener: () => void): void {
+        if (type === 'loadend') this.done.push(listener);
+      }
+      finish(status: number): void {
+        this.status = status;
+        this.done.forEach((listener) => listener());
+      }
+    }
+    const holderXhr = globalThis as { XMLHttpRequest?: unknown };
+    const saved = holderXhr.XMLHttpRequest;
+    holderXhr.XMLHttpRequest = Xhr;
+    try {
+      startTapline(direct('ws://one:1'));
+      const request = new Xhr();
+      request.open('GET', 'https://api.example.com/v1/workouts?token=secret');
+      request.send();
+      request.finish(500);
+      const line = getLogEntries().find((entry) => entry.message.startsWith('[network]'));
+      expect(line?.message).toBe('[network] GET https://api.example.com/v1/workouts?… → 500');
+      expect(line?.message).not.toContain('secret');
+    } finally {
+      stopTapline();
+      holderXhr.XMLHttpRequest = saved;
+    }
   });
 });
