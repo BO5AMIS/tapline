@@ -16,11 +16,45 @@ function formatValue(value: unknown): string {
   return clip(JSON.stringify(value) ?? String(value));
 }
 
-/** One compact line for an element, e.g. `e3 button "Log in" testID=login-button @24,610 354x48 [press, longPress]`. */
+/** AGENT-TOOLS §3.3: one lowercase role vocabulary for both tools. */
+const ROLE_ALIASES: Record<string, string> = {
+  textfield: "input",
+  search: "input",
+  textbox: "input",
+  scrollview: "scroll",
+  imagebutton: "button",
+  togglebutton: "button",
+  adjustable: "slider",
+  img: "image",
+  summary: "text",
+};
+
+export function roleOf(element: Pick<TreeElement, "role" | "type">): string | null {
+  const role = element.role;
+  if (role !== null && role !== undefined && role !== "") {
+    const lower = role.toLowerCase();
+    return ROLE_ALIASES[lower] ?? lower;
+  }
+  const type = element.type;
+  return type !== null && type !== undefined && type !== "" ? type : null;
+}
+
+/** AGENT-TOOLS §3.3: tap, longPress, type, toggle, scroll (submit is part of type). */
+export function actionsOf(element: Pick<TreeElement, "actions">): string[] {
+  const shown: string[] = [];
+  for (const action of element.actions ?? []) {
+    const name = action === "press" ? "tap" : action;
+    if (name === "submit" || shown.includes(name)) continue;
+    shown.push(name);
+  }
+  return shown;
+}
+
+/** One compact line for an element, e.g. `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`. */
 export function formatElement(element: TreeElement): string {
   const parts: string[] = [element.ref];
-  const kind = element.role ?? element.type;
-  if (kind !== null && kind !== undefined && kind !== "") parts.push(kind);
+  const kind = roleOf(element);
+  if (kind !== null) parts.push(kind);
 
   const text = element.text ?? "";
   const label = element.label ?? "";
@@ -30,7 +64,7 @@ export function formatElement(element: TreeElement): string {
     parts.push(`label=${quote(label)}`);
   }
   if (element.testID !== null && element.testID !== undefined && element.testID !== "") {
-    parts.push(`testID=${element.testID}`);
+    parts.push(`id=${element.testID}`);
   }
   if (element.value !== null && element.value !== undefined && element.value !== "") {
     parts.push(`value=${formatValue(element.value)}`);
@@ -42,22 +76,21 @@ export function formatElement(element: TreeElement): string {
     const f = element.frame;
     parts.push(`@${Math.round(f.x)},${Math.round(f.y)}`, `${Math.round(f.width)}x${Math.round(f.height)}`);
   }
-  if (element.actions !== null && element.actions !== undefined && element.actions.length > 0) {
-    parts.push(`[${element.actions.join(", ")}]`);
-  }
+  const actions = actionsOf(element);
+  if (actions.length > 0) parts.push(`[${actions.join(", ")}]`);
   return parts.join(" ");
 }
 
 /** Very short element description for action results, e.g. `e3 button "Log in"`. */
 export function describeElement(element: TreeElement): string {
   const parts: string[] = [element.ref];
-  const kind = element.role ?? element.type;
-  if (kind !== null && kind !== undefined && kind !== "") parts.push(kind);
+  const kind = roleOf(element);
+  if (kind !== null) parts.push(kind);
   const text = element.text ?? "";
   const name = text !== "" ? text : (element.label ?? "");
   if (name !== "") parts.push(quote(name));
   else if (element.testID !== null && element.testID !== undefined && element.testID !== "") {
-    parts.push(`testID=${element.testID}`);
+    parts.push(`id=${element.testID}`);
   }
   return parts.join(" ");
 }

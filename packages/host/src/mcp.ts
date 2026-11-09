@@ -71,7 +71,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
     {
       title: "Look at the screen",
       description:
-        'Read the current screen of the app: one line per element, e.g. `e3 button "Log in" testID=login-button @24,610 354x48 [press, longPress]` (ref, role, text, testID, position x,y and size in points, available actions), plus a screenshot when the app supports it (an image, or a file path when the host runs with --screenshots file; `width` sets its size, `screenshot: false` skips it, `labels: true` draws each tappable element\'s box and ref on it). Use the ref or testID as a target for actions.',
+        'Read the current screen of the app: one line per element, e.g. `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]` (ref, role, text, id, position x,y and size in points, available actions), plus a screenshot when the app supports it (an image, or a file path when the host runs with --screenshots file; `width` sets its size, `screenshot: false` skips it, `labels: true` draws each tappable element\'s box and ref on it). Use the ref or id as a target for actions.',
       inputSchema: toolShapes.look,
       annotations: { readOnlyHint: true },
     },

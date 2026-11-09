@@ -117,7 +117,7 @@ describe("press", () => {
     expect(result.isError).toBeUndefined();
     const text = textOf(result);
     expect(text).toContain('Pressed e3 button "Log in".');
-    expect(text).toContain('e3 button "Log in" testID=login-button @24,610 354x48 [press, longPress]');
+    expect(text).toContain('e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]');
     expect(result.content.every((block) => block.type === "text")).toBe(true);
     expect(app.requests.map((r) => r.method)).toEqual(["press", "tree"]);
     expect(app.requests[0]?.params).toEqual({ target: { testID: "login-button" } });
@@ -175,8 +175,8 @@ describe("press", () => {
     expect(result.isError).toBe(true);
     const text = textOf(result);
     expect(text).toContain("Error ambiguous");
-    expect(text).toContain('e5 button "Delete" @0,100 80x40 [press]');
-    expect(text).toContain('e9 button "Delete" @0,300 80x40 [press]');
+    expect(text).toContain('e5 button "Delete" @0,100 80x40 [tap]');
+    expect(text).toContain('e9 button "Delete" @0,300 80x40 [tap]');
     expect(text).toContain("index");
   });
 

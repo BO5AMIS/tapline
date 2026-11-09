@@ -47,7 +47,7 @@ const tree: TreeResult = {
 
 describe("formatElement", () => {
   it("renders the documented example line", () => {
-    expect(formatElement(tree.elements[2]!)).toBe('e3 button "Log in" testID=login-button @24,610 354x48 [press, longPress]');
+    expect(formatElement(tree.elements[2]!)).toBe('e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]');
   });
 
   it("omits empty fields", () => {
@@ -56,7 +56,7 @@ describe("formatElement", () => {
 
   it("shows value, label when it differs, disabled and checked", () => {
     expect(formatElement(tree.elements[1]!)).toBe(
-      'e2 TextInput "Email" testID=email value="me@example.com" @24,200 354x44 [type, submit]',
+      'e2 TextInput "Email" id=email value="me@example.com" @24,200 354x44 [type]',
     );
     expect(formatElement(tree.elements[3]!)).toBe('e4 switch "Remember me" disabled checked=true @330,301 51x31 [toggle]');
   });
@@ -66,6 +66,58 @@ describe("formatElement", () => {
     expect(line.length).toBeLessThan(100);
     expect(line).toContain("…");
     expect(line).not.toContain("\n");
+  });
+});
+
+describe("element lines (AGENT-TOOLS §3.3)", () => {
+  const base = {
+    ref: "e3",
+    type: "Pressable",
+    role: null as string | null,
+    text: "Log in",
+    label: null,
+    testID: "login",
+    value: null,
+    disabled: false,
+    selected: false,
+    checked: null,
+    frame: { x: 24, y: 610, width: 354, height: 48 },
+    actions: ["press", "longPress"],
+  };
+
+  it("shows id=, lowercase shared roles, and tap", () => {
+    expect(formatElement({ ...base, role: "button" })).toBe('e3 button "Log in" id=login @24,610 354x48 [tap, longPress]');
+  });
+
+  it.each([
+    ["textfield", "input"],
+    ["search", "input"],
+    ["textbox", "input"],
+    ["scrollview", "scroll"],
+    ["imagebutton", "button"],
+    ["togglebutton", "button"],
+    ["adjustable", "slider"],
+    ["img", "image"],
+    ["summary", "text"],
+    ["header", "header"],
+    ["radio", "radio"],
+    ["Tab", "tab"],
+  ])("role %s reads as %s", (from, to) => {
+    expect(formatElement({ ...base, role: from }).split(" ")[1]).toBe(to);
+  });
+
+  it("falls back to the component name when there's no role", () => {
+    expect(formatElement({ ...base, role: null, type: "FancyThing" }).split(" ")[1]).toBe("FancyThing");
+  });
+
+  it("lists type without submit, and scroll and toggle as they are", () => {
+    expect(formatElement({ ...base, role: "textfield", actions: ["type", "submit"] })).toMatch(/\[type\]$/);
+    expect(formatElement({ ...base, role: "switch", actions: ["toggle"] })).toMatch(/\[toggle\]$/);
+    expect(formatElement({ ...base, role: "scrollview", actions: ["scroll"] })).toMatch(/\[scroll\]$/);
+  });
+
+  it("leaves the action list out when only submit is offered", () => {
+    expect(formatElement({ ...base, actions: ["submit"] })).not.toContain("[");
   });
 });
 
@@ -134,7 +186,10 @@ describe("formatTree", () => {
   it("shows a native tab without a position", () => {
     expect(
       formatElement({ ref: "e9", type: "Tab", role: "tab", text: "Nutrition", frame: null, actions: ["press"], selected: false }),
-    ).toBe('e9 tab "Nutrition" [press]');
+    ).toBe('e9 tab "Nutrition" [tap]');
+    expect(
+      formatElement({ ref: "e9", type: "Tab", role: "tab", text: "Nutrition", frame: null, actions: ["press"] }),
+    ).toBe('e9 tab "Nutrition" [tap]');
   });
 });
 
