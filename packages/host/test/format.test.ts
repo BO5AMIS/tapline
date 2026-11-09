@@ -102,6 +102,7 @@ describe("element lines (AGENT-TOOLS §3.3)", () => {
     ["header", "header"],
     ["radio", "radio"],
     ["Tab", "tab"],
+    ["constructor", "constructor"],
   ])("role %s reads as %s", (from, to) => {
     expect(formatElement({ ...base, role: from }).split(" ")[1]).toBe(to);
   });
@@ -186,9 +187,6 @@ describe("formatTree", () => {
   it("shows a native tab without a position", () => {
     expect(
       formatElement({ ref: "e9", type: "Tab", role: "tab", text: "Nutrition", frame: null, actions: ["press"], selected: false }),
-    ).toBe('e9 tab "Nutrition" [tap]');
-    expect(
-      formatElement({ ref: "e9", type: "Tab", role: "tab", text: "Nutrition", frame: null, actions: ["press"] }),
     ).toBe('e9 tab "Nutrition" [tap]');
   });
 });

@@ -17,23 +17,23 @@ function formatValue(value: unknown): string {
 }
 
 /** AGENT-TOOLS §3.3: one lowercase role vocabulary for both tools. */
-const ROLE_ALIASES: Record<string, string> = {
-  textfield: "input",
-  search: "input",
-  textbox: "input",
-  scrollview: "scroll",
-  imagebutton: "button",
-  togglebutton: "button",
-  adjustable: "slider",
-  img: "image",
-  summary: "text",
-};
+const ROLE_ALIASES: ReadonlyMap<string, string> = new Map([
+  ["textfield", "input"],
+  ["search", "input"],
+  ["textbox", "input"],
+  ["scrollview", "scroll"],
+  ["imagebutton", "button"],
+  ["togglebutton", "button"],
+  ["adjustable", "slider"],
+  ["img", "image"],
+  ["summary", "text"],
+]);
 
 export function roleOf(element: Pick<TreeElement, "role" | "type">): string | null {
   const role = element.role;
   if (role !== null && role !== undefined && role !== "") {
     const lower = role.toLowerCase();
-    return ROLE_ALIASES[lower] ?? lower;
+    return ROLE_ALIASES.get(lower) ?? lower;
   }
   const type = element.type;
   return type !== null && type !== undefined && type !== "" ? type : null;
