@@ -11,7 +11,7 @@ import {
 } from './fiber';
 import { openAlerts } from './alerts';
 import { inFlight } from './network';
-import { getRoots } from './register';
+import { commitRevision, getRoots } from './register';
 import {
   TaplineError,
   isRecord,
@@ -804,6 +804,47 @@ export function refFor(fiber: Fiber): string {
   const ref = `e${++refCounter}`;
   bindRef(ref, fiber);
   return ref;
+}
+
+/** The ref a fiber already has, without handing out a new one. */
+function peekRef(fiber: Fiber): string | null {
+  const direct = fiberToRef.get(fiber) ?? (fiber.alternate ? fiberToRef.get(fiber.alternate) : undefined);
+  if (direct) return direct;
+  for (const [ref, known] of refToFiber) if (sameFiber(known, fiber)) return ref;
+  return null;
+}
+
+export interface OverlayElement {
+  ref: string | null;
+  type: string;
+  label: string | null;
+  id: string | null;
+  frame: Frame;
+}
+
+/**
+ * `overlay`: the elements on screen with their frames and the UI revision, for the live
+ * viewer's boxes. Unlike `tree` it leaves refs and the change baseline alone.
+ */
+export async function overlay(): Promise<{ rev: number; screen: ScreenInfo; elements: OverlayElement[] }> {
+  const rev = commitRevision();
+  const snapshot = takeSnapshot();
+  const candidates = snapshot.entries.filter((entry) => entry.info.interesting && !entry.tab);
+  const frames = await Promise.all(candidates.map((entry) => measureFiber(entry.node.fiber)));
+  const elements: OverlayElement[] = [];
+  candidates.forEach((entry, i) => {
+    const frame = frames[i];
+    if (!frame || !isOnScreen(frame, snapshot.screen)) return;
+    const { info } = entry;
+    elements.push({
+      ref: peekRef(entry.node.fiber),
+      type: info.role ?? info.type,
+      label: info.label ?? (info.text !== '' ? info.text.slice(0, 80) : null),
+      id: info.testID,
+      frame,
+    });
+  });
+  return { rev, screen: snapshot.screen, elements };
 }
 
 export function fiberForRef(ref: string): Fiber | null {

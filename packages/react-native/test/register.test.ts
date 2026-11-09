@@ -119,6 +119,27 @@ describe('without an existing hook', () => {
   });
 });
 
+describe('commit revisions', () => {
+  test('counts commits and tells listeners, who can stop listening; a throwing listener is harmless', () => {
+    const mod = loadFresh();
+    const hook = holder.__REACT_DEVTOOLS_GLOBAL_HOOK__ as Hook;
+    expect(mod.commitRevision()).toBe(0);
+    const seen: number[] = [];
+    const stop = mod.onCommit((revision) => seen.push(revision));
+    mod.onCommit(() => {
+      throw new Error('listener bug');
+    });
+    hook.onCommitFiberRoot?.(1, fakeRoot());
+    hook.onCommitFiberRoot?.(1, fakeRoot());
+    expect(mod.commitRevision()).toBe(2);
+    expect(seen).toEqual([1, 2]);
+    stop();
+    hook.onCommitFiberRoot?.(1, fakeRoot());
+    expect(seen).toEqual([1, 2]);
+    expect(mod.commitRevision()).toBe(3);
+  });
+});
+
 describe('with an existing hook (chaining)', () => {
   function previousHook(): Hook {
     return {

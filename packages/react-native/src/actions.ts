@@ -558,14 +558,23 @@ export async function typeText(
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
-  if (params.text === undefined && !submit) throw badParams('text is required (or pass submit: true)');
-  const replace = params.replace !== false;
+  const backspace = params.backspace;
+  if (backspace !== undefined && (typeof backspace !== 'number' || !Number.isInteger(backspace) || backspace < 0)) {
+    throw badParams('backspace must be a whole number of characters, 0 or more');
+  }
+  const deleting = typeof backspace === 'number' && backspace > 0;
+  if (params.text === undefined && !submit && !deleting) throw badParams('text is required (or pass submit: true)');
+  // Deleting from the end edits what is there, so it never replaces the whole text.
+  const replace = params.replace !== false && !deleting;
 
   const { entry } = await resolveInput(null, params.target);
   if (entry.info.disabled) throw new TaplineError('not_actionable', `${describe(entry)} is not editable`);
 
-  const previous = currentInputValue(entry.node);
-  const typed = typeof params.text === 'string' ? params.text : undefined;
+  const current = currentInputValue(entry.node);
+  // Characters, not UTF-16 units: an emoji is one.
+  const previous = deleting ? Array.from(current).slice(0, -backspace).join('') : current;
+  const typedText = typeof params.text === 'string' ? params.text : undefined;
+  const typed = typedText ?? (deleting ? '' : undefined);
   const next = typed === undefined ? previous : replace ? typed : previous + typed;
   const target = nativeTagOf(entry.node.fiber);
   const controlled = typeof findProp(entry.node, 'value') === 'string';

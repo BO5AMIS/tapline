@@ -32,6 +32,28 @@ const WRAPPED = Symbol.for('tapline.hookWrapped');
 const rootsByRenderer = new Map<number, Set<FiberRootLike>>();
 let installedHook: HookLike | null = null;
 
+/** How many React commits have happened: the screen's revision, for the live viewer. */
+let revision = 0;
+const commitListeners = new Set<(revision: number) => void>();
+
+function committed(): void {
+  revision += 1;
+  for (const listener of commitListeners) safely(() => listener(revision));
+}
+
+/** The number of React commits so far; it changes whenever the UI may have changed. */
+export function commitRevision(): number {
+  return revision;
+}
+
+/** Called after every React commit with the new revision; returns a function that stops it. */
+export function onCommit(listener: (revision: number) => void): () => void {
+  commitListeners.add(listener);
+  return () => {
+    commitListeners.delete(listener);
+  };
+}
+
 function record(rendererId: number, root: unknown): void {
   if (!isFiberRoot(root)) return;
   let set = rootsByRenderer.get(rendererId);
@@ -133,7 +155,10 @@ export function installHook(target: object = globalThis): unknown {
     }
   }
 
-  wrap(hook, 'onCommitFiberRoot', (args) => record(numberArg(args[0]), args[1]));
+  wrap(hook, 'onCommitFiberRoot', (args) => {
+    record(numberArg(args[0]), args[1]);
+    committed();
+  });
   wrap(hook, 'onCommitFiberUnmount', (args) => forgetByFiber(args[1]));
   Object.defineProperty(hook, WRAPPED, { value: true, enumerable: false });
   installedHook = hook;

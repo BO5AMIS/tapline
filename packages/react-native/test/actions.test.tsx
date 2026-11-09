@@ -440,6 +440,17 @@ describe('type', () => {
     expect(byTestID(elements, 'notes-input').value).toBe('hello!');
   });
 
+  test('backspace deletes characters from the end (an emoji counts as one), then appends any text', async () => {
+    await mountSample();
+    await run(() => typeText({ target: { testID: 'name-input' }, text: 'Mo😀' }));
+    const deleted = await run(() => typeText({ target: { testID: 'name-input' }, backspace: 1 }));
+    expect(deleted.value).toBe('Mo');
+    const replacedEnd = await run(() => typeText({ target: { testID: 'name-input' }, backspace: 1, text: 'e', replace: false }));
+    expect(replacedEnd.value).toBe('Me');
+    expect(spies.onControlledChange.mock.calls.map((call) => call[0])).toEqual(['Mo😀', 'Mo', 'Me']);
+    expect((await failure(run(() => typeText({ target: { testID: 'name-input' }, backspace: -1 })))).code).toBe('bad_params');
+  });
+
   test('appending to an untouched uncontrolled input starts from defaultValue', async () => {
     await mountSample();
     const result = await run(() => typeText({ target: { testID: 'notes-input' }, text: '-more', replace: false }));
