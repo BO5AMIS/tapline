@@ -29,6 +29,15 @@ export interface SessionInfo {
   capabilities: string[];
   connectedAt: number;
   lastSeen: number;
+  /** The app's last reported state ("active", "background", "inactive"), when it sent one. */
+  appState?: { state: string; at: number };
+}
+
+/** The most recent app that dropped, for explaining "no app is connected". */
+export interface LastDisconnect {
+  session: SessionInfo;
+  reason: string;
+  at: number;
 }
 
 export interface TaplineHostOptions {
@@ -149,6 +158,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly servers: Array<{ http: HttpServer; wss: WebSocketServer; host: string; port: number }> = [];
   private readonly sessionMap = new Map<string, Session>();
   private selectedId: string | undefined;
+  private lastDrop: LastDisconnect | undefined;
   private sweeper: NodeJS.Timeout | undefined;
   private listenCalled = false;
   private closed = false;
@@ -280,6 +290,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return [...this.sessionMap.values()].map((s) => ({ ...s.info }));
   }
 
+  /** The most recent app that dropped (its last state included), if any. */
+  lastDisconnect(): LastDisconnect | undefined {
+    return this.lastDrop === undefined ? undefined : { ...this.lastDrop, session: { ...this.lastDrop.session } };
+  }
+
   /** The selected session, else the most recently connected one. */
   current(): SessionInfo | undefined {
     const session = this.currentSession();
@@ -346,6 +361,17 @@ export class TaplineHost extends EventEmitter<HostEvents> {
         );
       }
       return Promise.reject(new TaplineError("no_app", "No app is connected to the Tapline host."));
+    }
+    const appState = session.info.appState;
+    if (appState?.state === "background") {
+      // iOS has paused the app: a request would only time out.
+      const since = new Date(appState.at).toTimeString().slice(0, 8);
+      return Promise.reject(
+        new TaplineError(
+          "in_background",
+          `${session.info.app.name} is in the background since ${since} (the user switched apps or locked the phone, so iOS paused it). Ask the user to open the app again; it carries on by itself.`,
+        ),
+      );
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
     const id = session.nextId++;
@@ -520,14 +546,26 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   }
 
   private recordEvent(session: Session, event: string, data: unknown): void {
+    if (event === "appState") {
+      const state = typeof data === "object" && data !== null ? (data as { state?: unknown }).state : undefined;
+      if (typeof state !== "string" || state === "") return;
+      const at = Date.now();
+      session.info.appState = { state, at };
+      const where = state === "active" ? "came back to the front" : state === "background" ? "went to the background" : `is ${state}`;
+      this.pushEntry(session, { level: "info", message: `[tapline] the app ${where}`, ts: at });
+      return;
+    }
     if (event !== "log" && event !== "error") return;
     const parsed = logEntrySchema.safeParse(data);
     if (!parsed.success) return;
-    const entry: LogEntry = {
+    this.pushEntry(session, {
       ...parsed.data,
       level: event === "error" ? "error" : (parsed.data.level ?? "log"),
       ts: parsed.data.ts ?? Date.now(),
-    };
+    });
+  }
+
+  private pushEntry(session: Session, entry: LogEntry): void {
     session.events.push(entry);
     if (session.events.length > this.logBufferSize) {
       session.events.splice(0, session.events.length - this.logBufferSize);
@@ -539,6 +577,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private dropSession(session: Session, reason: string): void {
     if (this.sessionMap.get(session.info.id) !== session) return;
     this.sessionMap.delete(session.info.id);
+    this.lastDrop = { session: { ...session.info }, reason, at: Date.now() };
     if (this.selectedId === session.info.id) this.selectedId = undefined;
     for (const [id, pending] of session.pending) {
       clearTimeout(pending.timer);

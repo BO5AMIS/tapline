@@ -130,6 +130,20 @@ export const treeResultSchema = z.object({
       params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
     })
     .optional(),
+  /** Open alerts the app showed (Alert.alert / Alert.prompt). */
+  alerts: z
+    .array(
+      z.object({
+        kind: z.enum(["alert", "prompt"]),
+        title: z.string(),
+        message: z.string().nullable(),
+        buttons: z.array(z.object({ text: z.string(), style: z.enum(["default", "cancel", "destructive"]) })),
+        standIn: z.boolean(),
+      }),
+    )
+    .optional(),
+  /** Network requests still running. */
+  network: z.object({ inFlight: z.number() }).optional(),
   /** With `changes: true`: what changed since the previous tree call. */
   changes: z
     .object({

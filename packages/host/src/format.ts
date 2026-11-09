@@ -73,6 +73,7 @@ export function formatTree(tree: TreeResult): string {
   const lines = [header];
   const route = formatRoute(tree.route);
   if (route !== null) lines.push(route);
+  lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");
   return [...lines, ...tree.elements.map(formatElement)].join("\n");
 }
@@ -92,7 +93,11 @@ export function formatChanges(tree: TreeResult): string | null {
   if (churn > Math.max(8, count / 2)) return null;
 
   const byRef = new Map(tree.elements.map((element) => [element.ref, element]));
-  const lines = [`Screen - ${count} element${count === 1 ? "" : "s"}, same screen. Changes since the last list:`];
+  const lines = [
+    `Screen - ${count} element${count === 1 ? "" : "s"}, same screen. Changes since the last list:`,
+    ...formatStatus(tree),
+  ];
+  const statusLines = lines.length;
   for (const ref of changes.added) {
     const element = byRef.get(ref);
     if (element !== undefined) lines.push(`+ ${formatElement(element)}`);
@@ -112,9 +117,27 @@ export function formatChanges(tree: TreeResult): string | null {
       if (element !== undefined) lines.push(`↕ ${formatElement(element)}`);
     }
   }
-  if (lines.length === 1) lines.push("No visible change.");
+  if (lines.length === statusLines) lines.push("No visible change.");
   lines.push("(Unchanged elements keep their refs; call look for the full list.)");
   return lines.join("\n");
+}
+
+/** Lines for open alerts and requests in flight: things that block or explain the screen. */
+export function formatStatus(tree: TreeResult): string[] {
+  const lines: string[] = [];
+  for (const alert of tree.alerts ?? []) {
+    const buttons = alert.buttons
+      .map((button) => `[${clip(button.text, 40)}${button.style === "destructive" ? " (destructive)" : ""}]`)
+      .join(" ");
+    const message = alert.message !== null && alert.message !== "" ? ` ${clip(alert.message, 160)}` : "";
+    const how = alert.standIn
+      ? "(Tapline's stand-in: press its buttons like any element)"
+      : "(an OS alert: Tapline can't press it; ask the user to tap one)";
+    lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons} ${how}`);
+  }
+  const busy = tree.network?.inFlight ?? 0;
+  if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);
+  return lines;
 }
 
 /** `Route: (tabs) › nutrition (day="2026-11-09")`, or null without a route. */

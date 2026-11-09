@@ -19,6 +19,7 @@ const INSTRUCTIONS = [
   "Act with press / type_text / scroll / toggle / open_url using a target: prefer {ref} or {testID} from the latest look.",
   "Every action returns what changed since the last list (added +, gone -, changed ~, moved ↕; unchanged elements keep their refs), or the full list when the screen changed. It has no screenshot: drive by text and call `look` when you need to see the screen.",
   "Actions refuse what a person couldn't tap (off screen, or covered by something on top) and say why; scroll or dismiss first, or pass force: true. `back` goes back like the back button; native tab bars appear as `tab` elements you can press. The `Route:` line names the screen.",
+  "Use `wait_for` (an element appears or is gone, or the network is quiet) rather than fixed waits. An `Alert:` line is an alert the app showed: an OS alert needs the user to tap it; Tapline's stand-in alert has buttons you press. `app_command` lists and runs the app's test commands (and `appearance` light/dark).",
   "Screenshots cost image tokens: skip them with screenshot:false, shrink them with width (300 is enough for a layout), and hand them to a smaller model when you can (see the Tapline guide for agents).",
 ].join(" ");
 
@@ -155,6 +156,28 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: toolShapes.back,
     },
     (args) => tools.back(args),
+  );
+
+  server.registerTool(
+    "app_command",
+    {
+      title: "App command",
+      description:
+        "Commands the app offers for testing (registered with registerTaplineCommand), such as switching the language, signing in as a test user or loading sample data. Without `name`: lists them with their descriptions. With `name` (and `args`): runs it, returns its result and what changed on screen. Built in: appearance { scheme: light | dark | system }.",
+      inputSchema: toolShapes.app_command,
+    },
+    (args) => tools.appCommand(args),
+  );
+
+  server.registerTool(
+    "wait_for",
+    {
+      title: "Wait for",
+      description:
+        "Wait until something is on screen (text contains, testID or label), or gone with `gone: true` (a spinner), and/or until no network request is in flight (`network_idle`). Polls up to `timeout` seconds (default 10). Better than a fixed `wait`: it returns as soon as the app is ready. Returns what changed on screen; error timeout when it didn't happen.",
+      inputSchema: toolShapes.wait_for,
+    },
+    (args) => tools.waitFor(args),
   );
 
   server.registerTool(

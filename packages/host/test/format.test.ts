@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatElement, formatLogs, formatTree } from "../src/format.js";
+import { formatChanges, formatElement, formatLogs, formatTree } from "../src/format.js";
 import type { TreeResult } from "../src/protocol.js";
 
 const tree: TreeResult = {
@@ -92,6 +92,43 @@ describe("formatTree", () => {
     expect(lines[1]).toBe('Route: (tabs) › nutrition (day="2026-11-09", count=3)');
     expect(lines).toHaveLength(6);
     expect(formatTree({ ...tree, route: { names: ["home"] } }).split("\n")[1]).toBe("Route: home");
+  });
+
+  it("shows open alerts and requests in flight under the header, in full lists and change lists", () => {
+    const withStatus = {
+      ...tree,
+      route: { names: ["workouts"] },
+      alerts: [
+        {
+          kind: "alert" as const,
+          title: "Delete workout?",
+          message: "This can't be undone.",
+          buttons: [
+            { text: "Cancel", style: "cancel" as const },
+            { text: "Delete", style: "destructive" as const },
+          ],
+          standIn: false,
+        },
+      ],
+      network: { inFlight: 2 },
+    };
+    const lines = formatTree(withStatus).split("\n");
+    expect(lines[1]).toBe("Route: workouts");
+    expect(lines[2]).toBe(
+      "Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)] (an OS alert: Tapline can't press it; ask the user to tap one)",
+    );
+    expect(lines[3]).toBe("Network: 2 requests in flight");
+
+    const standIn = formatTree({ ...withStatus, alerts: [{ ...withStatus.alerts[0]!, standIn: true }], network: undefined });
+    expect(standIn).toContain("(Tapline's stand-in: press its buttons like any element)");
+    expect(standIn).not.toContain("Network:");
+
+    const changes = formatChanges({
+      ...withStatus,
+      changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] },
+    });
+    expect(changes).toContain('Alert: "Delete workout?"');
+    expect(changes).toContain("Network: 2 requests in flight");
   });
 
   it("shows a native tab without a position", () => {

@@ -297,6 +297,48 @@ describe("sessions", () => {
   });
 });
 
+describe("app state", () => {
+  it("keeps the app's last state, logs it, and remembers it after the app drops", async () => {
+    const { host, port } = await start();
+    const { app, session } = await connect(port);
+    expect(host.lastDisconnect()).toBeUndefined();
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    await until(() => host.sessions()[0]?.appState?.state === "background");
+    expect(host.logs(session).at(-1)).toMatchObject({ level: "info", message: "[tapline] the app went to the background" });
+    app.close();
+    await until(() => host.lastDisconnect() !== undefined);
+    const last = host.lastDisconnect();
+    expect(last?.session.id).toBe(session);
+    expect(last?.session.appState?.state).toBe("background");
+    expect(typeof last?.at).toBe("number");
+  });
+
+  it("answers requests at once while the app is in the background, and normally once it's back", async () => {
+    const { host, port } = await start({ requestTimeoutMs: 5000 });
+    const { app, session } = await connect(port, {}, (req) => ({ ok: true, result: { method: req.method } }));
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    await until(() => host.sessions()[0]?.appState?.state === "background");
+    const started = Date.now();
+    await expect(host.request("tree", {}, { sessionId: session })).rejects.toMatchObject({
+      code: "in_background",
+      message: expect.stringContaining("open the app"),
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    app.send({ type: "event", event: "appState", data: { state: "active" } });
+    await until(() => host.sessions()[0]?.appState?.state === "active");
+    await expect(host.request("tree", {}, { sessionId: session })).resolves.toEqual({ method: "tree" });
+  });
+
+  it("ignores app state events without a state", async () => {
+    const { host, port } = await start();
+    const { app } = await connect(port);
+    app.send({ type: "event", event: "appState", data: { nope: 1 } });
+    app.send({ type: "event", event: "log", data: { message: "after", ts: 1 } });
+    await until(() => host.logs(host.sessions()[0]?.id ?? "").length === 1);
+    expect(host.sessions()[0]?.appState).toBeUndefined();
+  });
+});
+
 describe("log events", () => {
   it("buffers log and error events and returns them from logs()", async () => {
     const { host, port } = await start();

@@ -115,6 +115,20 @@ export const toolShapes = {
   },
   open_url: { url: z.string().describe('URL or deep link to open, e.g. "myapp://settings"'), look: lookField },
   back: { look: lookField },
+  app_command: {
+    name: z.string().optional().describe("The command to run; omit to list the app's commands and what they take"),
+    args: z.record(z.string(), z.unknown()).optional().describe("Arguments, as the command's description says"),
+    look: lookField,
+  },
+  wait_for: {
+    text: z.string().optional().describe("Wait until an element whose text contains this is on screen (or gone)"),
+    testID: z.string().optional().describe("Wait until the element with this testID is on screen (or gone)"),
+    label: z.string().optional().describe("Wait until the element with this accessibility label is on screen (or gone)"),
+    gone: z.boolean().optional().describe("Wait until it is gone instead, e.g. a spinner"),
+    network_idle: z.boolean().optional().describe("Also (or only) wait until no network request is in flight"),
+    timeout: z.number().min(0.5).max(30).optional().describe("Seconds to wait at most (default 10)"),
+    look: lookField,
+  },
   logs: {
     since: z.number().optional().describe("Only lines after this timestamp (epoch milliseconds)"),
   },
@@ -155,6 +169,10 @@ export interface ToolsOptions {
   /** How many file-mode screenshots to keep; older ones are deleted. Default 50. */
   screenshotKeep?: number;
 }
+
+const commandsSchema = z.object({
+  commands: z.array(z.object({ name: z.string(), description: z.string() })),
+});
 
 const findingsSchema = z.object({
   findings: z.array(z.object({ kind: z.string(), ref: z.string(), other: z.string().optional(), message: z.string() })),
@@ -250,7 +268,19 @@ export class TaplineTools {
   /** How to connect an app, shown when nothing is connected. */
   noAppMessage(): string {
     const { url, name } = this.options.connect;
+    const lines: string[] = [];
+    const last = this.host.lastDisconnect();
+    if (last !== undefined) {
+      const when = new Date(last.at).toTimeString().slice(0, 8);
+      const state = last.session.appState?.state;
+      lines.push(
+        state === "background" || state === "inactive"
+          ? `${last.session.app.name} disconnected at ${when} after it went to the background (the user switched apps or locked the phone, and iOS paused it). Ask the user to open the app again: it reconnects by itself.`
+          : `${last.session.app.name} disconnected at ${when} (${last.reason}). If the app is still open, it reconnects by itself.`,
+      );
+    }
     return [
+      ...lines,
       "No app is connected to Tapline.",
       `This host listens at ${url} on ${name}.`,
       'To connect a phone, call `pair` with the app\'s URL scheme ("scheme" in app.json, e.g. "myapp") and show the user the QR code. They scan it with the phone\'s camera and tap Connect in the app.',
@@ -572,6 +602,56 @@ export class TaplineTools {
       (r) => {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
         return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
+      },
+      args.look,
+    );
+  }
+
+  async appCommand(args: Shape<"app_command">): Promise<CallToolResult> {
+    if (args.name === undefined || args.name.trim() === "") {
+      const session = this.host.current();
+      if (session === undefined) return fail(this.noAppMessage());
+      let raw: unknown;
+      try {
+        raw = await this.host.request("commands", {}, { sessionId: session.id });
+      } catch (error) {
+        return fail(describeError(error));
+      }
+      const parsed = commandsSchema.safeParse(raw);
+      if (!parsed.success) return fail("Error internal: the app returned a command list the host could not read.");
+      const lines = parsed.data.commands.map((c) => `${c.name}: ${c.description}`);
+      return text(
+        lines.length > 0
+          ? [`${session.app.name} offers ${lines.length} command${lines.length === 1 ? "" : "s"}:`, ...lines].join("\n")
+          : `${session.app.name} offers no commands.`,
+      );
+    }
+    const name = args.name.trim();
+    return this.act(
+      "command",
+      { name, args: args.args ?? {} },
+      (r) => {
+        const result = typeof r === "object" && r !== null && "result" in r ? (r as { result: unknown }).result : null;
+        return result === null || result === undefined ? `Ran ${name}.` : `Ran ${name}: ${JSON.stringify(result)}`;
+      },
+      args.look,
+    );
+  }
+
+  waitFor(args: Shape<"wait_for">): Promise<CallToolResult> {
+    const params: Record<string, unknown> = {};
+    if (args.text !== undefined) params["text"] = args.text;
+    if (args.testID !== undefined) params["testID"] = args.testID;
+    if (args.label !== undefined) params["label"] = args.label;
+    if (args.gone !== undefined) params["gone"] = args.gone;
+    if (args.network_idle !== undefined) params["networkIdle"] = args.network_idle;
+    if (args.timeout !== undefined) params["timeout"] = args.timeout;
+    return this.act(
+      "waitFor",
+      params,
+      (r) => {
+        const ms = typeof r === "object" && r !== null && "waitedMs" in r ? (r as { waitedMs: unknown }).waitedMs : undefined;
+        return typeof ms === "number" ? `Done after ${(Math.round(ms / 100) / 10).toFixed(1)} s.` : "Done.";
       },
       args.look,
     );

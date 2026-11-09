@@ -166,6 +166,65 @@ describe("press", () => {
   });
 });
 
+describe("after the app went to the background", () => {
+  it("tells the agent the app was put in the background, and that it reconnects when opened", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    app.ws.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const text = textOf(await tools.look({}));
+    expect(text).toContain("went to the background");
+    expect(text).toContain("open the app");
+  });
+});
+
+describe("app commands and waiting", () => {
+  it("lists the app's commands when no name is given", async () => {
+    const commands = [
+      { name: "appearance", description: "Switch light/dark (args: { scheme })" },
+      { name: "language", description: "Switch language (args: { code })" },
+    ];
+    const { app, tools } = await setup((req) =>
+      req.method === "commands" ? { ok: true, result: { commands } } : defaultHandler(req),
+    )();
+    const text = textOf(await tools.appCommand({}));
+    expect(app.requests.map((r) => r.method)).toEqual(["commands"]);
+    expect(text).toContain("appearance: Switch light/dark (args: { scheme })");
+    expect(text).toContain("language: Switch language (args: { code })");
+  });
+
+  it("runs a command with args, shows its result and what changed", async () => {
+    const { app, tools } = await setup((req) =>
+      req.method === "command" ? { ok: true, result: { name: "language", result: { code: "ar" } } } : defaultHandler(req),
+    )();
+    const text = textOf(await tools.appCommand({ name: "language", args: { code: "ar" } }));
+    expect(app.requests[0]).toMatchObject({ method: "command", params: { name: "language", args: { code: "ar" } } });
+    expect(text).toContain('Ran language: {"code":"ar"}');
+    expect(text).toContain("e3 button");
+  });
+
+  it("wait_for passes the condition on and reports how long it took", async () => {
+    const { app, tools } = await setup((req) =>
+      req.method === "waitFor" ? { ok: true, result: { met: true, waitedMs: 1240 } } : defaultHandler(req),
+    )();
+    const text = textOf(await tools.waitFor({ text: "Saved", gone: false, network_idle: true, timeout: 5 }));
+    expect(app.requests[0]).toMatchObject({ method: "waitFor", params: { text: "Saved", gone: false, networkIdle: true, timeout: 5 } });
+    expect(text).toContain("Done after 1.2 s");
+  });
+
+  it("wait_for reports a timeout as an error", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "waitFor"
+        ? { ok: false, error: { code: "timeout", message: 'Waited 5 s for text "Saved" to appear; it didn\'t happen.' } }
+        : defaultHandler(req),
+    )();
+    const result = await tools.waitFor({ text: "Saved", timeout: 5 });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("it didn't happen");
+  });
+});
+
 describe("labels and layout checks", () => {
   const grey = jpeg.encode({ data: Buffer.alloc(300 * 600 * 4, 128), width: 300, height: 600 }, 80).data.toString("base64");
   const realShot = (req: IncomingRequest): Reply =>
@@ -557,7 +616,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "logs", "reload", "wait"].sort(),
+        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "logs", "reload", "wait"].sort(),
       );
       const ok = await client.callTool({ name: "press", arguments: { target: { testID: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Pressed e3");
