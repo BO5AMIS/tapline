@@ -139,6 +139,10 @@ function formatWas(key: string, value: unknown): string {
       return `@${r(x)},${r(y)} ${r(width)}x${r(height)}`;
     }
   }
+  if (key === "actions" && Array.isArray(value)) {
+    const names = actionsOf({ actions: value.filter((item): item is string => typeof item === "string") });
+    return `[${names.join(", ")}]`;
+  }
   return formatValue(value);
 }
 
@@ -196,9 +200,9 @@ export function formatStatus(tree: TreeResult): string[] {
       .join(" ");
     const message = alert.message !== null && alert.message !== "" ? ` ${clip(alert.message, 160)}` : "";
     const how = alert.standIn
-      ? "(Tapline's stand-in: tap its buttons like any element)"
-      : "(an OS alert: Tapline can't tap it; ask the user to tap one)";
-    lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons} ${how}`);
+      ? "Note: Tapline's stand-in alert: tap its buttons like any element."
+      : "Note: an OS alert: Tapline can't tap it; ask the user to tap one, or use Tapwright.";
+    lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons}`, how);
   }
   const busy = tree.network?.inFlight ?? 0;
   if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);

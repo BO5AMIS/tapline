@@ -365,6 +365,8 @@ function deviceLabel(s: SessionInfo): string {
 /** Default screenshot width in pixels: readable, about 1,000 image tokens for a phone screen. */
 export const DEFAULT_SCREENSHOT_WIDTH = 600;
 
+const NO_SCREENSHOT_NOTE = "Note: no screenshot: this app doesn't support it; add react-native-view-shot.";
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -685,35 +687,38 @@ export class TaplineTools {
       (askChanges ? formatChanges(tree) : null) ?? formatTree(tree, { name: session.app.name, id: session.app.id }),
     ];
     const content: CallToolResult["content"] = [];
+    // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
+    const notes: string[] = [];
     const shot = await shotPromise;
     if (shot === undefined) {
-      if (wantScreenshot) lines.push("(No screenshot: this app does not support it; add react-native-view-shot.)");
+      if (wantScreenshot) notes.push(NO_SCREENSHOT_NOTE);
     } else if (shot.ok) {
       const parsed = screenshotResultSchema.safeParse(shot.value);
-      if (!parsed.success) lines.push("(Screenshot unavailable: unreadable response.)");
+      if (!parsed.success) notes.push("Note: screenshot unavailable: unreadable response.");
       else {
         const screen = tree.screen;
         const image =
           labels && screen !== null && screen !== undefined
             ? annotateScreenshot(parsed.data, tree.elements, screen)
             : parsed.data;
-        if (labels) lines.push("(Screenshot labeled with each tappable element's box and ref.)");
+        if (labels) notes.push("Note: screenshot labeled with each tappable element's box and ref.");
         if (this.options.screenshots === "file") {
           const { mime, data, width: w, height: h } = image;
           try {
             const size = w !== undefined && h !== undefined ? ` (${w}x${h})` : "";
             lines.push(`Screenshot: ${this.saveShot(sid, mime, data)}${size}`);
           } catch (error) {
-            lines.push(`(Screenshot not saved: ${error instanceof Error ? error.message : String(error)})`);
+            notes.push(`Note: screenshot not saved: ${error instanceof Error ? error.message : String(error)}`);
           }
         } else content.push({ type: "image", data: image.data, mimeType: image.mime });
       }
     } else if (shot.error instanceof TaplineError && shot.error.code === "unsupported") {
       this.noScreenshot.add(sid);
-      lines.push("(No screenshot: this app does not support it; add react-native-view-shot.)");
+      notes.push(NO_SCREENSHOT_NOTE);
     } else {
-      lines.push(`(Screenshot failed: ${shot.error instanceof Error ? shot.error.message : String(shot.error)})`);
+      notes.push(`Note: screenshot failed: ${shot.error instanceof Error ? shot.error.message : String(shot.error)}`);
     }
+    lines.push(...notes);
     return { content: [{ type: "text", text: lines.join("\n") }, ...content], isError: false };
   }
 
@@ -756,7 +761,12 @@ export class TaplineTools {
       if (settled !== undefined) {
         const [first, ...rest] = response.content;
         if (first !== undefined && first.type === "text") {
-          response = { ...response, content: [{ type: "text", text: `${first.text.trimEnd()}\n${settled}` }, ...rest] };
+          // `Settled in` is the last line that isn't a note: it goes before the trailing `Note:` lines.
+          const all = first.text.trimEnd().split("\n");
+          let end = all.length;
+          while (end > 1 && all[end - 1]?.startsWith("Note: ") === true) end--;
+          all.splice(end, 0, settled);
+          response = { ...response, content: [{ type: "text", text: all.join("\n") }, ...rest] };
         }
       }
     }
@@ -963,7 +973,7 @@ export class TaplineTools {
         const size = image.width !== undefined && image.height !== undefined ? ` (${image.width}x${image.height})` : "";
         lines.push(`Image: ${this.saveShot(sessionId, image.mime, image.data)}${size}`);
       } catch (error) {
-        lines.push(`(Image not saved: ${error instanceof Error ? error.message : String(error)})`);
+        lines.push(`Note: image not saved: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else content.push({ type: "image", data: image.data, mimeType: image.mime });
   }
@@ -1209,7 +1219,7 @@ export class TaplineTools {
               `Replay "${script.name}" failed at step ${i + 1} of ${total}: ${describeStep(step)}`,
               problem,
               ...(lines.length > 0 ? ["Steps before it passed:", ...lines] : []),
-              ...(step.fragile ? ["(This step targets a ref from the recording run; give the element a testID.)"] : []),
+              ...(step.fragile ? ["Note: this step targets a ref from the recording run; give the element a testID."] : []),
             ].join("\n"),
           );
         }
@@ -1228,7 +1238,7 @@ export class TaplineTools {
   private async withLook(session: SessionInfo, line: string, screenshot = false): Promise<CallToolResult> {
     // The session may have been replaced (app restarted) in the meantime.
     const live = this.host.sessions().some((s) => s.id === session.id) ? session : this.host.current();
-    if (live === undefined) return text(`${line}\n(The app disconnected, so no fresh element list is available.)`);
+    if (live === undefined) return text(`${line}\nNote: the app disconnected, so there's no fresh element list.`);
     // Text only unless asked: a screenshot after every step would cost image tokens the agent rarely needs.
     const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true);
     const [first, ...rest] = parts.content;

@@ -121,6 +121,19 @@ describe("press", () => {
     expect(Date.now() - started).toBeLessThan(300);
   });
 
+  it("puts the settle line before any Note: lines", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "press"
+        ? { ok: true, result: { element: TREE.elements[0], settledMs: 310 } }
+        : req.method === "screenshot"
+          ? { ok: false, error: { code: "unsupported", message: "no view-shot" } }
+          : defaultHandler(req),
+    )();
+    const lines = textOf(await tools.tap({ target: { id: "login-button" }, screenshot: true })).split("\n");
+    expect(lines.at(-2)).toBe("Settled in 0.31 s.");
+    expect(lines.at(-1)).toMatch(/^Note: no screenshot/);
+  });
+
   it("prints no settle line when the app doesn't report one, and only the first line without look", async () => {
     const { tools } = await setup(defaultHandler)();
     expect(textOf(await tools.tap({ target: { id: "login-button" } }))).not.toContain("Settled in");
@@ -822,7 +835,7 @@ describe("look", () => {
     const first = await tools.look({});
     expect(first.isError).toBeUndefined();
     expect(first.content).toHaveLength(1);
-    expect(textOf(first)).toContain("No screenshot");
+    expect(textOf(first)).toContain("Note: no screenshot");
     expect(textOf(first)).toContain("e3 button");
     // remembered for this session: no second screenshot attempt
     await tools.look({});
@@ -902,7 +915,16 @@ describe("look", () => {
     )();
     const result = await tools.look({});
     expect(result.isError).toBeUndefined();
-    expect(textOf(result)).toContain("Screenshot failed: capture failed");
+    expect(textOf(result)).toContain("Note: screenshot failed: capture failed");
+  });
+
+  it("notes are Note: lines, never parenthesised", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "screenshot" ? { ok: false, error: { code: "unsupported", message: "no view-shot" } } : defaultHandler(req),
+    )();
+    const text = textOf(await tools.look({}));
+    expect(text).toContain("Note: no screenshot: this app doesn't support it; add react-native-view-shot.");
+    expect(text).not.toMatch(/^\(/m);
   });
 });
 

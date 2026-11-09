@@ -195,13 +195,12 @@ describe("formatTree", () => {
     };
     const lines = formatTree(withStatus).split("\n");
     expect(lines[1]).toBe("Route: workouts");
-    expect(lines[2]).toBe(
-      "Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)] (an OS alert: Tapline can't tap it; ask the user to tap one)",
-    );
-    expect(lines[3]).toBe("Network: 2 requests in flight");
+    expect(lines[2]).toBe("Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)]");
+    expect(lines[3]).toBe("Note: an OS alert: Tapline can't tap it; ask the user to tap one, or use Tapwright.");
+    expect(lines[4]).toBe("Network: 2 requests in flight");
 
     const standIn = formatTree({ ...withStatus, alerts: [{ ...withStatus.alerts[0]!, standIn: true }], network: undefined });
-    expect(standIn).toContain("(Tapline's stand-in: tap its buttons like any element)");
+    expect(standIn).toContain("Note: Tapline's stand-in alert: tap its buttons like any element.");
     expect(standIn).not.toContain("Network:");
 
     const changes = formatChanges({
@@ -270,6 +269,15 @@ describe("formatChanges (AGENT-TOOLS §3.1)", () => {
     expect(formatChanges(many)).toContain('(was frame=@0,10 100x10, text="a")');
     const checked = withChanges(2, { ...none, changed: [{ ref: "e2", was: { checked: false } }] });
     expect(formatChanges(checked)).toContain("(was false)");
+  });
+
+  it("shows an old actions list the way element lines do", () => {
+    const some = withChanges(2, { ...none, changed: [{ ref: "e2", was: { actions: ["press", "longPress", "submit"] } }] });
+    expect(formatChanges(some)).toContain("(was [tap, longPress])");
+    const empty = withChanges(2, { ...none, changed: [{ ref: "e2", was: { actions: [] } }] });
+    expect(formatChanges(empty)).toContain("(was [])");
+    const many = withChanges(2, { ...none, changed: [{ ref: "e2", was: { actions: ["press"], text: "a" } }] });
+    expect(formatChanges(many)).toContain('(was actions=[tap], text="a")');
   });
 
   it("counts many moved elements, and lists a few", () => {
