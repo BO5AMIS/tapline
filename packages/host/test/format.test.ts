@@ -122,10 +122,38 @@ describe("element lines (AGENT-TOOLS §3.3)", () => {
   });
 });
 
+describe("the header (AGENT-TOOLS §3.2)", () => {
+  it("starts with the screen line, then the app, with no session id", () => {
+    const text = formatTree(
+      { screen: { width: 440, height: 956, scale: 3 }, elements: [], route: { names: ["(tabs)", "today"], params: {} } },
+      { name: "Demo", id: "com.example.demo" },
+    );
+    expect(text.split("\n").slice(0, 3)).toEqual([
+      "Screen 440x956 pt @3x · 0 elements",
+      "App: Demo (com.example.demo)",
+      "Route: (tabs) › today",
+    ]);
+  });
+
+  it("lists up to 200 elements, then says how many more", () => {
+    const elements = Array.from({ length: 205 }, (_, i) => ({
+      ref: `e${i + 1}`,
+      type: "Text",
+      role: "text",
+      text: `Row ${i}`,
+    }));
+    const text = formatTree({ screen: { width: 440, height: 956, scale: 3 }, elements });
+    expect(text).toContain("Screen 440x956 pt @3x · 205 elements");
+    expect(text).toContain('e200 text "Row 199"');
+    expect(text).not.toContain("e201 ");
+    expect(text.trimEnd().endsWith("(+5 more below; scroll)")).toBe(true);
+  });
+});
+
 describe("formatTree", () => {
   it("has a header with the screen size and one line per element", () => {
     const lines = formatTree(tree).split("\n");
-    expect(lines[0]).toBe("Screen 402x874 @3x (points) - 4 elements");
+    expect(lines[0]).toBe("Screen 402x874 pt @3x · 4 elements");
     expect(lines).toHaveLength(5);
   });
 

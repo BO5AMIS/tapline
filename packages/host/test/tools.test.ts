@@ -762,8 +762,17 @@ describe("look", () => {
     const result = await tools.look({});
     expect(result.isError).toBeUndefined();
     expect(result.content[0]).toMatchObject({ type: "text" });
-    expect(textOf(result)).toContain("Screen 402x874 @3x (points) - 1 element");
+    expect(textOf(result)).toContain("Screen 402x874 pt @3x · 1 element");
     expect(result.content[1]).toEqual({ type: "image", data: "QUJD", mimeType: "image/jpeg" });
+  });
+
+  it("opens with the screen line, then the app by name and id, with no session id", async () => {
+    const { tools } = await setup(defaultHandler)();
+    const text = textOf(await tools.look({}));
+    const lines = text.split("\n");
+    expect(lines[0]).toMatch(/^Screen .* pt /);
+    expect(lines[1]).toBe("App: Demo (com.example.demo)");
+    expect(text).not.toContain("[s-");
   });
 
   it("returns text only with a note when screenshot is unsupported", async () => {

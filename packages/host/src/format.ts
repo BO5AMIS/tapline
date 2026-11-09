@@ -95,20 +95,28 @@ export function describeElement(element: TreeElement): string {
   return parts.join(" ");
 }
 
-/** The whole screen as text: a header line, then one line per element in tree order. */
-export function formatTree(tree: TreeResult): string {
+/** A list shows at most this many elements; the rest read as a scroll. */
+const MAX_ELEMENTS = 200;
+
+/**
+ * The whole screen as text (AGENT-TOOLS §3.2): the screen line, the app, route, alert and network
+ * lines, then one line per element in tree order, up to 200.
+ */
+export function formatTree(tree: TreeResult, app?: { name: string; id?: string }): string {
   const screen = tree.screen;
   const size = screen
-    ? `${Math.round(screen.width)}x${Math.round(screen.height)}${screen.scale !== undefined ? ` @${screen.scale}x` : ""}`
+    ? `${Math.round(screen.width)}x${Math.round(screen.height)} pt${screen.scale !== undefined ? ` @${screen.scale}x` : ""}`
     : "unknown size";
   const count = tree.elements.length;
-  const header = `Screen ${size} (points) - ${count} element${count === 1 ? "" : "s"}`;
-  const lines = [header];
+  const lines = [`Screen ${size} · ${count} element${count === 1 ? "" : "s"}`];
+  if (app !== undefined) lines.push(`App: ${app.name}${app.id !== undefined ? ` (${app.id})` : ""}`);
   const route = formatRoute(tree.route);
   if (route !== null) lines.push(route);
   lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");
-  return [...lines, ...tree.elements.map(formatElement)].join("\n");
+  lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map(formatElement));
+  if (count > MAX_ELEMENTS) lines.push(`(+${count - MAX_ELEMENTS} more below; scroll)`);
+  return lines.join("\n");
 }
 
 /** Most moved elements listed one by one; more read as a scroll. */

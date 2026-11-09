@@ -632,7 +632,9 @@ export class TaplineTools {
     this.listed.add(sid);
     this.lastLookRoute = tree.route?.names;
     if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
-    const lines = [`App: ${session.app.name} [${sid}]`, (askChanges ? formatChanges(tree) : null) ?? formatTree(tree)];
+    const lines = [
+      (askChanges ? formatChanges(tree) : null) ?? formatTree(tree, { name: session.app.name, id: session.app.id }),
+    ];
     const content: CallToolResult["content"] = [];
     const shot = await shotPromise;
     if (shot === undefined) {
