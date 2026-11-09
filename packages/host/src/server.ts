@@ -93,10 +93,9 @@ export interface ListenResult {
 }
 
 export type TaplineErrorCode =
-  | "no_app"
-  | "unknown_session"
+  | "not_connected"
   | "timeout"
-  | "disconnected"
+  | "reconnecting"
   | "send_failed"
   | (string & {});
 
@@ -356,7 +355,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     const session = this.sessionMap.get(sessionId);
     if (session === undefined) {
       throw new TaplineError(
-        "unknown_session",
+        "not_connected",
         `No connected session "${sessionId}". Connected: ${this.describeIds()}.`,
       );
     }
@@ -369,7 +368,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   logs(sessionId: string, since?: number): LogEntry[] {
     const session = this.sessionMap.get(sessionId);
     if (session === undefined) {
-      throw new TaplineError("unknown_session", `No connected session "${sessionId}".`);
+      throw new TaplineError("not_connected", `No connected session "${sessionId}".`);
     }
     return session.events.filter((e) => since === undefined || (e.ts ?? 0) > since).map((e) => ({ ...e }));
   }
@@ -401,12 +400,12 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       if (options.sessionId !== undefined) {
         return Promise.reject(
           new TaplineError(
-            "unknown_session",
+            "not_connected",
             `No connected session "${options.sessionId}". Connected: ${this.describeIds()}.`,
           ),
         );
       }
-      return Promise.reject(new TaplineError("no_app", "No app is connected to the Tapline host."));
+      return Promise.reject(new TaplineError("not_connected", "No app is connected to the Tapline host."));
     }
     const appState = session.info.appState;
     if (appState?.state === "background") {
@@ -635,7 +634,10 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       clearTimeout(pending.timer);
       session.pending.delete(id);
       pending.reject(
-        new TaplineError("disconnected", `The app disconnected before answering "${pending.method}" (${reason}).`),
+        new TaplineError(
+          "reconnecting",
+          `The app disconnected before answering "${pending.method}" (${reason}). It reconnects by itself while it's open; look again in a few seconds.`,
+        ),
       );
     }
     this.safely(() => this.emit("disconnect", { ...session.info }, reason));

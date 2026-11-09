@@ -434,6 +434,10 @@ export class TaplineTools {
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
   }
 
+  private notConnected(): CallToolResult {
+    return fail(`Error not_connected: ${this.noAppMessage()}`);
+  }
+
   /** How to connect an app, shown when nothing is connected. */
   noAppMessage(): string {
     const { url, name } = this.options.connect;
@@ -449,8 +453,8 @@ export class TaplineTools {
       );
     }
     return [
-      ...lines,
       "No app is connected to Tapline.",
+      ...lines,
       `This host listens at ${url} on ${name}.`,
       'To connect a phone, call `pair` with the app\'s URL scheme ("scheme" in app.json, e.g. "myapp") and show the user the QR code. They scan it with the phone\'s camera and tap Connect in the app.',
       "The phone needs Tailscale on (the same network as this computer), and the app must be a build with Tapline turned on, open in the foreground.",
@@ -540,7 +544,7 @@ export class TaplineTools {
 
   async look(args: Shape<"look"> = {}): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     const parts = await this.lookParts(
       session,
       args.screenshot ?? true,
@@ -555,7 +559,7 @@ export class TaplineTools {
 
   async checkLayout(_args: Shape<"check_layout"> = {}): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     let raw: unknown;
     try {
       raw = await this.host.request("check", {}, { sessionId: session.id });
@@ -674,7 +678,7 @@ export class TaplineTools {
     withLook: boolean | undefined,
   ): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     let result: unknown;
     try {
       const timeoutMs = answerTimeoutMs(method, params);
@@ -905,7 +909,7 @@ export class TaplineTools {
 
   async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     const name = args.name.trim();
     if (!SCRIPT_NAME.test(name)) return fail("Error bad_params: name the reference with letters, digits, '.', '_' and '-'.");
     const dir = this.options.baselinesDir;
@@ -979,7 +983,7 @@ export class TaplineTools {
 
   async filmstrip(args: Shape<"filmstrip">): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     const count = args.frames ?? 6;
     const interval = args.interval_ms ?? 250;
     const frameWidth = args.frame_width ?? 200;
@@ -1027,7 +1031,7 @@ export class TaplineTools {
         }
         if (this.recording !== null) return fail(`Error bad_params: already recording "${this.recording.name}"; stop it first.`);
         const session = this.host.current();
-        if (session === undefined) return fail(this.noAppMessage());
+        if (session === undefined) return this.notConnected();
         this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [] };
         return text(
           `Recording "${name}" on ${session.app.name}. Every action from now on is a step; wait_for steps check the app is where it should be. Prefer testIDs: they replay best. Stop with record { action: "stop" }.`,
@@ -1113,7 +1117,7 @@ export class TaplineTools {
       return fail(`Error internal: couldn't read ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
 
     const started = Date.now();
     const total = script.steps.length;
@@ -1254,7 +1258,7 @@ export class TaplineTools {
   async appCommand(args: Shape<"app_command">): Promise<CallToolResult> {
     if (args.name === undefined || args.name.trim() === "") {
       const session = this.host.current();
-      if (session === undefined) return fail(this.noAppMessage());
+      if (session === undefined) return this.notConnected();
       let raw: unknown;
       try {
         raw = await this.host.request("commands", {}, { sessionId: session.id });
@@ -1320,7 +1324,7 @@ export class TaplineTools {
 
   async logs(args: Shape<"logs">): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     let entries: LogEntry[] = this.host.logs(session.id, args.since);
     if (entries.length === 0) {
       // Nothing streamed to the host yet; ask the app for the lines it buffered before we connected.
@@ -1339,12 +1343,12 @@ export class TaplineTools {
 
   async reload(args: Shape<"reload">): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     try {
       await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
     } catch (error) {
       // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
-      const worked = error instanceof TaplineError && (error.code === "disconnected" || error.code === "timeout");
+      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout");
       if (!worked) return fail(describeError(error));
     }
     if (args.look === false) return text("Reload requested.");
@@ -1361,7 +1365,7 @@ export class TaplineTools {
 
   async wait(args: Shape<"wait">): Promise<CallToolResult> {
     const session = this.host.current();
-    if (session === undefined) return fail(this.noAppMessage());
+    if (session === undefined) return this.notConnected();
     await sleep(args.seconds * 1000);
     if (this.recording !== null && !this.replaying) {
       this.recording.steps.push({ method: "sleep", params: { seconds: args.seconds } });

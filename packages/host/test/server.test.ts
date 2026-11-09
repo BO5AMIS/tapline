@@ -196,15 +196,30 @@ describe("requests", () => {
     const pending = host.request("tree", {}, { timeoutMs: 5000 });
     await until(() => app.requests.length === 1);
     app.ws.terminate();
-    await expect(pending).rejects.toMatchObject({ code: "disconnected" });
+    await expect(pending).rejects.toMatchObject({ code: "reconnecting" });
     await until(() => host.sessions().length === 0);
+  });
+
+  it("names the codes as AGENT-TOOLS.md does", async () => {
+    const { host } = await start();
+    await expect(host.request("tree", {})).rejects.toMatchObject({ code: "not_connected" });
+    await expect(host.request("tree", {}, { sessionId: "s-nope" })).rejects.toMatchObject({ code: "not_connected" });
+  });
+
+  it("a request in flight when the app drops ends with reconnecting", async () => {
+    const { host, port } = await start();
+    const { app } = await connect(port, {}, () => "ignore");
+    const pending = host.request("tree", {}, { timeoutMs: 5000 });
+    await until(() => app.requests.length === 1);
+    app.ws.close();
+    await expect(pending).rejects.toMatchObject({ code: "reconnecting" });
   });
 
   it("fails clearly with no app connected or an unknown session", async () => {
     const { host, port } = await start();
-    await expect(host.request("tree")).rejects.toMatchObject({ code: "no_app" });
+    await expect(host.request("tree")).rejects.toMatchObject({ code: "not_connected" });
     await connect(port);
-    await expect(host.request("tree", {}, { sessionId: "s-ffff" })).rejects.toMatchObject({ code: "unknown_session" });
+    await expect(host.request("tree", {}, { sessionId: "s-ffff" })).rejects.toMatchObject({ code: "not_connected" });
   });
 
   it("targets a specific session and supports select()/current()", async () => {
@@ -237,7 +252,7 @@ describe("sessions", () => {
     await until(() => first.app.requests.length === 1);
     const second = await connect(port);
     expect((await first.app.closed).code).toBe(4010);
-    expect(await outcome).toMatchObject({ code: "disconnected" });
+    expect(await outcome).toMatchObject({ code: "reconnecting" });
     expect(host.sessions().map((s) => s.id)).toEqual([second.session]);
     expect(second.session).not.toBe(first.session);
     // selection follows the app to its new session

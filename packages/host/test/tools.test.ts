@@ -842,6 +842,16 @@ describe("no app connected", () => {
     expect(apps.isError).toBeUndefined();
     expect(textOf(apps)).toContain("No app is connected");
   });
+
+  it("without an app, actions fail with Error not_connected and the setup steps", async () => {
+    const { host } = await startHost();
+    hosts.push(host);
+    const tools = new TaplineTools(host, { connect: { url: "ws://127.0.0.1:7210/", name: "Dev PC" }, settleMs: 0 });
+    const result = await tools.press({ target: { testID: "save" } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/^Error not_connected: No app is connected to Tapline\./);
+    expect(textOf(result)).toContain("call `pair`");
+  });
 });
 
 describe("pair", () => {
