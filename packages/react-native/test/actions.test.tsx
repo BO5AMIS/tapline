@@ -704,16 +704,29 @@ describe('onActed', () => {
     await mountSample();
     const seen: string[] = [];
     const stop = onActed(() => seen.push(spies.onLogin.mock.calls.length > 0 ? 'handler ran' : 'handler not yet run'));
+    configureActions({ quietMs: 100, capMs: 2000 });
+    jest.useFakeTimers();
     try {
-      const result = await run(() => press({ target: { testID: 'login-button' } }));
-      seen.push('settled');
-      expect(seen).toEqual(['handler ran', 'settled']);
-      expect(result.settledMs).toBe(0);
+      let result: { settledMs: number } | undefined;
+      const pending = press({ target: { testID: 'login-button' } }).then((r) => {
+        result = r;
+      });
+      await jest.advanceTimersByTimeAsync(0);
+      // The handler ran and the listener was told, while the press still waits for the app to settle.
+      expect(seen).toEqual(['handler ran']);
+      expect(result).toBeUndefined();
+      await jest.advanceTimersByTimeAsync(99);
+      expect(result).toBeUndefined();
+      await jest.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(result?.settledMs).toBe(100);
     } finally {
+      jest.useRealTimers();
+      configureActions({ quietMs: 0, capMs: 0 });
       stop();
     }
     await run(() => press({ target: { testID: 'login-button' } }));
-    expect(seen).toEqual(['handler ran', 'settled']);
+    expect(seen).toEqual(['handler ran']);
   });
 });
 
