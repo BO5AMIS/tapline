@@ -117,7 +117,7 @@ export const toolShapes = {
   },
   scroll: {
     direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction (default down when no `to`)"),
-    amount: z.number().positive().optional().describe("Distance in points (default: 80% of the scroll view height)"),
+    amount: z.number().min(0.1).max(1).optional().describe("How far: a share of the scroll area, 0.1 to 1 (default 0.8)"),
     to: z.enum(["start", "end"]).optional().describe("Jump to the start or end instead of using direction/amount"),
     target: targetField.optional().describe("Scroll view to scroll; default: the largest one on screen"),
     look: lookField,
@@ -1290,7 +1290,7 @@ export class TaplineTools {
       return Promise.resolve(fail("Error bad_params: use either `to` or `direction`/`amount`, not both."));
     }
     const params: Record<string, unknown> =
-      args.to !== undefined ? { to: args.to } : { direction: args.direction ?? "down", ...(args.amount !== undefined ? { amount: args.amount } : {}) };
+      args.to !== undefined ? { to: args.to } : { direction: args.direction ?? "down", fraction: args.amount ?? 0.8 };
     if (args.target !== undefined) params["target"] = toWireTarget(args.target);
     return this.act(
       "scroll",

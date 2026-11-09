@@ -594,6 +594,27 @@ describe('scroll', () => {
     expect(scrollTo).toHaveBeenLastCalledWith({ x: 30, y: 0, animated: false });
   });
 
+  test('scroll by fraction moves that share of the scroll view', async () => {
+    await mountSample();
+    const scrollTo = jest.fn();
+    hostInstance('main-scroll').scrollTo = scrollTo;
+    const down = await run(() => scroll({ target: { testID: 'main-scroll' }, direction: 'down', fraction: 0.5 }));
+    expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 400, animated: false }); // half of the 800pt height
+    expect(down.offset).toEqual({ x: 0, y: 400 });
+    // left / right use the width (400pt)
+    await run(() => scroll({ target: { testID: 'main-scroll' }, direction: 'right', fraction: 0.25 }));
+    expect(scrollTo).toHaveBeenLastCalledWith({ x: 100, y: 400, animated: false });
+  });
+
+  test('fraction must be between 0.1 and 1, and not combined with amount', async () => {
+    await mountSample();
+    const target = { testID: 'main-scroll' };
+    expect((await failure(scroll({ target, direction: 'down', fraction: 2 }))).code).toBe('bad_params');
+    expect((await failure(scroll({ target, direction: 'down', fraction: 0.05 }))).code).toBe('bad_params');
+    expect((await failure(scroll({ target, direction: 'down', fraction: 'half' }))).code).toBe('bad_params');
+    expect((await failure(scroll({ target, direction: 'down', fraction: 0.5, amount: 100 }))).code).toBe('bad_params');
+  });
+
   test('to: end uses scrollToEnd, to: start goes back to 0', async () => {
     await mountSample();
     const instance = hostInstance('main-scroll');

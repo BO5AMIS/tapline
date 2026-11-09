@@ -720,6 +720,13 @@ export async function scroll(
     throw badParams('amount must be a positive number of points');
   }
 
+  if (params.fraction !== undefined) {
+    if (params.amount !== undefined) throw badParams('use fraction or amount, not both');
+    if (typeof params.fraction !== 'number' || !(params.fraction >= 0.1 && params.fraction <= 1)) {
+      throw badParams('fraction is a share of the scroll area, 0.1 to 1');
+    }
+  }
+
   let entry: Entry;
   let frame: Frame | null = null;
   if (params.target !== undefined && params.target !== null) {
@@ -782,7 +789,14 @@ export async function scroll(
     }
   } else {
     const visible = metrics?.visibleLength ?? (horizontal ? frame?.width : frame?.height) ?? getScreen().height;
-    const amount = typeof params.amount === 'number' ? params.amount : Math.round(visible * 0.8);
+    const vertical = direction === 'down' || direction === 'up';
+    const areaSize = (vertical ? frame?.height : frame?.width) ?? visible;
+    const amount =
+      typeof params.fraction === 'number'
+        ? Math.round(params.fraction * areaSize)
+        : typeof params.amount === 'number'
+          ? params.amount
+          : Math.round(visible * 0.8);
     const dx = direction === 'right' ? amount : direction === 'left' ? -amount : 0;
     const dy = direction === 'down' ? amount : direction === 'up' ? -amount : 0;
     let x = Math.max(0, current.x + dx);

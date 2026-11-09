@@ -9,7 +9,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "../src/mcp.js";
 import type { TaplineHost } from "../src/server.js";
 import { ControlQueue } from "../src/control.js";
-import { TaplineTools, targetSchema } from "../src/tools.js";
+import { z } from "zod";
+import { TaplineTools, targetSchema, toolShapes } from "../src/tools.js";
 import type { ViewerAction } from "../src/viewer.js";
 import { FakeApp, TOKEN, startHost, type IncomingRequest, type Reply } from "./helpers.js";
 
@@ -1083,6 +1084,25 @@ describe("other tools", () => {
     const { tools } = await setup(defaultHandler)();
     const result = await tools.scroll({ to: "end", direction: "up" });
     expect(result.isError).toBe(true);
+  });
+
+  it("scroll amount is a share of the scroll area, sent as fraction", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    await tools.scroll({ amount: 0.5, look: false });
+    expect(app.requests.find((r) => r.method === "scroll")?.params).toMatchObject({ direction: "down", fraction: 0.5 });
+    await tools.scroll({ look: false });
+    expect(app.requests.filter((r) => r.method === "scroll")[1]?.params).toMatchObject({ direction: "down", fraction: 0.8 });
+    await tools.scroll({ to: "end", look: false });
+    const last = app.requests.filter((r) => r.method === "scroll")[2]?.params;
+    expect(last).toEqual({ to: "end" });
+  });
+
+  it("scroll schema refuses an amount outside 0.1 to 1", () => {
+    const schema = z.object(toolShapes.scroll);
+    expect(schema.safeParse({ amount: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ amount: 0.05 }).success).toBe(false);
+    expect(schema.safeParse({ amount: 0.1 }).success).toBe(true);
+    expect(schema.safeParse({ amount: 1 }).success).toBe(true);
   });
 
   it("logs come from the host buffer", async () => {
