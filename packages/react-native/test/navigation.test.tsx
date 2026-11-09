@@ -1,11 +1,18 @@
 import { mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
-import { Dimensions, PixelRatio, Text, View } from 'react-native';
+import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
 import { act } from 'react-test-renderer';
 import { back, configureActions, press } from '../src/actions';
 import { resetRefs, setMeasurer, stableObjectKey, tree } from '../src/inspect';
 import { TaplineError } from '../src/types';
 import type { Fiber } from '../src/fiber';
+
+// The home-indicator inset the app's safe-area library reports (an optional peer, not installed here).
+jest.mock(
+  'react-native-safe-area-context',
+  () => ({ initialWindowMetrics: { insets: { top: 47, bottom: 34, left: 0, right: 0 }, frame: { x: 0, y: 0, width: 400, height: 800 } } }),
+  { virtual: true },
+);
 
 interface FakeNavigation {
   isFocused: () => boolean;
@@ -218,5 +225,75 @@ describe('native tabs', () => {
     await tree({});
     await run(() => press({ target: { text: 'Nutrition' } }));
     expect(todayNav.navigate).toHaveBeenCalledWith('nutrition');
+  });
+
+  describe('where iOS draws the tab bar (an iPhone in portrait: 49 pt above the 34 pt inset)', () => {
+    // The screen here is 400x800, so the bar is y 717 to 800, three tabs of 133 pt.
+    async function mountTabsOver(content: React.ReactNode): Promise<FakeNavigation> {
+      const todayNav = navigation({ state: tabState });
+      await mount(
+        <Native type="RNSTabsHostIOS">
+          <Native type="RNSTabsScreenIOS" title="Today" screenKey="today-abc" pointerEvents="box-none">
+            <Screen route={{ key: 'today-abc', name: 'today' }} navigation={todayNav}>
+              {content}
+            </Screen>
+          </Native>
+          <Native type="RNSTabsScreenIOS" title="Nutrition" screenKey="nutrition-def" pointerEvents="none" />
+          <Native type="RNSTabsScreenIOS" title="Steps" screenKey="steps-ghi" pointerEvents="none" />
+        </Native>,
+      );
+      return todayNav;
+    }
+
+    test('a tap there switches to the tab under it, never what the app draws behind the bar', async () => {
+      const onCard = jest.fn();
+      const todayNav = await mountTabsOver(
+        <Pressable testID="card" onPress={onCard}>
+          <Text>Card</Text>
+        </Pressable>,
+      );
+      useFrames({ card: { x: 0, y: 600, width: 400, height: 200 } });
+      await run(() => press({ target: { x: 200, y: 760 } }));
+      expect(todayNav.navigate).toHaveBeenCalledWith('nutrition');
+      await run(() => press({ target: { x: 390, y: 730 } }));
+      expect(todayNav.navigate).toHaveBeenLastCalledWith('steps');
+      expect(onCard).not.toHaveBeenCalled();
+      // Just above the bar is the card.
+      await run(() => press({ target: { x: 200, y: 700 } }));
+      expect(onCard).toHaveBeenCalledTimes(1);
+    });
+
+    test('an element whose middle is under the bar is covered by it', async () => {
+      const onLow = jest.fn();
+      await mountTabsOver(
+        <Pressable testID="low" onPress={onLow}>
+          <Text>Low</Text>
+        </Pressable>,
+      );
+      useFrames({ low: { x: 0, y: 730, width: 400, height: 40 } });
+      const error = await failure(press({ target: { testID: 'low' } }));
+      expect(error.code).toBe('not_actionable');
+      expect(error.message).toContain('tab bar');
+      expect(onLow).not.toHaveBeenCalled();
+      await run(() => press({ target: { testID: 'low' }, force: true }));
+      expect(onLow).toHaveBeenCalledTimes(1);
+    });
+
+    test('an open modal covers the bar: a tap there goes to the modal', async () => {
+      const onSheet = jest.fn();
+      const todayNav = await mountTabsOver(
+        <Native type="RCTModalHostView">
+          <View>
+            <Pressable testID="sheet-button" onPress={onSheet}>
+              <Text>Save</Text>
+            </Pressable>
+          </View>
+        </Native>,
+      );
+      useFrames({ 'sheet-button': { x: 0, y: 730, width: 400, height: 50 } });
+      await run(() => press({ target: { x: 200, y: 750 } }));
+      expect(onSheet).toHaveBeenCalledTimes(1);
+      expect(todayNav.navigate).not.toHaveBeenCalled();
+    });
   });
 });

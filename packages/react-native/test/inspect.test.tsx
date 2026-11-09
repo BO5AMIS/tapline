@@ -1,7 +1,8 @@
 import { SAMPLE_FRAMES, SampleScreen, frame, makeSpies, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
 import { Dimensions, PixelRatio, Text, View } from 'react-native';
-import { resetRefs, setMeasurer, tree, defaultMeasurer, publicInstancesOf } from '../src/inspect';
+import { resetRefs, setMeasurer, tree, defaultMeasurer, defaultHitTester, publicInstancesOf } from '../src/inspect';
+import { getRoots } from '../src/register';
 import type { TaplineElement } from '../src/types';
 import type { Fiber } from '../src/fiber';
 
@@ -298,5 +299,73 @@ describe('default measurer', () => {
       },
     });
     await expect(defaultMeasurer(throwing)).resolves.toBeNull();
+  });
+});
+
+describe('defaultHitTester', () => {
+  type Shadow = { id: string };
+
+  /** Gives every host fiber with a testID a fake Fabric shadow node; returns them by testID. */
+  function giveShadowNodes(): Record<string, { fiber: Fiber; node: Shadow }> {
+    const found: Record<string, { fiber: Fiber; node: Shadow }> = {};
+    const visit = (fiber: Fiber | null): void => {
+      for (let f = fiber; f; f = f.sibling) {
+        const props = f.memoizedProps as { testID?: unknown } | null;
+        if (f.tag === 5 && typeof f.stateNode === 'object' && f.stateNode !== null) {
+          const id = typeof props?.testID === 'string' ? props.testID : String(f.type);
+          const node = { id };
+          (f.stateNode as { node?: Shadow }).node = node;
+          found[id] = { fiber: f, node };
+        }
+        visit(f.child);
+      }
+    };
+    for (const root of getRoots()) visit(root.current.child);
+    return found;
+  }
+
+  function fakeHitTest(answer: (node: Shadow) => Fiber | null): Shadow[] {
+    const asked: Shadow[] = [];
+    (globalThis as { nativeFabricUIManager?: unknown }).nativeFabricUIManager = {
+      findNodeAtPoint: (node: Shadow, _x: number, _y: number, callback: (hit: unknown) => void) => {
+        asked.push(node);
+        callback(answer(node));
+      },
+    };
+    return asked;
+  }
+
+  afterEach(() => {
+    delete (globalThis as { nativeFabricUIManager?: unknown }).nativeFabricUIManager;
+  });
+
+  test("asks an open modal's content first: a modal is its own window over the screen", async () => {
+    await mount(
+      <View testID="screen">
+        <View testID="chip" />
+        <Native type="RCTModalHostView">
+          <View testID="modal-content">
+            <View testID="close" />
+          </View>
+        </Native>
+        <View testID="after-modal" />
+      </View>,
+    );
+    const nodes = giveShadowNodes();
+    const asked = fakeHitTest((node) => (node.id === 'modal-content' ? nodes.close!.fiber : nodes.chip!.fiber));
+    await expect(defaultHitTester(402, 289)).resolves.toBe(nodes.close!.fiber);
+    expect(asked[0]).toBe(nodes['modal-content']!.node);
+  });
+
+  test('without a modal, asks the screen', async () => {
+    await mount(
+      <View testID="screen">
+        <View testID="chip" />
+      </View>,
+    );
+    const nodes = giveShadowNodes();
+    const asked = fakeHitTest(() => nodes.chip!.fiber);
+    await expect(defaultHitTester(10, 10)).resolves.toBe(nodes.chip!.fiber);
+    expect(asked).toEqual([nodes.screen!.node]);
   });
 });

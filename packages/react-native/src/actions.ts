@@ -10,8 +10,10 @@ import {
   isWithin,
   isOnScreen,
   measureFiber,
+  nativeTabBar,
   publicInstancesOf,
   refFor,
+  tabAt,
   rememberTyped,
   fiberForRef,
   takeSnapshot,
@@ -218,6 +220,10 @@ export async function resolveTarget(raw: unknown): Promise<Resolved> {
   }
 
   if (target.kind === 'point') {
+    // iOS draws the native tab bar over the app: a touch there lands on a tab, not on what's behind.
+    const bar = nativeTabBar(snapshot);
+    const tab = bar && target.y >= bar.top ? tabAt(bar, target.x, snapshot.screen.width) : undefined;
+    if (tab) return { snapshot, entry: tab };
     const actionable = snapshot.entries.filter((e) => e.info.actions.length > 0);
     const frames = await Promise.all(actionable.map((e) => measureFiber(e.node.fiber)));
     let hit: Entry | undefined;
@@ -382,6 +388,14 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   }
   const x = Math.round((left + right) / 2);
   const y = Math.round((top + bottom) / 2);
+  const bar = nativeTabBar(snapshot);
+  if (bar && y >= bar.top) {
+    throw new TaplineError(
+      'not_actionable',
+      `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
+        'Scroll it up first, or pass force: true to call its handler anyway.',
+    );
+  }
   const hit = await hitTest(x, y);
   if (!hit) return;
   if (isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return;

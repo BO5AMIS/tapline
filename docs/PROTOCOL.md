@@ -232,7 +232,13 @@ Real-touch check (unless `force`): an element entirely off screen is `not_action
 ("scroll to it first"). Otherwise the app hit-tests the centre of the element's visible
 part with Fabric's `findNodeAtPoint` (as React Native's element inspector does); when the
 touch would land on something that is neither inside the element nor one of its ancestors,
-it's `not_actionable` and the message names what covers it. When the hit test isn't
+it's `not_actionable` and the message names what covers it. An open React Native `Modal` is
+hit-tested first, from its own content: it is its own window over the app, so the root's hit
+test never reaches it, and everything behind it is covered. On an iPhone in portrait with
+native tabs (and no modal open), the tab bar iOS draws is taken to be the 49 points above the
+home-indicator inset (from `react-native-safe-area-context` when the app has it), its tabs
+spread evenly: a `{x, y}` target there is the tab under it, and an element whose middle is
+there is `not_actionable` (under the tab bar). When the hit test isn't
 available (old architecture) or finds nothing, the press goes ahead. `toggle` does the same.
 
 ### `type`

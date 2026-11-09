@@ -1,4 +1,4 @@
-import { Dimensions, PixelRatio, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
+import { Dimensions, PixelRatio, Platform, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
 import {
   HostComponent,
   HostText,
@@ -610,11 +610,69 @@ function isFiberLike(value: unknown): value is Fiber {
   return isRecord(value) && typeof value.tag === 'number' && 'return' in value;
 }
 
-/** Fabric's own hit test (`findNodeAtPoint`, as React Native's element inspector uses), topmost root first. */
+/** React Native's `Modal` host (its Fabric name, and the name the JS side renders). */
+const MODAL_HOSTS = new Set(['RCTModalHostView', 'ModalHostView']);
+
+function shadowNodeOf(fiber: Fiber): unknown {
+  const state = fiber.stateNode;
+  return isRecord(state) && state.node != null ? state.node : undefined;
+}
+
+/** The first host fiber among `first`, its siblings and their descendants (pre-order). */
+function firstHostFiber(first: Fiber | null): Fiber | null {
+  const stack: Fiber[] = first ? [first] : [];
+  for (let next = stack.pop(); next; next = stack.pop()) {
+    if (next.tag === HostComponent) return next;
+    if (next.sibling) stack.push(next.sibling);
+    if (next.child) stack.push(next.child);
+  }
+  return null;
+}
+
+/** The host fibers of open `Modal`s, in tree order (React Native renders a closed one as nothing). */
+function openModalHosts(): Fiber[] {
+  const hosts: Fiber[] = [];
+  for (const root of getRoots()) {
+    const stack: Fiber[] = root.current.child ? [root.current.child] : [];
+    for (let fiber = stack.pop(); fiber; fiber = stack.pop()) {
+      if (fiber.tag === HostComponent && typeof fiber.type === 'string' && MODAL_HOSTS.has(fiber.type)) hosts.push(fiber);
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }
+  }
+  return hosts;
+}
+
+/** Whether a `Modal` is open: its window covers the whole app, the native tab bar included. */
+export function modalOpen(): boolean {
+  return openModalHosts().length > 0;
+}
+
+/**
+ * The shadow nodes of open modals' content, the last presented first. A `Modal` is its own native
+ * window over the app, but its content sits in the same React tree, under a host whose layout
+ * the root's hit test never reaches: hit-testing from the root finds the screen behind it.
+ */
+function openModalContentNodes(): unknown[] {
+  const nodes: unknown[] = [];
+  for (const host of openModalHosts()) {
+    const content = firstHostFiber(host.child);
+    const node = content ? shadowNodeOf(content) : undefined;
+    if (node !== undefined) nodes.push(node);
+  }
+  return nodes.reverse();
+}
+
+/**
+ * Fabric's own hit test (`findNodeAtPoint`, as React Native's element inspector uses): open modals
+ * first (a modal's window covers the whole screen, so a touch never reaches what's behind it),
+ * then the roots, topmost first.
+ */
 export const defaultHitTester: HitTester = async (x, y) => {
   const manager = fabricHitManager();
   if (!manager) return undefined;
-  const nodes = getRoots().map(rootShadowNode).filter((node) => node !== undefined).reverse();
+  const roots = getRoots().map(rootShadowNode).filter((node) => node !== undefined).reverse();
+  const nodes = [...openModalContentNodes(), ...roots];
   if (nodes.length === 0) return undefined;
   for (const node of nodes) {
     const hit = await new Promise<Fiber | null | undefined>((resolve) => {
@@ -773,6 +831,49 @@ export function takeSnapshot(): Snapshot {
     });
   }
   return { nodes, entries, screen: getScreen(), routes };
+}
+
+/** The height of iOS's tab bar on an iPhone in portrait, in points (the classic and iOS 26 bars). */
+const TAB_BAR_HEIGHT = 49;
+
+/** The home-indicator inset, from the app's safe-area library when it has one. */
+function bottomInset(screen: ScreenInfo): number {
+  try {
+    const safeArea: unknown = require('react-native-safe-area-context');
+    const metrics = isRecord(safeArea) ? safeArea.initialWindowMetrics : undefined;
+    const insets = isRecord(metrics) ? metrics.insets : undefined;
+    if (isRecord(insets) && typeof insets.bottom === 'number' && insets.bottom >= 0) return insets.bottom;
+  } catch {
+    // not installed
+  }
+  return screen.height >= 812 ? 34 : 0; // iPhones with Face ID have a home indicator
+}
+
+/** Where iOS draws the native tab bar: from `top` to the bottom of the screen, `tabs` spread evenly. */
+export interface NativeTabBar {
+  top: number;
+  tabs: Entry[];
+}
+
+/**
+ * The native tab bar, which iOS draws outside React's tree: on an iPhone in portrait, 49 points
+ * above the home-indicator inset, its items spread evenly across the width (the classic and the
+ * iOS 26 bars alike). Null without native tabs, on other platforms, in landscape, and while a
+ * modal's window covers it.
+ */
+export function nativeTabBar(snapshot: Snapshot): NativeTabBar | null {
+  const tabs = snapshot.entries.filter((entry) => entry.tab !== undefined);
+  if (tabs.length === 0) return null;
+  if (Platform.OS !== 'ios' || Platform.isPad) return null;
+  const { width, height } = snapshot.screen;
+  if (height <= width || modalOpen()) return null;
+  return { top: height - bottomInset(snapshot.screen) - TAB_BAR_HEIGHT, tabs };
+}
+
+/** The tab under x on the bar. */
+export function tabAt(bar: NativeTabBar, x: number, width: number): Entry | undefined {
+  const index = Math.floor(x / (width / bar.tabs.length));
+  return bar.tabs[Math.min(bar.tabs.length - 1, Math.max(0, index))];
 }
 
 let refCounter = 0;
