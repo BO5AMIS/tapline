@@ -12,16 +12,26 @@ published.
 
 - HTTP and WebSocket on the server's viewer address: `127.0.0.1` by default, the computer's
   Tailscale address only when the server is started with its remote-viewer option.
-- Every request carries the server's **viewer token**, in one of three ways:
-  - `Authorization: Bearer <token>`;
-  - a cookie the server sets when the page is first loaded with `?token=<token>` (the server
-    then redirects to the same address without it, so the token leaves the address bar and
-    the browser history);
-  - `?token=<token>` where neither is possible.
-
-  The token is separate from any app or device secret and is never written to logs.
+- Every request carries the server's **viewer token**. The token is separate from any app or
+  device secret and is never written to logs.
+  - Non-browser clients (adapters, scripts) send `Authorization: Bearer <token>` on every
+    request, including the WebSocket handshake.
+  - `?token=<token>` is accepted only on the page load that sets the cookie. The server
+    answers that load with the page itself and sets the cookie (`HttpOnly; SameSite=Strict;
+    Path=/`), with `Referrer-Policy: no-referrer` and `Cache-Control: no-store`; the page
+    then removes the query from the address bar (`history.replaceState`). Not a redirect:
+    when the link is clicked on another site, Chrome sends the redirected request as
+    `cross-site` and without the `Strict` cookie, and a reload stays that way (measured), so
+    the page would never load. No other request accepts the token in the URL.
+  - A browser page served by the server itself authenticates `/stream` and `/ws` with that
+    cookie.
+  - A request authenticated by the cookie is refused when it carries a `Sec-Fetch-Site`
+    header whose value isn't `same-origin` or `none` (cookies are shared across ports, and
+    `SameSite` ignores them: a page on `localhost:3000` is the same site).
 - Servers check the `Host` header (against DNS rebinding) and, on WebSocket upgrades,
   `Origin`: the page's own origin, or none.
+- Action endpoints outside this protocol don't accept the cookie at all (Tapwright's agent
+  API at `/api/*` is Bearer only).
 
 ## Coordinates and time
 

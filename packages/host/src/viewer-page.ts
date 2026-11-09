@@ -364,12 +364,13 @@ function parseMultipartChunk(state, chunk) {
   var marks = $("marks");
   var notice = $("notice");
 
-  var token = new URLSearchParams(location.search).get("token");
+  /* The cookie set with this page authenticates /stream and /ws: take the token out of the
+     address bar and the history. */
+  if (location.search) history.replaceState(null, "", location.pathname);
   function endpoint(path, socket) {
     var u = new URL(path, location.href);
     u.search = "";
     u.hash = "";
-    if (token) u.searchParams.set("token", token);
     if (socket) u.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     return u.href;
   }

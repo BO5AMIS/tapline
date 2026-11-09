@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -211,17 +212,29 @@ export class ViewerHub implements HttpExtension {
     return this.options.allowRemote || isLoopback(req.socket.remoteAddress);
   }
 
-  private tokenOf(req: IncomingMessage, url: URL): string | null {
-    const auth = req.headers.authorization;
-    if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice(7).trim();
-    const cookie = parseCookies(req.headers.cookie).get(COOKIE);
-    if (cookie !== undefined) return cookie;
-    return url.searchParams.get("token");
+  private matches(candidate: string): boolean {
+    const a = Buffer.from(candidate);
+    const b = Buffer.from(this.options.token);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
-  private authorized(req: IncomingMessage, url: URL): boolean {
-    const token = this.tokenOf(req, url);
-    return token !== null && token.length === this.options.token.length && token === this.options.token;
+  /**
+   * How a request shows it knows the token: a Bearer header (scripts, adapters), the URL (only
+   * the page load that sets the cookie), or the cookie (the page's own requests). Null if none.
+   */
+  private credential(req: IncomingMessage, url: URL, allowQuery: boolean): "bearer" | "query" | "cookie" | null {
+    const auth = req.headers.authorization;
+    if (typeof auth === "string" && auth.startsWith("Bearer ")) return this.matches(auth.slice(7).trim()) ? "bearer" : null;
+    const query = allowQuery ? url.searchParams.get("token") : null;
+    if (query !== null && this.matches(query)) return "query";
+    const cookie = parseCookies(req.headers.cookie).get(COOKIE);
+    return cookie !== undefined && this.matches(cookie) ? "cookie" : null;
+  }
+
+  /** Cookies are shared across ports and SameSite ignores them: a cookie must come from this page. */
+  private cookieFromElsewhere(req: IncomingMessage, credential: string | null): boolean {
+    const site = req.headers["sec-fetch-site"];
+    return credential === "cookie" && typeof site === "string" && site !== "same-origin" && site !== "none";
   }
 
   // ---- HTTP -----------------------------------------------------------------
@@ -234,23 +247,29 @@ export class ViewerHub implements HttpExtension {
       res.end("Not allowed from here.\n");
       return true;
     }
-    if (!this.authorized(req, url)) {
+    const credential = this.credential(req, url, url.pathname === "/viewer");
+    if (credential === null) {
       res.writeHead(401, { "content-type": "text/plain" });
       res.end("Open the viewer link the agent gave you (it has the token).\n");
       return true;
     }
+    if (this.cookieFromElsewhere(req, credential)) {
+      res.writeHead(403, { "content-type": "text/plain" });
+      res.end("Not from another site.\n");
+      return true;
+    }
     if (url.pathname === "/viewer") {
-      if (url.searchParams.has("token")) {
-        // Keep the token out of the address bar and the history.
-        res.writeHead(302, {
-          location: "/viewer",
-          "set-cookie": `${COOKIE}=${encodeURIComponent(this.options.token)}; HttpOnly; SameSite=Strict; Path=/`,
-          "cache-control": "no-store",
-        });
-        res.end();
-        return true;
-      }
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      // The link's load gets the page itself plus the cookie, not a redirect: after a click on
+      // another site, the browser would send the redirected request without the Strict cookie.
+      // The page then takes the token out of the address bar.
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+        ...(credential === "query"
+          ? { "set-cookie": `${COOKIE}=${encodeURIComponent(this.options.token)}; HttpOnly; SameSite=Strict; Path=/` }
+          : {}),
+      });
       res.end(this.options.html);
       return true;
     }
@@ -308,7 +327,14 @@ export class ViewerHub implements HttpExtension {
     const origin = req.headers.origin;
     const host = req.headers.host ?? "";
     const originOk = origin === undefined || origin === `http://${host}` || origin === `https://${host}`;
-    if (!this.hostAllowed(req) || !this.addressAllowed(req) || !originOk || !this.authorized(req, url)) {
+    const credential = this.credential(req, url, false);
+    if (
+      !this.hostAllowed(req) ||
+      !this.addressAllowed(req) ||
+      !originOk ||
+      credential === null ||
+      this.cookieFromElsewhere(req, credential)
+    ) {
       socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return true;

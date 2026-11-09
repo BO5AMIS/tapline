@@ -150,6 +150,10 @@ describe("viewer page document", () => {
     expect(scriptBody()).toContain('if (typeof e.ref === "string" && e.ref !== "")');
   });
 
+  it("takes the token out of the address bar and history on load", () => {
+    expect(scriptBody()).toContain('history.replaceState(null, "", location.pathname)');
+  });
+
   it("talks to /stream and /ws and sets a viewport for phones", () => {
     const script = scriptBody();
     expect(script).toContain("/stream");

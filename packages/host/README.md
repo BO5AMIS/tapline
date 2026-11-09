@@ -67,9 +67,12 @@ no screenshot) unless `look: false`; `look` adds a screenshot (`width` in pixels
 - Connections without the right token are closed (4001), and bad pairing codes too
   (4004). Traffic is plain WebSocket inside Tailscale's encrypted tunnel.
 - The live viewer has its own random key, new on each start, in the link the `viewer` tool
-  gives. The first load trades it for an HttpOnly, SameSite=Strict cookie and drops it from
-  the address bar. Requests from another Host or (for the WebSocket) another Origin are
-  refused, and by default only this computer can open it.
+  gives. Only that first page load takes the key in the address: it sets an HttpOnly,
+  SameSite=Strict cookie and the page removes the key from the address bar. The stream and
+  the WebSocket take the cookie or an `Authorization: Bearer` header, never the key in the
+  URL. A cookie sent from another site (even another port on this computer:
+  `Sec-Fetch-Site`) is refused, so are requests from another Host or (for the WebSocket)
+  another Origin, and by default only this computer can open it.
 
 ## Develop
 

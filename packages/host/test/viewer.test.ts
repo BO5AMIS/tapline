@@ -79,9 +79,19 @@ function get(port: number, path: string, headers: Record<string, string> = {}): 
   });
 }
 
-function openWs(port: number, extra: { origin?: string } = {}): Promise<{ ws: WebSocket; messages: Array<Record<string, unknown>> }> {
+function openWs(
+  port: number,
+  extra: { origin?: string; auth?: "bearer" | "cookie" | "query"; fetchSite?: string } = {},
+): Promise<{ ws: WebSocket; messages: Array<Record<string, unknown>> }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${TOKEN}`, extra.origin ? { origin: extra.origin } : {});
+    const auth = extra.auth ?? "bearer";
+    const headers: Record<string, string> = {
+      ...(auth === "bearer" ? { authorization: `Bearer ${TOKEN}` } : {}),
+      ...(auth === "cookie" ? { cookie: `tapline_viewer=${TOKEN}` } : {}),
+      ...(extra.fetchSite ? { "sec-fetch-site": extra.fetchSite } : {}),
+    };
+    const path = auth === "query" ? `/ws?token=${TOKEN}` : "/ws";
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers, ...(extra.origin ? { origin: extra.origin } : {}) });
     sockets.push(ws);
     const messages: Array<Record<string, unknown>> = [];
     ws.on("message", (data) => messages.push(JSON.parse(String(data)) as Record<string, unknown>));
@@ -114,20 +124,40 @@ describe("viewerStatusFor", () => {
 });
 
 describe("viewer access", () => {
-  it("needs the token: the first load sets a cookie and drops it from the address", async () => {
+  it("needs the token: the first load serves the page and sets a cookie (no redirect, which loses the cookie after a click on another site)", async () => {
     const { port } = await startHub();
     expect((await get(port, "/viewer")).status).toBe(401);
-    const first = await get(port, `/viewer?token=${TOKEN}`);
-    expect(first.status).toBe(302);
-    expect(first.headers["location"]).toBe("/viewer");
+    const first = await get(port, `/viewer?token=${TOKEN}`, { "sec-fetch-site": "cross-site" });
+    expect(first.status).toBe(200);
+    expect(first.body).toContain("<title>viewer</title>");
+    expect(first.headers["location"]).toBeUndefined();
+    expect(first.headers["referrer-policy"]).toBe("no-referrer");
+    expect(first.headers["cache-control"]).toBe("no-store");
     const cookie = String(first.headers["set-cookie"]);
     expect(cookie).toContain(`tapline_viewer=${TOKEN}`);
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Strict");
-    const page = await get(port, "/viewer", { cookie: `tapline_viewer=${TOKEN}` });
+    const page = await get(port, "/viewer", { cookie: `tapline_viewer=${TOKEN}`, "sec-fetch-site": "same-origin" });
     expect(page.status).toBe(200);
-    expect(page.body).toContain("<title>viewer</title>");
+    expect((await get(port, "/viewer", { cookie: `tapline_viewer=${TOKEN}`, "sec-fetch-site": "none" })).status).toBe(200);
     expect((await get(port, "/viewer?token=wrong")).status).toBe(401);
+  });
+
+  it("takes the token in the URL only on that page load, not on the stream or the WebSocket", async () => {
+    const { port } = await startHub();
+    expect((await get(port, `/stream?token=${TOKEN}`)).status).toBe(401);
+    await expect(openWs(port, { auth: "query" })).rejects.toThrow(/refused/);
+  });
+
+  it("refuses a cookie sent from another site, even on this computer (cookies ignore ports)", async () => {
+    const { port } = await startHub();
+    const fromOtherPort = { cookie: `tapline_viewer=${TOKEN}`, "sec-fetch-site": "same-site" };
+    expect((await get(port, "/viewer", fromOtherPort)).status).toBe(403);
+    expect((await get(port, "/stream", fromOtherPort)).status).toBe(403);
+    await expect(openWs(port, { auth: "cookie", fetchSite: "cross-site" })).rejects.toThrow(/refused 403/);
+    await expect(openWs(port, { auth: "cookie", origin: `http://127.0.0.1:${port}` })).resolves.toBeDefined();
+    // A Bearer token is not a cookie: other sites can't send it, so the header doesn't matter.
+    await expect(openWs(port, { fetchSite: "cross-site" })).resolves.toBeDefined();
   });
 
   it("checks the Host header and leaves other paths alone", async () => {

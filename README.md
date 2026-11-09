@@ -166,8 +166,8 @@ order, pair again (or give each agent a fixed `--port`).
 - The app must be open on screen: iOS pauses apps in the background, and the connection
   comes back as soon as the app is opened again (the agent is told when it went to the
   background). While an agent is connected, the screen stays on (with `expo-keep-awake`).
-- Screenshots come from inside the app: about 30-40 ms each at the viewer's size on an
-  iPhone (measured). The live viewer shows a frame when the screen changes, a few a second
+- Screenshots come from inside the app: about 30-65 ms each at the viewer's size on an
+  iPhone once the app has settled, a few hundred while it starts up (measured). The live viewer shows a frame when the screen changes, a few a second
   for about a second after each action, and one a second otherwise; filmstrips also show a
   few frames a second. That's enough to follow what happens and to see loading states, not
   for quick animations.
@@ -187,8 +187,8 @@ order, pair again (or give each agent a fixed `--port`).
 | | |
 |---|---|
 | Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue): 203 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed: 349 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
-| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps and scrolls from the viewer (captures 30-40 ms, no stutter from capturing, measured) |
-| Not yet | typing from the viewer on a device, TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
+| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured) |
+| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
 
 ## Repository
 

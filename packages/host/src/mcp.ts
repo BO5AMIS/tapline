@@ -358,8 +358,8 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string; v
       control,
       setFeed: (on, quality) => {
         void tools.setFeed(on, quality).then((outcome) => {
-          // In the background the status already says so (appState below).
-          if (!outcome.ok && on && outcome.code !== "in_background") {
+          // Without an app, or in the background, the status already says so (appStatus below).
+          if (!outcome.ok && on && host.current() !== undefined && outcome.code !== "in_background") {
             live.setStatus({ detail: `The app can't stream its screen: ${outcome.message ?? ""}` });
           }
         });
