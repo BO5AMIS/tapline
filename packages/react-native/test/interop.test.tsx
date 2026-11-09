@@ -199,23 +199,24 @@ describeIfBuilt('host <-> app over a real WebSocket, paired and driven through M
     expect(text).toContain('name-input');
   });
 
-  test('press by testID reaches the app', async () => {
-    const { isError } = await mcp.call('press', { target: { testID: 'login-button' }, look: false });
+  test('tap by id reaches the app', async () => {
+    const { text, isError } = await mcp.call('tap', { target: { id: 'login-button' }, look: false });
+    expect(text).toMatch(/^Tapped e\d+ button "Log in"/);
     expect(isError).toBe(false);
     expect(spies.onLogin).toHaveBeenCalledTimes(1);
   });
 
   test('type_text updates a controlled input, and look shows it', async () => {
-    const typed = await mcp.call('type_text', { text: 'Mo', target: { testID: 'name-input' }, look: false });
+    const typed = await mcp.call('type_text', { text: 'Mo', target: { id: 'name-input' }, look: false });
     expect(typed.isError).toBe(false);
     const { text } = await mcp.call('look', { screenshot: false });
     expect(text).toMatch(/name-input[^\n]*Mo/);
   });
 
   test('errors come back as tool errors with the code', async () => {
-    const { text, isError } = await mcp.call('press', { target: { testID: 'no-such-thing' }, look: false });
+    const { text, isError } = await mcp.call('tap', { target: { id: 'no-such-thing' }, look: false });
     expect(isError).toBe(true);
-    expect(text).toContain('not_found');
+    expect(text).toMatch(/^Error not_found: /);
   });
 
   test('on the next launch the app reconnects by itself, with no new code', async () => {
@@ -229,7 +230,8 @@ describeIfBuilt('host <-> app over a real WebSocket, paired and driven through M
     await agent.start();
     const text = await waitForApp();
     expect(text).toContain('dev.tapline.interop');
-    const { isError } = await mcp.call('press', { target: { testID: 'login-button' }, look: false });
+    const { text: tapped, isError } = await mcp.call('tap', { target: { id: 'login-button' }, look: false });
+    expect(tapped).toMatch(/^Tapped e\d+ button/);
     expect(isError).toBe(false);
   });
 });
