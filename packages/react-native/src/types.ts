@@ -16,23 +16,28 @@ export interface WireError {
   message: string;
   /** Candidate refs, only for `ambiguous`. */
   refs?: string[];
+  /** The candidates as elements (role, id, actions, frame), only for `ambiguous`. */
+  candidates?: TaplineElement[];
 }
 
 /** An error that maps 1:1 onto a protocol error response. */
 export class TaplineError extends Error {
   readonly code: ErrorCode;
   readonly refs: string[] | undefined;
+  readonly candidates: TaplineElement[] | undefined;
 
-  constructor(code: ErrorCode, message: string, refs?: string[]) {
+  constructor(code: ErrorCode, message: string, refs?: string[], candidates?: TaplineElement[]) {
     super(message);
     this.name = 'TaplineError';
     this.code = code;
     this.refs = refs;
+    this.candidates = candidates;
   }
 
   toWire(): WireError {
     const wire: WireError = { code: this.code, message: this.message };
     if (this.refs) wire.refs = this.refs;
+    if (this.candidates) wire.candidates = this.candidates;
     return wire;
   }
 }

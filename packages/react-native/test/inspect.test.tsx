@@ -1,7 +1,9 @@
 import { SAMPLE_FRAMES, SampleScreen, frame, makeSpies, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
-import { Dimensions, PixelRatio, Text, View } from 'react-native';
-import { resetRefs, setMeasurer, tree, defaultMeasurer, defaultHitTester, publicInstancesOf } from '../src/inspect';
+import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
+import { act } from 'react-test-renderer';
+import { resolveTarget } from '../src/actions';
+import { nativeTabBar, resetRefs, setMeasurer, takeSnapshot, tree, defaultMeasurer, defaultHitTester, publicInstancesOf } from '../src/inspect';
 import { getRoots } from '../src/register';
 import type { TaplineElement } from '../src/types';
 import type { Fiber } from '../src/fiber';
@@ -367,5 +369,68 @@ describe('defaultHitTester', () => {
     const asked = fakeHitTest(() => nodes.chip!.fiber);
     await expect(defaultHitTester(10, 10)).resolves.toBe(nodes.chip!.fiber);
     expect(asked).toEqual([nodes.screen!.node]);
+  });
+});
+
+describe('behind an open modal', () => {
+  function Screen({ modals }: { modals: 'none' | 'one' | 'two' }) {
+    return (
+      <Native type="RNSTabsHostIOS">
+        <Native type="RNSTabsScreenIOS" title="Today" screenKey="today-abc" pointerEvents="box-none">
+          <View>
+            <Pressable testID="behind" onPress={() => {}}>
+              <Text>Behind</Text>
+            </Pressable>
+            {modals !== 'none' && (
+              <Native type="RCTModalHostView">
+                <View>
+                  <Pressable testID="done" onPress={() => {}}>
+                    <Text>Done</Text>
+                  </Pressable>
+                  {modals === 'two' && (
+                    <Native type="RCTModalHostView">
+                      <Pressable testID="top-close" onPress={() => {}}>
+                        <Text>Close top</Text>
+                      </Pressable>
+                    </Native>
+                  )}
+                </View>
+              </Native>
+            )}
+          </View>
+        </Native>
+        <Native type="RNSTabsScreenIOS" title="Nutrition" screenKey="nutrition-def" pointerEvents="none" />
+      </Native>
+    );
+  }
+
+  const ids = (elements: TaplineElement[]): Array<string | null> => elements.filter((e) => e.testID !== null).map((e) => e.testID);
+
+  test('only the modal is listed, no tabs, and what is behind it is not a target; closing brings it all back', async () => {
+    const renderer = await mount(<Screen modals="one" />);
+    useFrames({});
+    const open = await tree({});
+    expect(ids(open.elements)).toEqual(['done']);
+    expect(open.elements.some((e) => e.role === 'tab')).toBe(false);
+    expect(open.elements.some((e) => e.text === 'Behind')).toBe(false);
+    await expect(resolveTarget({ text: 'Behind' })).rejects.toMatchObject({ code: 'not_found' });
+    expect((await resolveTarget({ text: 'Done' })).entry.info.testID).toBe('done');
+    expect(nativeTabBar(takeSnapshot())).toBeNull();
+
+    await act(async () => {
+      renderer.update(<Screen modals="none" />);
+    });
+    const closed = await tree({});
+    expect(ids(closed.elements)).toEqual(['behind']);
+    expect(closed.elements.filter((e) => e.role === 'tab').map((e) => e.text)).toEqual(['Today', 'Nutrition']);
+    expect((await resolveTarget({ text: 'Behind' })).entry.info.testID).toBe('behind');
+    expect(nativeTabBar(takeSnapshot())).not.toBeNull();
+  });
+
+  test('with two modals open, only the topmost one is listed', async () => {
+    await mount(<Screen modals="two" />);
+    useFrames({});
+    const { elements } = await tree({});
+    expect(ids(elements)).toEqual(['top-close']);
   });
 });

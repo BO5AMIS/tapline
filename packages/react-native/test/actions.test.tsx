@@ -4,6 +4,7 @@ import { Dimensions, DevSettings, Linking, PixelRatio, Pressable, ScrollView, Sw
 import { act } from 'react-test-renderer';
 import {
   configureActions,
+  describeHit,
   getLogs,
   longPress,
   onActed,
@@ -16,7 +17,7 @@ import {
   toggle,
   typeText,
 } from '../src/actions';
-import { collectNodes, resetRefs, setHitTester, setMeasurer, tree } from '../src/inspect';
+import { collectNodes, resetRefs, setHitTester, setMeasurer, takeSnapshot, tree } from '../src/inspect';
 import { isRecord, TaplineError, type TaplineElement } from '../src/types';
 import { firstHostChild, sameFiber, type Fiber } from '../src/fiber';
 
@@ -172,6 +173,57 @@ describe('press / longPress', () => {
       setHitTester(async () => null);
       await run(() => press({ target: { testID: 'save' } }));
       expect(onSave).toHaveBeenCalledTimes(2);
+    });
+
+    test('a cover that is not a listed element is "another view", never a native type name', async () => {
+      await mount(
+        <View>
+          <Pressable testID="settings" onPress={() => {}}>
+            <Text>Settings</Text>
+          </Pressable>
+          <View />
+        </View>,
+      );
+      useFrames({ settings: frame(20, 100, 100, 40) });
+      const veil = collectNodes()
+        .filter((n) => n.hostType === 'View' && n.fiber.child === null)
+        .pop();
+      if (!veil) throw new Error('no plain view');
+      setHitTester(async () => veil.fiber);
+      const error = await failure(run(() => press({ target: { testID: 'settings' } })));
+      expect(error.message).toMatch(/^covered: e\d+ button "Settings" is covered at \(70, 120\) by another view: /);
+      expect(error.message).not.toMatch(/RCT/);
+    });
+
+    test('a cover inside an open modal is "an open modal", with its nearest named element', async () => {
+      await mount(
+        <View>
+          <Pressable testID="settings" onPress={() => {}}>
+            <Text>Settings</Text>
+          </Pressable>
+          {React.createElement(
+            'RCTModalHostView',
+            null,
+            <View>
+              <View />
+              <Pressable testID="done" onPress={() => {}}>
+                <Text>Done</Text>
+              </Pressable>
+            </View>,
+          )}
+        </View>,
+      );
+      useFrames({ settings: frame(20, 100, 100, 40), done: frame(0, 700, 400, 50) });
+      // the screen behind the modal isn't in the list while it is open, so name the cover directly
+      const snapshot = takeSnapshot();
+      const spacer = collectNodes().find((n) => n.hostType === 'View' && n.fiber.child === null);
+      if (!spacer) throw new Error('modal view not found');
+      expect(describeHit(snapshot, spacer.fiber)).toMatch(/^an open modal \(e\d+ button "Done"\)$/);
+      // a cover inside the modal that the actor itself is in is just another view
+      setHitTester(async () => spacer.fiber);
+      const error = await failure(run(() => press({ target: { testID: 'done' } })));
+      expect(error.message).toContain('by another view');
+      expect(error.message).not.toMatch(/RCT/);
     });
 
     test('refuses an element that is off screen, suggesting a scroll', async () => {
@@ -342,6 +394,27 @@ describe('target resolution', () => {
     expect(spies.onDelete).toHaveBeenCalledWith(2);
     await run(() => press({ target: { ref: first } }));
     expect(spies.onDelete).toHaveBeenLastCalledWith(1);
+  });
+
+  test('ambiguous carries the candidates as elements, with role, id, actions and frame', async () => {
+    await mount(
+      <View>
+        <Pressable testID="nutrition-tab" onPress={() => {}}>
+          <Text>Nutrition</Text>
+        </Pressable>
+        <Text testID="nutrition-title">Nutrition</Text>
+      </View>,
+    );
+    useFrames({ 'nutrition-tab': frame(0, 733, 200, 49), 'nutrition-title': frame(76, 100, 273, 23) });
+    const error = await failure(resolveTarget({ text: 'Nutrition' }));
+    expect(error.code).toBe('ambiguous');
+    const candidates = error.candidates ?? [];
+    expect(candidates).toHaveLength(2);
+    expect(candidates.map((c) => c.ref)).toEqual(error.refs);
+    expect(candidates[0]).toMatchObject({ role: 'button', testID: 'nutrition-tab', actions: ['press'], frame: frame(0, 733, 200, 49) });
+    expect(candidates[1]).toMatchObject({ role: 'text', testID: 'nutrition-title', frame: frame(76, 100, 273, 23) });
+    expect(error.toWire().candidates).toEqual(candidates);
+    expect(error.message).toContain('2 elements match');
   });
 
   test('ambiguous caps the candidate list at 5', async () => {
@@ -894,6 +967,65 @@ describe('scroll', () => {
       });
       return { real, scrollTo, scrollToEnd };
     }
+
+    test('with a RefreshControl first, the offset and length come from the content view', async () => {
+      await mount(
+        React.createElement(
+          'RCTScrollView',
+          { testID: 'refreshing' },
+          React.createElement('RCTRefreshControl', { testID: 'spinner' }),
+          React.createElement('RCTScrollContentView', { testID: 'content' }, <Text>row</Text>),
+        ),
+      );
+      const hostOf = (testID: string): Fiber => {
+        const node = collectNodes().find((n) => isRecord(n.fiber.memoizedProps) && n.fiber.memoizedProps.testID === testID);
+        if (!node) throw new Error(`no host ${testID}`);
+        return node.fiber;
+      };
+      const [scrollFiber, spinnerFiber, contentFiber] = [hostOf('refreshing'), hostOf('spinner'), hostOf('content')];
+      expect(firstHostChild(scrollFiber)).toBe(spinnerFiber); // the old way picked this one
+      const real = { y: 120 };
+      const scrollTo = jest.fn((arg: { x: number; y: number }) => {
+        real.y = Math.min(Math.max(arg.y, 0), 2222);
+      });
+      hostInstance('refreshing').scrollTo = scrollTo;
+      setMeasurer(async (fiber) => {
+        if (sameFiber(fiber, scrollFiber)) return frame(0, SCROLL_TOP, 400, VISIBLE);
+        if (sameFiber(fiber, spinnerFiber)) return frame(180, SCROLL_TOP - 60, 40, 40);
+        if (sameFiber(fiber, contentFiber)) return frame(0, SCROLL_TOP - real.y, 400, 3000);
+        return frame(0, 0, 10, 10);
+      });
+      const down = await run(() => scroll({ target: { testID: 'refreshing' }, direction: 'down', fraction: 0.5 }));
+      expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 509, animated: false }); // 120 + 389
+      expect(down.offset).toEqual({ x: 0, y: 509 });
+      const end = await run(() => scroll({ target: { testID: 'refreshing' }, direction: 'down', amount: 9999 }));
+      expect(end.offset).toEqual({ x: 0, y: 2222 }); // content 3000 - visible 778
+    });
+
+    test('without the native type name, the largest child is the content view', async () => {
+      await mount(
+        React.createElement(
+          'RCTScrollView',
+          { testID: 'plain' },
+          React.createElement('Strip', { testID: 'strip' }),
+          React.createElement('Body', { testID: 'body' }, <Text>row</Text>),
+        ),
+      );
+      const hostOf = (testID: string): Fiber => {
+        const node = collectNodes().find((n) => isRecord(n.fiber.memoizedProps) && n.fiber.memoizedProps.testID === testID);
+        if (!node) throw new Error(`no host ${testID}`);
+        return node.fiber;
+      };
+      const [scrollFiber, bodyFiber] = [hostOf('plain'), hostOf('body')];
+      hostInstance('plain').scrollTo = jest.fn();
+      setMeasurer(async (fiber) => {
+        if (sameFiber(fiber, scrollFiber)) return frame(0, SCROLL_TOP, 400, VISIBLE);
+        if (sameFiber(fiber, bodyFiber)) return frame(0, SCROLL_TOP - 200, 400, 3000);
+        return frame(180, SCROLL_TOP - 60, 40, 40);
+      });
+      const result = await run(() => scroll({ target: { testID: 'plain' }, direction: 'down', amount: 10 }));
+      expect(result.offset).toEqual({ x: 0, y: 200 });
+    });
 
     test('from the resting inset of -59, down moves to 0, and a further up moves nothing', async () => {
       const { scrollTo } = await mountMeasured(VISIBLE, -59);

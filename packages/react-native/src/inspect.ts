@@ -116,6 +116,8 @@ interface Collected {
   nodes: HostNode[];
   routes: RouteFound[];
   tabs: TabFound[];
+  /** Open modals' host fibers (not inside a hidden subtree), in tree order. */
+  modals: Fiber[];
 }
 
 function routeOf(fiber: Fiber, chain: RouteFound[]): RouteFound | null {
@@ -175,6 +177,7 @@ function walk(
       const hostType = typeof fiber.type === 'string' ? fiber.type : '';
       if (TAB_HOST.test(hostType)) collectTabs(fiber.child, out.tabs);
       if (hidesSubtree(hostType, propsOf(fiber))) continue;
+      if (MODAL_HOSTS.has(hostType)) out.modals.push(fiber);
       const isText = TEXT_HOSTS.has(hostType);
       const node: HostNode = {
         index: out.nodes.length,
@@ -205,9 +208,15 @@ function walk(
 }
 
 function collect(roots: FiberRootLike[]): Collected {
-  const out: Collected = { nodes: [], routes: [], tabs: [] };
+  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
   for (const root of roots) walk(root.current.child, -1, [], false, out, []);
-  return out;
+  // iOS hides what is behind a modal from accessibility, so a person (and Tapwright, which reads
+  // that tree) sees only the topmost modal: list only that, no screen behind it and no tab bar.
+  const top = out.modals[out.modals.length - 1];
+  if (!top) return out;
+  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
+  walk(top.child, -1, [], false, only, []);
+  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals };
 }
 
 export function collectNodes(roots: FiberRootLike[] = getRoots()): HostNode[] {
@@ -630,7 +639,7 @@ function firstHostFiber(first: Fiber | null): Fiber | null {
 }
 
 /** The host fibers of open `Modal`s, in tree order (React Native renders a closed one as nothing). */
-function openModalHosts(): Fiber[] {
+export function openModalHosts(): Fiber[] {
   const hosts: Fiber[] = [];
   for (const root of getRoots()) {
     const stack: Fiber[] = root.current.child ? [root.current.child] : [];

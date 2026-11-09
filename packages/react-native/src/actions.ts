@@ -11,6 +11,7 @@ import {
   isOnScreen,
   measureFiber,
   nativeTabBar,
+  openModalHosts,
   publicInstancesOf,
   refFor,
   tabAt,
@@ -24,7 +25,7 @@ import {
   type TabFound,
 } from './inspect';
 import { openAlerts } from './alerts';
-import { firstHostChild, sameFiber, type Fiber } from './fiber';
+import { firstHostChild, hostChildren, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import { onCommit } from './register';
 import { waitUntilStill } from './settle';
@@ -275,6 +276,12 @@ const HINT_VERBS: Record<ActionHint, string> = {
   type: 'text input',
 };
 
+/** The candidates of an `ambiguous` error as full elements, so the agent sees role, id, actions and place. */
+async function candidateElements(entries: Entry[]): Promise<TaplineElement[]> {
+  const frames = await Promise.all(entries.map((entry) => measureFiber(entry.node.fiber)));
+  return entries.map((entry, i) => toElement(entry, entry.tab ? null : (frames[i] ?? null)));
+}
+
 /** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
 export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Resolved> {
   const target = parseTarget(raw);
@@ -328,12 +335,12 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
   if (!only) throw new TaplineError('not_found', `No element matches ${describeTarget(target)}`);
   if (rest.length > 0) {
     const shown = matches.slice(0, 5);
-    const refs = shown.map((entry) => refFor(entry.node.fiber));
     const list = shown.map((entry) => describe(entry)).join('; ');
     throw new TaplineError(
       'ambiguous',
       `${matches.length} elements match ${describeTarget(target)}: ${list}. Use a ref or "index".`,
-      refs,
+      shown.map((entry) => refFor(entry.node.fiber)),
+      await candidateElements(shown),
     );
   }
   return { snapshot, entry: only };
@@ -421,14 +428,21 @@ function pressEvent(fiber: Fiber, frame: Frame | null): Record<string, unknown> 
 }
 
 /** The nearest listed element at or above a host fiber, for naming what covers a target. */
-function describeHit(snapshot: Snapshot, hit: Fiber): string {
+export function describeHit(snapshot: Snapshot, hit: Fiber, actor?: Entry): string {
   for (let fiber: Fiber | null = hit; fiber; fiber = fiber.return) {
     const entry = snapshot.entries.find((candidate) => candidate.info.interesting && sameFiber(candidate.node.fiber, fiber));
     if (entry) {
       return describe(entry, 40);
     }
   }
-  return typeof hit.type === 'string' ? `a ${hit.type}` : 'another view';
+  // Never a native type name ("RCTView"): the agent can't act on it.
+  const modal = openModalHosts().find((host) => isWithin(hit, host));
+  if (modal && !(actor && isWithin(actor.node.fiber, modal))) {
+    const inside = snapshot.entries.filter((e) => e.info.interesting && !e.tab && isWithin(e.node.fiber, modal));
+    const named = inside.find((e) => e.info.actions.length > 0) ?? inside[0];
+    return named ? `an open modal (${describe(named, 40)})` : 'an open modal';
+  }
+  return 'another view';
 }
 
 /**
@@ -475,7 +489,7 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   if (isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return;
   throw notActionable(
     'covered',
-    `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit)}: a real tap would land there instead. ` +
+    `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit, actor)}: a real tap would land there instead. ` +
       'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.',
   );
 }
@@ -619,13 +633,13 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   const [only, ...rest] = inputs;
   if (only && rest.length === 0) return { snapshot: snap, entry: only };
   const shown = inputs.slice(0, 5);
-  const refs = shown.map((entry) => refFor(entry.node.fiber));
   throw new TaplineError(
     'ambiguous',
     `${inputs.length} TextInputs on screen and none is focused: ${shown
       .map((entry) => describe(entry))
       .join('; ')}. Pass a target.`,
-    refs,
+    shown.map((entry) => refFor(entry.node.fiber)),
+    await candidateElements(shown),
   );
 }
 
@@ -895,6 +909,9 @@ interface ScrollState {
   visible: { x: number; y: number };
 }
 
+/** The native type of a scroll view's content container (iOS and Android's horizontal one). */
+const SCROLL_CONTENT_HOSTS = new Set(['RCTScrollContentView', 'AndroidHorizontalScrollContentView']);
+
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 /**
@@ -903,10 +920,32 @@ const round2 = (value: number): number => Math.round(value * 100) / 100;
  * is the offset. Null when either can't be measured (old architecture, nothing laid out).
  */
 async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
-  const content = firstHostChild(entry.node.fiber);
-  if (!content) return null;
-  const [scrollFrame, contentFrame] = await Promise.all([measureFiber(entry.node.fiber), measureFiber(content)]);
-  if (!scrollFrame || !contentFrame) return null;
+  const scrollFiber = entry.node.fiber;
+  const horizontal = findProp(entry.node, 'horizontal') === true;
+  const children = hostChildren(scrollFiber);
+  // On iOS the RefreshControl is the scroll view's first child, so the first host child is not
+  // the content: pick the content container by its native type, else the largest child.
+  const typed = children.find((child) => typeof child.type === 'string' && SCROLL_CONTENT_HOSTS.has(child.type));
+  const scrollFrame = await measureFiber(scrollFiber);
+  if (!scrollFrame) return null;
+  let contentFrame: Frame | null = typed ? await measureFiber(typed) : null;
+  if (!contentFrame && children.length > 1) {
+    const frames = await Promise.all(children.map((child) => measureFiber(child)));
+    let bestSize = -1;
+    for (const f of frames) {
+      if (!f) continue;
+      const size = horizontal ? f.width : f.height;
+      if (size > bestSize) {
+        bestSize = size;
+        contentFrame = f;
+      }
+    }
+  }
+  if (!contentFrame) {
+    const first = firstHostChild(scrollFiber);
+    contentFrame = first ? await measureFiber(first) : null;
+  }
+  if (!contentFrame) return null;
   return {
     offset: { x: round2(scrollFrame.x - contentFrame.x), y: round2(scrollFrame.y - contentFrame.y) },
     max: {

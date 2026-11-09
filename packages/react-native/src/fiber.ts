@@ -72,6 +72,19 @@ export function firstHostChild(fiber: Fiber): Fiber | null {
   return null;
 }
 
+/** The host fibers directly below `fiber`, looking through non-host wrappers but not into hosts. */
+export function hostChildren(fiber: Fiber): Fiber[] {
+  const found: Fiber[] = [];
+  const visit = (first: Fiber | null): void => {
+    for (let child = first; child; child = child.sibling) {
+      if (child.tag === HostComponent) found.push(child);
+      else visit(child.child);
+    }
+  };
+  visit(fiber.child);
+  return found;
+}
+
 /** Best-effort display name of a component type; null when anonymous. */
 export function componentName(type: unknown, depth = 0): string | null {
   if (depth > 4 || type == null) return null;

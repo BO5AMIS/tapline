@@ -398,11 +398,12 @@ function toWireTarget(target: Target): WireTarget {
 
 function candidateLines(details: unknown): string[] {
   const lines: string[] = [];
+  const bareRefs: string[] = [];
   const visit = (value: unknown): void => {
     if (!Array.isArray(value)) return;
     for (const item of value) {
       if (typeof item === "string") {
-        lines.push(item);
+        bareRefs.push(item);
         continue;
       }
       const element = elementSchema.safeParse(item);
@@ -420,7 +421,8 @@ function candidateLines(details: unknown): string[] {
       visit(nested["refs"]);
     }
   }
-  return [...new Set(lines)];
+  // Full element lines say more than refs; refs only stand in when the app sent no elements.
+  return [...new Set(lines.length > 0 ? lines : bareRefs)];
 }
 
 export function describeError(error: unknown): string {

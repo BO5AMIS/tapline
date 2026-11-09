@@ -234,6 +234,27 @@ describe("press", () => {
     expect(text).toContain("index");
   });
 
+  it("prints full element lines under Candidates, not bare refs, when the app sends both", async () => {
+    const { tools } = await setup(() => ({
+      ok: false,
+      error: {
+        code: "ambiguous",
+        message: '2 elements match text "Nutrition": e32 text "Nutrition"; e57 tab "Nutrition". Use a ref or "index".',
+        refs: ["e32", "e57"],
+        candidates: [
+          { ref: "e32", type: "Text", role: "text", testID: null, label: null, text: "Nutrition", value: null, frame: { x: 76, y: 733, width: 273, height: 23 }, actions: [], disabled: false, selected: false, checked: null },
+          { ref: "e57", type: "Tab", role: "tab", testID: null, label: null, text: "Nutrition", value: null, frame: null, actions: ["press"], disabled: false, selected: false, checked: null },
+        ],
+      },
+    }))();
+    const text = textOf(await tools.tap({ target: { text: "Nutrition" } }));
+    const lines = text.split("\n");
+    const at = lines.indexOf("Candidates:");
+    expect(at).toBeGreaterThan(0);
+    expect(lines.slice(at + 1, at + 3)).toEqual(['  e32 text "Nutrition" @76,733 273x23', '  e57 tab "Nutrition" [tap]']);
+    expect(lines[at + 3]).toBe('Retry with one of the refs, or add "index" (0-based).');
+  });
+
   it("accepts refs-only candidates", async () => {
     const { tools } = await setup(() => ({
       ok: false,
