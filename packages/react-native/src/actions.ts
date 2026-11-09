@@ -94,10 +94,37 @@ function paramsOf(raw: unknown): Record<string, unknown> {
   return raw;
 }
 
-function describe(entry: Entry): string {
+/**
+ * The shared role vocabulary (AGENT-TOOLS §3.3). A copy of `roleOf` in packages/host/src/format.ts:
+ * keep the two tables in step; the packages must not import each other.
+ */
+const ROLE_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['textfield', 'input'],
+  ['search', 'input'],
+  ['textbox', 'input'],
+  ['scrollview', 'scroll'],
+  ['imagebutton', 'button'],
+  ['togglebutton', 'button'],
+  ['adjustable', 'slider'],
+  ['img', 'image'],
+  ['summary', 'text'],
+]);
+
+function roleName(info: Entry['info']): string {
+  if (info.role !== null && info.role !== '') {
+    const lower = info.role.toLowerCase();
+    return ROLE_ALIASES.get(lower) ?? lower;
+  }
+  return info.type;
+}
+
+/** An element as element lines name it: `e6 button "Continue"`, or `id=<testID>` without text or label. */
+function describe(entry: Entry, maxText = 80): string {
   const { info } = entry;
-  const name = info.testID ?? info.label ?? (info.text ? `"${info.text}"` : null);
-  return name ? `${info.type} ${name}` : info.type;
+  const flat = (info.text !== '' ? info.text : (info.label ?? '')).replace(/\s+/g, ' ').trim();
+  const shown = flat.length > maxText ? `${flat.slice(0, maxText - 1)}…` : flat;
+  const name = shown !== '' ? `"${shown}"` : info.testID ? `id=${info.testID}` : '';
+  return [refFor(entry.node.fiber), roleName(info), name].filter((part) => part !== '').join(' ');
 }
 
 /** Call an app handler; sync throws become errors, async rejections are logged not awaited. */
@@ -183,8 +210,9 @@ function dedupe(snapshot: Snapshot, matches: Entry[], mode: 'outer' | 'text'): E
       if (mode === 'outer') {
         drop.add(b);
       } else {
-        const aActs = a.info.actions.length > 0;
-        const bActs = b.info.actions.length > 0;
+        // A container that only scrolls is not a target: its text is its children's text joined.
+        const aActs = a.info.actions.some((action) => action !== 'scroll');
+        const bActs = b.info.actions.some((action) => action !== 'scroll');
         if (aActs && !bActs) drop.add(b);
         else if (!aActs) drop.add(a);
       }
@@ -204,6 +232,8 @@ function describeTarget(target: ParsedTarget): string {
       return `ref "${target.ref}"`;
     case 'point':
       return `point (${target.x}, ${target.y})`;
+    case 'testID':
+      return `id "${target.value}"`;
     default:
       return `${target.kind} "${target.value}"`;
   }
@@ -234,8 +264,19 @@ function matchEntries(snapshot: Snapshot, target: ParsedTarget): Entry[] {
   }
 }
 
+/** What the caller means to do; a point target then picks only an element that does it. */
+type ActionHint = 'press' | 'longPress' | 'toggle' | 'scroll' | 'type';
+
+const HINT_VERBS: Record<ActionHint, string> = {
+  press: 'tap',
+  longPress: 'long press',
+  toggle: 'toggle',
+  scroll: 'scroll',
+  type: 'text input',
+};
+
 /** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
-export async function resolveTarget(raw: unknown): Promise<Resolved> {
+export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Resolved> {
   const target = parseTarget(raw);
   const snapshot = takeSnapshot();
 
@@ -256,7 +297,9 @@ export async function resolveTarget(raw: unknown): Promise<Resolved> {
     const bar = nativeTabBar(snapshot);
     const tab = bar && target.y >= bar.top ? tabAt(bar, target.x, snapshot.screen.width) : undefined;
     if (tab) return { snapshot, entry: tab };
-    const actionable = snapshot.entries.filter((e) => e.info.actions.length > 0);
+    const actionable = snapshot.entries.filter((e) =>
+      hint === undefined ? e.info.actions.length > 0 : e.info.actions.includes(hint),
+    );
     const frames = await Promise.all(actionable.map((e) => measureFiber(e.node.fiber)));
     let hit: Entry | undefined;
     actionable.forEach((entry, i) => {
@@ -264,7 +307,8 @@ export async function resolveTarget(raw: unknown): Promise<Resolved> {
       if (frame && frameContains(frame, target.x, target.y)) hit = entry; // later in tree order = in front
     });
     if (!hit) {
-      throw notActionable('no_action', `Nothing at (${target.x}, ${target.y}) takes a touch.`);
+      const verb = hint === undefined ? 'touch' : HINT_VERBS[hint];
+      throw notActionable('no_action', `Nothing at (${target.x}, ${target.y}) takes a ${verb}.`);
     }
     return { snapshot, entry: hit };
   }
@@ -285,7 +329,7 @@ export async function resolveTarget(raw: unknown): Promise<Resolved> {
   if (rest.length > 0) {
     const shown = matches.slice(0, 5);
     const refs = shown.map((entry) => refFor(entry.node.fiber));
-    const list = shown.map((entry, i) => `${refs[i]} ${describe(entry)}`).join('; ');
+    const list = shown.map((entry) => describe(entry)).join('; ');
     throw new TaplineError(
       'ambiguous',
       `${matches.length} elements match ${describeTarget(target)}: ${list}. Use a ref or "index".`,
@@ -381,9 +425,7 @@ function describeHit(snapshot: Snapshot, hit: Fiber): string {
   for (let fiber: Fiber | null = hit; fiber; fiber = fiber.return) {
     const entry = snapshot.entries.find((candidate) => candidate.info.interesting && sameFiber(candidate.node.fiber, fiber));
     if (entry) {
-      const named = describe(entry);
-      const text = entry.info.text.length > 40 ? `${entry.info.text.slice(0, 40)}…` : entry.info.text;
-      return `${refFor(entry.node.fiber)} ${named}${text && !named.includes(text) ? ` "${text}"` : ''}`;
+      return describe(entry, 40);
     }
   }
   return typeof hit.type === 'string' ? `a ${hit.type}` : 'another view';
@@ -410,7 +452,7 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   const top = Math.max(frame.y, 0);
   const right = Math.min(frame.x + frame.width, width);
   const bottom = Math.min(frame.y + frame.height, height);
-  const name = `${refFor(actor.node.fiber)} ${describe(actor)}`;
+  const name = describe(actor);
   if (right <= left || bottom <= top) {
     throw notActionable(
       'off_screen',
@@ -495,7 +537,7 @@ async function pressLike(
   rawParams: unknown,
 ): Promise<{ element: TaplineElement; settledMs: number }> {
   const params = paramsOf(rawParams);
-  const { snapshot, entry } = await resolveTarget(params.target);
+  const { snapshot, entry } = await resolveTarget(params.target, kind);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `The "${entry.tab.title}" tab has no long press`);
     selectTab(snapshot, entry.tab);
@@ -503,15 +545,16 @@ async function pressLike(
   }
   const actor = findActionable(snapshot, entry, kind, false);
   const handlerName = kind === 'press' ? 'onPress' : 'onLongPress';
+  const actionName = kind === 'press' ? 'tap' : 'long-press';
   if (!actor) {
-    throw notActionable('no_action', `${describe(entry)} has no ${handlerName} handler`);
+    throw notActionable('no_action', `${describe(entry)} has no ${actionName} action`);
   }
   if (actor.info.disabled || entry.info.disabled) {
     throw notActionable('disabled', `${describe(actor)} is disabled`);
   }
   const handler = findHandler(actor.node, handlerName);
   if (!handler) {
-    throw notActionable('no_action', `${describe(actor)} has no ${handlerName} handler`);
+    throw notActionable('no_action', `${describe(actor)} has no ${actionName} action`);
   }
   const { element, frame } = await elementFor(actor);
   if (params.force !== true) await assertReachable(snapshot, actor, frame);
@@ -562,7 +605,7 @@ function ownsInstance(entry: Entry, instance: unknown): boolean {
 
 async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Promise<Resolved> {
   if (rawTarget !== undefined && rawTarget !== null) {
-    const { snapshot: snap, entry } = await resolveTarget(rawTarget);
+    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type');
     const input = findActionable(snap, entry, 'type', true);
     if (!input) throw notActionable('no_action', `${describe(entry)} is not a text input`);
     return { snapshot: snap, entry: input };
@@ -580,7 +623,7 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   throw new TaplineError(
     'ambiguous',
     `${inputs.length} TextInputs on screen and none is focused: ${shown
-      .map((entry, i) => `${refs[i]} ${describe(entry)}`)
+      .map((entry) => describe(entry))
       .join('; ')}. Pass a target.`,
     refs,
   );
@@ -737,7 +780,7 @@ export async function scroll(
   let entry: Entry;
   let frame: Frame | null = null;
   if (params.target !== undefined && params.target !== null) {
-    const resolved = await resolveTarget(params.target);
+    const resolved = await resolveTarget(params.target, 'scroll');
     const scroller = findActionable(resolved.snapshot, resolved.entry, 'scroll', true);
     if (!scroller) throw notActionable('no_action', `${describe(resolved.entry)} is not inside a scroll view`);
     entry = scroller;
@@ -834,12 +877,12 @@ export async function toggle(
 ): Promise<{ element: TaplineElement; value: boolean; settledMs: number }> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
-  const { snapshot, entry } = await resolveTarget(params.target);
+  const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
   const control = findActionable(snapshot, entry, 'toggle', true);
-  if (!control) throw notActionable('no_action', `${describe(entry)} is not a toggle`);
+  if (!control) throw notActionable('no_action', `${describe(entry)} is not a switch`);
   if (control.info.disabled) throw notActionable('disabled', `${describe(control)} is disabled`);
   const handler = findHandler(control.node, 'onValueChange');
-  if (!handler) throw notActionable('no_action', `${describe(control)} has no onValueChange handler`);
+  if (!handler) throw notActionable('no_action', `${describe(control)} has no switch action`);
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
   if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));

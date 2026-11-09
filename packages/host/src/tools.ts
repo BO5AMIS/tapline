@@ -694,6 +694,11 @@ export class TaplineTools {
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [];
+    if (tree.elements.length === 0) {
+      notes.push(
+        "Note: nothing of the app is visible: something outside it may cover it (a system sign-in or share sheet, a native modal) that Tapline can't see; ask the user, or use Tapwright.",
+      );
+    }
     const shot = await shotPromise;
     if (shot === undefined) {
       if (wantScreenshot) notes.push(NO_SCREENSHOT_NOTE);

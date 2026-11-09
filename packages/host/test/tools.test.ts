@@ -800,6 +800,24 @@ describe("changes after actions", () => {
     expect(text).toContain("Route: basket");
   });
 
+  it("says the app vanished, with a note, when the tree is empty after an action", async () => {
+    const EMPTY = { screen: { width: 402, height: 874, scale: 3 }, elements: [] };
+    const { tools } = await setup((req) => {
+      if (req.method === "tree") {
+        const wants = typeof req.params === "object" && req.params !== null && (req.params as { changes?: unknown }).changes === true;
+        return { ok: true, result: wants ? { ...EMPTY, changes: { ...CHANGES, removed: [CHANGES.removed[0]] } } : BASKET };
+      }
+      return defaultHandler(req);
+    })();
+    await tools.look({ screenshot: false });
+    const text = textOf(await tools.tap({ target: { ref: "e3" } }));
+    expect(text).not.toContain("Same screen");
+    expect(text).toContain("(nothing visible; the app may still be loading)");
+    expect(text).toContain(
+      "Note: nothing of the app is visible: something outside it may cover it (a system sign-in or share sheet, a native modal) that Tapline can't see; ask the user, or use Tapwright.",
+    );
+  });
+
   it("says when nothing visible changed", async () => {
     const { tools } = await setup(basket({ sameRoute: true, added: [], removed: [], changed: [], moved: [] }))();
     await tools.look({ screenshot: false });

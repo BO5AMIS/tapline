@@ -157,6 +157,8 @@ export function formatChanges(tree: TreeResult): string | null {
   const changes = tree.changes;
   if (changes === undefined || !changes.sameRoute) return null;
   const count = tree.elements.length;
+  // An empty tree is not "the same screen": the app vanished, so show the full list (and its note).
+  if (count === 0) return null;
   const churn = changes.added.length + changes.removed.length + changes.changed.length;
   if (churn > Math.max(8, count / 2)) return null;
 

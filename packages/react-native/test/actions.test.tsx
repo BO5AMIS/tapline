@@ -1,6 +1,6 @@
 import { SAMPLE_FRAMES, SampleScreen, frame, makeSpies, mount, unmountAll, useFrames, type Spies } from './helpers';
 import React from 'react';
-import { Dimensions, DevSettings, Linking, PixelRatio, Pressable, Switch, Text, TextInput, View } from 'react-native';
+import { Dimensions, DevSettings, Linking, PixelRatio, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { act } from 'react-test-renderer';
 import {
   configureActions,
@@ -335,7 +335,7 @@ describe('target resolution', () => {
     const error = await failure(run(() => press({ target: { text: 'Delete' } })));
     expect(error.code).toBe('ambiguous');
     expect(error.refs).toHaveLength(2);
-    expect(error.message).toContain('delete-1');
+    expect(error.message).toContain('button "Delete"');
     expect(spies.onDelete).not.toHaveBeenCalled();
     const [first, second] = error.refs ?? [];
     await run(() => press({ target: { ref: second } }));
@@ -388,6 +388,118 @@ describe('target resolution', () => {
     expect(empty.message).toMatch(/^no_action: Nothing at \(/);
     await run(() => press({ target: { x: 100, y: 410 } }));
     expect(spies.onDelete).toHaveBeenCalledWith(1);
+  });
+
+  describe('phone-check fixes', () => {
+    async function mountWelcome(): Promise<void> {
+      await mount(
+        <ScrollView testID="welcome-scroll">
+          <Text testID="title">Just Demo</Text>
+          <Text testID="header" accessibilityRole="header">
+            Train with a plan.
+          </Text>
+          <Pressable testID="continue" onPress={spies.onGo}>
+            <Text>Continue</Text>
+          </Pressable>
+        </ScrollView>,
+      );
+      useFrames({
+        'welcome-scroll': frame(0, 0, 400, 800),
+        title: frame(16, 442, 300, 60),
+        header: frame(16, 521, 300, 26),
+        continue: frame(16, 700, 368, 56),
+      });
+    }
+
+    test('a text target never picks a scroll container over the text inside it', async () => {
+      await mountWelcome();
+      const { entry } = await resolveTarget({ text: 'Demo' });
+      expect(entry.info.testID).toBe('title');
+      const error = await failure(run(() => press({ target: { text: 'Demo' } })));
+      expect(error.code).toBe('not_actionable');
+      expect(error.message).toMatch(/^no_action: /);
+      expect(error.message).toContain('text "Just Demo"');
+      expect(error.message).not.toMatch(/scroll/i);
+    });
+
+    test('a point on plain text inside a scroll view takes no tap', async () => {
+      await mountWelcome();
+      const error = await failure(run(() => press({ target: { x: 100, y: 534 } })));
+      expect(error.code).toBe('not_actionable');
+      expect(error.message).toMatch(/^no_action: Nothing at \(100, 534\) takes a tap\./);
+      const long = await failure(run(() => longPress({ target: { x: 100, y: 534 } })));
+      expect(long.message).toMatch(/^no_action: Nothing at \(100, 534\) takes a long press\./);
+      const flip = await failure(run(() => toggle({ target: { x: 100, y: 534 } })));
+      expect(flip.message).toMatch(/takes a toggle\./);
+      const text = await failure(run(() => typeText({ target: { x: 100, y: 534 }, text: 'a' })));
+      expect(text.message).toMatch(/takes a text input\./);
+    });
+
+    test('a point on a Pressable still taps it; a point on plain text scrolls the scroll view', async () => {
+      await mountWelcome();
+      await run(() => press({ target: { x: 100, y: 720 } }));
+      expect(spies.onGo).toHaveBeenCalledTimes(1);
+      hostInstance('welcome-scroll').scrollTo = jest.fn();
+      const result = await run(() => scroll({ target: { x: 100, y: 534 } }));
+      expect(result.element.testID).toBe('welcome-scroll');
+    });
+
+    test('without a hint a point still takes any actionable element', async () => {
+      await mountWelcome();
+      expect((await resolveTarget({ x: 100, y: 534 })).entry.info.testID).toBe('welcome-scroll');
+    });
+
+    test('refusals name elements like element lines', async () => {
+      await mountSample();
+      const notSwitch = await failure(toggle({ target: { testID: 'login-button' } }));
+      expect(notSwitch.message).toMatch(/^no_action: e\d+ button "Sign in now"|^no_action: e\d+ button "Log in"/);
+      expect(notSwitch.message).toContain('is not a switch');
+      const noLong = await failure(longPress({ target: { testID: 'delete-1' } }));
+      expect(noLong.message).toMatch(/^no_action: e\d+ button "Delete" has no long-press action/);
+      const noTap = await failure(press({ target: { testID: 'state-line' } }));
+      expect(noTap.message).toMatch(/^no_action: e\d+ text "name=/);
+      expect(noTap.message).toContain('has no tap action');
+      const disabled = await failure(press({ target: { testID: 'disabled-button' } }));
+      expect(disabled.message).toMatch(/^disabled: e\d+ button "Unavailable" is disabled/);
+      const notInput = await failure(typeText({ target: { testID: 'state-line' }, text: 'x' }));
+      expect(notInput.message).toMatch(/^no_action: e\d+ text "name=.*" is not a text input/);
+      const noValue = await failure(
+        (async () => {
+          await unmountAll();
+          await mount(<Switch testID="bare" value={false} />);
+          useFrames({});
+          return toggle({ target: { testID: 'bare' } });
+        })(),
+      );
+      expect(noValue.message).toMatch(/^no_action: e\d+ switch id=bare is not a switch/);
+    });
+
+    test('a covered element is named by role and text, and the cover by role', async () => {
+      await mount(
+        <View>
+          <Pressable testID="save" onPress={() => undefined}>
+            <Text>Continue</Text>
+          </Pressable>
+          <View testID="tapline-alert" />
+        </View>,
+      );
+      useFrames({ save: frame(20, 600, 100, 40), 'tapline-alert': frame(0, 580, 400, 80) });
+      const alertNode = collectNodes().find((n) => isRecord(n.fiber.memoizedProps) && n.fiber.memoizedProps.testID === 'tapline-alert');
+      if (!alertNode) throw new Error('no alert node');
+      setHitTester(async () => alertNode.fiber);
+      try {
+        const error = await failure(run(() => press({ target: { testID: 'save' } })));
+        expect(error.message).toMatch(/^covered: e\d+ button "Continue" is covered at \(70, 620\) by e\d+ View id=tapline-alert/);
+      } finally {
+        setHitTester(null);
+      }
+    });
+
+    test('not_found for an id reads id "..."', async () => {
+      await mountSample();
+      const error = await failure(resolveTarget({ testID: 'no-such-id' }));
+      expect(error.message).toBe('No element matches id "no-such-id"');
+    });
   });
 
   test('rejects malformed targets', async () => {

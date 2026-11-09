@@ -238,6 +238,17 @@ describe("formatChanges (AGENT-TOOLS §3.1)", () => {
     expect(formatChanges(withChanges(3, none))).toBe("Same screen. Changes:\nNo visible change.");
   });
 
+  it("gives the full list, not changes, when the new tree is empty", () => {
+    const gone = { ref: "e1", type: "Text", role: "text", text: "Hello" };
+    const t: TreeResult = {
+      screen: { width: 402, height: 874, scale: 3 },
+      elements: [],
+      changes: { ...none, removed: [gone] },
+    };
+    expect(formatChanges(t)).toBeNull();
+    expect(formatTree(t)).toContain("(nothing visible; the app may still be loading)");
+  });
+
   it("shows a single changed field with the old value only", () => {
     const t = withChanges(5, { ...none, changed: [{ ref: "e5", was: { text: "2 items" } }] });
     t.elements[4] = { ref: "e5", type: "Text", role: "text", text: "3 items", frame: null };
