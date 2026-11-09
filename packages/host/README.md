@@ -31,17 +31,25 @@ as a stdio server; it logs to stderr only.
 
 ## MCP tools
 
-`pair`, `apps`, `select_app`, `look`, `check_layout`, `press`, `long_press`, `type_text`,
+`pair`, `apps`, `open_app`, `look`, `check_layout`, `tap`, `long_press`, `type_text`,
 `scroll`, `toggle`, `open_url`, `back`, `app_command`, `wait_for`, `record`, `replay`,
-`compare_screen`, `filmstrip`, `viewer`, `logs`, `reload`, `wait`. Targets: `{testID}`, `{label}`,
-`{text, index?}`, `{ref}` or `{x, y}`. Every action returns the fresh element list (text,
-no screenshot) unless `look: false`; `look` adds a screenshot (`width` in pixels, default
-600; `screenshot: false` skips it).
+`compare_screen`, `filmstrip`, `viewer`, `logs`, `reload`, `wait`. Targets: `{ref}`, `{id}`
+(the `testID` prop), `{label}`, `{text}` or `{x, y}`; `index` goes with `id`, `label` and
+`text`. Every action answers with the verb and the element, then `Same screen. Changes:`
+(or the full list when the screen changed), then `Settled in N s.`, then any `Note:` lines;
+`look: false` returns only the first line. No image is sent by default: `screenshot: true`
+on any action or on `look` adds one (`width` in pixels, default 600). Errors read
+`Error <code>: <message>`; a `not_actionable` message starts with its reason (`disabled`,
+`off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`). After a person acts
+in the live viewer, `{ref}` targets fail with `stale` until the next `look`. `scroll.amount`
+is a share of the scroll area (0.1 to 1, default 0.8); `long_press` takes `seconds`, which
+Tapline ignores.
 
 - `pair {scheme}` returns a pairing link for this host (with the port it actually got),
   its QR code as an image, and the forget link; the QR code is also saved as
   `~/.tapline/pair-<port>.png`. A code works once, for 10 minutes.
-- With several apps connected, the latest one is used until `select_app` picks another.
+- With several apps connected, the latest one is used until `open_app {app}` picks another (`app` is a session id, app
+  id or name; several matches give `ambiguous`).
   Phones that send no name (iPhones) show their install id.
 - If an app can't take screenshots, the host remembers it for that session and stops asking.
 - `reload` waits for the app to reconnect, then returns the element list.

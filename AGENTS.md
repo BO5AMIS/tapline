@@ -43,7 +43,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    `isTaplineLink(path)` (docs/setup.md), or pairing links open a "not found" screen.
 5. Set `EXPO_PUBLIC_TAPLINE_ENABLED=1` only in the profiles used for testing (development,
    TestFlight; `.env.local` for local Metro), never in the production profile.
-6. Suggest `testID`s on the controls you'll test, and add them if the user agrees.
+6. Suggest `testID`s (the React Native prop) on the controls you'll test, and add them if
+   the user agrees. You target them as `{id}`.
 7. A new native dependency (`expo-secure-store`, `react-native-view-shot`) means a new
    build; ask the user before starting EAS builds or TestFlight submissions (they cost
    build minutes and reach testers).
@@ -59,48 +60,69 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 
 ## Testing an app
 
-1. `apps` shows the connected app (`select_app` when there are several). If none is
+1. `apps` shows the connected app (`open_app {app}` when there are several; `app` is a
+   session id, app id or name, and several matches give `ambiguous`). If none is
    connected: a phone that never paired needs `pair`; a paired one only needs the user to
    open the app with Tailscale on. The app must stay on screen while you work: iOS pauses
    it in the background (also when the user switches to chat with you on the same phone).
-2. `look` first. It lists elements as `ref type "text" testID=… @x,y WxH [actions]`
-   (positions in points), plus a screenshot when the app has `react-native-view-shot`.
-3. Every action returns what changed after it (`+` new, `-` gone, `~` changed with its old
-   value, `↕` moved; unchanged elements keep their refs), or the full list when the screen
-   changed, as text. **Read it before the next step**: check that the action did what you
-   meant, not just that it didn't fail. Call `look` when you need the full list or to see
-   the screen (next section). The `Route:` line names the screen you're on.
-4. Target by `testID` when there is one, else by visible `text` or `label`, else by
-   `ref` from the latest look (refs change when the screen changes). Use `x`/`y` only
-   when nothing else fits. An `ambiguous` error lists candidates: pick one by its ref or
-   add `index`.
-5. Screens load and animate. If a spinner shows or content is missing, `wait_for` what you
-   expect (`text`, `testID` or `label`; `gone: true` for a spinner; `network_idle` for
-   loading) instead of acting on a half-loaded screen. A `Network:` line in the list means
-   requests are still running; failed requests show up in `logs` as `[network]` lines.
-   Use a fixed `wait` only for animations.
+2. `look` first. The header reads `Screen 440x956 pt @3x · 49 elements`, then `App:`,
+   `Route:`, and `Alert:` or `Network:` when they apply. Elements read
+   `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`: ref, role, text,
+   `id` (the `testID` prop), position in points, size, actions. Roles are `button`, `input`,
+   `text`, `header`, `switch`, `slider`, `image`, `scroll`, `tab` and so on. The actions are
+   `tap`, `longPress`, `type`, `toggle` and `scroll`. A list holds up to 200 elements, then
+   `(+N more below; scroll)`. No image comes with it: pass `screenshot: true` when you need
+   to see the screen (the app needs `react-native-view-shot`).
+3. Every action answers with the verb and the element (`Tapped e3 button "Log in"
+   id=login-button @24,610 354x48.`), then either `Same screen. Changes:` with lines for
+   what changed (`+` new, `-` gone, `~` changed with its old value, `↕` moved; unchanged
+   elements keep their refs) or `No visible change.`, or the full list when the screen
+   changed. Then `Settled in 0.31 s.`: the app answers once React hasn't committed for
+   100 ms (2 s at most). **Read it before the next step**: check that the action did what
+   you meant, not just that it didn't fail. `look: false` returns only the first line. Call
+   `look` when you need the full list or to see the screen (next section). The `Route:` line
+   names the screen you're on. `Note:` lines at the end tell you things worth knowing, such
+   as `Note: a person used the app since your last look.`
+4. Target by `{id}` when there is one, else by visible `{text}` or `{label}`, else by
+   `{ref}` from the latest look (refs change when the screen changes). Use `{x, y}` only
+   when nothing else fits. An `ambiguous` error lists `Candidates:`: pick one by its ref or
+   add `index` (it works with `id`, `label` and `text`). After a person acts in the live
+   viewer, `{ref}` targets fail with `stale` until you `look` again; `id`, `label` and
+   `text` keep working.
+5. Screens load and animate. Actions already wait for the screen to settle. If a spinner
+   shows or content is missing, `wait_for` what you expect (`text`, `id` or `label`;
+   `gone: true` for a spinner; `network_idle` for loading) instead of acting on a
+   half-loaded screen. A `Network:` line in the list means requests are still running;
+   failed requests show up in `logs` as `[network]` lines. Use a fixed `wait` only for
+   animations.
 6. Inputs: `type_text` with the input as target; `replace` (default) clears it first,
    `submit` presses return. Toggles: `toggle`. Lists: `scroll` until what you need
-   appears (`down` shows what is below), or `to: "end"`.
+   appears (`down` shows what is below), or `to: "end"`. `amount` is a share of the scroll
+   area, 0.1 to 1 (default 0.8).
 7. Read `logs` after anything that misbehaves: JavaScript errors and warnings often
    explain a broken screen. Check them at the end of a run too.
 8. Deep links (`open_url`) jump straight to a screen; `back` goes back like the back
    button. Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS: their tabs appear
-   as `tab` elements without a position, and pressing one switches tabs. `look` leaves out
+   as `tab` elements without a position, and tapping one switches tabs. `look` leaves out
    tabs that aren't selected and screens covered by another. In development builds, `reload`
    starts over from a fresh JavaScript state.
-9. An action that a person couldn't do is refused with the reason: the element is off
-   screen (scroll to it) or something covers it (dismiss it). That is often a real bug
-   worth reporting. Pass `force: true` only when you've decided the check is wrong.
-10. An `Alert:` line means the app showed an alert. An OS alert can't be pressed from
+9. Errors read `Error <code>: <message>`. The codes are `not_found`, `ambiguous`,
+   `not_actionable`, `stale`, `busy`, `paused`, `in_background`, `reconnecting`,
+   `not_connected`, `timeout`, `bad_params`, `unsupported` and `internal`. An action that a
+   person couldn't do is `not_actionable`, and the message starts with the reason:
+   `disabled`, `off_screen` (scroll to it), `covered` (dismiss what covers it),
+   `under_tab_bar`, `behind_alert` or `no_action` (nothing at that point takes the
+   action). That is often a real bug worth reporting. Pass `force: true` only when you've
+   decided the check is wrong.
+10. An `Alert:` line means the app showed an alert. An OS alert can't be tapped from
    Tapline: ask the user to tap the button you need (say which), and actions are refused
-   until it's answered. When the app runs with Tapline's stand-in, the alert's buttons are
-   ordinary elements: press them.
+   (`behind_alert`) until it's answered. When the app runs with Tapline's stand-in, the
+   alert's buttons are ordinary elements: tap them.
 11. `app_command` without a name lists what the app offers for testing (for example
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
    `appearance` (light / dark) is always there. Use them to reach a state quickly and to
    check stress views: dark mode, right-to-left languages. Put things back when you're done.
-12. What you press calls the element's handler; it isn't a real touch. If a control only
+12. What you tap calls the element's handler; it isn't a real touch. If a control only
    reacts to gestures (swipe-to-delete, drag), say that you couldn't test it rather than
    guessing.
 
@@ -108,7 +130,7 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 
 - `record { action: "start", name }` before a flow worth keeping (sign-up, checkout,
   settings), then act as usual; `record { action: "stop" }` saves it. Targets are saved by
-  testID, else label, else text, so give key controls testIDs. Add `wait_for` steps as the
+  id, else label, else text, so give key controls `testID`s. Add `wait_for` steps as the
   checks ("Thanks for your order" appears).
 - `replay { name }` runs it again and stops at the first step that fails or lands on a
   different screen. Use it after a change to check nothing broke; the user can run
@@ -116,7 +138,7 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 - `compare_screen { name }` saves a reference picture of a screen the first time and later
   shows what changed (how much, where, which elements, marked in red). Use the same `width`
   each time, and `update: true` when the change is intended.
-- `filmstrip` (optionally `press` first) captures several frames in one image for
+- `filmstrip` (optionally `tap` first) captures several frames in one image for
   animations, transitions and loading states.
 
 ## Watching together
@@ -142,11 +164,12 @@ not on driving.
 - **Check by text first.** `check_layout` finds small tap areas, elements cut off at the
   edges, overlaps, low contrast, unnamed buttons and truncated text from the tree, without
   an image. Run it on each new screen; spend images on what it can't judge.
-- **Drive by text.** Take screenshots at checkpoints only: a new screen, before and after a
+- **Drive by text.** No image is sent unless you pass `screenshot: true`. Ask for one at
+  checkpoints only: a new screen, before and after a
   visual change, when the list suggests something is off, and at the end. `labels: true`
   draws each element's box and ref on the screenshot, so a helper can report by ref.
 - **Shrink them.** `look` with `width: 300` is enough to judge a layout (about a quarter of
-  the tokens); keep the default 600 to read text; `screenshot: false` when you only need refs.
+  the tokens); keep the default 600 to read text.
 - **Keep images out of the lead agent.** When you coordinate helpers, run the host with
   `--screenshots file` (`claude mcp add tapline -- tapline mcp --screenshots file`). `look` then
   saves each screenshot in `~/.tapline/shots` (newest 50 kept) and returns its path instead of
@@ -173,7 +196,7 @@ not on driving.
 ## Reporting
 
 For each problem: what you did (the steps, short), what you expected, what happened, and
-where (screen, element `testID` or text). Quote the relevant log lines. Separate real bugs
+where (screen, element `id` or text). Quote the relevant log lines. Separate real bugs
 from things you couldn't test (blocked by login, a missing test account, a system dialog,
 a gesture-only control). Note screens that took more than a few seconds to load.
 

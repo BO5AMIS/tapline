@@ -178,14 +178,14 @@ Good candidates: sign in as a test user, load sample data, reset to a fresh stat
 date. Registering does nothing in builds where Tapline is off. `appearance` (light / dark)
 is built in.
 
-**Optional: alerts the agent can press.** iOS alerts can't be pressed from inside the app,
+**Optional: alerts the agent can tap.** iOS alerts can't be tapped from inside the app,
 so Tapline tells the agent about them and asks it to get the user to tap. In test builds you
 can pass `alerts: 'stand-in'` to `startTapline`: alerts then show as Tapline's own in-app
-box, whose buttons the agent presses like any other. Tapline's own "Connect for testing?"
+box, whose buttons the agent taps like any other. Tapline's own "Connect for testing?"
 prompt always stays a real iOS alert.
 
 **Give important elements a `testID`.** Agents can also target visible text, labels and
-positions, but `testID`s keep tests stable:
+positions, but `testID`s keep tests stable (the agent targets them as `id`):
 
 ```jsx
 <Pressable testID="login-button" onPress={login}><Text>Log in</Text></Pressable>
@@ -265,7 +265,7 @@ and Metro over https, and says how to fix what's missing.
 | `screenshot … unsupported` | install `react-native-view-shot`, then rebuild the app (it has native code) |
 | an element isn't in `look` | it has no text, label, `testID` or handler (give it a `testID`), or it's hidden: tabs that aren't selected and screens covered by another are left out |
 | the tab bar isn't in `look` | native tab bars (Expo Router's `NativeTabs`) are drawn by iOS, not React; switch tabs with `open_url` and the tab's route (`myapp://settings`) |
-| `type` didn't change an input | inputs without `onChangeText` keep their native text; target the input by `testID` |
+| `type` didn't change an input | inputs without `onChangeText` keep their native text; target the input by `id` (its `testID`) |
 
 ## Undo
 

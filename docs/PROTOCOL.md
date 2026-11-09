@@ -85,7 +85,12 @@ it for every later connection.
 ```
 
 Error codes: `not_found`, `ambiguous`, `not_actionable`, `unsupported`, `bad_params`,
-`timeout`, `internal`. An `ambiguous` error also carries `refs`, the refs of up to 5
+`timeout`, `internal`. The host adds its own codes for the agent (`stale`, `busy`,
+`paused`, `in_background`, `reconnecting`, `not_connected`); they don't travel on this wire.
+A `not_actionable` message starts with a reason word: `disabled`, `off_screen`, `covered`,
+`under_tab_bar`, `behind_alert` or `no_action` (for example `covered: e47 … is covered by …`).
+A `{x, y}` target where nothing takes the action is `not_actionable` with
+`no_action: Nothing at (x, y) takes a touch.`, not `not_found`. An `ambiguous` error also carries `refs`, the refs of up to 5
 candidates (valid in later requests); its `message` describes each one:
 
 ```json
@@ -150,7 +155,9 @@ Most methods take a `target`, exactly one of:
 
 When several elements match, the frontmost visible one wins for `x,y`; for the others
 the response is `ambiguous` with up to 5 candidate `refs`, unless `index` is given
-(`{ "text": "Delete", "index": 1 }`, 0-based in tree order).
+(`{ "text": "Delete", "index": 1 }`, 0-based in tree order). `index` works with `testID`,
+`label` and `text` targets. The host's agent-facing names differ: `id` for `testID`
+(`testID` stays on the wire).
 
 ## Methods
 
@@ -223,7 +230,9 @@ Needs `react-native-view-shot` in the app; otherwise error `unsupported`.
 
 ### `press` / `longPress`
 
-params: `{ "target": …, "force": false }` → result: `{ "element": <element> }`. Calls the
+params: `{ "target": …, "force": false }` → result: `{ "element": <element>, "settledMs": 310 }`
+(the host's `tap` calls `press`). `settledMs`: every action result has it. The app answers
+once React hasn't committed for 100 ms, 2 s at most, and reports how long that took. Calls the
 target's `onPress` / `onLongPress` with a synthetic press event (`nativeEvent` with
 `locationX/Y`, `pageX/Y`, `timestamp`; `persist()`, `preventDefault()`,
 `stopPropagation()` no-ops). A disabled element: `not_actionable`.
@@ -255,12 +264,14 @@ sends `{ "backspace": 1 }`.
 
 ### `scroll`
 
-params: `{ "target": …optional, "direction": "down", "amount": 400 }` or
+params: `{ "target": …optional, "direction": "down", "amount": 400 }`,
+`{ "target": …optional, "direction": "down", "fraction": 0.8 }` or
 `{ "target": …optional, "to": "end" | "start" }`. `amount` in points (default: 80% of
-the scroll view's height). `up`/`down` move the vertical offset and `left`/`right` the
+the scroll view's height). `fraction` (0.1 to 1) is a share of the scroll view; it can't be
+combined with `amount`. The host's `scroll.amount` is sent as `fraction`. `up`/`down` move the vertical offset and `left`/`right` the
 horizontal one, whatever the list's orientation; `down` shows what is below. Without
 `target`: the largest scroll view on screen.
-→ result: `{ "element": <element>, "offset": { "x": 0, "y": 1210 } }`.
+→ result: `{ "element": <element>, "offset": { "x": 0, "y": 1210 }, "settledMs": 120 }`.
 
 ### `toggle`
 

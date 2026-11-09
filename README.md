@@ -6,7 +6,7 @@ Tapline puts a small agent inside the development and TestFlight builds of your
 React Native / Expo app. You pair your phone with your computer by scanning a QR code;
 from then on the app connects to your computer over [Tailscale](https://tailscale.com),
 and an agent (Claude, Codex, anything that speaks MCP) uses it to read the screen as
-named elements, press, type, scroll, toggle, open deep links, read the app's logs and
+named elements, tap, type, scroll, toggle, open deep links, read the app's logs and
 take screenshots. The phone can be anywhere: on cellular, on another Wi-Fi, across the
 world. Nothing is plugged in, and no Mac is needed.
 
@@ -84,8 +84,8 @@ your agent at it.
 | Tool | What it does |
 |---|---|
 | `pair` | a QR code and link that pair a phone with this computer |
-| `apps`, `select_app` | connected apps; pick one when several are connected |
-| `look` | the screen as elements (type, text, testID, position, actions) and the current route, plus a screenshot (an image or a file path; `labels` draws each element's box and ref on it) |
+| `apps`, `open_app` | connected apps; `open_app` picks one by session id, app id or name when several are connected |
+| `look` | the screen as elements (role, text, id, position, actions), the app and the current route; `screenshot: true` adds an image (or a file path; `labels` draws each element's box and ref on it) |
 | `check_layout` | automatic visual checks without a screenshot: small tap areas, cut-off edges, overlaps, low contrast, unnamed buttons, truncated text |
 | `back` | go back, like the back button or swipe |
 | `app_command` | the app's own test commands (switch language, sign in as a test user, sample data …) and the built-in light/dark switch |
@@ -94,9 +94,9 @@ your agent at it.
 | `filmstrip` | several frames in one image, for animations and loading states |
 | `record`, `replay` | save a test run as a script and replay it later, without an AI (also `tapline replay`) |
 | `viewer` | a link to watch the app live in a browser, with what the agent does marked on it; you can tap, scroll and type there too |
-| `press`, `long_press` | by `testID`, label, visible text, ref from the last look, or x/y |
+| `tap`, `long_press` | by `id` (the `testID` prop), label, visible text, ref from the last look, or x/y (`long_press` takes `seconds`, which Tapline ignores) |
 | `type_text` | into an input; replace or append; optionally submit |
-| `scroll` | by a direction and amount, or to the start or end |
+| `scroll` | by a direction and a share of the scroll area (0.1 to 1, default 0.8), or to the start or end |
 | `toggle` | switches |
 | `open_url` | deep links |
 | `logs` | the app's console output and JavaScript errors |
@@ -104,15 +104,29 @@ your agent at it.
 | `wait` | let something load, then look |
 
 Every action returns what changed on screen (or the whole list when the screen changed),
-as text, so each step is one call. Actions refuse what a person couldn't tap, such as a button
-off screen or covered by something, and say why. A look reads like this:
+as text, so each step is one call. No image is sent unless you pass `screenshot: true`.
+Actions refuse what a person couldn't tap, such as a button off screen or covered by
+something, and say why (`Error not_actionable: covered: …`). A look reads like this:
 
 ```
-Screen 402x874 @3x (points) - 4 elements
-e1 Text "Welcome back" @24,120 200x32
-e2 TextInput "Email" testID=email value="me@example.com" @24,200 354x44 [type, submit]
-e3 button "Log in" testID=login-button @24,610 354x48 [press, longPress]
+Screen 440x956 pt @3x · 4 elements
+App: Demo (com.example.demo)
+Route: login
+e1 text "Welcome back" @24,120 200x32
+e2 input "Email" id=email value="me@example.com" @24,200 354x44 [type]
+e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]
 e4 switch "Remember me" checked=true @330,301 51x31 [toggle]
+```
+
+An action answers with the verb and the element, then what changed, then how long the
+screen took to settle:
+
+```
+Tapped e3 button "Log in" id=login-button @24,610 354x48.
+Same screen. Changes:
++ e13 button "Done" @24,700 354x48 [tap]
+~ e5 text "3 items" (was "2 items")
+Settled in 0.31 s.
 ```
 
 **Screenshots and tokens.** Images cost far more tokens than the element list, so agents
@@ -179,9 +193,9 @@ order, pair again (or give each agent a fixed `--port`).
   app.
 - iOS alerts can't be pressed from inside the app. Tapline shows them to the agent and stops
   it from tapping behind them; with `alerts: 'stand-in'` (test builds) it shows its own in-app
-  alert instead, which the agent can press.
+  alert instead, which the agent can tap.
 - Release builds shorten component names, so element types read best in development
-  builds. `testID`s keep targeting reliable everywhere.
+  builds. Elements with a `testID` (targeted as `id`) stay reliable everywhere.
 - Screenshots need `react-native-view-shot` in the app; remembering the pairing across
   restarts needs `expo-secure-store` (or your own `storage`).
 
@@ -190,7 +204,7 @@ order, pair again (or give each agent a fixed `--port`).
 | | |
 |---|---|
 | Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue): 203 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check: 354 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
-| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured) |
+| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured) |
 | Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
 
 ## Repository
