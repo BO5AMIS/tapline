@@ -1,0 +1,364 @@
+import { Platform } from 'react-native';
+import { screenshotAvailable } from './actions';
+import { forgetLastTree } from './inspect';
+import { originalLog, setLogSink } from './logs';
+import { methods as defaultMethods, type MethodFn } from './methods';
+import {
+  PROTOCOL_VERSION,
+  TaplineError,
+  isRecord,
+  type AppInfo,
+  type DeviceInfo,
+  type WireError,
+} from './types';
+
+export const PING_INTERVAL_MS = 15_000;
+export const HOST_SILENCE_MS = 45_000;
+export const REQUEST_TIMEOUT_MS = 30_000;
+const BACKOFF_START_MS = 1_000;
+const BACKOFF_MAX_MS = 30_000;
+
+/** The slice of the WebSocket API Tapline uses (React Native provides it globally). */
+export interface WebSocketLike {
+  onopen: ((event: unknown) => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  onclose: ((event: { code?: number; reason?: string }) => void) | null;
+  onerror: ((event: unknown) => void) | null;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+}
+
+export type WebSocketCtor = new (url: string) => WebSocketLike;
+
+/** WebSocket close code for a token the host refused. */
+export const CLOSE_BAD_TOKEN = 4001;
+/** WebSocket close code for a pairing code the host refused (invalid, expired or used). */
+export const CLOSE_BAD_PAIR_CODE = 4004;
+
+export interface ClientOptions {
+  url: string;
+  /** The host's token (a paired app, or a direct connection). */
+  token?: string;
+  /** A one-time code from a pairing link, used instead of `token` until the host answers. */
+  pairCode?: string;
+  /** Random id of this app install, sent as `device.id`. */
+  deviceId?: string;
+  app?: AppInfo;
+  /** The host accepted `pairCode` and sent its token: remember it for later connections. */
+  onPaired?: (token: string) => void;
+  /** The host refused the pairing code (4004) or the token during the handshake (4001); the client has stopped. */
+  onRejected?: (code: number) => void;
+}
+
+export interface ClientDeps {
+  WebSocketCtor?: WebSocketCtor;
+  methods?: Record<string, MethodFn>;
+  device?: DeviceInfo;
+  capabilities?: string[];
+  /** Receives the one status line per connect/disconnect. */
+  log?: (line: string) => void;
+}
+
+export function backoffDelay(attempt: number): number {
+  return Math.min(BACKOFF_MAX_MS, BACKOFF_START_MS * 2 ** attempt);
+}
+
+export function normalizeUrl(url: string): string {
+  const trimmed = url.trim();
+  if (/^wss?:\/\//i.test(trimmed)) return trimmed;
+  return `ws://${trimmed.replace(/^https?:\/\//i, '')}`;
+}
+
+export function collectDeviceInfo(): DeviceInfo {
+  const constants: unknown = Platform.constants;
+  const info: DeviceInfo = { platform: Platform.OS, osVersion: String(Platform.Version) };
+  if (isRecord(constants)) {
+    if (typeof constants.osVersion === 'string') info.osVersion = constants.osVersion;
+    else if (typeof constants.Release === 'string') info.osVersion = constants.Release;
+    if (typeof constants.Model === 'string') info.model = constants.Model;
+    else if (typeof constants.model === 'string') info.model = constants.model;
+    if (typeof constants.deviceName === 'string') info.name = constants.deviceName;
+  }
+  return info;
+}
+
+export function defaultCapabilities(): string[] {
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'logs'];
+  if (screenshotAvailable()) capabilities.push('screenshot');
+  if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload');
+  return capabilities;
+}
+
+function toWireError(error: unknown): WireError {
+  if (error instanceof TaplineError) return error.toWire();
+  return { code: 'internal', message: error instanceof Error ? error.message : String(error) };
+}
+
+export class TaplineClient {
+  private readonly options: ClientOptions;
+  private readonly deps: ClientDeps;
+  private socket: WebSocketLike | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private attempt = 0;
+  private running = false;
+  private ready = false;
+  private everConnected = false;
+  private failureLogged = false;
+  private lastHeard = 0;
+  private queue: Promise<void> = Promise.resolve();
+  private token: string | undefined;
+  private pairCode: string | undefined;
+
+  constructor(options: ClientOptions, deps: ClientDeps = {}) {
+    this.options = options;
+    this.deps = deps;
+    this.token = options.token;
+    this.pairCode = options.pairCode;
+  }
+
+  get connected(): boolean {
+    return this.ready;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.attempt = 0;
+    this.connect();
+  }
+
+  stop(): void {
+    this.running = false;
+    this.clearTimers();
+    const socket = this.socket;
+    this.socket = null;
+    if (this.ready) this.status('disconnected');
+    this.ready = false;
+    setLogSink(null);
+    if (socket) {
+      detach(socket);
+      try {
+        socket.close(1000, 'stopped');
+      } catch {
+        // already closed
+      }
+    }
+  }
+
+  private status(line: string): void {
+    const log = this.deps.log ?? originalLog;
+    try {
+      log(`[tapline] ${line}`);
+    } catch {
+      // never throw into the app
+    }
+  }
+
+  private clearTimers(): void {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    this.reconnectTimer = null;
+    this.pingTimer = null;
+  }
+
+  private connect(): void {
+    if (!this.running) return;
+    const Ctor = this.deps.WebSocketCtor ?? (globalThis as { WebSocket?: WebSocketCtor }).WebSocket;
+    if (typeof Ctor !== 'function') {
+      this.status('no WebSocket available in this environment');
+      return;
+    }
+    let socket: WebSocketLike;
+    try {
+      socket = new Ctor(normalizeUrl(this.options.url));
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    this.socket = socket;
+    socket.onopen = () => this.safely(() => this.onOpen(socket));
+    socket.onmessage = (event) => this.safely(() => this.onMessage(socket, event.data));
+    socket.onerror = () => {
+      // onclose follows; nothing to do
+    };
+    socket.onclose = (event) => this.safely(() => this.onClose(socket, event.code));
+  }
+
+  private safely(fn: () => void): void {
+    try {
+      fn();
+    } catch {
+      // never throw into the app
+    }
+  }
+
+  private onOpen(socket: WebSocketLike): void {
+    if (socket !== this.socket) return;
+    this.lastHeard = Date.now();
+    const device = this.deps.device ?? collectDeviceInfo();
+    const deviceId = this.options.deviceId;
+    this.send({
+      type: 'hello',
+      protocol: PROTOCOL_VERSION,
+      ...(this.pairCode !== undefined ? { pairCode: this.pairCode } : { token: this.token ?? '' }),
+      app: { name: 'App', ...this.options.app },
+      device: deviceId === undefined ? device : { ...device, id: deviceId },
+      capabilities: this.deps.capabilities ?? defaultCapabilities(),
+    });
+  }
+
+  private onMessage(socket: WebSocketLike, data: unknown): void {
+    if (socket !== this.socket || typeof data !== 'string') return;
+    this.lastHeard = Date.now();
+    let message: unknown;
+    try {
+      message = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (!isRecord(message)) return;
+    switch (message.type) {
+      case 'welcome':
+        this.onWelcome(message.token);
+        break;
+      case 'ping':
+        this.send({ type: 'pong' });
+        break;
+      case 'request':
+        this.enqueue(message);
+        break;
+      default:
+        break; // pong and unknown types
+    }
+  }
+
+  private onWelcome(token: unknown): void {
+    // A new host session: its agent hasn't seen any list yet, so "changes" start over.
+    forgetLastTree();
+    if (this.pairCode !== undefined && typeof token === 'string' && token !== '') {
+      // Paired: the code was single-use, so later connections use the host's token.
+      this.pairCode = undefined;
+      this.token = token;
+      const onPaired = this.options.onPaired;
+      if (onPaired) this.safely(() => onPaired(token));
+    }
+    this.ready = true;
+    this.everConnected = true;
+    this.failureLogged = false;
+    this.attempt = 0;
+    this.status('connected');
+    setLogSink((event, payload) => this.send({ type: 'event', event, data: payload }));
+    if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => this.safely(() => this.onPingTick()), PING_INTERVAL_MS);
+  }
+
+  private onPingTick(): void {
+    if (Date.now() - this.lastHeard > HOST_SILENCE_MS) {
+      // The host stopped answering: drop the socket and reconnect.
+      const socket = this.socket;
+      if (socket) {
+        detach(socket);
+        try {
+          socket.close(4000, 'host silent');
+        } catch {
+          // ignore
+        }
+        this.handleLoss(undefined);
+      }
+      return;
+    }
+    this.send({ type: 'ping' });
+  }
+
+  private onClose(socket: WebSocketLike, code: number | undefined): void {
+    if (socket !== this.socket) return;
+    detach(socket);
+    if (code === CLOSE_BAD_PAIR_CODE || (code === CLOSE_BAD_TOKEN && !this.ready)) {
+      // Retrying a refused code or token can't work: stop and let the owner decide.
+      this.socket = null;
+      this.stop();
+      this.status(code === CLOSE_BAD_PAIR_CODE ? 'the computer refused the pairing code' : 'the computer refused the token');
+      const onRejected = this.options.onRejected;
+      if (onRejected) this.safely(() => onRejected(code));
+      return;
+    }
+    this.handleLoss(code);
+  }
+
+  private handleLoss(code: number | undefined): void {
+    this.socket = null;
+    if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    this.pingTimer = null;
+    setLogSink(null);
+    if (this.ready) {
+      this.status(code ? `disconnected (code ${code})` : 'disconnected');
+    } else if (!this.failureLogged) {
+      this.failureLogged = true;
+      this.status(code ? `cannot connect (code ${code}), retrying` : 'cannot reach the host, retrying');
+    }
+    this.ready = false;
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.running) return;
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    const delay = backoffDelay(this.attempt);
+    this.attempt += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  private send(message: Record<string, unknown>): void {
+    const socket = this.socket;
+    if (!socket) return;
+    try {
+      socket.send(JSON.stringify(message));
+    } catch {
+      // a failed send shows up as a close
+    }
+  }
+
+  /** Requests run one at a time so refs and snapshots never interleave. */
+  private enqueue(message: Record<string, unknown>): void {
+    this.queue = this.queue.then(() => this.handleRequest(message)).catch(() => undefined);
+  }
+
+  private async handleRequest(message: Record<string, unknown>): Promise<void> {
+    const id = message.id;
+    if (typeof id !== 'number' && typeof id !== 'string') return;
+    const respond = (body: Record<string, unknown>): void => this.send({ type: 'response', id, ...body });
+    const name = message.method;
+    const table = this.deps.methods ?? defaultMethods;
+    const method = typeof name === 'string' && Object.prototype.hasOwnProperty.call(table, name) ? table[name] : undefined;
+    if (!method) {
+      respond({ ok: false, error: { code: 'unsupported', message: `Unknown method ${String(name)}` } });
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new TaplineError('timeout', `${String(name)} did not finish in ${REQUEST_TIMEOUT_MS / 1000} s`)),
+          REQUEST_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([method(message.params), timeout]);
+      respond({ ok: true, result: result === undefined ? {} : result });
+    } catch (error) {
+      respond({ ok: false, error: toWireError(error) });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+}
+
+function detach(socket: WebSocketLike): void {
+  socket.onopen = null;
+  socket.onmessage = null;
+  socket.onclose = null;
+  socket.onerror = null;
+}

@@ -1,0 +1,68 @@
+{
+  "name": "@tapline/react-native",
+  "version": "0.1.0",
+  "description": "Tapline in-app agent: lets AI agents see and drive your own React Native / Expo app from anywhere, over Tailscale.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./register": {
+      "types": "./dist/register.d.ts",
+      "default": "./dist/register.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "register": [
+        "dist/register.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "register.js",
+    "register.d.ts",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/register.js",
+    "./register.js"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest"
+  },
+  "peerDependencies": {
+    "expo-secure-store": ">=12",
+    "react": ">=18",
+    "react-native": ">=0.72",
+    "react-native-view-shot": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "expo-secure-store": {
+      "optional": true
+    },
+    "react-native-view-shot": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@react-native/babel-preset": "0.88.1",
+    "@react-native/jest-preset": "0.88.1",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.1.1",
+    "@types/react-test-renderer": "^19.1.0",
+    "jest": "^29.7.0",
+    "react": "19.3.1",
+    "react-native": "0.88.1",
+    "react-test-renderer": "19.3.1",
+    "typescript": "^5.9.0"
+  }
+}
