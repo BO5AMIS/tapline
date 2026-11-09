@@ -28,7 +28,7 @@ import { openAlerts } from './alerts';
 import { firstHostChild, hostChildren, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import { onCommit } from './register';
-import { waitUntilStill } from './settle';
+import { waitUntilSteady, waitUntilStill } from './settle';
 import {
   TaplineError,
   isRecord,
@@ -78,11 +78,46 @@ export function settle(): Promise<number> {
       // a listener must never break the action
     }
   }
-  return waitUntilStill({
+  return settleNow();
+}
+
+const SHEET_POLL_MS = 100;
+
+/** Whether `fiber` sits inside `host`. */
+function isInside(fiber: Fiber, host: Fiber): boolean {
+  for (let up: Fiber | null = fiber.return; up; up = up.return) if (sameFiber(up, host)) return true;
+  return false;
+}
+
+/** The fiber to watch in the top open modal: its first element with an action, else its first framed host. */
+async function sheetProbe(): Promise<Fiber | null> {
+  const hosts = openModalHosts();
+  const top = hosts[hosts.length - 1];
+  if (!top) return null;
+  const inside = takeSnapshot().entries.filter((entry) => isInside(entry.node.fiber, top));
+  const acting = inside.find((entry) => entry.info.actions.length > 0);
+  if (acting) return acting.node.fiber;
+  for (const entry of inside) {
+    const frame = await measureFiber(entry.node.fiber);
+    if (frame && frame.width > 0 && frame.height > 0) return entry.node.fiber;
+  }
+  return null;
+}
+
+async function settleNow(): Promise<number> {
+  const started = Date.now();
+  await waitUntilStill({
     ...settings,
     onCommit: (listener) => onCommit(() => listener()),
     now: Date.now,
   });
+  const left = settings.capMs - (Date.now() - started);
+  if (left > 0) {
+    // A sheet lifted by a native-driver animation makes no commits: wait for it to stop moving.
+    const probe = await sheetProbe().catch(() => null);
+    if (probe) await waitUntilSteady(() => measureFiber(probe), { pollMs: SHEET_POLL_MS, capMs: left, now: Date.now });
+  }
+  return Math.max(0, Math.min(settings.capMs, Date.now() - started));
 }
 
 function badParams(message: string): TaplineError {

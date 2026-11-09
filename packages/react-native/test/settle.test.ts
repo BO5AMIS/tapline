@@ -1,4 +1,4 @@
-import { waitUntilStill } from '../src/settle';
+import { waitUntilSteady, waitUntilStill } from '../src/settle';
 
 function fakeCommits() {
   const listeners = new Set<() => void>();
@@ -52,5 +52,36 @@ describe('waitUntilStill', () => {
     expect(() => c.commit()).not.toThrow();
     await jest.advanceTimersByTimeAsync(500);
     await expect(done).resolves.toBe(100);
+  });
+});
+
+describe('waitUntilSteady', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  function frames(values: Array<{ x: number; y: number } | null>) {
+    let i = 0;
+    return jest.fn(async (): Promise<{ x: number; y: number } | null> => values[Math.min(i++, values.length - 1)] ?? null);
+  }
+
+  test('stops once two readings in a row agree within 1 pt', async () => {
+    const measure = frames([{ x: 0, y: 778 }, { x: 0, y: 650 }, { x: 0, y: 526 }, { x: 0, y: 526.5 }]);
+    const done = waitUntilSteady(measure, { pollMs: 100, capMs: 2000, now: () => Date.now() });
+    await jest.advanceTimersByTimeAsync(300);
+    await expect(done).resolves.toBe(300);
+    expect(measure).toHaveBeenCalledTimes(4);
+  });
+
+  test('ends at the cap when the reading never settles', async () => {
+    let y = 0;
+    const done = waitUntilSteady(async () => ({ x: 0, y: (y += 10) }), { pollMs: 100, capMs: 450, now: () => Date.now() });
+    await jest.advanceTimersByTimeAsync(1000);
+    await expect(done).resolves.toBe(450);
+  });
+
+  test('a null first reading skips the wait', async () => {
+    const done = waitUntilSteady(async () => null, { pollMs: 100, capMs: 2000, now: () => Date.now() });
+    await jest.advanceTimersByTimeAsync(0);
+    await expect(done).resolves.toBe(0);
   });
 });

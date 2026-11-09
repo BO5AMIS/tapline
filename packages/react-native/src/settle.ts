@@ -32,3 +32,28 @@ export function waitUntilStill(options: {
     restart();
   });
 }
+
+/**
+ * After the commits stop, a native-driver animation (a sheet sliding up) can still be moving.
+ * Polls `measure` every `pollMs` and resolves with the milliseconds waited once two readings in a
+ * row agree within 1 pt in x and y, or at `capMs`. A null reading (can't be measured) ends the wait.
+ */
+export async function waitUntilSteady(
+  measure: () => Promise<{ x: number; y: number } | null>,
+  options: { pollMs: number; capMs: number; now: () => number },
+): Promise<number> {
+  const started = options.now();
+  const elapsed = (): number => Math.max(0, Math.min(options.capMs, options.now() - started));
+  if (options.capMs <= 0) return 0;
+  let previous = await measure();
+  if (previous === null) return 0;
+  for (;;) {
+    const left = options.capMs - (options.now() - started);
+    if (left <= 0) return elapsed();
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(options.pollMs, left)));
+    const next = await measure();
+    if (next === null) return elapsed();
+    if (Math.abs(next.x - previous.x) <= 1 && Math.abs(next.y - previous.y) <= 1) return elapsed();
+    previous = next;
+  }
+}

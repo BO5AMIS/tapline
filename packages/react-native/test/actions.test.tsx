@@ -1125,6 +1125,69 @@ describe('onActed', () => {
   });
 });
 
+describe('settle waits for an open sheet to stop moving', () => {
+  async function mountSheet(): Promise<void> {
+    await mount(
+      <View>
+        {React.createElement(
+          'RCTModalHostView',
+          null,
+          <View>
+            <Pressable testID="close" onPress={() => {}}>
+              <Text>Close</Text>
+            </Pressable>
+          </View>,
+        )}
+      </View>,
+    );
+  }
+
+  async function timedOpenURL(advanceMs: number): Promise<number> {
+    jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
+    configureActions({ quietMs: 100, capMs: 2000 });
+    jest.useFakeTimers();
+    try {
+      const pending = openURL({ url: 'myapp://x' });
+      await jest.advanceTimersByTimeAsync(advanceMs);
+      return (await pending).settledMs;
+    } finally {
+      jest.useRealTimers();
+      configureActions({ quietMs: 0, capMs: 0 });
+    }
+  }
+
+  test('no modal: the settle is unchanged', async () => {
+    await mount(<Text>x</Text>);
+    const measure = jest.fn(async () => frame(0, 778, 100, 40));
+    setMeasurer(measure);
+    expect(await timedOpenURL(100)).toBe(100);
+    expect(measure).not.toHaveBeenCalled();
+  });
+
+  test('a moving sheet: waits until two readings agree', async () => {
+    await mountSheet();
+    const ys = [778, 650, 526, 526];
+    let i = 0;
+    setMeasurer(async () => frame(0, ys[Math.min(i++, ys.length - 1)] ?? 0, 100, 40));
+    // 100 quiet + polls at 100, 200, 300 after the first reading
+    expect(await timedOpenURL(400)).toBe(400);
+    expect(i).toBe(4);
+  });
+
+  test('a sheet that never stops: ends at the cap', async () => {
+    await mountSheet();
+    let y = 0;
+    setMeasurer(async () => frame(0, (y += 50), 100, 40));
+    expect(await timedOpenURL(3000)).toBe(2000);
+  });
+
+  test('a probe that measures null skips the extra wait', async () => {
+    await mountSheet();
+    setMeasurer(async () => null);
+    expect(await timedOpenURL(100)).toBe(100);
+  });
+});
+
 describe('openURL / logs / reload / screenshot', () => {
   test('openURL calls Linking.openURL', async () => {
     const spy = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
