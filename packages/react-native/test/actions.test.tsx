@@ -383,7 +383,9 @@ describe('target resolution', () => {
     expect((await resolveTarget({ x: 300, y: 700 })).entry.info.testID).toBe('feed');
     // only the main scroll view
     expect((await resolveTarget({ x: 390, y: 20 })).entry.info.testID).toBe('main-scroll');
-    expect((await failure(resolveTarget({ x: 5000, y: 5000 }))).code).toBe('not_found');
+    const empty = await failure(resolveTarget({ x: 5000, y: 5000 }));
+    expect(empty.code).toBe('not_actionable');
+    expect(empty.message).toMatch(/^no_action: Nothing at \(/);
     await run(() => press({ target: { x: 100, y: 410 } }));
     expect(spies.onDelete).toHaveBeenCalledWith(1);
   });

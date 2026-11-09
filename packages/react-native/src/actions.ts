@@ -264,7 +264,7 @@ export async function resolveTarget(raw: unknown): Promise<Resolved> {
       if (frame && frameContains(frame, target.x, target.y)) hit = entry; // later in tree order = in front
     });
     if (!hit) {
-      throw new TaplineError('not_found', `No actionable element at (${target.x}, ${target.y})`);
+      throw notActionable('no_action', `Nothing at (${target.x}, ${target.y}) takes a touch.`);
     }
     return { snapshot, entry: hit };
   }
