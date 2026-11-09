@@ -109,6 +109,7 @@ test('a press is refused while an iOS alert is open, unless forced', async () =>
   Alert.alert('Saved', 'Your workout was saved.');
   const error = await failure(run(() => press({ target: { testID: 'save' } })));
   expect(error.code).toBe('not_actionable');
+  expect(error.message).toMatch(/^behind_alert: /);
   expect(error.message).toContain('"Saved"');
   expect(error.message).toContain('stand-in');
   expect(onSave).not.toHaveBeenCalled();

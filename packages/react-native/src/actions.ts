@@ -43,6 +43,13 @@ export { tree } from './inspect';
 /* Small helpers                                                               */
 /* -------------------------------------------------------------------------- */
 
+/** The reasons AGENT-TOOLS §4 names for a `not_actionable` refusal; the message starts with one. */
+type NotActionable = 'disabled' | 'off_screen' | 'covered' | 'under_tab_bar' | 'behind_alert' | 'no_action';
+
+function notActionable(reason: NotActionable, message: string): TaplineError {
+  return new TaplineError('not_actionable', `${reason}: ${message}`);
+}
+
 const settings = { quietMs: 100, capMs: 2000 };
 
 /** Tune how long the app must be free of React commits after an action, and the longest wait (AGENT-TOOLS §6). */
@@ -391,8 +398,8 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   const blocking = openAlerts().find((alert) => !alert.standIn);
   if (blocking) {
     const buttons = blocking.buttons.map((button) => `[${button.text}]`).join(' ');
-    throw new TaplineError(
-      'not_actionable',
+    throw notActionable(
+      'behind_alert',
       `An alert is open: "${blocking.title}" ${buttons}. A person would have to answer it first, and Tapline can't press OS alerts: ` +
         "ask the user to tap a button, or start Tapline with alerts: 'stand-in' so its buttons can be pressed. force: true acts anyway.",
     );
@@ -405,8 +412,8 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   const bottom = Math.min(frame.y + frame.height, height);
   const name = `${refFor(actor.node.fiber)} ${describe(actor)}`;
   if (right <= left || bottom <= top) {
-    throw new TaplineError(
-      'not_actionable',
+    throw notActionable(
+      'off_screen',
       `${name} is off screen (at ${Math.round(frame.x)},${Math.round(frame.y)}; the screen is ${width}x${height}). ` +
         'Scroll to it first, or pass force: true to call its handler anyway.',
     );
@@ -415,8 +422,8 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   const y = Math.round((top + bottom) / 2);
   const bar = nativeTabBar(snapshot);
   if (bar && y >= bar.top) {
-    throw new TaplineError(
-      'not_actionable',
+    throw notActionable(
+      'under_tab_bar',
       `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
         'Scroll it up first, or pass force: true to call its handler anyway.',
     );
@@ -424,8 +431,8 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
   const hit = await hitTest(x, y);
   if (!hit) return;
   if (isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return;
-  throw new TaplineError(
-    'not_actionable',
+  throw notActionable(
+    'covered',
     `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit)}: a real tap would land there instead. ` +
       'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.',
   );
@@ -476,7 +483,7 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; settl
     canGoBack = true;
   }
   if (!canGoBack || typeof nav.goBack !== 'function') {
-    throw new TaplineError('not_actionable', `Nothing to go back to from ${current.chain.join(' › ')}.`);
+    throw notActionable('no_action', `Nothing to go back to from ${current.chain.join(' › ')}.`);
   }
   callHandler('goBack', nav.goBack as (...args: unknown[]) => unknown, []);
   const settledMs = await settle();
@@ -490,21 +497,21 @@ async function pressLike(
   const params = paramsOf(rawParams);
   const { snapshot, entry } = await resolveTarget(params.target);
   if (entry.tab) {
-    if (kind === 'longPress') throw new TaplineError('not_actionable', `The "${entry.tab.title}" tab has no long press`);
+    if (kind === 'longPress') throw notActionable('no_action', `The "${entry.tab.title}" tab has no long press`);
     selectTab(snapshot, entry.tab);
     return { element: toElement(entry, null), settledMs: await settle() };
   }
   const actor = findActionable(snapshot, entry, kind, false);
   const handlerName = kind === 'press' ? 'onPress' : 'onLongPress';
   if (!actor) {
-    throw new TaplineError('not_actionable', `${describe(entry)} has no ${handlerName} handler`);
+    throw notActionable('no_action', `${describe(entry)} has no ${handlerName} handler`);
   }
   if (actor.info.disabled || entry.info.disabled) {
-    throw new TaplineError('not_actionable', `${describe(actor)} is disabled`);
+    throw notActionable('disabled', `${describe(actor)} is disabled`);
   }
   const handler = findHandler(actor.node, handlerName);
   if (!handler) {
-    throw new TaplineError('not_actionable', `${describe(actor)} has no ${handlerName} handler`);
+    throw notActionable('no_action', `${describe(actor)} has no ${handlerName} handler`);
   }
   const { element, frame } = await elementFor(actor);
   if (params.force !== true) await assertReachable(snapshot, actor, frame);
@@ -557,7 +564,7 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   if (rawTarget !== undefined && rawTarget !== null) {
     const { snapshot: snap, entry } = await resolveTarget(rawTarget);
     const input = findActionable(snap, entry, 'type', true);
-    if (!input) throw new TaplineError('not_actionable', `${describe(entry)} is not a text input`);
+    if (!input) throw notActionable('no_action', `${describe(entry)} is not a text input`);
     return { snapshot: snap, entry: input };
   }
   const snap = snapshot ?? takeSnapshot();
@@ -608,7 +615,7 @@ export async function typeText(
   const replace = params.replace !== false && !deleting;
 
   const { entry } = await resolveInput(null, params.target);
-  if (entry.info.disabled) throw new TaplineError('not_actionable', `${describe(entry)} is not editable`);
+  if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable`);
 
   const current = currentInputValue(entry.node);
   // Characters, not UTF-16 units: an emoji is one.
@@ -732,7 +739,7 @@ export async function scroll(
   if (params.target !== undefined && params.target !== null) {
     const resolved = await resolveTarget(params.target);
     const scroller = findActionable(resolved.snapshot, resolved.entry, 'scroll', true);
-    if (!scroller) throw new TaplineError('not_actionable', `${describe(resolved.entry)} is not inside a scroll view`);
+    if (!scroller) throw notActionable('no_action', `${describe(resolved.entry)} is not inside a scroll view`);
     entry = scroller;
     frame = await measureFiber(entry.node.fiber);
   } else {
@@ -829,10 +836,10 @@ export async function toggle(
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
   const { snapshot, entry } = await resolveTarget(params.target);
   const control = findActionable(snapshot, entry, 'toggle', true);
-  if (!control) throw new TaplineError('not_actionable', `${describe(entry)} is not a toggle`);
-  if (control.info.disabled) throw new TaplineError('not_actionable', `${describe(control)} is disabled`);
+  if (!control) throw notActionable('no_action', `${describe(entry)} is not a toggle`);
+  if (control.info.disabled) throw notActionable('disabled', `${describe(control)} is disabled`);
   const handler = findHandler(control.node, 'onValueChange');
-  if (!handler) throw new TaplineError('not_actionable', `${describe(control)} has no onValueChange handler`);
+  if (!handler) throw notActionable('no_action', `${describe(control)} has no onValueChange handler`);
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
   if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));

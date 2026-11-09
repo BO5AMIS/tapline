@@ -1,6 +1,6 @@
 import { SAMPLE_FRAMES, SampleScreen, frame, makeSpies, mount, unmountAll, useFrames, type Spies } from './helpers';
 import React from 'react';
-import { Dimensions, DevSettings, Linking, PixelRatio, Pressable, Text, TextInput, View } from 'react-native';
+import { Dimensions, DevSettings, Linking, PixelRatio, Pressable, Switch, Text, TextInput, View } from 'react-native';
 import { act } from 'react-test-renderer';
 import {
   configureActions,
@@ -144,7 +144,7 @@ describe('press / longPress', () => {
       });
       const error = await failure(run(() => press({ target: { testID: 'save' } })));
       expect(error.code).toBe('not_actionable');
-      expect(error.message).toMatch(/covered/);
+      expect(error.message).toMatch(/^covered: /);
       expect(error.message).toContain('Saved!');
       expect(error.message).toContain('force');
       expect(asked).toEqual([[70, 620]]);
@@ -184,7 +184,7 @@ describe('press / longPress', () => {
       useFrames({ far: frame(20, 1200, 100, 40) });
       const error = await failure(run(() => press({ target: { testID: 'far' }, look: false })));
       expect(error.code).toBe('not_actionable');
-      expect(error.message).toMatch(/off screen/);
+      expect(error.message).toMatch(/^off_screen: /);
       expect(error.message).toMatch(/scroll/i);
       expect(onFar).not.toHaveBeenCalled();
       await run(() => press({ target: { testID: 'far' }, force: true }));
@@ -236,13 +236,15 @@ describe('press / longPress', () => {
     await mountSample();
     const error = await failure(run(() => longPress({ target: { testID: 'delete-1' } })));
     expect(error.code).toBe('not_actionable');
+    expect(error.message).toMatch(/^no_action: /);
+    expect(error.message).not.toContain('force');
   });
 
   test('refuses a disabled element', async () => {
     await mountSample();
     const error = await failure(run(() => press({ target: { testID: 'disabled-button' } })));
     expect(error.code).toBe('not_actionable');
-    expect(error.message).toMatch(/disabled/);
+    expect(error.message).toMatch(/^disabled: /);
     expect(spies.onDisabled).not.toHaveBeenCalled();
   });
 
@@ -250,6 +252,8 @@ describe('press / longPress', () => {
     await mountSample();
     const error = await failure(run(() => press({ target: { testID: 'state-line' } })));
     expect(error.code).toBe('not_actionable');
+    expect(error.message).toMatch(/^no_action: /);
+    expect(error.message).not.toContain('force');
   });
 
   test('pressing the Text inside a Pressable presses the Pressable', async () => {
@@ -522,7 +526,10 @@ describe('type', () => {
     await mount(<Text testID="plain">hi</Text>);
     useFrames({});
     expect((await failure(typeText({ text: 'x' }))).code).toBe('not_found');
-    expect((await failure(typeText({ target: { testID: 'plain' }, text: 'x' }))).code).toBe('not_actionable');
+    const notInput = await failure(typeText({ target: { testID: 'plain' }, text: 'x' }));
+    expect(notInput.code).toBe('not_actionable');
+    expect(notInput.message).toMatch(/^no_action: /);
+    expect(notInput.message).not.toContain('force');
     expect((await failure(typeText({ target: { testID: 'plain' } }))).code).toBe('bad_params');
     expect((await failure(typeText({ target: { testID: 'plain' }, text: 4 }))).code).toBe('bad_params');
   });
@@ -531,7 +538,9 @@ describe('type', () => {
     const onChangeText = jest.fn();
     await mount(<TextInput testID="ro" editable={false} onChangeText={onChangeText} />);
     useFrames({});
-    expect((await failure(typeText({ target: { testID: 'ro' }, text: 'x' }))).code).toBe('not_actionable');
+    const error = await failure(typeText({ target: { testID: 'ro' }, text: 'x' }));
+    expect(error.code).toBe('not_actionable');
+    expect(error.message).toMatch(/^disabled: /);
     expect(onChangeText).not.toHaveBeenCalled();
   });
 });
@@ -560,8 +569,28 @@ describe('toggle', () => {
 
   test('non-toggles are not_actionable; bad value is bad_params', async () => {
     await mountSample();
-    expect((await failure(toggle({ target: { testID: 'login-button' } }))).code).toBe('not_actionable');
+    const notToggle = await failure(toggle({ target: { testID: 'login-button' } }));
+    expect(notToggle.code).toBe('not_actionable');
+    expect(notToggle.message).toMatch(/^no_action: /);
+    expect(notToggle.message).not.toContain('force');
     expect((await failure(toggle({ target: { testID: 'notify-switch' }, value: 'yes' }))).code).toBe('bad_params');
+  });
+
+  test('a switch without onValueChange is no_action; a disabled one is disabled', async () => {
+    await mount(
+      <View>
+        <Switch testID="bare" value={false} />
+        <Switch testID="off" value={false} disabled onValueChange={() => undefined} />
+      </View>,
+    );
+    useFrames({});
+    const bare = await failure(toggle({ target: { testID: 'bare' } }));
+    expect(bare.code).toBe('not_actionable');
+    expect(bare.message).toMatch(/^no_action: /);
+    expect(bare.message).not.toContain('force');
+    const off = await failure(toggle({ target: { testID: 'off' } }));
+    expect(off.code).toBe('not_actionable');
+    expect(off.message).toMatch(/^disabled: /);
   });
 });
 
@@ -716,7 +745,10 @@ describe('scroll', () => {
     await mount(<Text testID="t">x</Text>);
     useFrames({});
     expect((await failure(scroll({}))).code).toBe('not_found');
-    expect((await failure(scroll({ target: { testID: 't' } }))).code).toBe('not_actionable');
+    const notScrollable = await failure(scroll({ target: { testID: 't' } }));
+    expect(notScrollable.code).toBe('not_actionable');
+    expect(notScrollable.message).toMatch(/^no_action: /);
+    expect(notScrollable.message).not.toContain('force');
   });
 });
 

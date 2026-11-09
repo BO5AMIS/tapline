@@ -785,7 +785,7 @@ describe("back", () => {
   it("reports nothing to go back to as an error", async () => {
     const { tools } = await setup((req) =>
       req.method === "back"
-        ? { ok: false, error: { code: "not_actionable", message: "Nothing to go back to from home." } }
+        ? { ok: false, error: { code: "not_actionable", message: "no_action: Nothing to go back to from home." } }
         : defaultHandler(req),
     )();
     const result = await tools.back({});

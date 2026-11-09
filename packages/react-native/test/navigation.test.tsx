@@ -2,7 +2,7 @@ import { mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
 import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
 import { act } from 'react-test-renderer';
-import { back, configureActions, press } from '../src/actions';
+import { back, configureActions, longPress, press } from '../src/actions';
 import { resetRefs, setMeasurer, stableObjectKey, tree } from '../src/inspect';
 import { TaplineError } from '../src/types';
 import type { Fiber } from '../src/fiber';
@@ -149,6 +149,8 @@ describe('back', () => {
     useFrames({});
     const error = await failure(run(() => back({})));
     expect(error.code).toBe('not_actionable');
+    expect(error.message).toMatch(/^no_action: /);
+    expect(error.message).not.toContain('force');
     expect(leaf.goBack).not.toHaveBeenCalled();
   });
 
@@ -227,6 +229,15 @@ describe('native tabs', () => {
     expect(todayNav.navigate).toHaveBeenCalledWith('nutrition');
   });
 
+  test('a long press on a tab is no_action', async () => {
+    await mountTabs();
+    await tree({});
+    const error = await failure(longPress({ target: { text: 'Nutrition' } }));
+    expect(error.code).toBe('not_actionable');
+    expect(error.message).toMatch(/^no_action: /);
+    expect(error.message).not.toContain('force');
+  });
+
   describe('where iOS draws the tab bar (an iPhone in portrait: 49 pt above the 34 pt inset)', () => {
     // The screen here is 400x800, so the bar is y 717 to 800, three tabs of 133 pt.
     async function mountTabsOver(content: React.ReactNode): Promise<FakeNavigation> {
@@ -273,6 +284,7 @@ describe('native tabs', () => {
       useFrames({ low: { x: 0, y: 730, width: 400, height: 40 } });
       const error = await failure(press({ target: { testID: 'low' } }));
       expect(error.code).toBe('not_actionable');
+      expect(error.message).toMatch(/^under_tab_bar: /);
       expect(error.message).toContain('tab bar');
       expect(onLow).not.toHaveBeenCalled();
       await run(() => press({ target: { testID: 'low' }, force: true }));
