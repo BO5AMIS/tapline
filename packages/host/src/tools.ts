@@ -24,40 +24,38 @@ import { TaplineError, type SessionInfo, type TaplineHost } from "./server.js";
 
 export const targetSchema = z
   .object({
-    ref: z.string().optional().describe('Element ref from the latest look, e.g. "e12" (refs change after the screen changes)'),
-    testID: z.string().optional().describe("Exact testID prop"),
-    label: z.string().optional().describe("accessibilityLabel / aria-label (case-insensitive, exact)"),
-    text: z.string().optional().describe("Visible text (case-insensitive; exact match preferred, else substring)"),
-    index: z.number().int().min(0).optional().describe("With text: pick the Nth match (0-based, tree order) when several match"),
-    x: z.number().optional().describe("X in points (window coordinates); use together with y"),
-    y: z.number().optional().describe("Y in points (window coordinates); use together with x"),
+    ref: z.string().optional().describe('Element ref from your latest list, e.g. "e12"'),
+    id: z.string().optional().describe("Exact identifier (React Native testID, the iOS accessibility identifier)"),
+    label: z.string().optional().describe("Accessibility label, exact, ignoring case"),
+    text: z.string().optional().describe("Visible text: an exact match first (ignoring case), then a substring"),
+    index: z.number().int().min(0).optional().describe("With id, label or text: pick the Nth match (0-based, reading order)"),
+    x: z.number().optional().describe("X in points; use together with y"),
+    y: z.number().optional().describe("Y in points; use together with x"),
   })
+  .strict()
   .superRefine((value, ctx) => {
     const kinds = [
       value.ref !== undefined,
-      value.testID !== undefined,
+      value.id !== undefined,
       value.label !== undefined,
       value.text !== undefined,
       value.x !== undefined || value.y !== undefined,
     ].filter(Boolean).length;
     if (kinds !== 1) {
-      ctx.addIssue({
-        code: "custom",
-        message: "Give exactly one kind of target: {ref}, {testID}, {label}, {text, index?} or {x, y}.",
-      });
+      ctx.addIssue({ code: "custom", message: "Give exactly one kind of target: {ref}, {id}, {label}, {text} or {x, y}." });
       return;
     }
     if ((value.x === undefined) !== (value.y === undefined)) {
-      ctx.addIssue({ code: "custom", message: "A coordinate target needs both x and y." });
+      ctx.addIssue({ code: "custom", message: "A point target needs both x and y." });
     }
-    if (value.index !== undefined && value.text === undefined) {
-      ctx.addIssue({ code: "custom", message: "index only works together with text." });
+    if (value.index !== undefined && value.id === undefined && value.label === undefined && value.text === undefined) {
+      ctx.addIssue({ code: "custom", message: "index works with id, label or text." });
     }
   });
 export type Target = z.infer<typeof targetSchema>;
 
 const targetField = targetSchema.describe(
-  'Which element: exactly one of {ref}, {testID}, {label}, {text, index?} or {x, y}. Prefer ref or testID from the latest look.',
+  "Which element: exactly one of {ref}, {id}, {label}, {text} or {x, y}; add index to pick among several id, label or text matches. Prefer ref or id from your latest list.",
 );
 const lookField = z
   .boolean()
@@ -152,7 +150,7 @@ export const toolShapes = {
   },
   wait_for: {
     text: z.string().optional().describe("Wait until an element whose text contains this is on screen (or gone)"),
-    testID: z.string().optional().describe("Wait until the element with this testID is on screen (or gone)"),
+    id: z.string().optional().describe("Wait until the element with this id is on screen (or gone)"),
     label: z.string().optional().describe("Wait until the element with this accessibility label is on screen (or gone)"),
     gone: z.boolean().optional().describe("Wait until it is gone instead, e.g. a spinner"),
     network_idle: z.boolean().optional().describe("Also (or only) wait until no network request is in flight"),
@@ -266,14 +264,14 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
   return { params: copy, fragile };
 }
 
-/** A short description of a step, e.g. `press testID=save` or `type "Ann" into label="Name"`. */
+/** A short description of a step, e.g. `press id=save` or `type "Ann" into label="Name"`. */
 function describeStep(step: ScriptStep): string {
   const p = step.params;
   const target = p["target"];
   let where = "";
   if (typeof target === "object" && target !== null) {
     const t = target as Record<string, unknown>;
-    if (typeof t["testID"] === "string") where = `testID=${t["testID"]}`;
+    if (typeof t["testID"] === "string") where = `id=${t["testID"]}`;
     else if (typeof t["label"] === "string") where = `label=${JSON.stringify(t["label"])}`;
     else if (typeof t["text"] === "string") where = `text=${JSON.stringify(t["text"])}`;
     else if (typeof t["ref"] === "string") where = `ref ${t["ref"]}`;
@@ -357,12 +355,12 @@ function fail(message: string): CallToolResult {
 }
 
 function toWireTarget(target: Target): WireTarget {
+  const withIndex = <T extends object>(t: T): T & { index?: number } =>
+    target.index !== undefined ? { ...t, index: target.index } : t;
   if (target.ref !== undefined) return { ref: target.ref };
-  if (target.testID !== undefined) return { testID: target.testID };
-  if (target.label !== undefined) return { label: target.label };
-  if (target.text !== undefined) {
-    return target.index !== undefined ? { text: target.text, index: target.index } : { text: target.text };
-  }
+  if (target.id !== undefined) return withIndex({ testID: target.id });
+  if (target.label !== undefined) return withIndex({ label: target.label });
+  if (target.text !== undefined) return withIndex({ text: target.text });
   return { x: target.x ?? 0, y: target.y ?? 0 };
 }
 
@@ -398,7 +396,7 @@ export function describeError(error: unknown): string {
     if (error.code === "ambiguous") {
       const candidates = candidateLines(error.details);
       const list = candidates.length > 0 ? `\nCandidates:\n${candidates.map((c) => `  ${c}`).join("\n")}` : "";
-      return `Error ambiguous: ${error.message}${list}\nRetry with one of the refs, or add "index" (0-based) to a {text} target.`;
+      return `Error ambiguous: ${error.message}${list}\nRetry with one of the refs, or add "index" (0-based).`;
     }
     return `Error ${error.code}: ${error.message}`;
   }
@@ -1289,7 +1287,7 @@ export class TaplineTools {
   waitFor(args: Shape<"wait_for">): Promise<CallToolResult> {
     const params: Record<string, unknown> = {};
     if (args.text !== undefined) params["text"] = args.text;
-    if (args.testID !== undefined) params["testID"] = args.testID;
+    if (args.id !== undefined) params["testID"] = args.id;
     if (args.label !== undefined) params["label"] = args.label;
     if (args.gone !== undefined) params["gone"] = args.gone;
     if (args.network_idle !== undefined) params["networkIdle"] = args.network_idle;

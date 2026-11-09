@@ -74,23 +74,45 @@ const defaultHandler = (req: IncomingRequest): Reply => {
 describe("target validation", () => {
   it("accepts exactly one kind of target", () => {
     expect(targetSchema.safeParse({ ref: "e1" }).success).toBe(true);
-    expect(targetSchema.safeParse({ testID: "a" }).success).toBe(true);
+    expect(targetSchema.safeParse({ id: "a" }).success).toBe(true);
     expect(targetSchema.safeParse({ label: "a" }).success).toBe(true);
     expect(targetSchema.safeParse({ text: "a", index: 1 }).success).toBe(true);
     expect(targetSchema.safeParse({ x: 1, y: 2 }).success).toBe(true);
   });
   it("rejects none, several, half a point, or a stray index", () => {
     expect(targetSchema.safeParse({}).success).toBe(false);
-    expect(targetSchema.safeParse({ ref: "e1", testID: "a" }).success).toBe(false);
+    expect(targetSchema.safeParse({ ref: "e1", id: "a" }).success).toBe(false);
     expect(targetSchema.safeParse({ x: 1 }).success).toBe(false);
     expect(targetSchema.safeParse({ ref: "e1", index: 0 }).success).toBe(false);
+  });
+});
+
+describe("targets (AGENT-TOOLS §2)", () => {
+  it("takes {id} and sends the app's testID; index works with id, label and text", () => {
+    expect(targetSchema.safeParse({ id: "save" }).success).toBe(true);
+    expect(targetSchema.safeParse({ testID: "save" }).success).toBe(false);
+    expect(targetSchema.safeParse({ id: "row", index: 2 }).success).toBe(true);
+    expect(targetSchema.safeParse({ label: "Delete", index: 1 }).success).toBe(true);
+    expect(targetSchema.safeParse({ ref: "e3", index: 1 }).success).toBe(false);
+  });
+
+  it("passes id and index on to the app", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    await tools.press({ target: { id: "row", index: 2 }, look: false });
+    expect(app.requests[0]).toMatchObject({ method: "press", params: { target: { testID: "row", index: 2 } } });
+  });
+
+  it("wait_for takes id", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    await tools.waitFor({ id: "done", look: false });
+    expect(app.requests[0]).toMatchObject({ method: "waitFor", params: { testID: "done" } });
   });
 });
 
 describe("press", () => {
   it("returns the result line and the fresh element list, without a screenshot", async () => {
     const { app, tools } = await setup(defaultHandler)();
-    const result = await tools.press({ target: { testID: "login-button" } });
+    const result = await tools.press({ target: { id: "login-button" } });
     expect(result.isError).toBeUndefined();
     const text = textOf(result);
     expect(text).toContain('Pressed e3 button "Log in".');
@@ -127,7 +149,7 @@ describe("press", () => {
         ? { ok: false, error: { code: "not_found", message: 'No element matches testID "nope"' } }
         : defaultHandler(req),
     )();
-    const result = await tools.press({ target: { testID: "nope" } });
+    const result = await tools.press({ target: { id: "nope" } });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toBe('Error not_found: No element matches testID "nope"');
   });
@@ -230,12 +252,12 @@ describe("the live viewer's side of the tools", () => {
   it("runs agent actions through the shared queue: refused while paused, shown to viewers", async () => {
     const { tools, control, actions } = await viewerTools();
     control.setPaused(true);
-    const refused = await tools.press({ target: { testID: "login-button" }, look: false });
+    const refused = await tools.press({ target: { id: "login-button" }, look: false });
     expect(refused.isError).toBe(true);
     expect(textOf(refused)).toContain("paused");
     expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", ok: false, code: "paused" });
     control.setPaused(false);
-    await tools.press({ target: { testID: "login-button" }, look: false });
+    await tools.press({ target: { id: "login-button" }, look: false });
     expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", label: "Log in", ok: true });
   });
 
@@ -350,7 +372,7 @@ describe("compare_screen and filmstrip", () => {
   it("filmstrip can press first, to catch what the press sets off", async () => {
     const { app, tools, dir } = await screenTools([picture(false), picture(true)]);
     try {
-      const result = await tools.filmstrip({ frames: 3, interval_ms: 10, press: { testID: "login-button" } });
+      const result = await tools.filmstrip({ frames: 3, interval_ms: 10, press: { id: "login-button" } });
       expect(app.requests.map((r) => r.method).slice(0, 4)).toEqual(["screenshot", "press", "screenshot", "screenshot"]);
       expect(textOf(result)).toContain("frame 1 is just before the press");
     } finally {
@@ -449,7 +471,7 @@ describe("record and replay", () => {
     const { app, tools, dir } = await shopTools(["basket"]);
     try {
       await tools.record({ action: "start", name: "checkout" });
-      await tools.press({ target: { testID: "save" } });
+      await tools.press({ target: { id: "save" } });
       await tools.waitFor({ text: "Thanks" });
       await tools.record({ action: "stop" });
       app.requests.length = 0;
@@ -457,7 +479,7 @@ describe("record and replay", () => {
       expect(app.requests.filter((r) => r.method !== "tree").map((r) => r.method)).toEqual(["press", "waitFor"]);
       expect(text).toContain('Replayed "checkout"');
       expect(text).toContain("2 of 2 steps passed");
-      expect(text).toContain("1 ✓ press testID=save");
+      expect(text).toContain("1 ✓ press id=save");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -466,7 +488,7 @@ describe("record and replay", () => {
   it("stops at the first failing step and says why", async () => {
     const first = await shopTools(["basket"]);
     await first.tools.record({ action: "start", name: "broken" });
-    await first.tools.press({ target: { testID: "save" } });
+    await first.tools.press({ target: { id: "save" } });
     await first.tools.press({ target: { label: "Pay now" } });
     await first.tools.record({ action: "stop" });
     const { host, port } = await startHost();
@@ -487,7 +509,7 @@ describe("record and replay", () => {
   it("fails a step that ends on a different screen than when it was recorded", async () => {
     const first = await shopTools(["basket"]);
     await first.tools.record({ action: "start", name: "nav" });
-    await first.tools.press({ target: { testID: "save" } });
+    await first.tools.press({ target: { id: "save" } });
     await first.tools.record({ action: "stop" });
     const { host, port } = await startHost();
     hosts.push(host);
@@ -510,7 +532,7 @@ describe("record and replay", () => {
       expect((await tools.record({ action: "stop" })).isError).toBe(true);
       expect((await tools.record({ action: "start", name: "../evil" })).isError).toBe(true);
       await tools.record({ action: "start", name: "one" });
-      await tools.press({ target: { testID: "save" } });
+      await tools.press({ target: { id: "save" } });
       await tools.record({ action: "stop" });
       expect(textOf(await tools.replay({}))).toContain("one (1 step");
       expect((await tools.replay({ name: "missing" })).isError).toBe(true);
@@ -847,7 +869,7 @@ describe("no app connected", () => {
     const { host } = await startHost();
     hosts.push(host);
     const tools = new TaplineTools(host, { connect: { url: "ws://127.0.0.1:7210/", name: "Dev PC" }, settleMs: 0 });
-    const result = await tools.press({ target: { testID: "save" } });
+    const result = await tools.press({ target: { id: "save" } });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/^Error not_connected: No app is connected to Tapline\./);
     expect(textOf(result)).toContain("call `pair`");
@@ -955,7 +977,7 @@ describe("other tools", () => {
     const { app, tools } = await setup((req) =>
       req.method === "type" ? { ok: true, result: { element: { ref: "e2", type: "TextInput" }, value: "hi" } } : defaultHandler(req),
     )();
-    const result = await tools.typeText({ text: "hi", target: { testID: "email" }, submit: true, look: false });
+    const result = await tools.typeText({ text: "hi", target: { id: "email" }, submit: true, look: false });
     expect(app.requests[0]?.params).toEqual({ text: "hi", replace: true, submit: true, target: { testID: "email" } });
     expect(textOf(result)).toBe('Typed into e2 TextInput and submitted. Value is now "hi".');
   });
@@ -996,9 +1018,9 @@ describe("mcp server", () => {
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
         ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
       );
-      const ok = await client.callTool({ name: "press", arguments: { target: { testID: "login-button" } } });
+      const ok = await client.callTool({ name: "press", arguments: { target: { id: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Pressed e3");
-      const bad = await client.callTool({ name: "press", arguments: { target: { ref: "e1", testID: "x" } } });
+      const bad = await client.callTool({ name: "press", arguments: { target: { ref: "e1", id: "x" } } });
       expect(bad.isError).toBe(true);
     } finally {
       await client.close();

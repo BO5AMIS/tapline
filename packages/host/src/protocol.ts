@@ -189,8 +189,8 @@ export type LogEntry = z.infer<typeof logEntrySchema>;
 /** A target exactly as it travels on the wire. */
 export type WireTarget =
   | { ref: string }
-  | { testID: string }
-  | { label: string }
+  | { testID: string; index?: number }
+  | { label: string; index?: number }
   | { text: string; index?: number }
   | { x: number; y: number };
 

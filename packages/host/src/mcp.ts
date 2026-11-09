@@ -22,7 +22,7 @@ import { TaplineTools, toolShapes } from "./tools.js";
 const INSTRUCTIONS = [
   "Tapline lets you see and drive the user's own mobile app running on their phone.",
   'Start with `apps` to see what is connected (if nothing is, `pair` makes a QR code the user scans with the phone), then `look` to read the screen (element refs like "e3" plus a screenshot).',
-  "Act with press / type_text / scroll / toggle / open_url using a target: prefer {ref} or {testID} from the latest look.",
+  "Act with press / type_text / scroll / toggle / open_url using a target: prefer {ref} or {id} from the latest look.",
   "Every action returns what changed since the last list (added +, gone -, changed ~, moved ↕; unchanged elements keep their refs), or the full list when the screen changed. It has no screenshot: drive by text and call `look` when you need to see the screen.",
   "Actions refuse what a person couldn't tap (off screen, or covered by something on top) and say why; scroll or dismiss first, or pass force: true. `back` goes back like the back button; native tab bars appear as `tab` elements you can press. The `Route:` line names the screen.",
   "Use `wait_for` (an element appears or is gone, or the network is quiet) rather than fixed waits. An `Alert:` line is an alert the app showed: an OS alert needs the user to tap it; Tapline's stand-in alert has buttons you press. `app_command` lists and runs the app's test commands (and `appearance` light/dark).",
@@ -95,7 +95,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
     {
       title: "Press",
       description:
-        "Press (tap) an element by calling its onPress. Target by {ref}, {testID}, {label}, {text, index?} or {x, y}. Returns the result and the fresh element list (no screenshot; call look for one). Errors: not_found, ambiguous (candidates listed), not_actionable (e.g. disabled).",
+        "Press (tap) an element by calling its onPress. Target by {ref}, {id}, {label}, {text} or {x, y} (index picks among several id, label or text matches). Returns the result and the fresh element list (no screenshot; call look for one). Errors: not_found, ambiguous (candidates listed), not_actionable (e.g. disabled).",
       inputSchema: toolShapes.press,
     },
     (args) => tools.press(args),
@@ -215,7 +215,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
     {
       title: "Record a script",
       description:
-        'Record a test run as a script you can replay without an AI: { action: "start", name } begins, every action after it (press, type_text, scroll, toggle, open_url, back, app_command, wait_for, wait) becomes a step, { action: "stop" } saves it. Targets are saved by testID, else label, else text (refs only work for one run). Use wait_for steps as checks. Also status and discard.',
+        'Record a test run as a script you can replay without an AI: { action: "start", name } begins, every action after it (press, type_text, scroll, toggle, open_url, back, app_command, wait_for, wait) becomes a step, { action: "stop" } saves it. Targets are saved by id, else label, else text (refs only work for one run). Use wait_for steps as checks. Also status and discard.',
       inputSchema: toolShapes.record,
     },
     (args) => tools.record(args),
@@ -237,7 +237,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
     {
       title: "Wait for",
       description:
-        "Wait until something is on screen (text contains, testID or label), or gone with `gone: true` (a spinner), and/or until no network request is in flight (`network_idle`). Polls up to `timeout` seconds (default 10). Better than a fixed `wait`: it returns as soon as the app is ready. Returns what changed on screen; error timeout when it didn't happen.",
+        "Wait until something is on screen (text contains, id or label), or gone with `gone: true` (a spinner), and/or until no network request is in flight (`network_idle`). Polls up to `timeout` seconds (default 10). Better than a fixed `wait`: it returns as soon as the app is ready. Returns what changed on screen; error timeout when it didn't happen.",
       inputSchema: toolShapes.wait_for,
     },
     (args) => tools.waitFor(args),
