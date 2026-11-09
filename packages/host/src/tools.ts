@@ -64,6 +64,8 @@ const lookField = z
     "Set false to skip the element list normally returned after the action (only the changes once you've had a full list; no screenshot, call look for one)",
   );
 
+const screenshotField = z.boolean().optional().describe("Add a screenshot to the answer (default false)");
+
 const forceField = z
   .boolean()
   .optional()
@@ -73,7 +75,7 @@ const forceField = z
 
 export const toolShapes = {
   apps: {},
-  select_app: { session: z.string().describe('Session id from "apps", e.g. "s-7f3a"') },
+  open_app: { app: z.string().describe("The app's session id, app id or name, as apps lists them") },
   pair: {
     scheme: z.string().describe('The app\'s URL scheme ("scheme" in app.json or app.config), e.g. "myapp"'),
   },
@@ -92,14 +94,26 @@ export const toolShapes = {
       .describe("Draw each tappable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
   },
   check_layout: {},
-  press: { target: targetField, force: forceField, look: lookField },
-  long_press: { target: targetField, force: forceField, look: lookField },
+  tap: { target: targetField, force: forceField, look: lookField, screenshot: screenshotField },
+  long_press: {
+    target: targetField,
+    seconds: z
+      .number()
+      .min(0.1)
+      .max(10)
+      .optional()
+      .describe("How long to hold (default 1.0). Tapline calls the handler, so it doesn't wait"),
+    force: forceField,
+    look: lookField,
+    screenshot: screenshotField,
+  },
   type_text: {
     text: z.string().describe("Text to enter"),
     target: targetField.optional().describe("Input to type into; default: the focused input, else the only input on screen"),
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
     look: lookField,
+    screenshot: screenshotField,
   },
   scroll: {
     direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction (default down when no `to`)"),
@@ -107,19 +121,26 @@ export const toolShapes = {
     to: z.enum(["start", "end"]).optional().describe("Jump to the start or end instead of using direction/amount"),
     target: targetField.optional().describe("Scroll view to scroll; default: the largest one on screen"),
     look: lookField,
+    screenshot: screenshotField,
   },
   toggle: {
     target: targetField,
     value: z.boolean().optional().describe("Desired state; omit to flip"),
     force: forceField,
     look: lookField,
+    screenshot: screenshotField,
   },
-  open_url: { url: z.string().describe('URL or deep link to open, e.g. "myapp://settings"'), look: lookField },
-  back: { look: lookField },
+  open_url: {
+    url: z.string().describe('URL or deep link to open, e.g. "myapp://settings"'),
+    look: lookField,
+    screenshot: screenshotField,
+  },
+  back: { look: lookField, screenshot: screenshotField },
   app_command: {
     name: z.string().optional().describe("The command to run; omit to list the app's commands and what they take"),
     args: z.record(z.string(), z.unknown()).optional().describe("Arguments, as the command's description says"),
     look: lookField,
+    screenshot: screenshotField,
   },
   compare_screen: {
     name: z.string().describe('A name for this screen\'s reference picture, e.g. "home" or "checkout-empty"'),
@@ -136,7 +157,7 @@ export const toolShapes = {
     frames: z.number().int().min(2).max(9).optional().describe("How many frames (default 6)"),
     interval_ms: z.number().int().min(0).max(2000).optional().describe("Time between frames in ms (default 250)"),
     frame_width: z.number().int().min(100).max(400).optional().describe("Width of each frame in pixels (default 200)"),
-    press: targetField.optional().describe("Press this first, then film what it sets off (an animation, a loading state)"),
+    tap: targetField.optional().describe("Tap this first, then film what it sets off (an animation, a loading state)"),
   },
   viewer: {},
   record: {
@@ -156,12 +177,13 @@ export const toolShapes = {
     network_idle: z.boolean().optional().describe("Also (or only) wait until no network request is in flight"),
     timeout: z.number().min(0.5).max(30).optional().describe("Seconds to wait at most (default 10)"),
     look: lookField,
+    screenshot: screenshotField,
   },
   logs: {
     since: z.number().optional().describe("Only lines after this timestamp (epoch milliseconds)"),
   },
   reload: { look: lookField },
-  wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds") },
+  wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
 } as const;
 
 type Shape<K extends keyof typeof toolShapes> = z.infer<z.ZodObject<(typeof toolShapes)[K]>>;
@@ -329,6 +351,16 @@ const commandsSchema = z.object({
 const findingsSchema = z.object({
   findings: z.array(z.object({ kind: z.string(), ref: z.string(), other: z.string().optional(), message: z.string() })),
 });
+
+/** A phone described as `apps` lists it: name, platform and OS, or the install id when it sends no name. */
+function deviceLabel(s: SessionInfo): string {
+  // iPhones send no name, so the install id is what tells two of them apart.
+  const install = s.device.name === undefined && s.device.id !== undefined ? `install ${s.device.id.slice(0, 6)}` : undefined;
+  const device = [s.device.name, [s.device.platform, s.device.osVersion].filter(Boolean).join(" "), install]
+    .filter((p): p is string => typeof p === "string" && p !== "")
+    .join(", ");
+  return device || "unknown device";
+}
 
 /** Default screenshot width in pixels: readable, about 1,000 image tokens for a phone screen. */
 export const DEFAULT_SCREENSHOT_WIDTH = 600;
@@ -513,25 +545,33 @@ export class TaplineTools {
     const lines = sessions.map((s) => {
       const version = s.app.version !== undefined ? ` ${s.app.version}${s.app.build !== undefined ? ` (${s.app.build})` : ""}` : "";
       // iPhones send no name, so the install id is what tells two of them apart.
-      const install = s.device.name === undefined && s.device.id !== undefined ? `install ${s.device.id.slice(0, 6)}` : undefined;
-      const device = [s.device.name, [s.device.platform, s.device.osVersion].filter(Boolean).join(" "), install]
-        .filter((p): p is string => typeof p === "string" && p !== "")
-        .join(", ");
+      const device = deviceLabel(s);
       const age = Math.max(0, Math.round((now - s.connectedAt) / 1000));
       const marker = current?.id === s.id ? "*" : " ";
-      return `${marker} ${s.id}  ${s.app.name}${version} [${s.app.id}] on ${device || "unknown device"}, connected ${age}s ago`;
+      return `${marker} ${s.id}  ${s.app.name}${version} [${s.app.id}] on ${device}, connected ${age}s ago`;
     });
-    const footer = sessions.length > 1 ? '\n* = selected. Use select_app {session} to switch.' : "\n* = selected.";
+    const footer = sessions.length > 1 ? "\n* = selected. Use open_app {app} to switch." : "\n* = selected.";
     return text(`Connected apps:\n${lines.join("\n")}${footer}`);
   }
 
-  selectApp(args: Shape<"select_app">): CallToolResult {
+  openApp(args: Shape<"open_app">): CallToolResult {
+    const sessions = this.host.sessions();
+    if (sessions.length === 0) return this.notConnected();
+    const wanted = args.app.trim().toLowerCase();
+    const session = sessions.find(
+      (s) => s.id.toLowerCase() === wanted || s.app.id.toLowerCase() === wanted || s.app.name.toLowerCase() === wanted,
+    );
+    if (session === undefined) {
+      return fail(
+        `Error not_connected: ${args.app} isn't connected. Tapline can't launch apps: open it on the phone with Tailscale on (it reconnects by itself), or pair it with pair.`,
+      );
+    }
     try {
-      const session = this.host.select(args.session);
-      return text(`Selected ${session.app.name} (${session.id}) on ${session.device.name ?? session.device.platform}.`);
+      this.host.select(session.id);
     } catch (error) {
       return fail(describeError(error));
     }
+    return text(`Driving ${session.app.name} (${session.app.id}) on ${deviceLabel(session)}.`);
   }
 
   // -- look
@@ -607,7 +647,7 @@ export class TaplineTools {
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
         ? this.host
-            .request("screenshot", { format: "jpg", quality: 0.7, maxWidth: width }, { sessionId: sid })
+            .request("screenshot", { format: "jpg", quality: 0.75, maxWidth: width }, { sessionId: sid })
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error }))
         : Promise.resolve(undefined);
@@ -672,6 +712,7 @@ export class TaplineTools {
     params: unknown,
     describe: (result: unknown) => string,
     withLook: boolean | undefined,
+    screenshot?: boolean,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -698,7 +739,7 @@ export class TaplineTools {
     if (withLook === false) response = text(line);
     else {
       // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
-      response = await this.withLook(session, line);
+      response = await this.withLook(session, line, screenshot === true);
       if (settled !== undefined) {
         const [first, ...rest] = response.content;
         if (first !== undefined && first.type === "text") {
@@ -998,10 +1039,10 @@ export class TaplineTools {
     try {
       const frames: ShotImage[] = [];
       const started = Date.now();
-      if (args.press !== undefined) {
+      if (args.tap !== undefined) {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-        await this.host.request("press", { target: toWireTarget(args.press) }, { sessionId: session.id });
+        await this.host.request("press", { target: toWireTarget(args.tap) }, { sessionId: session.id });
       }
       for (let i = frames.length; i < count; i++) {
         const at = Date.now();
@@ -1012,7 +1053,7 @@ export class TaplineTools {
       const spacing = count > 1 ? Math.round((Date.now() - started) / count) : 0;
       const strip = composeFilmstrip(frames, { columns: Math.min(3, count), frameWidth });
       lines.push(
-        `Filmstrip: ${count} frames about ${spacing} ms apart, numbered in order, left to right and top to bottom${args.press !== undefined ? "; frame 1 is just before the press, the rest follow it" : ""}. Each capture takes a few hundred ms on a phone, so very quick animations fall between frames.`,
+        `Filmstrip: ${count} frames about ${spacing} ms apart, numbered in order, left to right and top to bottom${args.tap !== undefined ? "; frame 1 is just before the tap, the rest follow it" : ""}. Each capture takes a few hundred ms on a phone, so very quick animations fall between frames.`,
       );
       const content: CallToolResult["content"] = [];
       this.deliver(session.id, strip, lines, content);
@@ -1171,12 +1212,12 @@ export class TaplineTools {
     );
   }
 
-  private async withLook(session: SessionInfo, line: string): Promise<CallToolResult> {
+  private async withLook(session: SessionInfo, line: string, screenshot = false): Promise<CallToolResult> {
     // The session may have been replaced (app restarted) in the meantime.
     const live = this.host.sessions().some((s) => s.id === session.id) ? session : this.host.current();
     if (live === undefined) return text(`${line}\n(The app disconnected, so no fresh element list is available.)`);
-    // Text only: a screenshot after every step would cost image tokens the agent rarely needs.
-    const parts = await this.lookParts(live, false, DEFAULT_SCREENSHOT_WIDTH, true);
+    // Text only unless asked: a screenshot after every step would cost image tokens the agent rarely needs.
+    const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true);
     const [first, ...rest] = parts.content;
     const head = first !== undefined && first.type === "text" ? first.text : "";
     return { content: [{ type: "text", text: `${line}\n${head}` }, ...rest] };
@@ -1190,21 +1231,24 @@ export class TaplineTools {
     return "element";
   }
 
-  press(args: Shape<"press">): Promise<CallToolResult> {
+  tap(args: Shape<"tap">): Promise<CallToolResult> {
     return this.act(
       "press",
       { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) },
       (r) => `Tapped ${this.elementName(r)}.`,
       args.look,
+      args.screenshot,
     );
   }
 
+  /** `seconds` is accepted for the shared interface; Tapline calls the handler, so it doesn't hold. */
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
     return this.act(
       "longPress",
       { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) },
       (r) => `Long-pressed ${this.elementName(r)}.`,
       args.look,
+      args.screenshot,
     );
   }
 
@@ -1224,6 +1268,7 @@ export class TaplineTools {
         return `Typed into ${this.elementName(r)}${args.submit ? " and submitted" : ""}.${shown}`;
       },
       args.look,
+      args.screenshot,
     );
   }
 
@@ -1244,6 +1289,7 @@ export class TaplineTools {
         return `Scrolled ${this.elementName(r)} ${args.to !== undefined ? `to ${args.to}` : (args.direction ?? "down")}.${at}`;
       },
       args.look,
+      args.screenshot,
     );
   }
 
@@ -1259,6 +1305,7 @@ export class TaplineTools {
         return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
       },
       args.look,
+      args.screenshot,
     );
   }
 
@@ -1290,6 +1337,7 @@ export class TaplineTools {
         return result === null || result === undefined ? `Ran ${name}.` : `Ran ${name}: ${JSON.stringify(result)}`;
       },
       args.look,
+      args.screenshot,
     );
   }
 
@@ -1309,6 +1357,7 @@ export class TaplineTools {
         return typeof ms === "number" ? `Done after ${(Math.round(ms / 100) / 10).toFixed(1)} s.` : "Done.";
       },
       args.look,
+      args.screenshot,
     );
   }
 
@@ -1322,11 +1371,12 @@ export class TaplineTools {
         return `Went back${from}.`;
       },
       args.look,
+      args.screenshot,
     );
   }
 
   openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
-    return this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look);
+    return this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
   }
 
   async logs(args: Shape<"logs">): Promise<CallToolResult> {
@@ -1377,6 +1427,6 @@ export class TaplineTools {
     if (this.recording !== null && !this.replaying) {
       this.recording.steps.push({ method: "sleep", params: { seconds: args.seconds } });
     }
-    return this.withLook(session, `Waited ${args.seconds.toFixed(1)} s.`);
+    return this.withLook(session, `Waited ${args.seconds.toFixed(1)} s.`, args.screenshot === true);
   }
 }

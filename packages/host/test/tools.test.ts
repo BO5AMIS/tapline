@@ -98,7 +98,7 @@ describe("targets (AGENT-TOOLS §2)", () => {
 
   it("passes id and index on to the app", async () => {
     const { app, tools } = await setup(defaultHandler)();
-    await tools.press({ target: { id: "row", index: 2 }, look: false });
+    await tools.tap({ target: { id: "row", index: 2 }, look: false });
     expect(app.requests[0]).toMatchObject({ method: "press", params: { target: { testID: "row", index: 2 } } });
   });
 
@@ -115,18 +115,18 @@ describe("press", () => {
       req.method === "press" ? { ok: true, result: { element: TREE.elements[0], settledMs: 310 } } : defaultHandler(req),
     )();
     const started = Date.now();
-    const text = textOf(await tools.press({ target: { id: "login-button" } }));
+    const text = textOf(await tools.tap({ target: { id: "login-button" } }));
     expect(text.trimEnd().split("\n").at(-1)).toBe("Settled in 0.31 s.");
     expect(Date.now() - started).toBeLessThan(300);
   });
 
   it("prints no settle line when the app doesn't report one, and only the first line without look", async () => {
     const { tools } = await setup(defaultHandler)();
-    expect(textOf(await tools.press({ target: { id: "login-button" } }))).not.toContain("Settled in");
+    expect(textOf(await tools.tap({ target: { id: "login-button" } }))).not.toContain("Settled in");
     const { tools: tools2 } = await setup((req) =>
       req.method === "press" ? { ok: true, result: { element: TREE.elements[0], settledMs: 120 } } : defaultHandler(req),
     )();
-    expect(textOf(await tools2.press({ target: { id: "login-button" }, look: false }))).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+    expect(textOf(await tools2.tap({ target: { id: "login-button" }, look: false }))).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
   });
 
   it("an action answer reads like AGENT-TOOLS §3.1", async () => {
@@ -141,11 +141,11 @@ describe("press", () => {
           : defaultHandler(req),
     )();
     await tools.look({ screenshot: false });
-    const text = textOf(await tools.press({ target: { id: "login-button" } }));
+    const text = textOf(await tools.tap({ target: { id: "login-button" } }));
     const lines = text.split("\n");
     expect(lines.at(-1)).toBe("Settled in 0.31 s.");
     expect(text).not.toContain("\n\n");
-    expect(textOf(await tools.press({ target: { id: "login-button" }, look: false })).split("\n")).toHaveLength(1);
+    expect(textOf(await tools.tap({ target: { id: "login-button" }, look: false })).split("\n")).toHaveLength(1);
     expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
     expect(lines[1]).toBe("Same screen. Changes:");
     expect(text).not.toContain("Unchanged elements keep their refs");
@@ -153,7 +153,7 @@ describe("press", () => {
 
   it("returns the result line and the fresh element list, without a screenshot", async () => {
     const { app, tools } = await setup(defaultHandler)();
-    const result = await tools.press({ target: { id: "login-button" } });
+    const result = await tools.tap({ target: { id: "login-button" } });
     expect(result.isError).toBeUndefined();
     const text = textOf(result);
     expect(text).toContain('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
@@ -165,10 +165,10 @@ describe("press", () => {
 
   it("passes force through to press, long_press and toggle only when set", async () => {
     const { app, tools } = await setup(defaultHandler)();
-    await tools.press({ target: { ref: "e3" }, force: true, look: false });
+    await tools.tap({ target: { ref: "e3" }, force: true, look: false });
     await tools.longPress({ target: { ref: "e3" }, force: true, look: false });
     await tools.toggle({ target: { ref: "e3" }, force: true, look: false });
-    await tools.press({ target: { ref: "e3" }, look: false });
+    await tools.tap({ target: { ref: "e3" }, look: false });
     expect(app.requests.map((r) => r.params)).toEqual([
       { target: { ref: "e3" }, force: true },
       { target: { ref: "e3" }, force: true },
@@ -179,7 +179,7 @@ describe("press", () => {
 
   it("skips the look when look is false", async () => {
     const { app, tools } = await setup(defaultHandler)();
-    const result = await tools.press({ target: { ref: "e3" }, look: false });
+    const result = await tools.tap({ target: { ref: "e3" }, look: false });
     expect(textOf(result)).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
     expect(app.requests.map((r) => r.method)).toEqual(["press"]);
   });
@@ -190,7 +190,7 @@ describe("press", () => {
         ? { ok: false, error: { code: "not_found", message: 'No element matches testID "nope"' } }
         : defaultHandler(req),
     )();
-    const result = await tools.press({ target: { id: "nope" } });
+    const result = await tools.tap({ target: { id: "nope" } });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toBe('Error not_found: No element matches testID "nope"');
   });
@@ -211,7 +211,7 @@ describe("press", () => {
           }
         : defaultHandler(req),
     )();
-    const result = await tools.press({ target: { text: "Delete" } });
+    const result = await tools.tap({ target: { text: "Delete" } });
     expect(result.isError).toBe(true);
     const text = textOf(result);
     expect(text).toContain("Error ambiguous");
@@ -225,7 +225,7 @@ describe("press", () => {
       ok: false,
       error: { code: "ambiguous", message: "2 matches", refs: ["e5", "e9"] },
     }))();
-    const text = textOf(await tools.press({ target: { text: "Delete" } }));
+    const text = textOf(await tools.tap({ target: { text: "Delete" } }));
     expect(text).toContain("  e5");
     expect(text).toContain("  e9");
   });
@@ -292,12 +292,12 @@ describe("the live viewer's side of the tools", () => {
   it("runs agent actions through the shared queue: refused while paused, shown to viewers", async () => {
     const { tools, control, actions } = await viewerTools();
     control.setPaused(true);
-    const refused = await tools.press({ target: { id: "login-button" }, look: false });
+    const refused = await tools.tap({ target: { id: "login-button" }, look: false });
     expect(refused.isError).toBe(true);
     expect(textOf(refused)).toContain("paused");
     expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", ok: false, code: "paused" });
     control.setPaused(false);
-    await tools.press({ target: { id: "login-button" }, look: false });
+    await tools.tap({ target: { id: "login-button" }, look: false });
     expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", label: "Log in", ok: true });
   });
 
@@ -408,12 +408,12 @@ describe("compare_screen and filmstrip", () => {
     }
   });
 
-  it("filmstrip can press first, to catch what the press sets off", async () => {
+  it("filmstrip can tap first, to catch what the tap sets off", async () => {
     const { app, tools, dir } = await screenTools([picture(false), picture(true)]);
     try {
-      const result = await tools.filmstrip({ frames: 3, interval_ms: 10, press: { id: "login-button" } });
+      const result = await tools.filmstrip({ frames: 3, interval_ms: 10, tap: { id: "login-button" } });
       expect(app.requests.map((r) => r.method).slice(0, 4)).toEqual(["screenshot", "press", "screenshot", "screenshot"]);
-      expect(textOf(result)).toContain("frame 1 is just before the press");
+      expect(textOf(result)).toContain("frame 1 is just before the tap");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -463,8 +463,8 @@ describe("record and replay", () => {
     const { tools, dir } = await shopTools(["basket"]);
     try {
       expect(textOf(await tools.record({ action: "start", name: "checkout" }))).toContain("Recording");
-      await tools.press({ target: { ref: "e7" } });
-      await tools.press({ target: { ref: "e9" } });
+      await tools.tap({ target: { ref: "e7" } });
+      await tools.tap({ target: { ref: "e9" } });
       await tools.typeText({ target: { ref: "e4" }, text: "Ann" });
       await tools.wait({ seconds: 0.1 });
       await tools.waitFor({ text: "Thanks", timeout: 5 });
@@ -496,7 +496,7 @@ describe("record and replay", () => {
     const { tools, dir } = await shopTools(["basket"]);
     try {
       await tools.record({ action: "start", name: "kept" });
-      await tools.press({ target: { text: "Pay" } }); // the element also has label "Pay now"
+      await tools.tap({ target: { text: "Pay" } }); // the element also has label "Pay now"
       await tools.record({ action: "stop" });
       const script = JSON.parse(readFileSync(join(dir, "kept.json"), "utf8")) as { steps: Array<{ params: unknown }> };
       expect(script.steps[0]?.params).toEqual({ target: { text: "Pay" } });
@@ -509,7 +509,7 @@ describe("record and replay", () => {
     const { app, tools, dir } = await shopTools(["basket"]);
     try {
       await tools.record({ action: "start", name: "checkout" });
-      await tools.press({ target: { id: "save" } });
+      await tools.tap({ target: { id: "save" } });
       await tools.waitFor({ text: "Thanks" });
       await tools.record({ action: "stop" });
       app.requests.length = 0;
@@ -542,8 +542,8 @@ describe("record and replay", () => {
   it("stops at the first failing step and says why", async () => {
     const first = await shopTools(["basket"]);
     await first.tools.record({ action: "start", name: "broken" });
-    await first.tools.press({ target: { id: "save" } });
-    await first.tools.press({ target: { label: "Pay now" } });
+    await first.tools.tap({ target: { id: "save" } });
+    await first.tools.tap({ target: { label: "Pay now" } });
     await first.tools.record({ action: "stop" });
     const { host, port } = await startHost();
     hosts.push(host);
@@ -563,7 +563,7 @@ describe("record and replay", () => {
   it("fails a step that ends on a different screen than when it was recorded", async () => {
     const first = await shopTools(["basket"]);
     await first.tools.record({ action: "start", name: "nav" });
-    await first.tools.press({ target: { id: "save" } });
+    await first.tools.tap({ target: { id: "save" } });
     await first.tools.record({ action: "stop" });
     const { host, port } = await startHost();
     hosts.push(host);
@@ -586,7 +586,7 @@ describe("record and replay", () => {
       expect((await tools.record({ action: "stop" })).isError).toBe(true);
       expect((await tools.record({ action: "start", name: "../evil" })).isError).toBe(true);
       await tools.record({ action: "start", name: "one" });
-      await tools.press({ target: { id: "save" } });
+      await tools.tap({ target: { id: "save" } });
       await tools.record({ action: "stop" });
       expect(textOf(await tools.replay({}))).toContain("one (1 step");
       expect((await tools.replay({ name: "missing" })).isError).toBe(true);
@@ -736,7 +736,7 @@ describe("changes after actions", () => {
   it("shows only what changed once the agent has had a full list", async () => {
     const { app, tools } = await setup(basket(CHANGES))();
     await tools.look({ screenshot: false });
-    const text = textOf(await tools.press({ target: { ref: "e3" } }));
+    const text = textOf(await tools.tap({ target: { ref: "e3" } }));
     expect(app.requests.filter((r) => r.method === "tree").map((r) => r.params)).toEqual([{}, { changes: true }]);
     expect(text).toContain("Same screen. Changes:");
     expect(text).toContain('+ e5 text "Free delivery"');
@@ -749,7 +749,7 @@ describe("changes after actions", () => {
 
   it("gives the full list when the agent hasn't had one yet", async () => {
     const { app, tools } = await setup(basket(CHANGES))();
-    const text = textOf(await tools.press({ target: { ref: "e3" } }));
+    const text = textOf(await tools.tap({ target: { ref: "e3" } }));
     expect(app.requests.filter((r) => r.method === "tree").map((r) => r.params)).toEqual([{}]);
     expect(text).toContain('e1 text "Basket"');
   });
@@ -757,7 +757,7 @@ describe("changes after actions", () => {
   it("gives the full list when the screen changed", async () => {
     const { tools } = await setup(basket({ ...CHANGES, sameRoute: false }))();
     await tools.look({ screenshot: false });
-    const text = textOf(await tools.press({ target: { ref: "e3" } }));
+    const text = textOf(await tools.tap({ target: { ref: "e3" } }));
     expect(text).toContain('e1 text "Basket"');
     expect(text).toContain("Route: basket");
   });
@@ -765,7 +765,7 @@ describe("changes after actions", () => {
   it("says when nothing visible changed", async () => {
     const { tools } = await setup(basket({ sameRoute: true, added: [], removed: [], changed: [], moved: [] }))();
     await tools.look({ screenshot: false });
-    expect(textOf(await tools.press({ target: { ref: "e3" } }))).toContain("No visible change");
+    expect(textOf(await tools.tap({ target: { ref: "e3" } }))).toContain("No visible change");
   });
 });
 
@@ -841,8 +841,8 @@ describe("look", () => {
     await tools.look({ width: 300 });
     const shots = app.requests.filter((r) => r.method === "screenshot").map((r) => r.params);
     expect(shots).toEqual([
-      { format: "jpg", quality: 0.7, maxWidth: 600 },
-      { format: "jpg", quality: 0.7, maxWidth: 300 },
+      { format: "jpg", quality: 0.75, maxWidth: 600 },
+      { format: "jpg", quality: 0.75, maxWidth: 300 },
     ]);
   });
 
@@ -912,7 +912,7 @@ describe("no app connected", () => {
     const tools = new TaplineTools(host, {
       connect: { url: `ws://100.101.102.103:${port}/`, name: "Dev PC" },
     });
-    for (const result of [await tools.look({}), await tools.press({ target: { ref: "e1" } })]) {
+    for (const result of [await tools.look({}), await tools.tap({ target: { ref: "e1" } })]) {
       expect(result.isError).toBe(true);
       const text = textOf(result);
       expect(text).toContain("No app is connected");
@@ -929,7 +929,7 @@ describe("no app connected", () => {
     const { host } = await startHost();
     hosts.push(host);
     const tools = new TaplineTools(host, { connect: { url: "ws://127.0.0.1:7210/", name: "Dev PC" } });
-    const result = await tools.press({ target: { id: "save" } });
+    const result = await tools.tap({ target: { id: "save" } });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/^Error not_connected: No app is connected to Tapline\./);
     expect(textOf(result)).toContain("call `pair`");
@@ -1009,7 +1009,7 @@ describe("pair", () => {
   });
 });
 
-describe("apps and select_app", () => {
+describe("apps and open_app", () => {
   it("lists connected apps and marks the selected one", async () => {
     const { host, app, tools } = await setup(defaultHandler)();
     void app;
@@ -1018,9 +1018,26 @@ describe("apps and select_app", () => {
     expect(text).toContain("Test iPhone");
     expect(text.split("\n")[1]?.startsWith("*")).toBe(true);
     const id = host.sessions()[0]?.id ?? "";
-    expect(textOf(tools.selectApp({ session: id }))).toContain(`Selected Demo (${id})`);
-    const bad = tools.selectApp({ session: "s-ffff" });
-    expect(bad.isError).toBe(true);
+    expect(textOf(tools.openApp({ app: id }))).toContain("Driving Demo (com.example.demo) on Test iPhone");
+  });
+
+  it("open_app picks a connected app by session id, app id or name, and says how to connect one that isn't", async () => {
+    const { host, tools } = await setup(defaultHandler)();
+    expect(textOf(tools.openApp({ app: "Demo" }))).toMatch(/^Driving Demo/);
+    expect(textOf(tools.openApp({ app: "DEMO" }))).toMatch(/^Driving Demo/);
+    expect(textOf(tools.openApp({ app: "COM.example.Demo" }))).toMatch(/^Driving Demo/);
+    const id = host.sessions()[0]?.id ?? "";
+    expect(textOf(tools.openApp({ app: id.toUpperCase() }))).toMatch(/^Driving Demo/);
+    const missing = tools.openApp({ app: "Other" });
+    expect(missing.isError).toBe(true);
+    expect(textOf(missing)).toMatch(/^Error not_connected: Other isn't connected/);
+  });
+
+  it("apps tells a second app to switch with open_app", async () => {
+    const { host, tools } = await setup(defaultHandler)();
+    const { app } = await FakeApp.connect(host.boundPort() ?? 0, { app: { name: "Other", id: "com.example.other" } });
+    apps.push(app);
+    expect(textOf(tools.apps())).toContain("Use open_app {app} to switch.");
   });
 
   it("shows the install id of a phone that sends no name, so two iPhones can be told apart", async () => {
@@ -1065,6 +1082,39 @@ describe("other tools", () => {
   });
 });
 
+describe("screenshots on actions", () => {
+  it("an action with screenshot: true adds one image", async () => {
+    const { tools } = await setup(defaultHandler)();
+    const result = await tools.tap({ target: { id: "login-button" }, screenshot: true });
+    expect(result.content.filter((c) => c.type === "image")).toHaveLength(1);
+  });
+
+  it("an action without screenshot, or with look: false, adds no image", async () => {
+    const { tools } = await setup(defaultHandler)();
+    expect((await tools.tap({ target: { id: "login-button" } })).content.filter((c) => c.type === "image")).toHaveLength(0);
+    const quiet = await tools.tap({ target: { id: "login-button" }, screenshot: true, look: false });
+    expect(quiet.content.filter((c) => c.type === "image")).toHaveLength(0);
+  });
+
+  it("wait honours screenshot", async () => {
+    const { tools } = await setup(defaultHandler)();
+    const result = await tools.wait({ seconds: 0.1, screenshot: true });
+    expect(result.content.filter((c) => c.type === "image")).toHaveLength(1);
+  });
+
+  it("asks the app for JPEG at quality 0.75", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    await tools.look({});
+    expect(app.requests.find((r) => r.method === "screenshot")?.params).toMatchObject({ format: "jpg", quality: 0.75 });
+  });
+
+  it("long_press accepts seconds", async () => {
+    const { tools } = await setup(defaultHandler)();
+    const result = await tools.longPress({ target: { id: "login-button" }, seconds: 2, look: false });
+    expect(result.isError).not.toBe(true);
+  });
+});
+
 describe("mcp server", () => {
   it("registers every tool and validates input over an in-memory transport", async () => {
     const { tools } = await setup(defaultHandler)();
@@ -1075,11 +1125,11 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
+        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
       );
-      const ok = await client.callTool({ name: "press", arguments: { target: { id: "login-button" } } });
+      const ok = await client.callTool({ name: "tap", arguments: { target: { id: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Tapped e3");
-      const bad = await client.callTool({ name: "press", arguments: { target: { ref: "e1", id: "x" } } });
+      const bad = await client.callTool({ name: "tap", arguments: { target: { ref: "e1", id: "x" } } });
       expect(bad.isError).toBe(true);
     } finally {
       await client.close();
