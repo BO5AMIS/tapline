@@ -1174,18 +1174,18 @@ export class TaplineTools {
   private async withLook(session: SessionInfo, line: string): Promise<CallToolResult> {
     // The session may have been replaced (app restarted) in the meantime.
     const live = this.host.sessions().some((s) => s.id === session.id) ? session : this.host.current();
-    if (live === undefined) return text(`${line}\n\n(The app disconnected, so no fresh element list is available.)`);
+    if (live === undefined) return text(`${line}\n(The app disconnected, so no fresh element list is available.)`);
     // Text only: a screenshot after every step would cost image tokens the agent rarely needs.
     const parts = await this.lookParts(live, false, DEFAULT_SCREENSHOT_WIDTH, true);
     const [first, ...rest] = parts.content;
     const head = first !== undefined && first.type === "text" ? first.text : "";
-    return { content: [{ type: "text", text: `${line}\n\n${head}` }, ...rest] };
+    return { content: [{ type: "text", text: `${line}\n${head}` }, ...rest] };
   }
 
   private elementName(result: unknown): string {
     if (typeof result === "object" && result !== null && "element" in result) {
       const element = elementSchema.safeParse((result as { element: unknown }).element);
-      if (element.success) return describeElement(element.data);
+      if (element.success) return formatElement(element.data, { actions: false });
     }
     return "element";
   }
@@ -1194,7 +1194,7 @@ export class TaplineTools {
     return this.act(
       "press",
       { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) },
-      (r) => `Pressed ${this.elementName(r)}.`,
+      (r) => `Tapped ${this.elementName(r)}.`,
       args.look,
     );
   }

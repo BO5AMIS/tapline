@@ -219,6 +219,50 @@ describe("formatTree", () => {
   });
 });
 
+describe("formatChanges (AGENT-TOOLS §3.1)", () => {
+  const base = (n: number): TreeResult["elements"] =>
+    Array.from({ length: n }, (_, i) => ({
+      ref: `e${i + 1}`,
+      type: "Text",
+      role: "text",
+      text: `row ${i + 1}`,
+      frame: { x: 0, y: i * 10, width: 100, height: 10 },
+    }));
+  const withChanges = (n: number, changes: NonNullable<TreeResult["changes"]>): TreeResult => ({
+    screen: { width: 402, height: 874, scale: 3 },
+    elements: base(n),
+    changes,
+  });
+  const none = { sameRoute: true, added: [], removed: [], changed: [], moved: [] };
+
+  it("says so when nothing changed", () => {
+    expect(formatChanges(withChanges(3, none))).toBe("Same screen. Changes:\nNo visible change.");
+  });
+
+  it("shows a single changed field with the old value only", () => {
+    const t = withChanges(5, { ...none, changed: [{ ref: "e5", was: { text: "2 items" } }] });
+    t.elements[4] = { ref: "e5", type: "Text", role: "text", text: "3 items", frame: null };
+    expect(formatChanges(t)).toBe('Same screen. Changes:\n~ e5 text "3 items" (was "2 items")');
+  });
+
+  it("shows several changed fields as key=value pairs", () => {
+    const t = withChanges(2, { ...none, changed: [{ ref: "e2", was: { text: "a", value: "b" } }] });
+    expect(formatChanges(t)).toContain('(was text="a", value="b")');
+  });
+
+  it("shows a removed element without ref or position", () => {
+    const gone = { ref: "e9", type: "Text", role: "text", text: "Loading", frame: { x: 1, y: 2, width: 3, height: 4 } };
+    expect(formatChanges(withChanges(2, { ...none, removed: [gone] }))).toBe('Same screen. Changes:\n- text "Loading"');
+  });
+
+  it("counts many moved elements, and lists a few", () => {
+    const many = formatChanges(withChanges(9, { ...none, moved: ["e1", "e2", "e3", "e4", "e5", "e6", "e7"] }));
+    expect(many).toBe("Same screen. Changes:\n↕ 7 elements moved");
+    const few = formatChanges(withChanges(3, { ...none, moved: ["e1", "e2"] }))?.split("\n");
+    expect(few?.slice(1)).toEqual(["↕ e1 text \"row 1\" @0,0 100x10", "↕ e2 text \"row 2\" @0,10 100x10"]);
+  });
+});
+
 describe("formatLogs", () => {
   it("renders time, level and message", () => {
     const out = formatLogs([{ level: "warn", message: "careful", ts: Date.UTC(2026, 0, 1, 12, 30, 5, 7) }]);

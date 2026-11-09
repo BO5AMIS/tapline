@@ -51,7 +51,7 @@ export function actionsOf(element: Pick<TreeElement, "actions">): string[] {
 }
 
 /** One compact line for an element, e.g. `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`. */
-export function formatElement(element: TreeElement): string {
+export function formatElement(element: TreeElement, options: { actions?: boolean } = {}): string {
   const parts: string[] = [element.ref];
   const kind = roleOf(element);
   if (kind !== null) parts.push(kind);
@@ -76,7 +76,7 @@ export function formatElement(element: TreeElement): string {
     const f = element.frame;
     parts.push(`@${Math.round(f.x)},${Math.round(f.y)}`, `${Math.round(f.width)}x${Math.round(f.height)}`);
   }
-  const actions = actionsOf(element);
+  const actions = options.actions === false ? [] : actionsOf(element);
   if (actions.length > 0) parts.push(`[${actions.join(", ")}]`);
   return parts.join(" ");
 }
@@ -114,7 +114,7 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
   if (route !== null) lines.push(route);
   lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");
-  lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map(formatElement));
+  lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map((element) => formatElement(element)));
   if (count > MAX_ELEMENTS) lines.push(`(+${count - MAX_ELEMENTS} more below; scroll)`);
   return lines.join("\n");
 }
@@ -134,24 +134,26 @@ export function formatChanges(tree: TreeResult): string | null {
   if (churn > Math.max(8, count / 2)) return null;
 
   const byRef = new Map(tree.elements.map((element) => [element.ref, element]));
-  const lines = [
-    `Screen - ${count} element${count === 1 ? "" : "s"}, same screen. Changes since the last list:`,
-    ...formatStatus(tree),
-  ];
+  const lines = ["Same screen. Changes:", ...formatStatus(tree)];
   const statusLines = lines.length;
   for (const ref of changes.added) {
     const element = byRef.get(ref);
     if (element !== undefined) lines.push(`+ ${formatElement(element)}`);
   }
-  for (const element of changes.removed) lines.push(`- ${formatElement(element).replace(/^\S+ /, "")}`);
+  for (const element of changes.removed) lines.push(`- ${describeElement(element).replace(/^\S+ ?/, "")}`);
   for (const { ref, was } of changes.changed) {
     const element = byRef.get(ref);
     if (element === undefined) continue;
-    const before = Object.entries(was).map(([key, value]) => `${key}=${formatValue(value)}`);
-    lines.push(`~ ${formatElement(element)} (was ${before.join(", ")})`);
+    const entries = Object.entries(was);
+    const [only] = entries;
+    const before =
+      entries.length === 1 && only !== undefined
+        ? formatValue(only[1])
+        : entries.map(([key, value]) => `${key}=${formatValue(value)}`).join(", ");
+    lines.push(`~ ${formatElement(element)} (was ${before})`);
   }
   if (changes.moved.length > MAX_MOVED_LINES) {
-    lines.push(`↕ ${changes.moved.length} elements moved (a scroll or a layout change)`);
+    lines.push(`↕ ${changes.moved.length} elements moved`);
   } else {
     for (const ref of changes.moved) {
       const element = byRef.get(ref);
@@ -159,7 +161,6 @@ export function formatChanges(tree: TreeResult): string | null {
     }
   }
   if (lines.length === statusLines) lines.push("No visible change.");
-  lines.push("(Unchanged elements keep their refs; call look for the full list.)");
   return lines.join("\n");
 }
 

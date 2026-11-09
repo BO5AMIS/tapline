@@ -126,7 +126,24 @@ describe("press", () => {
     const { tools: tools2 } = await setup((req) =>
       req.method === "press" ? { ok: true, result: { element: TREE.elements[0], settledMs: 120 } } : defaultHandler(req),
     )();
-    expect(textOf(await tools2.press({ target: { id: "login-button" }, look: false }))).toBe('Pressed e3 button "Log in".');
+    expect(textOf(await tools2.press({ target: { id: "login-button" }, look: false }))).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+  });
+
+  it("an action answer reads like AGENT-TOOLS §3.1", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "tree"
+        ? {
+            ok: true,
+            result: { ...TREE, changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] } },
+          }
+        : defaultHandler(req),
+    )();
+    await tools.look({ screenshot: false });
+    const text = textOf(await tools.press({ target: { id: "login-button" } }));
+    const lines = text.split("\n");
+    expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+    expect(lines[1]).toBe("Same screen. Changes:");
+    expect(text).not.toContain("Unchanged elements keep their refs");
   });
 
   it("returns the result line and the fresh element list, without a screenshot", async () => {
@@ -134,7 +151,7 @@ describe("press", () => {
     const result = await tools.press({ target: { id: "login-button" } });
     expect(result.isError).toBeUndefined();
     const text = textOf(result);
-    expect(text).toContain('Pressed e3 button "Log in".');
+    expect(text).toContain('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
     expect(text).toContain('e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]');
     expect(result.content.every((block) => block.type === "text")).toBe(true);
     expect(app.requests.map((r) => r.method)).toEqual(["press", "tree"]);
@@ -158,7 +175,7 @@ describe("press", () => {
   it("skips the look when look is false", async () => {
     const { app, tools } = await setup(defaultHandler)();
     const result = await tools.press({ target: { ref: "e3" }, look: false });
-    expect(textOf(result)).toBe('Pressed e3 button "Log in".');
+    expect(textOf(result)).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
     expect(app.requests.map((r) => r.method)).toEqual(["press"]);
   });
 
@@ -716,13 +733,13 @@ describe("changes after actions", () => {
     await tools.look({ screenshot: false });
     const text = textOf(await tools.press({ target: { ref: "e3" } }));
     expect(app.requests.filter((r) => r.method === "tree").map((r) => r.params)).toEqual([{}, { changes: true }]);
-    expect(text).toContain("same screen");
+    expect(text).toContain("Same screen. Changes:");
     expect(text).toContain('+ e5 text "Free delivery"');
     expect(text).toContain('- button "Use coupon"');
-    expect(text).toContain('~ e2 text "$8" @0,40 200x30 (was text="$10")');
+    expect(text).toContain('~ e2 text "$8" @0,40 200x30 (was "$10")');
     expect(text).toContain('↕ e4 button "Pay" @0,650 200x48');
     expect(text).not.toContain('e1 text "Basket"');
-    expect(text).toContain("call look for the full list");
+    expect(text).not.toContain("call look for the full list");
   });
 
   it("gives the full list when the agent hasn't had one yet", async () => {
@@ -1056,7 +1073,7 @@ describe("mcp server", () => {
         ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
       );
       const ok = await client.callTool({ name: "press", arguments: { target: { id: "login-button" } } });
-      expect(JSON.stringify(ok.content)).toContain("Pressed e3");
+      expect(JSON.stringify(ok.content)).toContain("Tapped e3");
       const bad = await client.callTool({ name: "press", arguments: { target: { ref: "e1", id: "x" } } });
       expect(bad.isError).toBe(true);
     } finally {
