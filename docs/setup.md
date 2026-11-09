@@ -37,6 +37,8 @@ claude mcp add tapline -- tapline mcp           # Claude Code
 
 If your agent hands screenshots to smaller helper models, add `--screenshots file`: `look`
 then returns a file path instead of the image ([AGENTS.md](../AGENTS.md#screenshots-and-tokens)).
+The live viewer (the agent's `viewer` tool gives its link) opens on this computer only; add
+`--viewer remote` to also open it from your own devices on Tailscale, or `--viewer off`.
 Other MCP clients: run `tapline mcp` as a stdio server. To only watch connections and
 app logs, without an agent: `tapline host --scheme <your app's scheme>` (it also prints a
 pairing QR code).

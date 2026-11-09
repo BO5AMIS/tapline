@@ -93,6 +93,7 @@ your agent at it.
 | `compare_screen` | compare the screen with a saved reference picture: what changed, where, marked in red |
 | `filmstrip` | several frames in one image, for animations and loading states |
 | `record`, `replay` | save a test run as a script and replay it later, without an AI (also `tapline replay`) |
+| `viewer` | a link to watch the app live in a browser, with what the agent does marked on it; you can tap, scroll and type there too |
 | `press`, `long_press` | by `testID`, label, visible text, ref from the last look, or x/y |
 | `type_text` | into an input; replace or append; optionally submit |
 | `scroll` | by a direction and amount, or to the start or end |
@@ -120,6 +121,14 @@ For a team of agents, `tapline mcp --screenshots file` returns screenshot paths 
 images: a small, cheap vision model looks and reports in text, a mid-size model checks the
 reports, and the lead only reads the summary. [AGENTS.md](AGENTS.md#screenshots-and-tokens)
 has the recipe.
+
+**Watch live.** Ask your agent for the viewer link and open it in a browser on your
+computer. It shows the app's screen as it changes, marks each tap and scroll the agent makes,
+and can draw a box around every element. You can tap, scroll and type in it as well: your
+input goes first, the agent waits until you've been idle for 3 seconds, and **Pause agent**
+stops it until you resume. The link carries a key and works on this computer only;
+`tapline mcp --viewer remote` also opens it to your own devices on Tailscale, and
+`--viewer off` turns it off. It runs only while someone watches.
 
 **Several phones, several agents.** Each agent runs its own host; when 7210 is taken, the
 next one takes 7211, and so on up to 7219. Each agent pairs its own phone with its own QR
@@ -157,9 +166,14 @@ order, pair again (or give each agent a fixed `--port`).
 - The app must be open on screen: iOS pauses apps in the background, and the connection
   comes back as soon as the app is opened again (the agent is told when it went to the
   background). While an agent is connected, the screen stays on (with `expo-keep-awake`).
-- Screenshots come from inside the app and take a few hundred milliseconds each, so a
-  filmstrip shows about two frames a second: enough for loading states, not for quick
-  animations.
+- Screenshots come from inside the app: about 30-40 ms each at the viewer's size on an
+  iPhone (measured). The live viewer shows a frame when the screen changes, a few a second
+  for about a second after each action, and one a second otherwise; filmstrips also show a
+  few frames a second. That's enough to follow what happens and to see loading states, not
+  for quick animations.
+- The live viewer shows only the app's window: not the keyboard, the status bar or system
+  alerts. Open it on another device than the phone: switching apps on the phone pauses the
+  app.
 - iOS alerts can't be pressed from inside the app. Tapline shows them to the agent and stops
   it from tapping behind them; with `alerts: 'stand-in'` (test builds) it shows its own in-app
   alert instead, which the agent can press.
@@ -172,9 +186,9 @@ order, pair again (or give each agent a fixed `--port`).
 
 | | |
 |---|---|
-| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev: 162 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots: 316 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
-| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips |
-| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
+| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue): 203 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed: 349 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
+| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps and scrolls from the viewer (captures 30-40 ms, no stutter from capturing, measured) |
+| Not yet | typing from the viewer on a device, TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
 
 ## Repository
 

@@ -21,16 +21,19 @@ Options: `--port <n>` for a fixed port (or `TAPLINE_PORT`; otherwise 7210, movin
 7219 when taken, so each agent's host gets its own); `--host <addr>[,<addr>…]` to listen
 on other addresses; `--screenshots file` (or `TAPLINE_SCREENSHOTS=file`) makes `look` save
 screenshots in `~/.tapline/shots` (newest 50 kept) and return the path instead of the image,
-for agents that hand images to smaller models. `TAPLINE_HOME` moves the data directory
-(default `~/.tapline`).
+for agents that hand images to smaller models; `--viewer <local|remote|off>` (or
+`TAPLINE_VIEWER`) sets where the live viewer opens: this computer only (default), also your
+own devices on Tailscale, or nowhere. `TAPLINE_HOME` moves the data directory (default
+`~/.tapline`).
 
 Claude Code: `claude mcp add tapline -- tapline mcp`. Other MCP clients: run `tapline mcp`
 as a stdio server; it logs to stderr only.
 
 ## MCP tools
 
-`pair`, `apps`, `select_app`, `look`, `press`, `long_press`, `type_text`, `scroll`,
-`toggle`, `open_url`, `logs`, `reload`, `wait`. Targets: `{testID}`, `{label}`,
+`pair`, `apps`, `select_app`, `look`, `check_layout`, `press`, `long_press`, `type_text`,
+`scroll`, `toggle`, `open_url`, `back`, `app_command`, `wait_for`, `record`, `replay`,
+`compare_screen`, `filmstrip`, `viewer`, `logs`, `reload`, `wait`. Targets: `{testID}`, `{label}`,
 `{text, index?}`, `{ref}` or `{x, y}`. Every action returns the fresh element list (text,
 no screenshot) unless `look: false`; `look` adds a screenshot (`width` in pixels, default
 600; `screenshot: false` skips it).
@@ -44,6 +47,11 @@ no screenshot) unless `look: false`; `look` adds a screenshot (`width` in pixels
 - `reload` waits for the app to reconnect, then returns the element list.
 - `logs` returns what the host has buffered since the app connected (500 lines); with
   nothing buffered it asks the app for its own.
+- `viewer` returns the live viewer's link, plus the app's capture and stutter numbers while
+  someone watches. The viewer rides on the host's port (`/viewer`, `/stream`, `/ws`) and
+  speaks [docs/VIEWER-PROTOCOL.md](../../docs/VIEWER-PROTOCOL.md). The app captures frames
+  only while someone watches. A person's input goes ahead of the agent's actions, which
+  wait until the person has been idle for 3 s (`busy` after 30 s; `paused` while paused).
 
 ## Security
 
@@ -58,6 +66,10 @@ no screenshot) unless `look: false`; `look` adds a screenshot (`width` in pixels
   your whole network: only on networks you trust.
 - Connections without the right token are closed (4001), and bad pairing codes too
   (4004). Traffic is plain WebSocket inside Tailscale's encrypted tunnel.
+- The live viewer has its own random key, new on each start, in the link the `viewer` tool
+  gives. The first load trades it for an HttpOnly, SameSite=Strict cookie and drops it from
+  the address bar. Requests from another Host or (for the WebSocket) another Origin are
+  refused, and by default only this computer can open it.
 
 ## Develop
 

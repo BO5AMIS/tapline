@@ -119,6 +119,19 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 - `filmstrip` (optionally `press` first) captures several frames in one image for
   animations, transitions and loading states.
 
+## Watching together
+
+- `viewer` gives a link the user opens in a browser on their computer: the app's screen as
+  it changes, with your taps and scrolls marked. The link carries a key: show it to the user
+  only. Offer it when they want to watch, or to do a step themselves (sign in with their own
+  password, finish a step you can't).
+- The user can tap, scroll and type there too, and their input goes first: your next action
+  waits until they've been idle for 3 seconds. It fails with `busy` after 30 seconds of their
+  input, and with `paused` while they've paused you. Then wait, or ask them.
+- The viewer is for people. Don't read its stream yourself; `look` is cheaper and gives refs.
+  The `viewer` tool also reports how long the app's captures take and whether they made it
+  stutter.
+
 ## Screenshots and tokens
 
 Images are the most expensive thing you read. A phone screenshot at the default width costs

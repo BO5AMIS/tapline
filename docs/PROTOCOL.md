@@ -216,7 +216,9 @@ result:
 
 params: `{ "format": "jpg", "quality": 0.7, "maxWidth": 600 }` → result:
 `{ "mime": "image/jpeg", "data": "<base64>", "width": 600, "height": 1304 }` (height
-follows the screen's aspect).
+follows the screen's aspect; `width` and `height` are the image's pixels, never more than the
+screen's own). On iOS, `react-native-view-shot` takes the size in points and renders at the
+screen's scale, so the app divides by the scale there.
 Needs `react-native-view-shot` in the app; otherwise error `unsupported`.
 
 ### `press` / `longPress`
@@ -240,6 +242,9 @@ Without `target`: the focused TextInput, else the only TextInput on screen.
 `replace: false` appends to the current value. Calls `onChangeText(newText)` and
 `onChange({ nativeEvent: { text } })`, updates the native view's text for uncontrolled
 inputs, and with `submit` calls `onSubmitEditing` / `onEndEditing`.
+`backspace: n` (a whole number) first deletes the last n characters (code points, so 😀 is
+one) and then appends `text`, if any; it never replaces. The live viewer's backspace key
+sends `{ "backspace": 1 }`.
 → result: `{ "element": <element>, "value": "hello" }`.
 
 ### `scroll`
@@ -294,6 +299,28 @@ when it goes to the background or comes back (`active`). The host logs it and, a
 drops, tells the agent the app went to the background. The app keeps the screen awake while
 connected (`expo-keep-awake`, when the app has it) and reconnects at once when it's back in
 front.
+
+### `feed` / `overlay` and event `frame` (the live viewer)
+
+`feed` params: `{ "on": true, "quality": "balanced" }` (`sharp` 700 px, `balanced` 400 px,
+`light` 240 px wide) → `{ "on", "quality", "stats" }`. While on, the app captures its window
+when React commits a change (after 250 ms of quiet), every 350 ms for 1.2 s after each
+action, and at least once a second, never two at once, and sends each frame as an event:
+
+```json
+{ "type": "event", "event": "frame", "data": { "seq": 12, "rev": 340, "capturedAt": 1794115000123, "captureMs": 38, "mime": "image/jpeg", "data": "<base64>", "width": 400, "height": 869 } }
+```
+
+`rev` counts React commits, so a frame and an overlay with the same `rev` match. `stats`:
+`{ "frames", "avgCaptureMs", "maxCaptureMs", "observedFrames", "janky", "jankyWhileCapturing" }`,
+where `janky` counts animation frames that came more than 50 ms after the one before.
+`{ "on": false }` stops it; so does losing the connection. The host turns it on only while
+someone watches. The app lists `feed` in its capabilities when it can take screenshots.
+
+`overlay` params: `{}` → `{ "rev", "screen": { "width", "height" }, "elements": [ { "ref",
+"type", "label", "id", "frame" } ] }`: the elements on screen for the viewer's boxes.
+`ref` is the element's ref from the last `tree` if it had one, else `null`. Reading it
+doesn't change refs.
 
 ### `back`
 
