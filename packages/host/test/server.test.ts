@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { WebSocket, WebSocketServer } from "ws";
 import { PAIR_CODE_TTL_MS, createPairCode } from "../src/pairing.js";
 import { TaplineError, TaplineHost } from "../src/server.js";
 import { FakeApp, TOKEN, delay, startHost, until } from "./helpers.js";
@@ -297,6 +298,48 @@ describe("sessions", () => {
   });
 });
 
+describe("http extension and frames", () => {
+  it("lets an extension answer HTTP requests and WebSocket upgrades first; apps still connect", async () => {
+    const { host, port } = await start();
+    const viewerWss = new WebSocketServer({ noServer: true });
+    host.setHttpExtension({
+      onRequest: (req, res) => {
+        if (req.url !== "/hello") return false;
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("hi");
+        return true;
+      },
+      onUpgrade: (req, socket, head) => {
+        if (req.url !== "/ws") return false;
+        viewerWss.handleUpgrade(req, socket, head, (ws) => ws.send("viewer"));
+        return true;
+      },
+    });
+    const hello = await fetch(`http://127.0.0.1:${port}/hello`);
+    expect(await hello.text()).toBe("hi");
+    expect((await fetch(`http://127.0.0.1:${port}/other`)).status).toBe(426);
+    const viewer = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const first = await new Promise<string>((resolve) => viewer.once("message", (data) => resolve(String(data))));
+    expect(first).toBe("viewer");
+    viewer.close();
+    const { session } = await connect(port);
+    expect(host.sessions().map((s) => s.id)).toEqual([session]);
+    viewerWss.close();
+  });
+
+  it("emits frames the app sends, without putting them in the logs", async () => {
+    const { host, port } = await start();
+    const frames: unknown[] = [];
+    host.on("frame", (_s, frame) => frames.push(frame));
+    const { app, session } = await connect(port);
+    app.send({ type: "event", event: "frame", data: { seq: 1, rev: 4, capturedAt: 10, captureMs: 120, mime: "image/jpeg", data: "QUJD", width: 400, height: 870 } });
+    app.send({ type: "event", event: "frame", data: { nope: true } });
+    await until(() => frames.length === 1);
+    expect(frames[0]).toMatchObject({ seq: 1, rev: 4, mime: "image/jpeg", data: "QUJD", width: 400 });
+    expect(host.logs(session)).toEqual([]);
+  });
+});
+
 describe("app state", () => {
   it("keeps the app's last state, logs it, and remembers it after the app drops", async () => {
     const { host, port } = await start();
@@ -327,6 +370,18 @@ describe("app state", () => {
     app.send({ type: "event", event: "appState", data: { state: "active" } });
     await until(() => host.sessions()[0]?.appState?.state === "active");
     await expect(host.request("tree", {}, { sessionId: session })).resolves.toEqual({ method: "tree" });
+  });
+
+  it("emits the app's state changes", async () => {
+    const { host, port } = await start();
+    const seen: string[] = [];
+    host.on("appState", (s, state) => seen.push(`${s.app.name}:${state}`));
+    const { app } = await connect(port);
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    app.send({ type: "event", event: "appState", data: { state: "active" } });
+    await until(() => seen.length === 2);
+    expect(seen[0]).toMatch(/:background$/);
+    expect(seen[1]).toMatch(/:active$/);
   });
 
   it("ignores app state events without a state", async () => {

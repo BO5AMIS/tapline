@@ -10,6 +10,7 @@ import {
   reachableHost,
   resolveConfig,
   screenshotMode,
+  viewerMode,
   tokenFilePath,
 } from "../src/config.js";
 
@@ -103,6 +104,16 @@ describe("screenshotMode", () => {
   });
   it("rejects anything else, naming the choices", () => {
     expect(() => screenshotMode("files", {})).toThrow(/inline.*file/);
+  });
+});
+
+describe("viewerMode", () => {
+  it("is local unless --viewer or TAPLINE_VIEWER says remote or off", () => {
+    expect(viewerMode(undefined, {})).toBe("local");
+    expect(viewerMode("remote", {})).toBe("remote");
+    expect(viewerMode(undefined, { TAPLINE_VIEWER: "off" })).toBe("off");
+    expect(viewerMode("local", { TAPLINE_VIEWER: "remote" })).toBe("local");
+    expect(() => viewerMode("public", {})).toThrow(/local, remote or off/);
   });
 });
 

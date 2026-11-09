@@ -42,6 +42,9 @@ Options:
   --screenshots <inline|file>
                  For mcp: put screenshots in the tool result (default), or save them in
                  ~/.tapline/shots and return the path (or TAPLINE_SCREENSHOTS)
+  --viewer <local|remote|off>
+                 For mcp: the live viewer on this computer only (default), also on your
+                 own Tailscale devices, or off (or TAPLINE_VIEWER)
   --metro-port <n>   For dev: Metro's port (default 8081)
   --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
   --stop             For dev: stop serving Metro
@@ -194,6 +197,7 @@ async function main(argv: string[]): Promise<number> {
       host: { type: "string" },
       scheme: { type: "string" },
       screenshots: { type: "string" },
+      viewer: { type: "string" },
       "metro-port": { type: "string" },
       "https-port": { type: "string" },
       stop: { type: "boolean" },
@@ -214,7 +218,11 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case "mcp":
-      return (await runMcp({ ...options, ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}) }))
+      return (await runMcp({
+        ...options,
+        ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}),
+        ...(values.viewer !== undefined ? { viewer: values.viewer } : {}),
+      }))
         ? -1 // keep running
         : 1;
     case "host":

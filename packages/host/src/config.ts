@@ -66,6 +66,19 @@ export function screenshotMode(flag: string | undefined, env: NodeJS.ProcessEnv 
   throw new Error(`Unknown screenshot mode "${raw}": use inline or file (--screenshots or TAPLINE_SCREENSHOTS).`);
 }
 
+export type ViewerMode = "local" | "remote" | "off";
+
+/**
+ * Where the live viewer can be opened: from `--viewer`, else `TAPLINE_VIEWER`, else local
+ * (this computer only). "remote" adds your own devices on Tailscale; "off" turns it off.
+ */
+export function viewerMode(flag: string | undefined, env: NodeJS.ProcessEnv = process.env): ViewerMode {
+  const fromEnv = env["TAPLINE_VIEWER"];
+  const raw = flag ?? (fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : "local");
+  if (raw === "local" || raw === "remote" || raw === "off") return raw;
+  throw new Error(`Unknown viewer mode "${raw}": use local, remote or off (--viewer or TAPLINE_VIEWER).`);
+}
+
 /** `~/.tapline`, or `$TAPLINE_HOME` when set. */
 export function configDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env["TAPLINE_HOME"];

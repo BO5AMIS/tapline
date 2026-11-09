@@ -7,9 +7,15 @@ import {
   reachableHost,
   resolveConfig,
   screenshotMode,
+  viewerMode,
   type ResolveOptions,
   type ScreenshotMode,
+  type ViewerMode,
 } from "./config.js";
+import { randomBytes } from "node:crypto";
+import { ControlQueue } from "./control.js";
+import { ViewerHub, viewerStatusFor } from "./viewer.js";
+import { VIEWER_HTML } from "./viewer-page.js";
 import { TaplineHost } from "./server.js";
 import { TaplineTools, toolShapes } from "./tools.js";
 
@@ -193,6 +199,18 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "viewer",
+    {
+      title: "Live viewer",
+      description:
+        "The link to the live viewer: the user watches the app in a browser as you work (your actions are shown), and can tap, scroll and type on it too; their touches go first and your actions wait, and they can pause you. Give the link to the user only (it carries a key). While frames are on, also reports capture time and stutter.",
+      inputSchema: toolShapes.viewer,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => tools.viewer(args),
+  );
+
+  server.registerTool(
     "record",
     {
       title: "Record a script",
@@ -267,10 +285,12 @@ function log(message: string): void {
 }
 
 /** Runs the host and serves MCP over stdio. stdout is reserved for the protocol; everything else goes to stderr. */
-export async function runMcp(options: ResolveOptions & { screenshots?: string } = {}): Promise<boolean> {
+export async function runMcp(options: ResolveOptions & { screenshots?: string; viewer?: string } = {}): Promise<boolean> {
   let screenshots: ScreenshotMode;
+  let viewer: ViewerMode;
   try {
     screenshots = screenshotMode(options.screenshots, options.env);
+    viewer = viewerMode(options.viewer, options.env);
   } catch (error) {
     log(error instanceof Error ? error.message : String(error));
     return false;
@@ -302,6 +322,16 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string } 
   const url = hostUrl({ advertisedHost: advertised }, port);
   log(`apps connect to ${url}; use the pair tool to connect a phone`);
 
+  // The live viewer rides on this host's port: local by default, the tailnet with --viewer remote.
+  const viewerToken = randomBytes(24).toString("base64url");
+  const remoteViewer = viewer === "remote" && config.tailscaleIp !== null;
+  const viewerHosts = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, ...(remoteViewer ? [`${config.tailscaleIp}:${port}`] : [])];
+  const viewerLinks = [
+    `http://127.0.0.1:${port}/viewer?token=${viewerToken}`,
+    ...(remoteViewer ? [`http://${config.tailscaleIp}:${port}/viewer?token=${viewerToken} (from your own devices on Tailscale)`] : []),
+  ];
+  const control = new ControlQueue();
+  let hub: ViewerHub | undefined;
   const tools = new TaplineTools(host, {
     connect: { url, name: config.name },
     pairImagePath: join(configDir(), `pair-${port}.png`),
@@ -309,7 +339,46 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string } 
     screenshotDir: join(configDir(), "shots"),
     scriptsDir: join(configDir(), "scripts"),
     baselinesDir: join(configDir(), "baselines"),
+    ...(viewer === "off"
+      ? {}
+      : {
+          control,
+          onAction: (action) => hub?.pushAction(action),
+          viewerLinks: () => viewerLinks,
+          viewerFeed: () => hub?.feed() ?? { on: false, quality: "balanced" },
+        }),
   });
+  if (viewer !== "off") {
+    const live = new ViewerHub({
+      token: viewerToken,
+      html: VIEWER_HTML,
+      allowedHosts: () => viewerHosts,
+      allowRemote: remoteViewer,
+      accepts: ["tap", "longPress", "scroll", "text", "enter", "backspace", "quality"],
+      control,
+      setFeed: (on, quality) => {
+        void tools.setFeed(on, quality).then((outcome) => {
+          // In the background the status already says so (appState below).
+          if (!outcome.ok && on && outcome.code !== "in_background") {
+            live.setStatus({ detail: `The app can't stream its screen: ${outcome.message ?? ""}` });
+          }
+        });
+      },
+      readOverlay: () => tools.readOverlay(),
+      runInput: (input) => tools.personInput(input),
+    });
+    hub = live;
+    host.setHttpExtension(live);
+    host.on("frame", (session, frame) => {
+      if (host.current()?.id === session.id) live.pushFrame(frame);
+    });
+    const appStatus = (): void => live.setStatus(viewerStatusFor(host.current()));
+    host.on("connect", appStatus);
+    host.on("disconnect", appStatus);
+    host.on("appState", appStatus);
+    appStatus();
+    log(`live viewer: ${remoteViewer ? "this computer and your Tailscale devices" : "this computer only"} (the viewer tool gives the link)`);
+  }
   if (screenshots === "file") log(`screenshots are saved in ${join(configDir(), "shots")} (newest 50 kept)`);
   const server = createMcpServer(tools);
   const shutdown = (): void => {

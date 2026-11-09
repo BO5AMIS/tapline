@@ -4,6 +4,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
 import { annotateScreenshot, type ShotImage } from "./annotate.js";
+import type { ControlQueue } from "./control.js";
+import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { describeElement, formatChanges, formatElement, formatLogs, formatTree } from "./format.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
@@ -138,6 +140,7 @@ export const toolShapes = {
     frame_width: z.number().int().min(100).max(400).optional().describe("Width of each frame in pixels (default 200)"),
     press: targetField.optional().describe("Press this first, then film what it sets off (an animation, a loading state)"),
   },
+  viewer: {},
   record: {
     action: z
       .enum(["start", "stop", "status", "discard"])
@@ -199,7 +202,20 @@ export interface ToolsOptions {
   scriptsDir?: string;
   /** Where `compare_screen` keeps reference pictures, one folder per app (e.g. ~/.tapline/baselines). */
   baselinesDir?: string;
+  /** The live viewer's queue: agent actions wait for a person and stop while paused. */
+  control?: ControlQueue;
+  /** Shows each agent action to people watching the live viewer. */
+  onAction?: (action: ViewerAction) => void;
+  /** The live viewer's links (with its token), for the `viewer` tool. */
+  viewerLinks?: () => string[];
+  /** Whether the app's frames are on and at which quality, for the `viewer` tool's stats. */
+  viewerFeed?: () => { on: boolean; quality: QualityPreset };
 }
+
+/** Under this many points, a pointer path is a tap or a hold, not a drag. */
+const TAP_SLOP = 12;
+/** Held at least this long, a tap is a long press. */
+const LONG_PRESS_MS = 500;
 
 const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
 
@@ -282,6 +298,34 @@ function describeStep(step: ScriptStep): string {
   }
 }
 
+const overlaySchema = z.object({
+  rev: z.number().optional(),
+  screen: z.object({ width: z.number(), height: z.number() }),
+  elements: z.array(
+    z.object({
+      ref: z.string().nullish(),
+      type: z.string().nullish(),
+      label: z.string().nullish(),
+      id: z.string().nullish(),
+      frame: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }),
+    }),
+  ),
+});
+
+const feedAnswerSchema = z.object({
+  on: z.boolean(),
+  stats: z
+    .object({
+      frames: z.number(),
+      avgCaptureMs: z.number(),
+      maxCaptureMs: z.number(),
+      observedFrames: z.number(),
+      janky: z.number(),
+      jankyWhileCapturing: z.number(),
+    })
+    .optional(),
+});
+
 const commandsSchema = z.object({
   commands: z.array(z.object({ name: z.string(), description: z.string() })),
 });
@@ -295,6 +339,13 @@ export const DEFAULT_SCREENSHOT_WIDTH = 600;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** waitFor answers only when its own wait ends (default 10 s): wait that long plus a margin for it. */
+function answerTimeoutMs(method: string, params: unknown): number | undefined {
+  if (method !== "waitFor") return undefined;
+  const timeout = typeof params === "object" && params !== null && "timeout" in params ? params.timeout : undefined;
+  return (typeof timeout === "number" && timeout > 0 ? timeout : 10) * 1000 + 5000;
 }
 
 function text(message: string): CallToolResult {
@@ -369,6 +420,8 @@ export class TaplineTools {
   private lastLookRoute: string[] | undefined;
   private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
   private replaying = false;
+  /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
+  private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
   private pairWrites = 0;
 
@@ -576,6 +629,7 @@ export class TaplineTools {
 
     this.listed.add(sid);
     this.lastLookRoute = tree.route?.names;
+    if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
     const lines = [`App: ${session.app.name} [${sid}]`, (askChanges ? formatChanges(tree) : null) ?? formatTree(tree)];
     const content: CallToolResult["content"] = [];
     const shot = await shotPromise;
@@ -623,10 +677,16 @@ export class TaplineTools {
     if (session === undefined) return fail(this.noAppMessage());
     let result: unknown;
     try {
-      result = await this.host.request(method, params, { sessionId: session.id });
+      const timeoutMs = answerTimeoutMs(method, params);
+      const run = (): Promise<unknown> =>
+        this.host.request(method, params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+      // With the live viewer, a person watching goes first.
+      result = this.options.control ? await this.options.control.runAgent(run) : await run();
     } catch (error) {
+      this.showAction("agent", method, undefined, params, error instanceof TaplineError ? error.code : "internal");
       return fail(describeError(error));
     }
+    this.showAction("agent", method, result, params);
     const line = describe(result);
     let response: CallToolResult;
     this.lastLookRoute = undefined;
@@ -643,6 +703,183 @@ export class TaplineTools {
       this.recording.steps.push(step);
     }
     return response;
+  }
+
+  // -- the live viewer
+
+  /** An element's frame (points) as 0..1 of the screen. */
+  private normalized(frame: { x: number; y: number; width: number; height: number } | null | undefined): Rect | undefined {
+    const screen = this.lastScreen;
+    if (!frame || !screen || screen.w <= 0 || screen.h <= 0) return undefined;
+    return { x: frame.x / screen.w, y: frame.y / screen.h, w: frame.width / screen.w, h: frame.height / screen.h };
+  }
+
+  /** The viewer's description of an action: its element's name and where it was. */
+  private describeAction(method: string, result: unknown, point?: { x: number; y: number }): Omit<ViewerAction, "by" | "ok" | "code"> {
+    const element =
+      typeof result === "object" && result !== null && "element" in result
+        ? elementSchema.safeParse((result as { element: unknown }).element)
+        : null;
+    const data = element?.success ? element.data : undefined;
+    const label = data ? (data.text || data.label || data.testID || undefined) : undefined;
+    const rect = this.normalized(data?.frame);
+    return {
+      kind: method,
+      ...(label ? { label: label.slice(0, 80) } : {}),
+      ...(rect ? { rect } : {}),
+      ...(point ? { point } : {}),
+    };
+  }
+
+  private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string): void {
+    const onAction = this.options.onAction;
+    if (onAction === undefined) return;
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    const t = typeof target === "object" && target !== null ? (target as { x?: unknown; y?: unknown }) : undefined;
+    const screen = this.lastScreen;
+    const point =
+      t && typeof t.x === "number" && typeof t.y === "number" && screen ? { x: t.x / screen.w, y: t.y / screen.h } : undefined;
+    try {
+      onAction({ by, ...this.describeAction(method, result, point), ok: code === undefined, ...(code ? { code } : {}) });
+    } catch {
+      // a viewer's trouble must not fail the action
+    }
+  }
+
+  /** The screen size in points, from the latest list or a fresh overlay read. */
+  private async screenSize(sessionId: string): Promise<{ w: number; h: number } | undefined> {
+    if (this.lastScreen) return this.lastScreen;
+    await this.readOverlay(sessionId).catch(() => null);
+    return this.lastScreen;
+  }
+
+  /** The elements on screen for the live viewer's boxes, in points. */
+  async readOverlay(sessionId?: string): Promise<OverlayRead | null> {
+    const sid = sessionId ?? this.host.current()?.id;
+    if (sid === undefined) return null;
+    const parsed = overlaySchema.safeParse(await this.host.request("overlay", {}, { sessionId: sid }));
+    if (!parsed.success) return null;
+    const { rev, screen, elements } = parsed.data;
+    this.lastScreen = { w: screen.width, h: screen.height };
+    return {
+      ...(rev !== undefined ? { rev } : {}),
+      size: { w: screen.width, h: screen.height },
+      elements: elements.map((e) => ({
+        ref: e.ref ?? null,
+        type: e.type ?? null,
+        label: e.label ?? null,
+        id: e.id ?? null,
+        rect: { x: e.frame.x, y: e.frame.y, w: e.frame.width, h: e.frame.height },
+      })),
+    };
+  }
+
+  /** Starts or stops the app's frames. */
+  async setFeed(on: boolean, quality: QualityPreset): Promise<{ ok: boolean; code?: string; message?: string }> {
+    const session = this.host.current();
+    if (session === undefined) return { ok: false, message: "No app is connected." };
+    try {
+      await this.host.request("feed", { on, quality }, { sessionId: session.id });
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        code: error instanceof TaplineError ? error.code : "internal",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** A person's input from the live viewer, mapped onto the app's actions; it goes ahead of the agent. */
+  async personInput(input: PersonInput): Promise<InputOutcome> {
+    const session = this.host.current();
+    if (session === undefined) return { ok: false, code: "reconnecting", message: "The app isn't connected." };
+    const run = async (): Promise<InputOutcome> => {
+      const size = await this.screenSize(session.id);
+      if (size === undefined) return { ok: false, code: "unsupported", message: "Couldn't read the screen size yet." };
+      const { method, params, point } = this.mapInput(input, size);
+      try {
+        const result = await this.host.request(method, params, { sessionId: session.id });
+        return { ok: true, action: this.describeAction(method, result, point) };
+      } catch (error) {
+        return {
+          ok: false,
+          code: error instanceof TaplineError ? error.code : "internal",
+          message: error instanceof Error ? error.message : String(error),
+          action: { kind: method, ...(point ? { point } : {}) },
+        };
+      }
+    };
+    try {
+      return this.options.control ? await this.options.control.runPerson(run) : await run();
+    } catch (error) {
+      return { ok: false, code: "internal", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private mapInput(
+    input: PersonInput,
+    size: { w: number; h: number },
+  ): { method: string; params: Record<string, unknown>; point?: { x: number; y: number } } {
+    switch (input.type) {
+      case "gesture": {
+        const first = input.points[0] ?? [0, 0, 0];
+        const last = input.points[input.points.length - 1] ?? first;
+        const fx = first[1] * size.w;
+        const fy = first[2] * size.h;
+        const moved = Math.max(...input.points.map(([, x, y]) => Math.hypot(x * size.w - fx, y * size.h - fy)));
+        const target = { x: Math.round(fx), y: Math.round(fy) };
+        const point = { x: first[1], y: first[2] };
+        if (moved < TAP_SLOP) {
+          return { method: last[0] - first[0] >= LONG_PRESS_MS ? "longPress" : "press", params: { target }, point };
+        }
+        const dx = (last[1] - first[1]) * size.w;
+        const dy = (last[2] - first[2]) * size.h;
+        // A finger moving up shows what is further down.
+        const vertical = Math.abs(dy) >= Math.abs(dx);
+        const direction = vertical ? (dy < 0 ? "down" : "up") : dx < 0 ? "right" : "left";
+        return { method: "scroll", params: { target, direction, amount: Math.round(Math.abs(vertical ? dy : dx)) }, point };
+      }
+      case "scroll": {
+        const target = { x: Math.round(input.x * size.w), y: Math.round(input.y * size.h) };
+        const vertical = Math.abs(input.dy) >= Math.abs(input.dx);
+        const direction = vertical ? (input.dy > 0 ? "down" : "up") : input.dx > 0 ? "right" : "left";
+        const amount = Math.round(vertical ? Math.abs(input.dy) * size.h : Math.abs(input.dx) * size.w);
+        return { method: "scroll", params: { target, direction, amount }, point: { x: input.x, y: input.y } };
+      }
+      case "text":
+        return { method: "type", params: { text: input.text, replace: false, submit: false } };
+      case "key":
+        return input.key === "enter"
+          ? { method: "type", params: { replace: false, submit: true } }
+          : { method: "type", params: { backspace: 1, replace: false, submit: false } };
+    }
+  }
+
+  async viewer(_args: Shape<"viewer"> = {}): Promise<CallToolResult> {
+    const links = this.options.viewerLinks?.() ?? [];
+    if (links.length === 0) return fail("Error unsupported: this host has no live viewer.");
+    const lines = [
+      "Live viewer (watch the app, see what you do, and let the user tap and type too):",
+      ...links.map((link) => `- ${link}`),
+      "The link carries a key: give it to the user only. While they use the viewer, their touches go first and your actions wait.",
+    ];
+    const feed = this.options.viewerFeed?.();
+    const session = this.host.current();
+    if (feed?.on === true && session !== undefined) {
+      try {
+        const answer = feedAnswerSchema.safeParse(await this.host.request("feed", { on: true, quality: feed.quality }, { sessionId: session.id }));
+        const stats = answer.success ? answer.data.stats : undefined;
+        if (stats !== undefined) {
+          lines.push(
+            `Capture: ${stats.frames} frames, ${Math.round(stats.avgCaptureMs)} ms each on average (longest ${Math.round(stats.maxCaptureMs)} ms). Stutter: ${stats.janky} of ${stats.observedFrames} animation frames were slow, ${stats.jankyWhileCapturing} of them during a capture.`,
+          );
+        }
+      } catch {
+        // stats are a bonus
+      }
+    }
+    return text(lines.join("\n"));
   }
 
   // -- compare_screen and filmstrip

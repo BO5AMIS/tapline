@@ -8,7 +8,9 @@ import jpeg from "jpeg-js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "../src/mcp.js";
 import type { TaplineHost } from "../src/server.js";
+import { ControlQueue } from "../src/control.js";
 import { TaplineTools, targetSchema } from "../src/tools.js";
+import type { ViewerAction } from "../src/viewer.js";
 import { FakeApp, TOKEN, startHost, type IncomingRequest, type Reply } from "./helpers.js";
 
 const hosts: TaplineHost[] = [];
@@ -163,6 +165,90 @@ describe("press", () => {
     const text = textOf(await tools.press({ target: { text: "Delete" } }));
     expect(text).toContain("  e5");
     expect(text).toContain("  e9");
+  });
+});
+
+describe("the live viewer's side of the tools", () => {
+  const OVERLAY = {
+    rev: 12,
+    screen: { width: 400, height: 800, scale: 3 },
+    elements: [{ ref: "e3", type: "button", label: "Log in", id: "login-button", frame: { x: 24, y: 610, width: 354, height: 48 } }],
+  };
+  const viewerHandler = (req: IncomingRequest): Reply => {
+    if (req.method === "overlay") return { ok: true, result: OVERLAY };
+    if (req.method === "scroll") return { ok: true, result: { element: TREE.elements[0], offset: { x: 0, y: 300 } } };
+    if (req.method === "type") return { ok: true, result: { element: { ...TREE.elements[0], role: "textfield" }, value: "x" } };
+    if (req.method === "longPress") return { ok: true, result: { element: TREE.elements[0] } };
+    return defaultHandler(req);
+  };
+
+  async function viewerTools() {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, viewerHandler);
+    apps.push(app);
+    const control = new ControlQueue({ idleMs: 50, giveUpMs: 2000 });
+    const actions: ViewerAction[] = [];
+    const tools = new TaplineTools(host, {
+      connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
+      settleMs: 0,
+      control,
+      onAction: (action) => actions.push(action),
+      viewerLinks: () => ["http://127.0.0.1:7210/viewer?token=abc"],
+    });
+    return { app, tools, control, actions };
+  }
+
+  it("maps a person's tap, hold, drag, wheel, typing and keys onto the app's actions, in points", async () => {
+    const { app, tools } = await viewerTools();
+    const params = (method: string) => app.requests.filter((r) => r.method === method).map((r) => r.params);
+    expect((await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [90, 0.5, 0.25]] })).ok).toBe(true);
+    expect(params("press")).toEqual([{ target: { x: 200, y: 200 } }]);
+    await tools.personInput({ type: "gesture", points: [[0, 0.25, 0.5], [700, 0.25, 0.5]] });
+    expect(params("longPress")).toEqual([{ target: { x: 100, y: 400 } }]);
+    await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.75], [150, 0.5, 0.5], [300, 0.5, 0.25]] });
+    expect(params("scroll").at(-1)).toEqual({ target: { x: 200, y: 600 }, direction: "down", amount: 400 });
+    await tools.personInput({ type: "scroll", x: 0.5, y: 0.5, dx: 0, dy: -0.1 });
+    expect(params("scroll").at(-1)).toEqual({ target: { x: 200, y: 400 }, direction: "up", amount: 80 });
+    await tools.personInput({ type: "text", text: "hi" });
+    await tools.personInput({ type: "key", key: "enter" });
+    await tools.personInput({ type: "key", key: "backspace" });
+    expect(params("type")).toEqual([
+      { text: "hi", replace: false, submit: false },
+      { replace: false, submit: true },
+      { backspace: 1, replace: false, submit: false },
+    ]);
+  });
+
+  it("reports a person's action with where it happened, in 0..1", async () => {
+    const { tools } = await viewerTools();
+    const outcome = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [90, 0.5, 0.25]] });
+    expect(outcome.action).toMatchObject({ kind: "press", label: "Log in", point: { x: 0.5, y: 0.25 } });
+    expect(outcome.action?.rect?.x).toBeCloseTo(24 / 400, 5);
+  });
+
+  it("runs agent actions through the shared queue: refused while paused, shown to viewers", async () => {
+    const { tools, control, actions } = await viewerTools();
+    control.setPaused(true);
+    const refused = await tools.press({ target: { testID: "login-button" }, look: false });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toContain("paused");
+    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", ok: false, code: "paused" });
+    control.setPaused(false);
+    await tools.press({ target: { testID: "login-button" }, look: false });
+    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", label: "Log in", ok: true });
+  });
+
+  it("reads the overlay in points with the screen size, and gives the viewer link", async () => {
+    const { tools } = await viewerTools();
+    const read = await tools.readOverlay();
+    expect(read).toEqual({
+      rev: 12,
+      size: { w: 400, h: 800 },
+      elements: [{ ref: "e3", type: "button", label: "Log in", id: "login-button", rect: { x: 24, y: 610, w: 354, h: 48 } }],
+    });
+    const text = textOf(await tools.viewer({}));
+    expect(text).toContain("http://127.0.0.1:7210/viewer?token=abc");
   });
 });
 
@@ -479,6 +565,20 @@ describe("app commands and waiting", () => {
     const text = textOf(await tools.waitFor({ text: "Saved", gone: false, network_idle: true, timeout: 5 }));
     expect(app.requests[0]).toMatchObject({ method: "waitFor", params: { text: "Saved", gone: false, networkIdle: true, timeout: 5 } });
     expect(text).toContain("Done after 1.2 s");
+  });
+
+  it("wait_for waits as long as its own timeout, past the usual request timeout", async () => {
+    const { host, port } = await startHost({ requestTimeoutMs: 100 });
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, (req) => {
+      if (req.method !== "waitFor") return defaultHandler(req);
+      setTimeout(() => app.send({ type: "response", id: req.id, ok: true, result: { met: true, waitedMs: 300 } }), 300);
+      return "ignore";
+    });
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, settleMs: 0 });
+    const result = await tools.waitFor({ text: "Saved", timeout: 1, look: false });
+    expect(textOf(result)).toContain("Done after 0.3 s");
   });
 
   it("wait_for reports a timeout as an error", async () => {
@@ -884,7 +984,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "logs", "reload", "wait"].sort(),
+        ["apps", "select_app", "pair", "look", "press", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "check_layout", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
       );
       const ok = await client.callTool({ name: "press", arguments: { target: { testID: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Pressed e3");

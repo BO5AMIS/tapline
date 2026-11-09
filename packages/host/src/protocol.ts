@@ -157,6 +157,18 @@ export const treeResultSchema = z.object({
 });
 export type TreeResult = z.infer<typeof treeResultSchema>;
 
+/** A frame of the app's live picture, sent as `event: "frame"` while a viewer watches. */
+export const appFrameSchema = z.object({
+  seq: z.number(),
+  rev: z.number().optional(),
+  capturedAt: z.number(),
+  captureMs: z.number().optional(),
+  mime: z.string(),
+  data: z.string(),
+  width: z.number().optional(),
+  height: z.number().optional(),
+});
+
 export const screenshotResultSchema = z.object({
   mime: z.string(),
   data: z.string(),

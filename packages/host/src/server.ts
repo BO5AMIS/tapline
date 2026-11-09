@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { createServer, type Server as HttpServer } from "node:http";
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { createPairCode, pairCodeExpiry, verifyPairCode } from "./pairing.js";
@@ -12,6 +13,7 @@ import {
   appInfoSchema,
   deviceInfoSchema,
   eventSchema,
+  appFrameSchema,
   logEntrySchema,
   responseSchema,
   type AppInfo,
@@ -31,6 +33,26 @@ export interface SessionInfo {
   lastSeen: number;
   /** The app's last reported state ("active", "background", "inactive"), when it sent one. */
   appState?: { state: string; at: number };
+}
+
+/** Something that answers some HTTP requests and upgrades before the app connection does (the live viewer). */
+export interface HttpExtension {
+  /** Return true when it answered the request. */
+  onRequest(req: IncomingMessage, res: ServerResponse): boolean;
+  /** Return true when it took the upgrade. */
+  onUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean;
+}
+
+/** One frame of the app's live picture (the `frame` event). */
+export interface AppFrame {
+  seq: number;
+  rev?: number;
+  capturedAt: number;
+  captureMs?: number;
+  mime: string;
+  data: string;
+  width?: number;
+  height?: number;
 }
 
 /** The most recent app that dropped, for explaining "no app is connected". */
@@ -94,6 +116,9 @@ interface HostEvents {
   connect: [session: SessionInfo];
   disconnect: [session: SessionInfo, reason: string];
   log: [session: SessionInfo, entry: LogEntry];
+  frame: [session: SessionInfo, frame: AppFrame];
+  /** The app went to the background or came back ("background", "active", "inactive"). */
+  appState: [session: SessionInfo, state: string];
   selected: [session: SessionInfo | undefined];
   warning: [message: string];
 }
@@ -159,6 +184,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly sessionMap = new Map<string, Session>();
   private selectedId: string | undefined;
   private lastDrop: LastDisconnect | undefined;
+  private httpExtension: HttpExtension | undefined;
   private sweeper: NodeJS.Timeout | undefined;
   private listenCalled = false;
   private closed = false;
@@ -232,9 +258,21 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     }
   }
 
+  /** Lets another part (the live viewer) answer HTTP requests and WebSocket upgrades first. */
+  setHttpExtension(extension: HttpExtension | undefined): void {
+    this.httpExtension = extension;
+  }
+
   private listenOn(host: string, port: number): Promise<number> {
     return new Promise((resolve, reject) => {
-      const http = createServer((_req, res) => {
+      const http = createServer((req, res) => {
+        try {
+          if (this.httpExtension?.onRequest(req, res) === true) return;
+        } catch {
+          if (!res.headersSent) res.writeHead(500);
+          res.end();
+          return;
+        }
         res.writeHead(426, { "content-type": "text/plain" });
         res.end("Tapline host: connect with a WebSocket (ws://).\n");
       });
@@ -242,13 +280,21 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       http.listen(port, host, () => {
         http.off("error", reject);
         http.on("error", (error) => this.safely(() => this.emit("warning", `Server error on ${host}: ${error.message}`)));
-        // Attached only once listening: the WebSocket server re-emits the HTTP server's errors,
-        // and a bind error must reach `reject` above instead.
-        const wss = new WebSocketServer({ server: http, maxPayload: 64 * 1024 * 1024 });
+        // Attached only once listening, so a bind error reaches `reject` above.
+        const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
         wss.on("error", () => {
           // reported by the HTTP server's handler
         });
         wss.on("connection", (socket) => this.onConnection(socket));
+        http.on("upgrade", (req, socket, head) => {
+          try {
+            if (this.httpExtension?.onUpgrade(req, socket, head) === true) return;
+          } catch {
+            socket.destroy();
+            return;
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+        });
         const address = http.address();
         const bound = typeof address === "object" && address !== null ? address.port : port;
         this.servers.push({ http, wss, host, port: bound });
@@ -546,6 +592,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   }
 
   private recordEvent(session: Session, event: string, data: unknown): void {
+    if (event === "frame") {
+      const frame = appFrameSchema.safeParse(data);
+      if (frame.success) this.safely(() => this.emit("frame", { ...session.info }, frame.data));
+      return;
+    }
     if (event === "appState") {
       const state = typeof data === "object" && data !== null ? (data as { state?: unknown }).state : undefined;
       if (typeof state !== "string" || state === "") return;
@@ -553,6 +604,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       session.info.appState = { state, at };
       const where = state === "active" ? "came back to the front" : state === "background" ? "went to the background" : `is ${state}`;
       this.pushEntry(session, { level: "info", message: `[tapline] the app ${where}`, ts: at });
+      this.safely(() => this.emit("appState", { ...session.info }, state));
       return;
     }
     if (event !== "log" && event !== "error") return;
