@@ -542,25 +542,38 @@ export class TaplineTools {
     if (sessions.length === 0) return text(this.noAppMessage());
     const current = this.host.current();
     const now = Date.now();
-    const lines = sessions.map((s) => {
-      const version = s.app.version !== undefined ? ` ${s.app.version}${s.app.build !== undefined ? ` (${s.app.build})` : ""}` : "";
-      // iPhones send no name, so the install id is what tells two of them apart.
-      const device = deviceLabel(s);
-      const age = Math.max(0, Math.round((now - s.connectedAt) / 1000));
-      const marker = current?.id === s.id ? "*" : " ";
-      return `${marker} ${s.id}  ${s.app.name}${version} [${s.app.id}] on ${device}, connected ${age}s ago`;
-    });
+    const lines = sessions.map((s) => this.appLine(s, current?.id === s.id, now));
     const footer = sessions.length > 1 ? "\n* = selected. Use open_app {app} to switch." : "\n* = selected.";
     return text(`Connected apps:\n${lines.join("\n")}${footer}`);
+  }
+
+  /** One line of the `apps` list. */
+  private appLine(s: SessionInfo, selected: boolean, now: number): string {
+    const version = s.app.version !== undefined ? ` ${s.app.version}${s.app.build !== undefined ? ` (${s.app.build})` : ""}` : "";
+    const age = Math.max(0, Math.round((now - s.connectedAt) / 1000));
+    return `${selected ? "*" : " "} ${s.id}  ${s.app.name}${version} [${s.app.id}] on ${deviceLabel(s)}, connected ${age}s ago`;
   }
 
   openApp(args: Shape<"open_app">): CallToolResult {
     const sessions = this.host.sessions();
     if (sessions.length === 0) return this.notConnected();
     const wanted = args.app.trim().toLowerCase();
-    const session = sessions.find(
-      (s) => s.id.toLowerCase() === wanted || s.app.id.toLowerCase() === wanted || s.app.name.toLowerCase() === wanted,
-    );
+    // A session id is exact; an app id or name can match several phones, and Tapline never guesses between them.
+    const matches = sessions.filter((s) => s.id.toLowerCase() === wanted);
+    if (matches.length === 0) {
+      matches.push(...sessions.filter((s) => s.app.id.toLowerCase() === wanted || s.app.name.toLowerCase() === wanted));
+    }
+    if (matches.length > 1) {
+      const current = this.host.current();
+      const now = Date.now();
+      return fail(
+        [
+          `Error ambiguous: ${matches.length} connected apps match "${args.app}". Pick one by its session id:`,
+          ...matches.map((s) => this.appLine(s, current?.id === s.id, now)),
+        ].join("\n"),
+      );
+    }
+    const session = matches[0];
     if (session === undefined) {
       return fail(
         `Error not_connected: ${args.app} isn't connected. Tapline can't launch apps: open it on the phone with Tailscale on (it reconnects by itself), or pair it with pair.`,

@@ -196,8 +196,8 @@ export function formatStatus(tree: TreeResult): string[] {
       .join(" ");
     const message = alert.message !== null && alert.message !== "" ? ` ${clip(alert.message, 160)}` : "";
     const how = alert.standIn
-      ? "(Tapline's stand-in: press its buttons like any element)"
-      : "(an OS alert: Tapline can't press it; ask the user to tap one)";
+      ? "(Tapline's stand-in: tap its buttons like any element)"
+      : "(an OS alert: Tapline can't tap it; ask the user to tap one)";
     lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons} ${how}`);
   }
   const busy = tree.network?.inFlight ?? 0;

@@ -106,7 +106,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
     "long_press",
     {
       title: "Long press",
-      description: "Long-press an element by calling its onLongPress. Same targets as tap. Returns the first line, then what changed and how long the app took to settle. Pass screenshot: true to add an image.",
+      description: "Long-press an element by calling its onLongPress. Same targets as tap; `seconds` sets how long to hold (default 1.0), and Tapline calls the handler, so it doesn't wait. Returns the first line, then what changed and how long the app took to settle. Pass screenshot: true to add an image.",
       inputSchema: toolShapes.long_press,
     },
     (args) => tools.longPress(args),

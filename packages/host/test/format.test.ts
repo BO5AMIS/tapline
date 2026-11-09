@@ -196,12 +196,12 @@ describe("formatTree", () => {
     const lines = formatTree(withStatus).split("\n");
     expect(lines[1]).toBe("Route: workouts");
     expect(lines[2]).toBe(
-      "Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)] (an OS alert: Tapline can't press it; ask the user to tap one)",
+      "Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)] (an OS alert: Tapline can't tap it; ask the user to tap one)",
     );
     expect(lines[3]).toBe("Network: 2 requests in flight");
 
     const standIn = formatTree({ ...withStatus, alerts: [{ ...withStatus.alerts[0]!, standIn: true }], network: undefined });
-    expect(standIn).toContain("(Tapline's stand-in: press its buttons like any element)");
+    expect(standIn).toContain("(Tapline's stand-in: tap its buttons like any element)");
     expect(standIn).not.toContain("Network:");
 
     const changes = formatChanges({
