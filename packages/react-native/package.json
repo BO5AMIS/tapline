@@ -14,12 +14,19 @@
       "types": "./dist/register.d.ts",
       "default": "./dist/register.js"
     },
+    "./metro": {
+      "types": "./metro.d.ts",
+      "default": "./metro.js"
+    },
     "./package.json": "./package.json"
   },
   "typesVersions": {
     "*": {
       "register": [
         "dist/register.d.ts"
+      ],
+      "metro": [
+        "metro.d.ts"
       ]
     }
   },
@@ -27,6 +34,8 @@
     "dist",
     "register.js",
     "register.d.ts",
+    "metro.js",
+    "metro.d.ts",
     "README.md"
   ],
   "sideEffects": [
@@ -39,12 +48,16 @@
     "test": "jest"
   },
   "peerDependencies": {
+    "expo-keep-awake": ">=12",
     "expo-secure-store": ">=12",
     "react": ">=18",
     "react-native": ">=0.72",
     "react-native-view-shot": ">=3"
   },
   "peerDependenciesMeta": {
+    "expo-keep-awake": {
+      "optional": true
+    },
     "expo-secure-store": {
       "optional": true
     },
