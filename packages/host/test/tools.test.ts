@@ -90,7 +90,8 @@ describe("target validation", () => {
 describe("targets (AGENT-TOOLS §2)", () => {
   it("takes {id} and sends the app's testID; index works with id, label and text", () => {
     expect(targetSchema.safeParse({ id: "save" }).success).toBe(true);
-    expect(targetSchema.safeParse({ testID: "save" }).success).toBe(false);
+    expect(targetSchema.safeParse({ id: "a", testID: "b" }).success).toBe(false);
+    expect(targetSchema.safeParse({ x: 1, y: 2, index: 0 }).success).toBe(false);
     expect(targetSchema.safeParse({ id: "row", index: 2 }).success).toBe(true);
     expect(targetSchema.safeParse({ label: "Delete", index: 1 }).success).toBe(true);
     expect(targetSchema.safeParse({ ref: "e3", index: 1 }).success).toBe(false);
@@ -480,6 +481,22 @@ describe("record and replay", () => {
       expect(text).toContain('Replayed "checkout"');
       expect(text).toContain("2 of 2 steps passed");
       expect(text).toContain("1 ✓ press id=save");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("shows a recorded wait_for id as id=, not testID", async () => {
+    const { app, tools, dir } = await shopTools(["basket"]);
+    try {
+      await tools.record({ action: "start", name: "waiting" });
+      await tools.waitFor({ id: "done" });
+      await tools.record({ action: "stop" });
+      app.requests.length = 0;
+      const text = textOf(await tools.replay({ name: "waiting" }));
+      expect(app.requests.find((r) => r.method === "waitFor")?.params).toMatchObject({ testID: "done" });
+      expect(text).toContain('wait for id="done"');
+      expect(text).not.toContain("testID");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

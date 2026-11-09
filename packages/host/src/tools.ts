@@ -288,7 +288,7 @@ function describeStep(step: ScriptStep): string {
       return `command ${String(p["name"])}`;
     case "waitFor": {
       const what = ["text", "testID", "label"].find((key) => typeof p[key] === "string");
-      const thing = what ? `${what}=${JSON.stringify(p[what])}${p["gone"] === true ? " gone" : ""}` : "";
+      const thing = what ? `${what === "testID" ? "id" : what}=${JSON.stringify(p[what])}${p["gone"] === true ? " gone" : ""}` : "";
       return `wait for ${[thing, p["networkIdle"] === true ? "quiet network" : ""].filter(Boolean).join(" and ")}`;
     }
     default:
