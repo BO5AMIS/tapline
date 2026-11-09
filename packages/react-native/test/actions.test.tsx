@@ -6,6 +6,7 @@ import {
   configureActions,
   getLogs,
   longPress,
+  onActed,
   openURL,
   press,
   reload,
@@ -56,7 +57,7 @@ function hostInstance(testID: string): Record<string, unknown> {
 
 let spies: Spies;
 
-beforeAll(() => configureActions({ settleMs: 0 }));
+beforeAll(() => configureActions({ quietMs: 0, capMs: 0 }));
 
 beforeEach(async () => {
   resetRefs();
@@ -698,10 +699,28 @@ describe('scroll', () => {
   });
 });
 
+describe('onActed', () => {
+  test('runs once the handler has run, before the settle wait is over, and the result reports settledMs', async () => {
+    await mountSample();
+    const seen: string[] = [];
+    const stop = onActed(() => seen.push(spies.onLogin.mock.calls.length > 0 ? 'handler ran' : 'handler not yet run'));
+    try {
+      const result = await run(() => press({ target: { testID: 'login-button' } }));
+      seen.push('settled');
+      expect(seen).toEqual(['handler ran', 'settled']);
+      expect(result.settledMs).toBe(0);
+    } finally {
+      stop();
+    }
+    await run(() => press({ target: { testID: 'login-button' } }));
+    expect(seen).toEqual(['handler ran', 'settled']);
+  });
+});
+
 describe('openURL / logs / reload / screenshot', () => {
   test('openURL calls Linking.openURL', async () => {
     const spy = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
-    await expect(openURL({ url: 'myapp://settings' })).resolves.toEqual({});
+    await expect(openURL({ url: 'myapp://settings' })).resolves.toEqual({ settledMs: 0 });
     expect(spy).toHaveBeenCalledWith('myapp://settings');
   });
 

@@ -26,6 +26,8 @@ import {
 import { openAlerts } from './alerts';
 import { sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
+import { onCommit } from './register';
+import { waitUntilStill } from './settle';
 import {
   TaplineError,
   isRecord,
@@ -41,15 +43,38 @@ export { tree } from './inspect';
 /* Small helpers                                                               */
 /* -------------------------------------------------------------------------- */
 
-const settings = { settleMs: 30 };
+const settings = { quietMs: 100, capMs: 2000 };
 
-/** Tune how long to wait after an action so React can flush resulting renders. */
-export function configureActions(next: { settleMs?: number }): void {
-  if (typeof next.settleMs === 'number') settings.settleMs = next.settleMs;
+/** Tune how long the app must be free of React commits after an action, and the longest wait (AGENT-TOOLS §6). */
+export function configureActions(next: { quietMs?: number; capMs?: number }): void {
+  if (typeof next.quietMs === 'number') settings.quietMs = next.quietMs;
+  if (typeof next.capMs === 'number') settings.capMs = next.capMs;
 }
 
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, settings.settleMs));
+const actedListeners = new Set<() => void>();
+
+/** Runs `listener` when an action's handler has run, before the wait for the app to settle. */
+export function onActed(listener: () => void): () => void {
+  actedListeners.add(listener);
+  return () => {
+    actedListeners.delete(listener);
+  };
+}
+
+/** Waits until the app is still after an action; resolves with the milliseconds that took. */
+export function settle(): Promise<number> {
+  for (const listener of [...actedListeners]) {
+    try {
+      listener();
+    } catch {
+      // a listener must never break the action
+    }
+  }
+  return waitUntilStill({
+    ...settings,
+    onCommit: (listener) => onCommit(() => listener()),
+    now: Date.now,
+  });
 }
 
 function badParams(message: string): TaplineError {
@@ -436,7 +461,7 @@ function selectTab(snapshot: Snapshot, tab: TabFound): void {
 }
 
 /** `back`: what the back button or gesture does, on the focused screen. */
-export async function back(rawParams: unknown): Promise<{ route: string[] }> {
+export async function back(rawParams: unknown): Promise<{ route: string[]; settledMs: number }> {
   paramsOf(rawParams);
   const snapshot = takeSnapshot();
   const current = currentRoute(snapshot.routes);
@@ -454,18 +479,20 @@ export async function back(rawParams: unknown): Promise<{ route: string[] }> {
     throw new TaplineError('not_actionable', `Nothing to go back to from ${current.chain.join(' › ')}.`);
   }
   callHandler('goBack', nav.goBack as (...args: unknown[]) => unknown, []);
-  await settle();
-  return { route: current.chain };
+  const settledMs = await settle();
+  return { route: current.chain, settledMs };
 }
 
-async function pressLike(kind: 'press' | 'longPress', rawParams: unknown): Promise<{ element: TaplineElement }> {
+async function pressLike(
+  kind: 'press' | 'longPress',
+  rawParams: unknown,
+): Promise<{ element: TaplineElement; settledMs: number }> {
   const params = paramsOf(rawParams);
   const { snapshot, entry } = await resolveTarget(params.target);
   if (entry.tab) {
     if (kind === 'longPress') throw new TaplineError('not_actionable', `The "${entry.tab.title}" tab has no long press`);
     selectTab(snapshot, entry.tab);
-    await settle();
-    return { element: toElement(entry, null) };
+    return { element: toElement(entry, null), settledMs: await settle() };
   }
   const actor = findActionable(snapshot, entry, kind, false);
   const handlerName = kind === 'press' ? 'onPress' : 'onLongPress';
@@ -482,15 +509,14 @@ async function pressLike(kind: 'press' | 'longPress', rawParams: unknown): Promi
   const { element, frame } = await elementFor(actor);
   if (params.force !== true) await assertReachable(snapshot, actor, frame);
   callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
-  await settle();
-  return { element };
+  return { element, settledMs: await settle() };
 }
 
-export function press(params: unknown): Promise<{ element: TaplineElement }> {
+export function press(params: unknown): Promise<{ element: TaplineElement; settledMs: number }> {
   return pressLike('press', params);
 }
 
-export function longPress(params: unknown): Promise<{ element: TaplineElement }> {
+export function longPress(params: unknown): Promise<{ element: TaplineElement; settledMs: number }> {
   return pressLike('longPress', params);
 }
 
@@ -568,7 +594,7 @@ function setNativeText(entry: Entry, text: string): void {
 
 export async function typeText(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: string }> {
+): Promise<{ element: TaplineElement; value: string; settledMs: number }> {
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
@@ -612,9 +638,9 @@ export async function typeText(
     if (onEnd) callHandler('onEndEditing', onEnd, [event]);
   }
 
-  await settle();
+  const settledMs = await settle();
   const { element } = await elementFor(entry);
-  return { element: { ...element, value: next }, value: next };
+  return { element: { ...element, value: next }, value: next, settledMs };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -684,7 +710,7 @@ type Direction = (typeof DIRECTIONS)[number];
 
 export async function scroll(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; offset: { x: number; y: number } }> {
+): Promise<{ element: TaplineElement; offset: { x: number; y: number }; settledMs: number }> {
   const params = paramsOf(rawParams);
   const to = params.to;
   if (to !== undefined && to !== 'start' && to !== 'end') throw badParams('to must be "start" or "end"');
@@ -773,16 +799,18 @@ export async function scroll(
   }
 
   if (key) rememberedOffsets.set(key, offset);
-  await settle();
+  const settledMs = await settle();
   const { element } = await elementFor(entry, frame);
-  return { element, offset };
+  return { element, offset, settledMs };
 }
 
 /* -------------------------------------------------------------------------- */
 /* toggle                                                                      */
 /* -------------------------------------------------------------------------- */
 
-export async function toggle(rawParams: unknown): Promise<{ element: TaplineElement; value: boolean }> {
+export async function toggle(
+  rawParams: unknown,
+): Promise<{ element: TaplineElement; value: boolean; settledMs: number }> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
   const { snapshot, entry } = await resolveTarget(params.target);
@@ -795,9 +823,9 @@ export async function toggle(rawParams: unknown): Promise<{ element: TaplineElem
   const next = typeof params.value === 'boolean' ? params.value : !current;
   if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));
   callHandler('onValueChange', handler, [next]);
-  await settle();
+  const settledMs = await settle();
   const { element } = await elementFor(control);
-  return { element: { ...element, checked: next }, value: next };
+  return { element: { ...element, checked: next }, value: next, settledMs };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -806,7 +834,7 @@ export async function toggle(rawParams: unknown): Promise<{ element: TaplineElem
 
 const OPEN_URL_TIMEOUT_MS = 5000;
 
-export async function openURL(rawParams: unknown): Promise<Record<string, never>> {
+export async function openURL(rawParams: unknown): Promise<{ settledMs: number }> {
   const params = paramsOf(rawParams);
   if (typeof params.url !== 'string' || params.url === '') throw badParams('url must be a non-empty string');
   const url = params.url;
@@ -822,7 +850,7 @@ export async function openURL(rawParams: unknown): Promise<Record<string, never>
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
-  return {};
+  return { settledMs: await settle() };
 }
 
 export async function getLogs(rawParams: unknown): Promise<{ entries: LogEntry[] }> {

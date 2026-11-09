@@ -46,7 +46,7 @@ async function failure(promise: Promise<unknown>): Promise<TaplineError> {
   throw new Error('expected a TaplineError');
 }
 
-beforeAll(() => configureActions({ settleMs: 0 }));
+beforeAll(() => configureActions({ quietMs: 0, capMs: 0 }));
 
 beforeEach(() => {
   resetRefs();

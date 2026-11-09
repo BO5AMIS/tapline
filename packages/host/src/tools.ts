@@ -181,8 +181,6 @@ export interface ToolsOptions {
   pairImagePath?: string;
   /** How long that PNG is kept. Default: the code's 10 minutes. */
   pairImageLifetimeMs?: number;
-  /** Delay between an action and the follow-up look. Default 350 ms. */
-  settleMs?: number;
   /** How long `reload` waits for the app to come back. Default 20 000 ms. */
   reloadWaitMs?: number;
   /** Extra delay after a reload before looking. Default 1500 ms. */
@@ -407,7 +405,6 @@ export function describeError(error: unknown): string {
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
-  private readonly settleMs: number;
   private readonly reloadWaitMs: number;
   private readonly reloadSettleMs: number;
   private readonly noScreenshot = new Set<string>();
@@ -427,7 +424,6 @@ export class TaplineTools {
     private readonly host: TaplineHost,
     private readonly options: ToolsOptions,
   ) {
-    this.settleMs = options.settleMs ?? 350;
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
   }
@@ -670,7 +666,7 @@ export class TaplineTools {
 
   // -- actions
 
-  /** Runs a request, then (unless disabled) appends the fresh element list after a short settle. */
+  /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
   private async act(
     method: string,
     params: unknown,
@@ -694,10 +690,21 @@ export class TaplineTools {
     const line = describe(result);
     let response: CallToolResult;
     this.lastLookRoute = undefined;
+    const settledMs =
+      typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
+    const settled = typeof settledMs === "number" && Number.isFinite(settledMs) && settledMs >= 0
+      ? `Settled in ${(settledMs / 1000).toFixed(2)} s.`
+      : undefined;
     if (withLook === false) response = text(line);
     else {
-      await sleep(this.settleMs);
+      // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
       response = await this.withLook(session, line);
+      if (settled !== undefined) {
+        const [first, ...rest] = response.content;
+        if (first !== undefined && first.type === "text") {
+          response = { ...response, content: [{ type: "text", text: `${first.text.trimEnd()}\n${settled}` }, ...rest] };
+        }
+      }
     }
     if (this.recording !== null && !this.replaying) {
       const { params: stable, fragile } = stableParams(params, result);

@@ -1,4 +1,4 @@
-import { back, getLogs, longPress, openURL, press, reload, screenshot, scroll, toggle, typeText } from './actions';
+import { back, getLogs, longPress, onActed, openURL, press, reload, screenshot, scroll, settle, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
@@ -6,6 +6,9 @@ import { feedMethod, frameAfterAction } from './live';
 import { waitFor } from './wait';
 
 export type MethodFn = (params: unknown) => Promise<unknown>;
+
+// The handler has run: viewers get their first frame now, not after the settle wait.
+onActed(frameAfterAction);
 
 /** An action changes the screen: let anyone watching see the result soon. */
 function action(fn: MethodFn): MethodFn {
@@ -30,7 +33,10 @@ export const methods: Record<string, MethodFn> = {
   back: action((params) => back(params)),
   check: (params) => checkLayout(params),
   commands: async () => ({ commands: listCommands() }),
-  command: action((params) => runCommand(params)),
+  command: action(async (params) => {
+    const ran = await runCommand(params);
+    return { ...ran, settledMs: await settle() };
+  }),
   waitFor: (params) => waitFor(params),
   logs: (params) => getLogs(params),
   reload: () => reload(),

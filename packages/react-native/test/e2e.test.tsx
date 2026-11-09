@@ -45,7 +45,7 @@ async function call(method: string, params: Record<string, unknown> = {}): Promi
   return found;
 }
 
-beforeAll(() => configureActions({ settleMs: 0 }));
+beforeAll(() => configureActions({ quietMs: 0, capMs: 0 }));
 
 beforeEach(async () => {
   resetRefs();

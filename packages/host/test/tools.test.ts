@@ -52,7 +52,6 @@ function setup(handler: (req: IncomingRequest) => Reply) {
     apps.push(app);
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-      settleMs: 0,
     });
     return { host, app, tools };
   };
@@ -111,6 +110,25 @@ describe("targets (AGENT-TOOLS §2)", () => {
 });
 
 describe("press", () => {
+  it("ends an action's answer with how long the app took to settle, and doesn't wait on its own", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "press" ? { ok: true, result: { element: TREE.elements[0], settledMs: 310 } } : defaultHandler(req),
+    )();
+    const started = Date.now();
+    const text = textOf(await tools.press({ target: { id: "login-button" } }));
+    expect(text.trimEnd().split("\n").at(-1)).toBe("Settled in 0.31 s.");
+    expect(Date.now() - started).toBeLessThan(300);
+  });
+
+  it("prints no settle line when the app doesn't report one, and only the first line without look", async () => {
+    const { tools } = await setup(defaultHandler)();
+    expect(textOf(await tools.press({ target: { id: "login-button" } }))).not.toContain("Settled in");
+    const { tools: tools2 } = await setup((req) =>
+      req.method === "press" ? { ok: true, result: { element: TREE.elements[0], settledMs: 120 } } : defaultHandler(req),
+    )();
+    expect(textOf(await tools2.press({ target: { id: "login-button" }, look: false }))).toBe('Pressed e3 button "Log in".');
+  });
+
   it("returns the result line and the fresh element list, without a screenshot", async () => {
     const { app, tools } = await setup(defaultHandler)();
     const result = await tools.press({ target: { id: "login-button" } });
@@ -214,7 +232,6 @@ describe("the live viewer's side of the tools", () => {
     const actions: ViewerAction[] = [];
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-      settleMs: 0,
       control,
       onAction: (action) => actions.push(action),
       viewerLinks: () => ["http://127.0.0.1:7210/viewer?token=abc"],
@@ -321,7 +338,6 @@ describe("compare_screen and filmstrip", () => {
     apps.push(app);
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-      settleMs: 0,
       baselinesDir: dir,
     });
     return { app, tools, dir };
@@ -416,7 +432,6 @@ describe("record and replay", () => {
     apps.push(app);
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-      settleMs: 0,
       scriptsDir: dir,
     });
     return { app, tools, dir };
@@ -512,7 +527,7 @@ describe("record and replay", () => {
     hosts.push(host);
     const { app } = await FakeApp.connect(port, {}, shop(["basket"], "press"));
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, settleMs: 0, scriptsDir: first.dir });
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir });
     try {
       const result = await tools.replay({ name: "broken" });
       expect(result.isError).toBe(true);
@@ -532,7 +547,7 @@ describe("record and replay", () => {
     hosts.push(host);
     const { app } = await FakeApp.connect(port, {}, shop(["home"]));
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, settleMs: 0, scriptsDir: first.dir });
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir });
     try {
       const result = await tools.replay({ name: "nav" });
       expect(result.isError).toBe(true);
@@ -615,7 +630,7 @@ describe("app commands and waiting", () => {
       return "ignore";
     });
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, settleMs: 0 });
+    const tools = new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" } });
     const result = await tools.waitFor({ text: "Saved", timeout: 1, look: false });
     expect(textOf(result)).toContain("Done after 0.3 s");
   });
@@ -818,7 +833,6 @@ describe("look", () => {
       apps.push(app);
       const tools = new TaplineTools(host, {
         connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-        settleMs: 0,
         screenshots: "file",
         screenshotDir: dir,
       });
@@ -843,7 +857,6 @@ describe("look", () => {
       apps.push(app);
       const tools = new TaplineTools(host, {
         connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-        settleMs: 0,
         screenshots: "file",
         screenshotDir: dir,
         screenshotKeep: 2,
@@ -876,7 +889,6 @@ describe("no app connected", () => {
     hosts.push(host);
     const tools = new TaplineTools(host, {
       connect: { url: `ws://100.101.102.103:${port}/`, name: "Dev PC" },
-      settleMs: 0,
     });
     for (const result of [await tools.look({}), await tools.press({ target: { ref: "e1" } })]) {
       expect(result.isError).toBe(true);
@@ -894,7 +906,7 @@ describe("no app connected", () => {
   it("without an app, actions fail with Error not_connected and the setup steps", async () => {
     const { host } = await startHost();
     hosts.push(host);
-    const tools = new TaplineTools(host, { connect: { url: "ws://127.0.0.1:7210/", name: "Dev PC" }, settleMs: 0 });
+    const tools = new TaplineTools(host, { connect: { url: "ws://127.0.0.1:7210/", name: "Dev PC" } });
     const result = await tools.press({ target: { id: "save" } });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/^Error not_connected: No app is connected to Tapline\./);
@@ -916,7 +928,6 @@ describe("pair", () => {
     const imagePath = join(dir, `pair-${port}.png`);
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
-      settleMs: 0,
       pairImagePath: imagePath,
     });
     return { port, tools, imagePath };
