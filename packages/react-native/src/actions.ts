@@ -24,7 +24,7 @@ import {
   type TabFound,
 } from './inspect';
 import { openAlerts } from './alerts';
-import { sameFiber, type Fiber } from './fiber';
+import { firstHostChild, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import { onCommit } from './register';
 import { waitUntilStill } from './settle';
@@ -760,7 +760,7 @@ type Direction = (typeof DIRECTIONS)[number];
 
 export async function scroll(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; offset: { x: number; y: number }; settledMs: number }> {
+): Promise<{ element: TaplineElement; offset: { x: number; y: number }; moved: boolean; settledMs: number }> {
   const params = paramsOf(rawParams);
   const to = params.to;
   if (to !== undefined && to !== 'start' && to !== 'end') throw badParams('to must be "start" or "end"');
@@ -814,11 +814,16 @@ export async function scroll(
   const horizontal = findProp(entry.node, 'horizontal') === true;
   const metrics = readMetrics(candidates);
   const remembered = key ? rememberedOffsets.get(key) : undefined;
-  const current = metrics
-    ? horizontal
-      ? { x: metrics.offset, y: 0 }
-      : { x: 0, y: metrics.offset }
-    : (remembered ?? { x: 0, y: 0 });
+  // The real position first: Tapline's own record is wrong after a person scrolls or the system clamps.
+  const measured = await measureScrollState(entry);
+  const known = measured !== null || metrics !== null || remembered !== undefined;
+  const current = measured
+    ? measured.offset
+    : metrics
+      ? horizontal
+        ? { x: metrics.offset, y: 0 }
+        : { x: 0, y: metrics.offset }
+      : (remembered ?? { x: 0, y: 0 });
 
   const scrollTo = method(candidates, 'scrollTo');
   const scrollToOffset = method(candidates, 'scrollToOffset');
@@ -833,12 +838,18 @@ export async function scroll(
   } else if (to === 'end') {
     if (!scrollToEnd) throw new TaplineError('unsupported', 'This scroll view exposes no scrollToEnd');
     scrollToEnd({ animated: false });
-    if (metrics && metrics.contentLength !== null && metrics.visibleLength !== null) {
+    if (measured) {
+      offset = horizontal ? { x: measured.max.x, y: 0 } : { x: 0, y: measured.max.y };
+    } else if (metrics && metrics.contentLength !== null && metrics.visibleLength !== null) {
       const max = Math.max(0, metrics.contentLength - metrics.visibleLength);
       offset = horizontal ? { x: max, y: 0 } : { x: 0, y: max };
     }
   } else {
-    const visible = metrics?.visibleLength ?? (horizontal ? frame?.width : frame?.height) ?? getScreen().height;
+    const visible =
+      (measured ? (horizontal ? measured.visible.x : measured.visible.y) : null) ??
+      metrics?.visibleLength ??
+      (horizontal ? frame?.width : frame?.height) ??
+      getScreen().height;
     const vertical = direction === 'down' || direction === 'up';
     const areaSize = (vertical ? frame?.height : frame?.width) ?? visible;
     const amount =
@@ -851,7 +862,11 @@ export async function scroll(
     const dy = direction === 'down' ? amount : direction === 'up' ? -amount : 0;
     let x = Math.max(0, current.x + dx);
     let y = Math.max(0, current.y + dy);
-    if (metrics && metrics.contentLength !== null && metrics.visibleLength !== null) {
+    if (measured) {
+      // native clamps to [0, max]; the automatic inset (a negative resting offset) is out of reach
+      x = Math.min(x, measured.max.x);
+      y = Math.min(y, measured.max.y);
+    } else if (metrics && metrics.contentLength !== null && metrics.visibleLength !== null) {
       const max = Math.max(0, metrics.contentLength - metrics.visibleLength);
       if (horizontal) x = Math.min(x, max);
       else y = Math.min(y, max);
@@ -862,10 +877,44 @@ export async function scroll(
     else throw new TaplineError('unsupported', 'This scroll view exposes no scrollTo');
   }
 
-  if (key) rememberedOffsets.set(key, offset);
   const settledMs = await settle();
+  // Report where the content really is, not where we asked it to go.
+  const after = await measureScrollState(entry);
+  if (after) offset = after.offset;
+  const moved = !known && !after ? true : Math.abs(offset.x - current.x) >= 1 || Math.abs(offset.y - current.y) >= 1;
+  if (key) rememberedOffsets.set(key, offset);
   const { element } = await elementFor(entry, frame);
-  return { element, offset, settledMs };
+  return { element, offset, moved, settledMs };
+}
+
+interface ScrollState {
+  /** The real content offset; negative at rest when the system adds an inset. */
+  offset: { x: number; y: number };
+  /** The furthest offset a scrollTo can reach. */
+  max: { x: number; y: number };
+  visible: { x: number; y: number };
+}
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
+
+/**
+ * The scroll view's real offset, from where its content container sits inside it. On the new
+ * architecture `measureInWindow` includes the content offset, so scroll frame minus content frame
+ * is the offset. Null when either can't be measured (old architecture, nothing laid out).
+ */
+async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
+  const content = firstHostChild(entry.node.fiber);
+  if (!content) return null;
+  const [scrollFrame, contentFrame] = await Promise.all([measureFiber(entry.node.fiber), measureFiber(content)]);
+  if (!scrollFrame || !contentFrame) return null;
+  return {
+    offset: { x: round2(scrollFrame.x - contentFrame.x), y: round2(scrollFrame.y - contentFrame.y) },
+    max: {
+      x: Math.max(0, round2(contentFrame.width - scrollFrame.width)),
+      y: Math.max(0, round2(contentFrame.height - scrollFrame.height)),
+    },
+    visible: { x: scrollFrame.width, y: scrollFrame.height },
+  };
 }
 
 /* -------------------------------------------------------------------------- */

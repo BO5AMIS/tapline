@@ -18,7 +18,7 @@ import {
 } from '../src/actions';
 import { collectNodes, resetRefs, setHitTester, setMeasurer, tree } from '../src/inspect';
 import { isRecord, TaplineError, type TaplineElement } from '../src/types';
-import type { Fiber } from '../src/fiber';
+import { firstHostChild, sameFiber, type Fiber } from '../src/fiber';
 
 async function run<T>(fn: () => Promise<T>): Promise<T> {
   let result: T | undefined;
@@ -709,6 +709,13 @@ describe('toggle', () => {
 });
 
 describe('scroll', () => {
+  // These tests have no content frame to measure (the sample's content container is unmeasured), so
+  // the scroll falls back to Tapline's own record of the offset.
+  async function mountSample(): Promise<void> {
+    await mount(<SampleScreen spies={spies} />);
+    useFrames(SAMPLE_FRAMES, null);
+  }
+
   test('scrolls down by 80% of the view height and tracks the offset', async () => {
     await mountSample();
     const scrollTo = jest.fn();
@@ -848,6 +855,95 @@ describe('scroll', () => {
     removeScrollMethods(scrollObjects('main-scroll'));
     expect((await failure(scroll({ target: { testID: 'main-scroll' } }))).code).toBe('unsupported');
     expect((await failure(scroll({ target: { testID: 'main-scroll' }, to: 'end' }))).code).toBe('unsupported');
+  });
+
+  describe('from the real offset', () => {
+    const SCROLL_TOP = 59; // the safe area above the scroll view
+    const VISIBLE = 778;
+
+    /**
+     * A ScrollView whose content frame follows a "real" offset, the way Fabric reports it, and whose
+     * scrollTo clamps to [0, max] like native does (it never reaches the automatic inset).
+     */
+    async function mountMeasured(contentHeight: number, restingY: number) {
+      await mount(
+        <ScrollView testID="real-scroll">
+          <Text>content</Text>
+        </ScrollView>,
+      );
+      const scrollFiber = collectNodes().find((n) => isRecord(n.fiber.memoizedProps) && n.fiber.memoizedProps.testID === 'real-scroll')!.fiber;
+      const contentFiber = firstHostChild(scrollFiber);
+      if (!contentFiber) throw new Error('no content container');
+      const max = Math.max(0, contentHeight - VISIBLE);
+      const real = { x: 0, y: restingY };
+      const clamp = (value: number, upper: number): number => Math.min(Math.max(value, 0), upper);
+      const scrollTo = jest.fn((arg: { x: number; y: number }) => {
+        real.x = clamp(arg.x, 0);
+        real.y = clamp(arg.y, max);
+      });
+      const scrollToEnd = jest.fn(() => {
+        real.y = max;
+      });
+      const instance = hostInstance('real-scroll');
+      instance.scrollTo = scrollTo;
+      instance.scrollToEnd = scrollToEnd;
+      setMeasurer(async (fiber) => {
+        if (sameFiber(fiber, scrollFiber)) return frame(0, SCROLL_TOP, 400, VISIBLE);
+        if (sameFiber(fiber, contentFiber)) return frame(-real.x, SCROLL_TOP - real.y, 400, contentHeight);
+        return frame(0, 0, 10, 10);
+      });
+      return { real, scrollTo, scrollToEnd };
+    }
+
+    test('from the resting inset of -59, down moves to 0, and a further up moves nothing', async () => {
+      const { scrollTo } = await mountMeasured(VISIBLE, -59);
+      const target = { testID: 'real-scroll' };
+      const down = await run(() => scroll({ target, direction: 'down', fraction: 0.5 }));
+      expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 0, animated: false }); // -59 + 389, clamped to the end
+      expect(down.offset).toEqual({ x: 0, y: 0 });
+      expect(down.moved).toBe(true);
+
+      const up = await run(() => scroll({ target, direction: 'up', fraction: 0.5 }));
+      expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 0, animated: false });
+      expect(up.offset).toEqual({ x: 0, y: 0 });
+      expect(up.moved).toBe(false);
+    });
+
+    test('a long list moves by the requested share and reports the real offset', async () => {
+      const { scrollTo, real } = await mountMeasured(3000, 0);
+      const target = { testID: 'real-scroll' };
+      const first = await run(() => scroll({ target, direction: 'down', fraction: 0.5 }));
+      expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 389, animated: false });
+      expect(first.offset).toEqual({ x: 0, y: 389 });
+      expect(first.moved).toBe(true);
+
+      // a person scrolls; Tapline's own record is out of date and must not be used
+      real.y = 1000;
+      const second = await run(() => scroll({ target, direction: 'down', fraction: 0.5 }));
+      expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 1389, animated: false });
+      expect(second.offset).toEqual({ x: 0, y: 1389 });
+
+      const clamped = await run(() => scroll({ target, direction: 'down', amount: 5000 }));
+      expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, y: 2222, animated: false }); // content - visible
+      expect(clamped.offset).toEqual({ x: 0, y: 2222 });
+      const atEnd = await run(() => scroll({ target, direction: 'down', fraction: 0.5 }));
+      expect(atEnd.moved).toBe(false);
+      expect(atEnd.offset).toEqual({ x: 0, y: 2222 });
+    });
+
+    test('to: end reports the real end offset; to: start reports 0', async () => {
+      const { scrollToEnd } = await mountMeasured(3000, 0);
+      const target = { testID: 'real-scroll' };
+      const end = await run(() => scroll({ target, to: 'end' }));
+      expect(scrollToEnd).toHaveBeenCalledWith({ animated: false });
+      expect(end.offset).toEqual({ x: 0, y: 2222 });
+      expect(end.moved).toBe(true);
+      expect((await run(() => scroll({ target, to: 'end' }))).moved).toBe(false);
+      const start = await run(() => scroll({ target, to: 'start' }));
+      expect(start.offset).toEqual({ x: 0, y: 0 });
+      expect(start.moved).toBe(true);
+      expect((await run(() => scroll({ target, to: 'start' }))).moved).toBe(false);
+    });
   });
 
   test('validates params; no scroll view is not_found; non-scrollable target is not_actionable', async () => {

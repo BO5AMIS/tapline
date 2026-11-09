@@ -748,6 +748,7 @@ export class TaplineTools {
     describe: (result: unknown) => string,
     withLook: boolean | undefined,
     screenshot?: boolean,
+    extraNotes?: (result: unknown) => string[],
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -795,6 +796,13 @@ export class TaplineTools {
           all.splice(end, 0, settled);
           response = { ...response, content: [{ type: "text", text: all.join("\n") }, ...rest] };
         }
+      }
+    }
+    const extra = extraNotes?.(result) ?? [];
+    if (extra.length > 0) {
+      const [first, ...rest] = response.content;
+      if (first !== undefined && first.type === "text") {
+        response = { ...response, content: [{ type: "text", text: [first.text.trimEnd(), ...extra].join("\n") }, ...rest] };
       }
     }
     if (this.recording !== null && !this.replaying) {
@@ -1343,6 +1351,18 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      (r) => {
+        const moved = typeof r === "object" && r !== null && "moved" in r ? (r as { moved: unknown }).moved : undefined;
+        if (moved !== false) return [];
+        const direction = args.to !== undefined ? (args.to === "start" ? "up" : "down") : (args.direction ?? "down");
+        if (direction === "up") {
+          return [
+            "Note: the scroll view is already at the top (as far as Tapline can scroll it; a person's swipe can reach a little further when the system adds an inset).",
+          ];
+        }
+        if (direction === "left") return ["Note: the scroll view is already at the start."];
+        return ["Note: the scroll view is already at the end."];
+      },
     );
   }
 

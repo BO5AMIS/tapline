@@ -62,6 +62,16 @@ export function propsOf(fiber: Fiber): UnknownRecord {
   return isRecord(fiber.memoizedProps) ? fiber.memoizedProps : {};
 }
 
+/** The first host fiber below `fiber` in tree order (a scroll view's content container); null when none. */
+export function firstHostChild(fiber: Fiber): Fiber | null {
+  for (let child = fiber.child; child; child = child.sibling) {
+    if (child.tag === HostComponent) return child;
+    const nested = firstHostChild(child);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 /** Best-effort display name of a component type; null when anonymous. */
 export function componentName(type: unknown, depth = 0): string | null {
   if (depth > 4 || type == null) return null;

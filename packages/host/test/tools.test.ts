@@ -1161,6 +1161,38 @@ describe("other tools", () => {
     expect(last).toEqual({ to: "end" });
   });
 
+  it("scroll that moved nothing ends with a note after Settled in, and reports the real offset", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "scroll"
+        ? { ok: true, result: { element: TREE.elements[0], offset: { x: 0, y: 0 }, moved: false, settledMs: 310 } }
+        : defaultHandler(req),
+    )();
+    const up = textOf(await tools.scroll({ direction: "up" })).split("\n");
+    expect(up[0]).toContain('Offset now {"x":0,"y":0}.');
+    expect(up.at(-2)).toBe("Settled in 0.31 s.");
+    expect(up.at(-1)).toBe(
+      "Note: the scroll view is already at the top (as far as Tapline can scroll it; a person's swipe can reach a little further when the system adds an inset).",
+    );
+    expect(textOf(await tools.scroll({ to: "start" })).split("\n").at(-1)).toMatch(/already at the top/);
+    expect(textOf(await tools.scroll({ direction: "down" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
+    expect(textOf(await tools.scroll({ to: "end" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
+    expect(textOf(await tools.scroll({ direction: "left" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the start.");
+    expect(textOf(await tools.scroll({ direction: "right" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
+    expect(textOf(await tools.scroll({ direction: "down", look: false })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
+  });
+
+  it("scroll that moved adds no note", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "scroll"
+        ? { ok: true, result: { element: TREE.elements[0], offset: { x: 0, y: 389 }, moved: true, settledMs: 310 } }
+        : defaultHandler(req),
+    )();
+    const text = textOf(await tools.scroll({ direction: "down" }));
+    expect(text).toContain('Offset now {"x":0,"y":389}.');
+    expect(text).not.toContain("already at");
+    expect(text.split("\n").at(-1)).toBe("Settled in 0.31 s.");
+  });
+
   it("scroll schema refuses an amount outside 0.1 to 1", () => {
     const schema = z.object(toolShapes.scroll);
     expect(schema.safeParse({ amount: 1.5 }).success).toBe(false);
