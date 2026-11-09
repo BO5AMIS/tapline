@@ -1377,6 +1377,6 @@ export class TaplineTools {
     if (this.recording !== null && !this.replaying) {
       this.recording.steps.push({ method: "sleep", params: { seconds: args.seconds } });
     }
-    return this.withLook(session, `Waited ${args.seconds}s.`);
+    return this.withLook(session, `Waited ${args.seconds.toFixed(1)} s.`);
   }
 }

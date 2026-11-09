@@ -119,6 +119,29 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
   return lines.join("\n");
 }
 
+/** A gone element as `<role> "<name>"`. It omits the ref and position on purpose: neither means anything now. */
+function describeGone(element: TreeElement): string {
+  const kind = roleOf(element);
+  const text = element.text ?? "";
+  const name = text !== "" ? text : (element.label ?? "");
+  const id = element.testID ?? "";
+  const rest = name !== "" ? quote(name) : id !== "" ? `id=${id}` : "";
+  const line = [kind, rest].filter((part) => part !== null && part !== "").join(" ");
+  return line !== "" ? line : "element";
+}
+
+/** An old value as it would have been shown: positions as `@x,y WxH`, other values as in an element line. */
+function formatWas(key: string, value: unknown): string {
+  if (key === "frame" && typeof value === "object" && value !== null) {
+    const { x, y, width, height } = value as Record<string, unknown>;
+    if ([x, y, width, height].every((n) => typeof n === "number")) {
+      const r = (n: unknown): number => Math.round(n as number);
+      return `@${r(x)},${r(y)} ${r(width)}x${r(height)}`;
+    }
+  }
+  return formatValue(value);
+}
+
 /** Most moved elements listed one by one; more read as a scroll. */
 const MAX_MOVED_LINES = 5;
 
@@ -140,7 +163,7 @@ export function formatChanges(tree: TreeResult): string | null {
     const element = byRef.get(ref);
     if (element !== undefined) lines.push(`+ ${formatElement(element)}`);
   }
-  for (const element of changes.removed) lines.push(`- ${describeElement(element).replace(/^\S+ ?/, "")}`);
+  for (const element of changes.removed) lines.push(`- ${describeGone(element)}`);
   for (const { ref, was } of changes.changed) {
     const element = byRef.get(ref);
     if (element === undefined) continue;
@@ -148,8 +171,8 @@ export function formatChanges(tree: TreeResult): string | null {
     const [only] = entries;
     const before =
       entries.length === 1 && only !== undefined
-        ? formatValue(only[1])
-        : entries.map(([key, value]) => `${key}=${formatValue(value)}`).join(", ");
+        ? formatWas(only[0], only[1])
+        : entries.map(([key, value]) => `${key}=${formatWas(key, value)}`).join(", ");
     lines.push(`~ ${formatElement(element)} (was ${before})`);
   }
   if (changes.moved.length > MAX_MOVED_LINES) {

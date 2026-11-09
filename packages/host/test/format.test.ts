@@ -255,6 +255,23 @@ describe("formatChanges (AGENT-TOOLS §3.1)", () => {
     expect(formatChanges(withChanges(2, { ...none, removed: [gone] }))).toBe('Same screen. Changes:\n- text "Loading"');
   });
 
+  it("never prints an empty gone line", () => {
+    const named = { ref: "e8", type: "Text", role: "text", testID: "spinner" };
+    const bare = { ref: "e9" };
+    const noRole = { ref: "e7", text: "Hi" };
+    const out = formatChanges(withChanges(2, { ...none, removed: [named, bare, noRole] }));
+    expect(out).toBe('Same screen. Changes:\n- text id=spinner\n- element\n- "Hi"');
+  });
+
+  it("shows an old frame as a position, and an old checked as a value", () => {
+    const one = withChanges(2, { ...none, changed: [{ ref: "e2", was: { frame: { x: 0, y: 10.4, width: 100, height: 10 } } }] });
+    expect(formatChanges(one)).toContain("(was @0,10 100x10)");
+    const many = withChanges(2, { ...none, changed: [{ ref: "e2", was: { frame: { x: 0, y: 10, width: 100, height: 10 }, text: "a" } }] });
+    expect(formatChanges(many)).toContain('(was frame=@0,10 100x10, text="a")');
+    const checked = withChanges(2, { ...none, changed: [{ ref: "e2", was: { checked: false } }] });
+    expect(formatChanges(checked)).toContain("(was false)");
+  });
+
   it("counts many moved elements, and lists a few", () => {
     const many = formatChanges(withChanges(9, { ...none, moved: ["e1", "e2", "e3", "e4", "e5", "e6", "e7"] }));
     expect(many).toBe("Same screen. Changes:\n↕ 7 elements moved");

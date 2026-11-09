@@ -136,11 +136,16 @@ describe("press", () => {
             ok: true,
             result: { ...TREE, changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] } },
           }
-        : defaultHandler(req),
+        : req.method === "press"
+          ? { ok: true, result: { element: TREE.elements[0], settledMs: 310 } }
+          : defaultHandler(req),
     )();
     await tools.look({ screenshot: false });
     const text = textOf(await tools.press({ target: { id: "login-button" } }));
     const lines = text.split("\n");
+    expect(lines.at(-1)).toBe("Settled in 0.31 s.");
+    expect(text).not.toContain("\n\n");
+    expect(textOf(await tools.press({ target: { id: "login-button" }, look: false })).split("\n")).toHaveLength(1);
     expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
     expect(lines[1]).toBe("Same screen. Changes:");
     expect(text).not.toContain("Unchanged elements keep their refs");
@@ -1055,7 +1060,7 @@ describe("other tools", () => {
   it("wait returns a fresh look", async () => {
     const { tools } = await setup(defaultHandler)();
     const result = await tools.wait({ seconds: 0.1 });
-    expect(textOf(result)).toContain("Waited 0.1s.");
+    expect(textOf(result)).toContain("Waited 0.1 s.");
     expect(textOf(result)).toContain("e3 button");
   });
 });
