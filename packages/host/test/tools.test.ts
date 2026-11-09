@@ -828,15 +828,64 @@ describe("changes after actions", () => {
         const wants = typeof req.params === "object" && req.params !== null && (req.params as { changes?: unknown }).changes === true;
         return { ok: true, result: wants ? { ...EMPTY, changes: { ...CHANGES, removed: [CHANGES.removed[0]] } } : BASKET };
       }
+      if (req.method === "press") return { ok: true, result: { element: TREE.elements[0], settledMs: 310 } };
       return defaultHandler(req);
     })();
     await tools.look({ screenshot: false });
     const text = textOf(await tools.tap({ target: { ref: "e3" } }));
     expect(text).not.toContain("Same screen");
     expect(text).toContain("(nothing visible; the app may still be loading)");
-    expect(text).toContain(
-      "Note: nothing of the app is visible: something outside it may cover it (a system sign-in or share sheet, a native modal) that Tapline can't see; ask the user, or use Tapwright.",
+    const lines = text.trimEnd().split("\n");
+    expect(lines.at(-1)).toBe(
+      "Note: something outside the app (a system sheet or browser) may cover it. Tapline can't see it: ask the user, or use Tapwright.",
     );
+    expect(lines.at(-2)).toMatch(/^Settled in /);
+  });
+
+  const ALERT = {
+    kind: "alert" as const,
+    title: "Delete?",
+    message: null,
+    buttons: [{ text: "OK", style: "default" as const }],
+    standIn: false,
+  };
+  const NO_CHANGES = { sameRoute: true, added: [], removed: [], changed: [], moved: [] };
+
+  it("puts the alert's note at the end, after Settled in, and the Alert: line first", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "tree"
+        ? { ok: true, result: { ...BASKET, alerts: [ALERT] } }
+        : req.method === "press"
+          ? { ok: true, result: { element: TREE.elements[0], settledMs: 310 } }
+          : defaultHandler(req),
+    )();
+    const look = textOf(await tools.look({ screenshot: false })).split("\n");
+    expect(look.at(-1)).toMatch(/^Note: an OS alert:/);
+    expect(look.findIndex((l) => l.startsWith("Alert:"))).toBe(3);
+    const lines = textOf(await tools.tap({ target: { ref: "e4" } })).trimEnd().split("\n");
+    expect(lines.at(-1)).toMatch(/^Note: an OS alert:/);
+    expect(lines.at(-2)).toMatch(/^Settled in /);
+    expect(lines.some((l) => l.startsWith("Alert:"))).toBe(true);
+  });
+
+  it("says Alert: gone in the next change block after an alert closed, once", async () => {
+    let alertOpen = true;
+    const { tools } = await setup((req) => {
+      if (req.method === "tree") {
+        const wants = typeof req.params === "object" && req.params !== null && (req.params as { changes?: unknown }).changes === true;
+        const open = alertOpen ? { alerts: [ALERT] } : {};
+        return { ok: true, result: wants ? { ...BASKET, ...open, changes: NO_CHANGES } : { ...BASKET, ...open } };
+      }
+      if (req.method === "press") return { ok: true, result: { element: TREE.elements[0], settledMs: 310 } };
+      return defaultHandler(req);
+    })();
+    await tools.look({ screenshot: false });
+    alertOpen = false;
+    const first = textOf(await tools.tap({ target: { ref: "e4" } })).split("\n");
+    expect(first.slice(1, 3)).toEqual(["Same screen. Changes:", "Alert: gone"]);
+    expect(first.join("\n")).not.toContain("No visible change");
+    expect(first.join("\n")).not.toContain("Note: an OS alert");
+    expect(textOf(await tools.tap({ target: { ref: "e4" } }))).not.toContain("Alert: gone");
   });
 
   it("says when nothing visible changed", async () => {
@@ -1162,7 +1211,7 @@ describe("other tools", () => {
     )();
     const result = await tools.typeText({ text: "hi", target: { id: "email" }, submit: true, look: false });
     expect(app.requests[0]?.params).toEqual({ text: "hi", replace: true, submit: true, target: { testID: "email" } });
-    expect(textOf(result)).toBe('Typed into e2 TextInput and submitted. Value is now "hi".');
+    expect(textOf(result)).toBe('Typed into e2 input and submitted. Value is now "hi".');
   });
 
   it("scroll rejects `to` combined with direction", async () => {

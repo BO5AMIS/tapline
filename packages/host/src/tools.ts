@@ -7,7 +7,7 @@ import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
-import { describeElement, formatChanges, formatElement, formatLogs, formatTree } from "./format.js";
+import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatTree } from "./format.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
 import {
   elementSchema,
@@ -447,6 +447,8 @@ export class TaplineTools {
   private readonly shotFiles: string[] = [];
   /** Sessions this agent has had an element list for (so later lists can be just the changes). */
   private readonly listed = new Set<string>();
+  /** Sessions whose previous answer had an alert open, so the next change block can say `Alert: gone`. */
+  private readonly alertOpen = new Set<string>();
   /** The route of the latest element list, for recording and checking replays. */
   private lastLookRoute: string[] | undefined;
   /** A person acted in the viewer since the agent's last full list: `{ref}` targets fail with `stale`. */
@@ -689,16 +691,20 @@ export class TaplineTools {
     this.listed.add(sid);
     this.lastLookRoute = tree.route?.names;
     if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
-    const changesText = askChanges ? formatChanges(tree) : null;
+    const alertsNow = (tree.alerts ?? []).length > 0;
+    const alertGone = this.alertOpen.has(sid) && !alertsNow;
+    if (alertsNow) this.alertOpen.add(sid);
+    else this.alertOpen.delete(sid);
+    const changesText = askChanges ? formatChanges(tree, { alertGone }) : null;
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
-    const notes: string[] = [];
+    const notes: string[] = [...alertNotes(tree)];
     if (tree.elements.length === 0) {
       notes.push(
-        "Note: nothing of the app is visible: something outside it may cover it (a system sign-in or share sheet, a native modal) that Tapline can't see; ask the user, or use Tapwright.",
+        "Note: something outside the app (a system sheet or browser) may cover it. Tapline can't see it: ask the user, or use Tapwright.",
       );
     }
     const shot = await shotPromise;

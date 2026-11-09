@@ -495,6 +495,30 @@ describe('target resolution', () => {
       expect(error.message).not.toMatch(/scroll/i);
     });
 
+    test('containers stop matching text targets; their own label still matches a label target', async () => {
+      await mount(
+        <View testID="card" accessibilityLabel="Profile card">
+          <Text testID="name">Ada Lovelace</Text>
+        </View>,
+      );
+      useFrames({});
+      const { entry } = await resolveTarget({ text: 'Ada' });
+      expect(entry.info.testID).toBe('name');
+      expect((await resolveTarget({ label: 'profile card' })).entry.info.testID).toBe('card');
+      expect((await failure(resolveTarget({ text: 'Profile card' }))).code).toBe('not_found');
+    });
+
+    test('a container with no role is named other in refusals', async () => {
+      await mount(
+        <View testID="box" accessibilityLabel="Box">
+          <Text>hi</Text>
+        </View>,
+      );
+      useFrames({});
+      const error = await failure(press({ target: { testID: 'box' } }));
+      expect(error.message).toBe('no_action: e1 other "Box" has no tap action');
+    });
+
     test('a point on plain text inside a scroll view takes no tap', async () => {
       await mountWelcome();
       const error = await failure(run(() => press({ target: { x: 100, y: 534 } })));
@@ -505,7 +529,9 @@ describe('target resolution', () => {
       const flip = await failure(run(() => toggle({ target: { x: 100, y: 534 } })));
       expect(flip.message).toMatch(/takes a toggle\./);
       const text = await failure(run(() => typeText({ target: { x: 100, y: 534 }, text: 'a' })));
-      expect(text.message).toMatch(/takes a text input\./);
+      expect(text.message).toMatch(/takes typing\./);
+      const scrolled = await failure(run(() => scroll({ target: { x: 5000, y: 5000 } })));
+      expect(scrolled.message).toBe('no_action: Nothing at (5000, 5000) takes a scroll.');
     });
 
     test('a point on a Pressable still taps it; a point on plain text scrolls the scroll view', async () => {
@@ -535,7 +561,7 @@ describe('target resolution', () => {
       const disabled = await failure(press({ target: { testID: 'disabled-button' } }));
       expect(disabled.message).toMatch(/^disabled: e\d+ button "Unavailable" is disabled/);
       const notInput = await failure(typeText({ target: { testID: 'state-line' }, text: 'x' }));
-      expect(notInput.message).toMatch(/^no_action: e\d+ text "name=.*" is not a text input/);
+      expect(notInput.message).toMatch(/^no_action: e\d+ text "name=.*" is not an input$/);
       const noValue = await failure(
         (async () => {
           await unmountAll();
@@ -562,16 +588,22 @@ describe('target resolution', () => {
       setHitTester(async () => alertNode.fiber);
       try {
         const error = await failure(run(() => press({ target: { testID: 'save' } })));
-        expect(error.message).toMatch(/^covered: e\d+ button "Continue" is covered at \(70, 620\) by e\d+ View id=tapline-alert/);
+        expect(error.message).toMatch(/^covered: e\d+ button "Continue" is covered at \(70, 620\) by e\d+ other id=tapline-alert/);
       } finally {
         setHitTester(null);
       }
     });
 
-    test('not_found for an id reads id "..."', async () => {
+    test('not_found says what was looked for, per kind of target (AGENT-TOOLS §4)', async () => {
       await mountSample();
-      const error = await failure(resolveTarget({ testID: 'no-such-id' }));
-      expect(error.message).toBe('No element matches id "no-such-id"');
+      const byId = await failure(resolveTarget({ testID: 'no-such-id' }));
+      expect(byId.message).toBe('nothing on screen has id "no-such-id"; look, then pick another target.');
+      const byLabel = await failure(resolveTarget({ label: 'No such label' }));
+      expect(byLabel.message).toBe('nothing on screen has label "No such label"; use {text} for a partial match, or look.');
+      const byText = await failure(resolveTarget({ text: 'No such text' }));
+      expect(byText.message).toBe('nothing on screen shows "No such text"; look, then pick another target.');
+      const byRef = await failure(resolveTarget({ ref: 'e999' }));
+      expect(byRef.message).toBe("e999 isn't on screen any more; look again.");
     });
   });
 
@@ -707,12 +739,16 @@ describe('type', () => {
     const error = await failure(run(() => typeText({ text: 'x' })));
     expect(error.code).toBe('ambiguous');
     expect(error.refs).toHaveLength(2);
+    expect(error.message).toBe('2 inputs on screen; pass a target to pick one, and none is focused:');
+    expect(error.candidates).toHaveLength(2);
   });
 
   test('no inputs on screen: not_found; non-input target: not_actionable; bad text: bad_params', async () => {
     await mount(<Text testID="plain">hi</Text>);
     useFrames({});
-    expect((await failure(typeText({ text: 'x' }))).code).toBe('not_found');
+    const none = await failure(typeText({ text: 'x' }));
+    expect(none.code).toBe('not_found');
+    expect(none.message).toBe('No input on screen');
     const notInput = await failure(typeText({ target: { testID: 'plain' }, text: 'x' }));
     expect(notInput.code).toBe('not_actionable');
     expect(notInput.message).toMatch(/^no_action: /);

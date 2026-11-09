@@ -71,16 +71,47 @@ describe('tree', () => {
     expect(byTestID(elements, 'main-scroll')).toMatchObject({ type: 'ScrollView', actions: ['scroll'] });
     expect(byTestID(elements, 'feed')).toMatchObject({ type: 'FlatList', actions: ['scroll'] });
 
-    // nested components: the Card's Text is its own element, the card carries both the label text and its children
+    // nested components: the Card's Text is its own element; the card is a plain container, so it
+    // quotes none of its children's text (own text only, AGENT-TOOLS §3.3)
     const title = elements.find((element) => element.text === 'Account' && element.type === 'Text');
     expect(title).toBeDefined();
-    expect(byTestID(elements, 'account-card').text).toContain('Account');
-    expect(byTestID(elements, 'account-card').text).toContain('Log in');
+    expect(byTestID(elements, 'account-card').text).toBe('');
+    expect(byTestID(elements, 'main-scroll').text).toBe('');
 
     // the Text inside a Pressable is folded into the Pressable
     expect(elements.filter((element) => element.type === 'Text' && element.text === 'Log in')).toHaveLength(0);
     // FlatList rows are listed
     expect(elements.some((element) => element.type === 'Text' && element.text === 'item one')).toBe(true);
+  });
+
+  test('own text only: an accessible element carries its inner text, a plain container quotes only its label', async () => {
+    await mount(
+      <View testID="plain" accessibilityLabel="Card">
+        <View testID="bare">
+          <Text testID="inner">Hello there</Text>
+        </View>
+        <Pressable testID="wrapper" onPress={() => {}}>
+          <View>
+            <Text>Log</Text>
+            <Text> in</Text>
+          </View>
+        </Pressable>
+        <View testID="marked" accessible>
+          <Text>Marked text</Text>
+        </View>
+        <View testID="pressless" accessible={false}>
+          <Text>Not read as one</Text>
+        </View>
+      </View>,
+    );
+    useFrames({});
+    const { elements } = await tree({ all: true });
+    expect(byTestID(elements, 'plain')).toMatchObject({ text: '', label: 'Card' });
+    expect(byTestID(elements, 'bare').text).toBe('');
+    expect(byTestID(elements, 'inner').text).toBe('Hello there');
+    expect(byTestID(elements, 'wrapper')).toMatchObject({ text: 'Log in', role: 'button' });
+    expect(byTestID(elements, 'marked').text).toBe('Marked text');
+    expect(byTestID(elements, 'pressless').text).toBe('');
   });
 
   test('elements come in tree order with refs e1, e2, ...', async () => {

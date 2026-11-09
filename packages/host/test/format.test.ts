@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatChanges, formatElement, formatLogs, formatTree } from "../src/format.js";
+import { alertNotes, formatChanges, formatElement, formatLogs, formatTree } from "../src/format.js";
 import type { TreeResult } from "../src/protocol.js";
 
 const tree: TreeResult = {
@@ -51,12 +51,12 @@ describe("formatElement", () => {
   });
 
   it("omits empty fields", () => {
-    expect(formatElement(tree.elements[0]!)).toBe('e1 Text "Welcome back" @24,120 200x32');
+    expect(formatElement(tree.elements[0]!)).toBe('e1 text "Welcome back" @24,120 200x32');
   });
 
   it("shows value, label when it differs, disabled and checked", () => {
     expect(formatElement(tree.elements[1]!)).toBe(
-      'e2 TextInput "Email" id=email value="me@example.com" @24,200 354x44 [type]',
+      'e2 input "Email" id=email value="me@example.com" @24,200 354x44 [type]',
     );
     expect(formatElement(tree.elements[3]!)).toBe('e4 switch "Remember me" disabled checked=true @330,301 51x31 [toggle]');
   });
@@ -107,8 +107,30 @@ describe("element lines (AGENT-TOOLS §3.3)", () => {
     expect(formatElement({ ...base, role: from }).split(" ")[1]).toBe(to);
   });
 
-  it("falls back to the component name when there's no role", () => {
-    expect(formatElement({ ...base, role: null, type: "FancyThing" }).split(" ")[1]).toBe("FancyThing");
+  it.each([
+    ["Image", [], "image"],
+    ["TextInput", [], "input"],
+    ["Switch", [], "switch"],
+    ["Text", [], "text"],
+    ["ScrollView", [], "scroll"],
+    ["FlatList", [], "scroll"],
+    ["SectionList", [], "scroll"],
+    ["VirtualizedList", [], "scroll"],
+    ["Pressable", ["press"], "button"],
+    ["TouchableOpacity", ["press"], "button"],
+    ["TouchableHighlight", ["press"], "button"],
+    ["Button", ["press"], "button"],
+    ["Pressable", [], "other"],
+    ["Button", [], "other"],
+    ["View", [], "other"],
+    ["FancyThing", [], "other"],
+    ["FancyThing", ["press"], "other"],
+  ])("with no role, a %s with actions %j reads as %s", (type, actions, expected) => {
+    expect(formatElement({ ...base, role: null, type, actions }).split(" ")[1]).toBe(expected);
+  });
+
+  it("falls back to other, not the component name, for a container with no role", () => {
+    expect(formatElement({ ...base, role: null, type: "FancyThing", actions: [] })).toMatch(/^e3 other /);
   });
 
   it("lists type without submit, and scroll and toggle as they are", () => {
@@ -196,12 +218,19 @@ describe("formatTree", () => {
     const lines = formatTree(withStatus).split("\n");
     expect(lines[1]).toBe("Route: workouts");
     expect(lines[2]).toBe("Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)]");
-    expect(lines[3]).toBe("Note: an OS alert: Tapline can't tap it; ask the user to tap one, or use Tapwright.");
-    expect(lines[4]).toBe("Network: 2 requests in flight");
+    expect(lines[3]).toBe("Network: 2 requests in flight");
+    // The alert's note is not a header line: it goes at the end of the answer with the other notes.
+    expect(formatTree(withStatus)).not.toContain("Note:");
+    expect(alertNotes(withStatus)).toEqual([
+      "Note: an OS alert: Tapline can't tap it; ask the user to tap one, or use Tapwright.",
+    ]);
 
-    const standIn = formatTree({ ...withStatus, alerts: [{ ...withStatus.alerts[0]!, standIn: true }], network: undefined });
-    expect(standIn).toContain("Note: Tapline's stand-in alert: tap its buttons like any element.");
+    const standInTree = { ...withStatus, alerts: [{ ...withStatus.alerts[0]!, standIn: true }], network: undefined };
+    const standIn = formatTree(standInTree);
     expect(standIn).not.toContain("Network:");
+    expect(standIn).not.toContain("Note:");
+    expect(alertNotes(standInTree)).toEqual(["Note: Tapline's stand-in alert: tap its buttons like any element."]);
+    expect(alertNotes(tree)).toEqual([]);
 
     const changes = formatChanges({
       ...withStatus,
@@ -209,6 +238,29 @@ describe("formatTree", () => {
     });
     expect(changes).toContain('Alert: "Delete workout?"');
     expect(changes).toContain("Network: 2 requests in flight");
+    expect(changes).not.toContain("Note:");
+  });
+
+  it("says Alert: gone in a change block when an alert closed, right after the first line", () => {
+    const withNetwork = {
+      ...tree,
+      network: { inFlight: 1 },
+      changes: { sameRoute: true, added: [], removed: [], changed: [{ ref: "e1", was: { text: "Hi" } }], moved: [] },
+    };
+    expect(formatChanges(withNetwork, { alertGone: true })!.split("\n").slice(0, 3)).toEqual([
+      "Same screen. Changes:",
+      "Alert: gone",
+      "Network: 1 request in flight",
+    ]);
+    expect(formatChanges(withNetwork)).not.toContain("Alert: gone");
+    // An alert that is still open is shown, not "gone".
+    const open = { ...withNetwork, alerts: [{ kind: "alert" as const, title: "Hi", message: null, buttons: [], standIn: true }] };
+    expect(formatChanges(open, { alertGone: true })).not.toContain("Alert: gone");
+  });
+
+  it("an alert closing alone is a change, not 'No visible change'", () => {
+    const t = { ...tree, changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] } };
+    expect(formatChanges(t, { alertGone: true })).toBe("Same screen. Changes:\nAlert: gone");
   });
 
   it("shows a native tab without a position", () => {

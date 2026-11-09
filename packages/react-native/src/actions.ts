@@ -146,12 +146,27 @@ const ROLE_ALIASES: ReadonlyMap<string, string> = new Map([
   ['summary', 'text'],
 ]);
 
+/** Component types that read as a shared role when the app gives none (copy of `TYPE_ROLES` in the host's format.ts). */
+const TYPE_ROLES: ReadonlyMap<string, string> = new Map([
+  ['Image', 'image'],
+  ['TextInput', 'input'],
+  ['Switch', 'switch'],
+  ['Text', 'text'],
+  ['ScrollView', 'scroll'],
+  ['FlatList', 'scroll'],
+  ['SectionList', 'scroll'],
+  ['VirtualizedList', 'scroll'],
+]);
+
 function roleName(info: Entry['info']): string {
   if (info.role !== null && info.role !== '') {
     const lower = info.role.toLowerCase();
     return ROLE_ALIASES.get(lower) ?? lower;
   }
-  return info.type;
+  const byType = TYPE_ROLES.get(info.type);
+  if (byType !== undefined) return byType;
+  const pressable = info.type === 'Pressable' || info.type === 'Button' || info.type.startsWith('Touchable');
+  return pressable && info.actions.includes('press') ? 'button' : 'other';
 }
 
 /** An element as element lines name it: `e6 button "Continue"`, or `id=<testID>` without text or label. */
@@ -275,6 +290,22 @@ function describeTarget(target: ParsedTarget): string {
   }
 }
 
+/** AGENT-TOOLS §4: what a `not_found` says, per kind of target. */
+function notFoundMessage(target: ParsedTarget): string {
+  switch (target.kind) {
+    case 'testID':
+      return `nothing on screen has id "${target.value}"; look, then pick another target.`;
+    case 'label':
+      return `nothing on screen has label "${target.value}"; use {text} for a partial match, or look.`;
+    case 'text':
+      return `nothing on screen shows "${target.value}"; look, then pick another target.`;
+    case 'ref':
+      return `${target.ref} isn't on screen any more; look again.`;
+    case 'point':
+      return `nothing on screen at (${target.x}, ${target.y}); look, then pick another target.`;
+  }
+}
+
 function matchEntries(snapshot: Snapshot, target: ParsedTarget): Entry[] {
   const pool = snapshot.entries.filter((entry) => entry.info.interesting);
   switch (target.kind) {
@@ -303,12 +334,13 @@ function matchEntries(snapshot: Snapshot, target: ParsedTarget): Entry[] {
 /** What the caller means to do; a point target then picks only an element that does it. */
 type ActionHint = 'press' | 'longPress' | 'toggle' | 'scroll' | 'type';
 
+/** What a point takes, as `Nothing at (x, y) takes <this>.` reads (AGENT-TOOLS §4). */
 const HINT_VERBS: Record<ActionHint, string> = {
-  press: 'tap',
-  longPress: 'long press',
-  toggle: 'toggle',
-  scroll: 'scroll',
-  type: 'text input',
+  press: 'a tap',
+  longPress: 'a long press',
+  toggle: 'a toggle',
+  scroll: 'a scroll',
+  type: 'typing',
 };
 
 /** The candidates of an `ambiguous` error as full elements, so the agent sees role, id, actions and place. */
@@ -325,12 +357,7 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
   if (target.kind === 'ref') {
     const fiber = fiberForRef(target.ref);
     const entry = fiber ? snapshot.entries.find((e) => sameFiber(e.node.fiber, fiber)) : undefined;
-    if (!entry) {
-      throw new TaplineError(
-        'not_found',
-        `Element ${target.ref} is not on screen (refs last until the next tree call); call tree again.`,
-      );
-    }
+    if (!entry) throw new TaplineError('not_found', notFoundMessage(target));
     return { snapshot, entry };
   }
 
@@ -349,8 +376,8 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
       if (frame && frameContains(frame, target.x, target.y)) hit = entry; // later in tree order = in front
     });
     if (!hit) {
-      const verb = hint === undefined ? 'touch' : HINT_VERBS[hint];
-      throw notActionable('no_action', `Nothing at (${target.x}, ${target.y}) takes a ${verb}.`);
+      const verb = hint === undefined ? 'a touch' : HINT_VERBS[hint];
+      throw notActionable('no_action', `Nothing at (${target.x}, ${target.y}) takes ${verb}.`);
     }
     return { snapshot, entry: hit };
   }
@@ -367,7 +394,7 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
     return { snapshot, entry: picked };
   }
   const [only, ...rest] = matches;
-  if (!only) throw new TaplineError('not_found', `No element matches ${describeTarget(target)}`);
+  if (!only) throw new TaplineError('not_found', notFoundMessage(target));
   if (rest.length > 0) {
     const shown = matches.slice(0, 5);
     const list = shown.map((entry) => describe(entry)).join('; ');
@@ -656,12 +683,12 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   if (rawTarget !== undefined && rawTarget !== null) {
     const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type');
     const input = findActionable(snap, entry, 'type', true);
-    if (!input) throw notActionable('no_action', `${describe(entry)} is not a text input`);
+    if (!input) throw notActionable('no_action', `${describe(entry)} is not an input`);
     return { snapshot: snap, entry: input };
   }
   const snap = snapshot ?? takeSnapshot();
   const inputs = snap.entries.filter((entry) => isInputNode(entry.node));
-  if (inputs.length === 0) throw new TaplineError('not_found', 'No TextInput on screen');
+  if (inputs.length === 0) throw new TaplineError('not_found', 'No input on screen');
   const focused = focusedInputInstance();
   const focusedEntry = inputs.find((entry) => ownsInstance(entry, focused));
   if (focusedEntry) return { snapshot: snap, entry: focusedEntry };
@@ -670,9 +697,7 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   const shown = inputs.slice(0, 5);
   throw new TaplineError(
     'ambiguous',
-    `${inputs.length} TextInputs on screen and none is focused: ${shown
-      .map((entry) => describe(entry))
-      .join('; ')}. Pass a target.`,
+    `${inputs.length} inputs on screen; pass a target to pick one, and none is focused:`,
     shown.map((entry) => refFor(entry.node.fiber)),
     await candidateElements(shown),
   );
@@ -1005,7 +1030,7 @@ export async function toggle(
   if (!control) throw notActionable('no_action', `${describe(entry)} is not a switch`);
   if (control.info.disabled) throw notActionable('disabled', `${describe(control)} is disabled`);
   const handler = findHandler(control.node, 'onValueChange');
-  if (!handler) throw notActionable('no_action', `${describe(control)} has no switch action`);
+  if (!handler) throw notActionable('no_action', `${describe(control)} is not a switch`);
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
   if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));

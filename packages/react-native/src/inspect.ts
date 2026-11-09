@@ -469,13 +469,19 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
       }
     }
 
+    // Own text only (AGENT-TOOLS §3.3): an accessible element (what VoiceOver reads as one item)
+    // carries the text inside it, the way iOS forms its label; a plain container quotes nothing,
+    // so it never matches a text target through its children's text.
+    const accessible =
+      node.isText || input || toggleable || actions.includes('press') || actions.includes('longPress') || findProp(node, 'accessible') === true;
+
     const hasContent = node.isText && !node.insideText && node.text !== '';
     infos.push({
       type: typeName(node),
       role,
       testID,
       label,
-      text: input ? '' : node.text,
+      text: input || !accessible ? '' : node.text,
       value: input ? currentInputValue(node) : null,
       actions,
       disabled,

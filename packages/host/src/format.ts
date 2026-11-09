@@ -29,14 +29,39 @@ const ROLE_ALIASES: ReadonlyMap<string, string> = new Map([
   ["summary", "text"],
 ]);
 
-export function roleOf(element: Pick<TreeElement, "role" | "type">): string | null {
+/** Component types that read as a shared role when the app gives them none (AGENT-TOOLS §3.3). */
+const TYPE_ROLES: ReadonlyMap<string, string> = new Map([
+  ["Image", "image"],
+  ["TextInput", "input"],
+  ["Switch", "switch"],
+  ["Text", "text"],
+  ["ScrollView", "scroll"],
+  ["FlatList", "scroll"],
+  ["SectionList", "scroll"],
+  ["VirtualizedList", "scroll"],
+]);
+
+/** Pressables, touchables and buttons are `button` only when they take a tap. */
+function isPressableType(type: string): boolean {
+  return type === "Pressable" || type === "Button" || type.startsWith("Touchable");
+}
+
+/**
+ * The shared role of an element: its role, else by component type, else `other` (a container with
+ * no role). Null only when the app sent neither a role nor a type.
+ */
+export function roleOf(element: Pick<TreeElement, "role" | "type" | "actions">): string | null {
   const role = element.role;
   if (role !== null && role !== undefined && role !== "") {
     const lower = role.toLowerCase();
     return ROLE_ALIASES.get(lower) ?? lower;
   }
   const type = element.type;
-  return type !== null && type !== undefined && type !== "" ? type : null;
+  if (type === null || type === undefined || type === "") return null;
+  const byType = TYPE_ROLES.get(type);
+  if (byType !== undefined) return byType;
+  const taps = (element.actions ?? []).some((action) => action === "press" || action === "tap");
+  return isPressableType(type) && taps ? "button" : "other";
 }
 
 /** AGENT-TOOLS §3.3: tap, longPress, type, toggle, scroll (submit is part of type). */
@@ -153,7 +178,7 @@ const MAX_MOVED_LINES = 5;
  * Only what changed since the previous list, or null when the screen changed too much (another
  * route, or most elements new or gone) and the full list reads better.
  */
-export function formatChanges(tree: TreeResult): string | null {
+export function formatChanges(tree: TreeResult, options: { alertGone?: boolean } = {}): string | null {
   const changes = tree.changes;
   if (changes === undefined || !changes.sameRoute) return null;
   const count = tree.elements.length;
@@ -163,7 +188,11 @@ export function formatChanges(tree: TreeResult): string | null {
   if (churn > Math.max(8, count / 2)) return null;
 
   const byRef = new Map(tree.elements.map((element) => [element.ref, element]));
-  const lines = ["Same screen. Changes:", ...formatStatus(tree)];
+  // Header lines come first (§3.1). An alert open in the previous answer and not now is "gone".
+  const header = formatStatus(tree);
+  const alertGone = options.alertGone === true && (tree.alerts ?? []).length === 0;
+  if (alertGone) header.unshift("Alert: gone");
+  const lines = ["Same screen. Changes:", ...header];
   const statusLines = lines.length;
   for (const ref of changes.added) {
     const element = byRef.get(ref);
@@ -189,7 +218,8 @@ export function formatChanges(tree: TreeResult): string | null {
       if (element !== undefined) lines.push(`↕ ${formatElement(element)}`);
     }
   }
-  if (lines.length === statusLines) lines.push("No visible change.");
+  // A closed alert is itself a change.
+  if (lines.length === statusLines && !alertGone) lines.push("No visible change.");
   return lines.join("\n");
 }
 
@@ -201,14 +231,20 @@ export function formatStatus(tree: TreeResult): string[] {
       .map((button) => `[${clip(button.text, 40)}${button.style === "destructive" ? " (destructive)" : ""}]`)
       .join(" ");
     const message = alert.message !== null && alert.message !== "" ? ` ${clip(alert.message, 160)}` : "";
-    const how = alert.standIn
-      ? "Note: Tapline's stand-in alert: tap its buttons like any element."
-      : "Note: an OS alert: Tapline can't tap it; ask the user to tap one, or use Tapwright.";
-    lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons}`, how);
+    lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons}`);
   }
   const busy = tree.network?.inFlight ?? 0;
   if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);
   return lines;
+}
+
+/** What an open alert means for the agent, as `Note:` lines for the end of the answer (§3.6). */
+export function alertNotes(tree: TreeResult): string[] {
+  return (tree.alerts ?? []).map((alert) =>
+    alert.standIn
+      ? "Note: Tapline's stand-in alert: tap its buttons like any element."
+      : "Note: an OS alert: Tapline can't tap it; ask the user to tap one, or use Tapwright.",
+  );
 }
 
 /** `Route: (tabs) › nutrition (day="2026-11-09")`, or null without a route. */
