@@ -87,3 +87,21 @@ test('no visible change gives empty lists', async () => {
   const again = await tree({ changes: true });
   expect(again.changes).toEqual({ sameRoute: true, added: [], removed: [], changed: [], moved: [] });
 });
+
+test("a button's text change is a changed field: a Pressable keeps its inner text for change detection", async () => {
+  const Buy = ({ label }: { label: string }) => (
+    <Pressable testID="buy" onPress={() => undefined}>
+      <Text>{label}</Text>
+    </Pressable>
+  );
+  const renderer = await mount(<Buy label="Buy" />);
+  useFrames({ buy: frame(0, 0, 100, 40) });
+  const before = await tree({});
+  const ref = before.elements.find((e) => e.testID === 'buy')?.ref;
+  await act(async () => {
+    renderer.update(<Buy label="Bought" />);
+  });
+  const after = await tree({ changes: true });
+  expect(after.elements.find((e) => e.testID === 'buy')).toMatchObject({ role: 'button', text: 'Bought' });
+  expect(after.changes?.changed).toEqual([{ ref, was: { text: 'Buy' } }]);
+});

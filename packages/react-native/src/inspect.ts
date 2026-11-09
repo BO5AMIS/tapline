@@ -369,6 +369,47 @@ export function currentInputValue(node: HostNode): string {
   return typeof initial === 'string' ? initial : '';
 }
 
+/**
+ * The shared role vocabulary (AGENT-TOOLS §3.3). A copy of `roleOf` in packages/host/src/format.ts:
+ * keep the two tables in step; the packages must not import each other.
+ */
+const ROLE_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['textfield', 'input'],
+  ['search', 'input'],
+  ['textbox', 'input'],
+  ['scrollview', 'scroll'],
+  ['imagebutton', 'button'],
+  ['togglebutton', 'button'],
+  ['adjustable', 'slider'],
+  ['img', 'image'],
+  ['summary', 'text'],
+]);
+
+/** Component types that read as a shared role when the app gives none (copy of `TYPE_ROLES` in the host's format.ts). */
+const TYPE_ROLES: ReadonlyMap<string, string> = new Map([
+  ['Image', 'image'],
+  ['TextInput', 'input'],
+  ['Switch', 'switch'],
+  ['Slider', 'slider'],
+  ['RNCSlider', 'slider'],
+  ['Text', 'text'],
+  ['ScrollView', 'scroll'],
+  ['FlatList', 'scroll'],
+  ['SectionList', 'scroll'],
+  ['VirtualizedList', 'scroll'],
+]);
+
+export function roleName(info: Pick<Entry['info'], 'role' | 'type' | 'actions'>): string {
+  if (info.role !== null && info.role !== '') {
+    const lower = info.role.toLowerCase();
+    return ROLE_ALIASES.get(lower) ?? lower;
+  }
+  const byType = TYPE_ROLES.get(info.type);
+  if (byType !== undefined) return byType;
+  const pressable = info.type === 'Pressable' || info.type === 'Button' || info.type.startsWith('Touchable');
+  return pressable && info.actions.includes('press') ? 'button' : 'other';
+}
+
 export interface NodeInfo {
   type: string;
   role: string | null;
@@ -954,7 +995,7 @@ export async function overlay(): Promise<{ rev: number; screen: ScreenInfo; elem
     const { info } = entry;
     elements.push({
       ref: peekRef(entry.node.fiber),
-      type: info.role ?? info.type,
+      type: roleName(info),
       label: info.label ?? (info.text !== '' ? info.text.slice(0, 80) : null),
       id: info.testID,
       frame,

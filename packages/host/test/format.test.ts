@@ -111,6 +111,8 @@ describe("element lines (AGENT-TOOLS §3.3)", () => {
     ["Image", [], "image"],
     ["TextInput", [], "input"],
     ["Switch", [], "switch"],
+    ["Slider", [], "slider"],
+    ["RNCSlider", [], "slider"],
     ["Text", [], "text"],
     ["ScrollView", [], "scroll"],
     ["FlatList", [], "scroll"],

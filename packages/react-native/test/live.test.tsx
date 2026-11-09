@@ -1,6 +1,6 @@
 import { frame, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
-import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
+import { Dimensions, Image, PixelRatio, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { setEventSink } from '../src/events';
 import { overlay, resetRefs, setMeasurer, tree } from '../src/inspect';
 import { configureLiveFeed, feedMethod, frameAfterAction, stopLiveFeed } from '../src/live';
@@ -69,6 +69,19 @@ describe('the live feed', () => {
 });
 
 describe('overlay', () => {
+  test('boxes carry the shared role: other for a plain container, scroll, input, image', async () => {
+    await mount(
+      <View testID="box" accessibilityLabel="Box">
+        <ScrollView testID="list" />
+        <TextInput testID="field" />
+        <Image testID="pic" />
+      </View>,
+    );
+    useFrames({ box: frame(0, 0, 100, 100), list: frame(0, 0, 100, 50), field: frame(0, 50, 100, 20), pic: frame(0, 70, 20, 20) });
+    const types = Object.fromEntries((await overlay()).elements.map((e) => [e.id, e.type]));
+    expect(types).toEqual({ box: 'other', list: 'scroll', field: 'input', pic: 'image' });
+  });
+
   test('lists the elements with their frames and the revision, without changing refs', async () => {
     await mount(
       <View>
@@ -86,6 +99,8 @@ describe('overlay', () => {
     expect(typeof result.rev).toBe('number');
     expect(result.elements).toContainEqual({ ref: saveRef, type: 'button', label: 'Save', id: 'save', frame: { x: 20, y: 40, width: 100, height: 44 } });
     expect(result.elements.some((e) => e.id === 'note' && e.label === 'Saved 2 minutes ago')).toBe(true);
+    // the viewer names things by the shared role, like the agent's lines: never a component name
+    expect(result.elements.find((e) => e.id === 'note')?.type).toBe('text');
     // refs still point where they did
     expect((await tree({ changes: true })).elements.find((e) => e.testID === 'save')?.ref).toBe(saveRef);
   });

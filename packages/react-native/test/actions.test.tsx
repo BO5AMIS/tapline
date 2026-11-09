@@ -17,7 +17,7 @@ import {
   toggle,
   typeText,
 } from '../src/actions';
-import { collectNodes, resetRefs, setHitTester, setMeasurer, takeSnapshot, tree } from '../src/inspect';
+import { collectNodes, resetRefs, roleName, setHitTester, setMeasurer, takeSnapshot, tree } from '../src/inspect';
 import { isRecord, TaplineError, type TaplineElement } from '../src/types';
 import { firstHostChild, sameFiber, type Fiber } from '../src/fiber';
 
@@ -517,6 +517,40 @@ describe('target resolution', () => {
       useFrames({});
       const error = await failure(press({ target: { testID: 'box' } }));
       expect(error.message).toBe('no_action: e1 other "Box" has no tap action');
+    });
+
+    test('a target that is not inside a scroll view says so, naming the element', async () => {
+      await mount(
+        <View>
+          <Pressable testID="continue" onPress={spies.onGo}>
+            <Text>Continue</Text>
+          </Pressable>
+        </View>,
+      );
+      useFrames({});
+      const outside = await failure(run(() => scroll({ target: { testID: 'continue' } })));
+      expect(outside.code).toBe('not_actionable');
+      expect(outside.message).toMatch(/^no_action: e\d+ button "Continue" is not inside a scroll view$/);
+    });
+
+    test('a long press on a native tab is refused with its element line', async () => {
+      await mount(
+        React.createElement(
+          'RNSTabsHostIOS',
+          null,
+          React.createElement('RNSTabsScreenIOS', { title: 'Today', screenKey: 'today-abc', pointerEvents: 'box-none' }),
+          React.createElement('RNSTabsScreenIOS', { title: 'Nutrition', screenKey: 'nutrition-def', pointerEvents: 'none' }),
+        ),
+      );
+      useFrames({});
+      const error = await failure(run(() => longPress({ target: { text: 'Nutrition' } })));
+      expect(error.code).toBe('not_actionable');
+      expect(error.message).toMatch(/^no_action: e\d+ tab "Nutrition" has no long-press action$/);
+    });
+
+    test('a slider reads as slider, by component name or the community host type', () => {
+      expect(roleName({ role: null, actions: [], type: 'Slider' })).toBe('slider');
+      expect(roleName({ role: null, actions: [], type: 'RNCSlider' })).toBe('slider');
     });
 
     test('a point on plain text inside a scroll view takes no tap', async () => {

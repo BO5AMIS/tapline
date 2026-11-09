@@ -14,6 +14,7 @@ import {
   openModalHosts,
   publicInstancesOf,
   refFor,
+  roleName,
   tabAt,
   rememberTyped,
   fiberForRef,
@@ -128,45 +129,6 @@ function paramsOf(raw: unknown): Record<string, unknown> {
   if (raw === undefined || raw === null) return {};
   if (!isRecord(raw)) throw badParams('params must be an object');
   return raw;
-}
-
-/**
- * The shared role vocabulary (AGENT-TOOLS §3.3). A copy of `roleOf` in packages/host/src/format.ts:
- * keep the two tables in step; the packages must not import each other.
- */
-const ROLE_ALIASES: ReadonlyMap<string, string> = new Map([
-  ['textfield', 'input'],
-  ['search', 'input'],
-  ['textbox', 'input'],
-  ['scrollview', 'scroll'],
-  ['imagebutton', 'button'],
-  ['togglebutton', 'button'],
-  ['adjustable', 'slider'],
-  ['img', 'image'],
-  ['summary', 'text'],
-]);
-
-/** Component types that read as a shared role when the app gives none (copy of `TYPE_ROLES` in the host's format.ts). */
-const TYPE_ROLES: ReadonlyMap<string, string> = new Map([
-  ['Image', 'image'],
-  ['TextInput', 'input'],
-  ['Switch', 'switch'],
-  ['Text', 'text'],
-  ['ScrollView', 'scroll'],
-  ['FlatList', 'scroll'],
-  ['SectionList', 'scroll'],
-  ['VirtualizedList', 'scroll'],
-]);
-
-function roleName(info: Entry['info']): string {
-  if (info.role !== null && info.role !== '') {
-    const lower = info.role.toLowerCase();
-    return ROLE_ALIASES.get(lower) ?? lower;
-  }
-  const byType = TYPE_ROLES.get(info.type);
-  if (byType !== undefined) return byType;
-  const pressable = info.type === 'Pressable' || info.type === 'Button' || info.type.startsWith('Touchable');
-  return pressable && info.actions.includes('press') ? 'button' : 'other';
 }
 
 /** An element as element lines name it: `e6 button "Continue"`, or `id=<testID>` without text or label. */
@@ -615,7 +577,7 @@ async function pressLike(
   const params = paramsOf(rawParams);
   const { snapshot, entry } = await resolveTarget(params.target, kind);
   if (entry.tab) {
-    if (kind === 'longPress') throw notActionable('no_action', `The "${entry.tab.title}" tab has no long press`);
+    if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     selectTab(snapshot, entry.tab);
     return { element: toElement(entry, null), settledMs: await settle() };
   }

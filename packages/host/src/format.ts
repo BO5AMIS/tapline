@@ -34,6 +34,8 @@ const TYPE_ROLES: ReadonlyMap<string, string> = new Map([
   ["Image", "image"],
   ["TextInput", "input"],
   ["Switch", "switch"],
+  ["Slider", "slider"],
+  ["RNCSlider", "slider"],
   ["Text", "text"],
   ["ScrollView", "scroll"],
   ["FlatList", "scroll"],
