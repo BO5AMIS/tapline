@@ -1,4 +1,4 @@
-import { DevSettings, Linking, TextInput } from 'react-native';
+import { DevSettings, Linking, Platform, TextInput } from 'react-native';
 import {
   currentInputValue,
   findHandler,
@@ -866,9 +866,11 @@ export async function screenshot(
   const nativeWidth = Math.round(screen.width * screen.scale);
   const width = Math.min(maxWidth, nativeWidth);
   const height = Math.round((width * screen.height) / screen.width);
+  // iOS renders view-shot's size at the screen scale (400 gives 1200 px on a 3x phone); Android takes pixels.
+  const perUnit = Platform.OS === 'ios' && screen.scale > 0 ? screen.scale : 1;
   let data: string;
   try {
-    data = await viewShot.captureScreen({ format, quality, result: 'base64', width, height });
+    data = await viewShot.captureScreen({ format, quality, result: 'base64', width: width / perUnit, height: height / perUnit });
   } catch (error) {
     throw new TaplineError('internal', `captureScreen failed: ${error instanceof Error ? error.message : String(error)}`);
   }

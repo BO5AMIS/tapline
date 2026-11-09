@@ -1,4 +1,4 @@
-import { Dimensions, PixelRatio } from 'react-native';
+import { Dimensions, PixelRatio, Platform } from 'react-native';
 import { screenshot, screenshotAvailable } from '../src/actions';
 import { TaplineError } from '../src/types';
 
@@ -21,16 +21,24 @@ describe('screenshot', () => {
     expect(screenshotAvailable()).toBe(true);
   });
 
-  test('defaults: jpg, quality 0.7, scaled to 600 px wide', async () => {
+  test('defaults: jpg, quality 0.7, scaled to 600 px wide (iOS takes the size in points)', async () => {
     const result = await screenshot({});
-    expect(mockCaptureScreen).toHaveBeenCalledWith({ format: 'jpg', quality: 0.7, result: 'base64', width: 600, height: 1304 });
+    // iOS renders view-shot's size at the screen scale: 200 x 434.67 pt is 600 x 1304 px on a 3x phone.
+    expect(mockCaptureScreen).toHaveBeenCalledWith({ format: 'jpg', quality: 0.7, result: 'base64', width: 200, height: 1304 / 3 });
     expect(result).toEqual({ mime: 'image/jpeg', data: 'BASE64DATA', width: 600, height: 1304 });
   });
 
   test('honours format, quality and maxWidth', async () => {
     const result = await screenshot({ format: 'png', quality: 0.9, maxWidth: 300 });
-    expect(mockCaptureScreen).toHaveBeenCalledWith({ format: 'png', quality: 0.9, result: 'base64', width: 300, height: 652 });
+    expect(mockCaptureScreen).toHaveBeenCalledWith({ format: 'png', quality: 0.9, result: 'base64', width: 100, height: 652 / 3 });
     expect(result.mime).toBe('image/png');
+    expect(result.width).toBe(300);
+  });
+
+  test('Android takes the size in pixels', async () => {
+    jest.replaceProperty(Platform, 'OS', 'android');
+    const result = await screenshot({ maxWidth: 300 });
+    expect(mockCaptureScreen).toHaveBeenCalledWith({ format: 'jpg', quality: 0.7, result: 'base64', width: 300, height: 652 });
     expect(result.width).toBe(300);
   });
 
