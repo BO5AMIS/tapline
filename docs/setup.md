@@ -139,6 +139,37 @@ If you already have one, return `null` for Tapline links before your own handlin
 Locally, put `EXPO_PUBLIC_TAPLINE_ENABLED=1` in `.env.local` (or `.env`) while you run
 Metro for a development build.
 
+**Optional: test commands.** Give agents shortcuts no screen offers: register a command
+where its state lives, and remove it on unmount (`registerTaplineCommand` returns the
+remover). The agent lists them with `app_command`.
+
+```tsx
+import { registerTaplineCommand } from '@tapline/react-native';
+
+useEffect(
+  () =>
+    registerTaplineCommand('language', {
+      description: 'Switch the language (args: { code: "en" | "ar" })',
+      run: async ({ code }) => {
+        if (code !== 'en' && code !== 'ar') throw new Error('code must be "en" or "ar"');
+        await setLanguage(code);
+        return { language: code };
+      },
+    }),
+  [setLanguage],
+);
+```
+
+Good candidates: sign in as a test user, load sample data, reset to a fresh state, set the
+date. Registering does nothing in builds where Tapline is off. `appearance` (light / dark)
+is built in.
+
+**Optional: alerts the agent can press.** iOS alerts can't be pressed from inside the app,
+so Tapline tells the agent about them and asks it to get the user to tap. In test builds you
+can pass `alerts: 'stand-in'` to `startTapline`: alerts then show as Tapline's own in-app
+box, whose buttons the agent presses like any other. Tapline's own "Connect for testing?"
+prompt always stays a real iOS alert.
+
 **Give important elements a `testID`.** Agents can also target visible text, labels and
 positions, but `testID`s keep tests stable:
 

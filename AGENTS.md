@@ -73,8 +73,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    `ref` from the latest look (refs change when the screen changes). Use `x`/`y` only
    when nothing else fits. An `ambiguous` error lists candidates: pick one by its ref or
    add `index`.
-5. Screens load and animate. If a spinner shows or content is missing, `wait` (0.5–3 s)
-   instead of acting on a half-loaded screen.
+5. Screens load and animate. If a spinner shows or content is missing, `wait_for` what you
+   expect (`text`, `testID` or `label`; `gone: true` for a spinner; `network_idle` for
+   loading) instead of acting on a half-loaded screen. A `Network:` line in the list means
+   requests are still running; failed requests show up in `logs` as `[network]` lines.
+   Use a fixed `wait` only for animations.
 6. Inputs: `type_text` with the input as target; `replace` (default) clears it first,
    `submit` presses return. Toggles: `toggle`. Lists: `scroll` until what you need
    appears (`down` shows what is below), or `to: "end"`.
@@ -88,6 +91,14 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 9. An action that a person couldn't do is refused with the reason: the element is off
    screen (scroll to it) or something covers it (dismiss it). That is often a real bug
    worth reporting. Pass `force: true` only when you've decided the check is wrong.
+10. An `Alert:` line means the app showed an alert. An OS alert can't be pressed from
+   Tapline: ask the user to tap the button you need (say which), and actions are refused
+   until it's answered. When the app runs with Tapline's stand-in, the alert's buttons are
+   ordinary elements: press them.
+11. `app_command` without a name lists what the app offers for testing (for example
+   switching the language, a test sign-in or sample data); run one with `name` and `args`.
+   `appearance` (light / dark) is always there. Use them to reach a state quickly and to
+   check stress views: dark mode, right-to-left languages. Put things back when you're done.
 9. What you press calls the element's handler; it isn't a real touch. If a control only
    reacts to gestures (swipe-to-delete, drag), say that you couldn't test it rather than
    guessing.

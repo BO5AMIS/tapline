@@ -260,6 +260,41 @@ params: `{ "target": …, "value": true | false | omitted (flip), "force": false
 
 params: `{ "url": "myapp://settings" }` → `Linking.openURL`. → `{}`.
 
+### `commands` / `command`
+
+`commands` → `{ "commands": [ { "name": "language", "description": "…" } … ] }`, the app's
+registered test commands (`registerTaplineCommand`) plus the built-in `appearance`
+(`{ "scheme": "light" | "dark" | "system" }`, `Appearance.setColorScheme`).
+`command` params: `{ "name": "language", "args": { "code": "ar" } }` → `{ "name", "result" }`
+(the command's return value, JSON-safe, at most 4000 characters). Unknown name: `not_found`
+(the message lists the names); a throwing command: `internal`; slower than 15 s: `timeout`.
+
+### `waitFor`
+
+params: `{ "text" | "testID" | "label": "…", "gone": false, "networkIdle": false,
+"timeout": 10 }` (at least one of the four; `timeout` in seconds, at most 30). Polls every
+250 ms until an element matches (text contains, case-insensitive; testID equal; label
+equal, case-insensitive), or none does with `gone`, and, with `networkIdle`, no request is in
+flight. → `{ "met": true, "waitedMs": 1240 }`, or error `timeout`.
+
+### Status in `tree`
+
+- `alerts`: open alerts the app showed with `Alert.alert` / `Alert.prompt`, oldest first:
+  `{ "kind": "alert", "title", "message", "buttons": [ { "text", "style" } ], "standIn" }`.
+  While an OS alert (not the stand-in) is open, `press`, `longPress` and `toggle` answer
+  `not_actionable` unless `force`.
+- `network`: `{ "inFlight": 2 }` while requests (fetch / XMLHttpRequest) are running; absent
+  otherwise. Failed requests (status 400 and up, network errors, timeouts) are added to the
+  logs as `[network] GET https://host/path?… → 500`, with the query string removed.
+
+### Event `appState`
+
+The app sends `{ "type": "event", "event": "appState", "data": { "state": "background" } }`
+when it goes to the background or comes back (`active`). The host logs it and, after the app
+drops, tells the agent the app went to the background. The app keeps the screen awake while
+connected (`expo-keep-awake`, when the app has it) and reconnects at once when it's back in
+front.
+
 ### `back`
 
 params: `{}` → calls `goBack()` on the focused screen's React Navigation `navigation`, like

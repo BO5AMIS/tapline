@@ -88,6 +88,8 @@ your agent at it.
 | `look` | the screen as elements (type, text, testID, position, actions) and the current route, plus a screenshot (an image or a file path; `labels` draws each element's box and ref on it) |
 | `check_layout` | automatic visual checks without a screenshot: small tap areas, cut-off edges, overlaps, low contrast, unnamed buttons, truncated text |
 | `back` | go back, like the back button or swipe |
+| `app_command` | the app's own test commands (switch language, sign in as a test user, sample data …) and the built-in light/dark switch |
+| `wait_for` | wait until something appears or is gone, or the network is quiet |
 | `press`, `long_press` | by `testID`, label, visible text, ref from the last look, or x/y |
 | `type_text` | into an input; replace or append; optionally submit |
 | `scroll` | by a direction and amount, or to the start or end |
@@ -150,7 +152,11 @@ order, pair again (or give each agent a fixed `--port`).
 - The real-touch check sees what React draws. Bars iOS draws on top of the app (a native
   tab bar or navigation bar) can cover an element without Tapline noticing.
 - The app must be open on screen: iOS pauses apps in the background, and the connection
-  comes back when the app is opened again.
+  comes back as soon as the app is opened again (the agent is told when it went to the
+  background). While an agent is connected, the screen stays on (with `expo-keep-awake`).
+- iOS alerts can't be pressed from inside the app. Tapline shows them to the agent and stops
+  it from tapping behind them; with `alerts: 'stand-in'` (test builds) it shows its own in-app
+  alert instead, which the agent can press.
 - Release builds shorten component names, so element types read best in development
   builds. `testID`s keep targeting reliable everywhere.
 - Screenshots need `react-native-view-shot` in the app; remembering the pairing across
@@ -160,9 +166,9 @@ order, pair again (or give each agent a fixed `--port`).
 
 | | |
 |---|---|
-| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists: 105 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, targets, every action, client, pairing, logs, screenshots: 235 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
-| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload` |
-| Not yet | TestFlight and release builds, `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
+| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting: 114 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, targets, every action, client, pairing, logs, screenshots: 311 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
+| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports |
+| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
 
 ## Repository
 
