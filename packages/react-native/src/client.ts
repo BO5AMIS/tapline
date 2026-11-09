@@ -1,5 +1,6 @@
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { screenshotAvailable } from './actions';
+import { keepAwake } from './awake';
 import { forgetLastTree } from './inspect';
 import { originalLog, setLogSink } from './logs';
 import { methods as defaultMethods, type MethodFn } from './methods';
@@ -57,6 +58,14 @@ export interface ClientDeps {
   capabilities?: string[];
   /** Receives the one status line per connect/disconnect. */
   log?: (line: string) => void;
+  /** Foreground/background changes. Default: React Native's AppState. */
+  appState?: AppStateLike;
+  /** Keep the screen on while connected. Default: expo-keep-awake when the app has it. */
+  keepAwake?: (on: boolean) => void;
+}
+
+export interface AppStateLike {
+  addEventListener: (type: 'change', listener: (state: string) => void) => { remove: () => void } | undefined;
 }
 
 export function backoffDelay(attempt: number): number {
@@ -83,7 +92,7 @@ export function collectDeviceInfo(): DeviceInfo {
 }
 
 export function defaultCapabilities(): string[] {
-  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'logs'];
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs'];
   if (screenshotAvailable()) capabilities.push('screenshot');
   if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload');
   return capabilities;
@@ -109,6 +118,7 @@ export class TaplineClient {
   private queue: Promise<void> = Promise.resolve();
   private token: string | undefined;
   private pairCode: string | undefined;
+  private appStateSubscription: { remove: () => void } | null = null;
 
   constructor(options: ClientOptions, deps: ClientDeps = {}) {
     this.options = options;
@@ -125,6 +135,7 @@ export class TaplineClient {
     if (this.running) return;
     this.running = true;
     this.attempt = 0;
+    this.watchAppState();
     this.connect();
   }
 
@@ -136,6 +147,10 @@ export class TaplineClient {
     if (this.ready) this.status('disconnected');
     this.ready = false;
     setLogSink(null);
+    this.setAwake(false);
+    const subscription = this.appStateSubscription;
+    this.appStateSubscription = null;
+    if (subscription) this.safely(() => subscription.remove());
     if (socket) {
       detach(socket);
       try {
@@ -152,6 +167,30 @@ export class TaplineClient {
       log(`[tapline] ${line}`);
     } catch {
       // never throw into the app
+    }
+  }
+
+  private setAwake(on: boolean): void {
+    this.safely(() => (this.deps.keepAwake ?? keepAwake)(on));
+  }
+
+  private watchAppState(): void {
+    if (this.appStateSubscription) return;
+    this.safely(() => {
+      const source = this.deps.appState ?? (AppState as unknown as AppStateLike);
+      const subscription = source.addEventListener('change', (state) => this.safely(() => this.onAppState(state)));
+      if (isRecord(subscription) && typeof subscription.remove === 'function') this.appStateSubscription = subscription;
+    });
+  }
+
+  /** Tells the host when the app goes to the background (iOS then pauses it), and reconnects at once when it's back. */
+  private onAppState(state: string): void {
+    if (this.ready) this.send({ type: 'event', event: 'appState', data: { state } });
+    if (state === 'active' && this.running && !this.ready && this.socket === null) {
+      if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.attempt = 0;
+      this.connect();
     }
   }
 
@@ -248,6 +287,7 @@ export class TaplineClient {
     this.failureLogged = false;
     this.attempt = 0;
     this.status('connected');
+    this.setAwake(true);
     setLogSink((event, payload) => this.send({ type: 'event', event, data: payload }));
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => this.safely(() => this.onPingTick()), PING_INTERVAL_MS);
@@ -291,6 +331,7 @@ export class TaplineClient {
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = null;
     setLogSink(null);
+    this.setAwake(false);
     if (this.ready) {
       this.status(code ? `disconnected (code ${code})` : 'disconnected');
     } else if (!this.failureLogged) {

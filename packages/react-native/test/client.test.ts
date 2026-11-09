@@ -105,6 +105,72 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+describe('app state and keeping awake', () => {
+  function fakeAppState(): { appState: NonNullable<ClientDeps['appState']>; emit: (state: string) => void; removed: () => number } {
+    const listeners = new Set<(state: string) => void>();
+    let removals = 0;
+    return {
+      appState: {
+        addEventListener: (_type, listener) => {
+          listeners.add(listener);
+          return {
+            remove: () => {
+              removals += 1;
+              listeners.delete(listener);
+            },
+          };
+        },
+      },
+      emit: (state) => listeners.forEach((listener) => listener(state)),
+      removed: () => removals,
+    };
+  }
+
+  test('reports going to the background and back as appState events while connected', () => {
+    const fake = fakeAppState();
+    const harness = makeClient({ appState: fake.appState, keepAwake: () => undefined });
+    const socket = connect(harness);
+    fake.emit('background');
+    fake.emit('active');
+    const events = socket.messages.filter((m) => m.type === 'event' && m.event === 'appState');
+    expect(events.map((m) => m.data)).toEqual([{ state: 'background' }, { state: 'active' }]);
+  });
+
+  test('keeps the screen awake while connected, and lets it sleep after', () => {
+    const calls: boolean[] = [];
+    const harness = makeClient({ appState: fakeAppState().appState, keepAwake: (on) => calls.push(on) });
+    const socket = connect(harness);
+    expect(calls).toEqual([true]);
+    socket.drop();
+    expect(calls).toEqual([true, false]);
+    const again = (jest.advanceTimersByTime(backoffDelay(0)), last());
+    again.open();
+    again.receive(WELCOME);
+    harness.client.stop();
+    expect(calls).toEqual([true, false, true, false]);
+  });
+
+  test('reconnects at once when the app comes back to the front', () => {
+    const fake = fakeAppState();
+    const harness = makeClient({ appState: fake.appState, keepAwake: () => undefined });
+    const socket = connect(harness);
+    socket.drop();
+    jest.advanceTimersByTime(backoffDelay(0));
+    last().drop(); // still unreachable: the next try waits longer
+    const before = MockSocket.instances.length;
+    fake.emit('active');
+    expect(MockSocket.instances.length).toBe(before + 1);
+  });
+
+  test('stops listening to app state when stopped', () => {
+    const fake = fakeAppState();
+    const harness = makeClient({ appState: fake.appState, keepAwake: () => undefined });
+    connect(harness);
+    harness.client.stop();
+    expect(fake.removed()).toBe(1);
+  });
+});
+
 describe('hello and welcome', () => {
   test('sends hello with token, app, device and capabilities as the first message', () => {
     const harness = makeClient();
