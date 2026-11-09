@@ -90,6 +90,9 @@ your agent at it.
 | `back` | go back, like the back button or swipe |
 | `app_command` | the app's own test commands (switch language, sign in as a test user, sample data …) and the built-in light/dark switch |
 | `wait_for` | wait until something appears or is gone, or the network is quiet |
+| `compare_screen` | compare the screen with a saved reference picture: what changed, where, marked in red |
+| `filmstrip` | several frames in one image, for animations and loading states |
+| `record`, `replay` | save a test run as a script and replay it later, without an AI (also `tapline replay`) |
 | `press`, `long_press` | by `testID`, label, visible text, ref from the last look, or x/y |
 | `type_text` | into an input; replace or append; optionally submit |
 | `scroll` | by a direction and amount, or to the start or end |
@@ -154,6 +157,9 @@ order, pair again (or give each agent a fixed `--port`).
 - The app must be open on screen: iOS pauses apps in the background, and the connection
   comes back as soon as the app is opened again (the agent is told when it went to the
   background). While an agent is connected, the screen stays on (with `expo-keep-awake`).
+- Screenshots come from inside the app and take a few hundred milliseconds each, so a
+  filmstrip shows about two frames a second: enough for loading states, not for quick
+  animations.
 - iOS alerts can't be pressed from inside the app. Tapline shows them to the agent and stops
   it from tapping behind them; with `alerts: 'stand-in'` (test builds) it shows its own in-app
   alert instead, which the agent can press.
@@ -166,8 +172,8 @@ order, pair again (or give each agent a fixed `--port`).
 
 | | |
 |---|---|
-| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting: 114 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, targets, every action, client, pairing, logs, screenshots: 311 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
-| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports |
+| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev: 162 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots: 316 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
+| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `press` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips |
 | Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
 
 ## Repository

@@ -80,8 +80,20 @@ Both have native code: a new development build or TestFlight build includes them
 Without `expo-secure-store`, pairing works but lasts only until the app restarts (or pass
 your own `storage`, see below).
 
-**Import `register` first.** It has to run before anything imports React, so it goes on
-the first line of the app's entry file:
+**Load `register` first.** It has to run before React starts. The simplest way is Metro,
+in `metro.config.js` (it only does this when `EXPO_PUBLIC_TAPLINE_ENABLED=1`, so store
+builds are untouched):
+
+```js
+const { getDefaultConfig } = require('expo/metro-config');
+const { withTapline } = require('@tapline/react-native/metro');
+
+module.exports = withTapline(getDefaultConfig(__dirname));
+```
+
+Then call `startTapline` (below) anywhere that loads at startup, such as the top of
+`app/_layout.tsx`. Or, without the Metro helper, import it on the first line of the app's
+entry file:
 
 - Expo Router (`"main": "expo-router/entry"` in package.json): create `index.js` and set
   `"main": "index.js"`:
@@ -188,7 +200,16 @@ positions, but `testID`s keep tests stable:
 your computer. iOS refuses plain `http` to a Tailscale address ("App Transport Security
 policy requires the use of a secure connection"), so serve Metro over `https` with
 [Tailscale Serve](https://tailscale.com/kb/1312/serve) (MagicDNS and HTTPS certificates on in
-your Tailscale admin console; pick a port nothing else serves on):
+your Tailscale admin console). `tapline dev` does it in one go, without touching anything
+else Tailscale serves:
+
+```sh
+tapline dev -- npx expo start --dev-client --port 8081
+```
+
+It serves `http://127.0.0.1:8081` on `https://<computer>.<tailnet>.ts.net:8443` and runs
+your Metro command with `EXPO_PACKAGER_PROXY_URL` set (`--https-port` picks another port,
+`tapline dev --stop` turns it off). By hand:
 
 ```sh
 tailscale serve --bg --https=8443 http://127.0.0.1:8081
@@ -222,6 +243,9 @@ answer shows the exact link). Pairing with another computer replaces the old pai
 `tapline token` in a git-ignored env file.
 
 ## Troubleshooting
+
+`tapline doctor` checks Node, Tailscale, the token, the ports, the Windows firewall rule
+and Metro over https, and says how to fix what's missing.
 
 | Symptom | Fix |
 |---|---|

@@ -17,7 +17,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 **Computer side**
 
 1. Clone and build Tapline (`npm install`, `npm run build`), then `npm install -g
-   ./packages/host` (or use `node <clone>/packages/host/dist/cli.js`).
+   ./packages/host` (or use `node <clone>/packages/host/dist/cli.js`). `tapline doctor`
+   checks the whole computer side and says what to fix.
 2. Check that Tailscale is running (`tailscale ip -4` prints a `100.x.y.z` address). If it
    isn't installed or signed in, ask the user; it needs their account.
 3. `tapline info` prints this computer's address and the code the app needs. The token in
@@ -99,9 +100,24 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
    `appearance` (light / dark) is always there. Use them to reach a state quickly and to
    check stress views: dark mode, right-to-left languages. Put things back when you're done.
-9. What you press calls the element's handler; it isn't a real touch. If a control only
+12. What you press calls the element's handler; it isn't a real touch. If a control only
    reacts to gestures (swipe-to-delete, drag), say that you couldn't test it rather than
    guessing.
+
+## Repeatable runs
+
+- `record { action: "start", name }` before a flow worth keeping (sign-up, checkout,
+  settings), then act as usual; `record { action: "stop" }` saves it. Targets are saved by
+  testID, else label, else text, so give key controls testIDs. Add `wait_for` steps as the
+  checks ("Thanks for your order" appears).
+- `replay { name }` runs it again and stops at the first step that fails or lands on a
+  different screen. Use it after a change to check nothing broke; the user can run
+  `tapline replay <name>` without an agent. Scripts keep typed text: no real passwords.
+- `compare_screen { name }` saves a reference picture of a screen the first time and later
+  shows what changed (how much, where, which elements, marked in red). Use the same `width`
+  each time, and `update: true` when the change is intended.
+- `filmstrip` (optionally `press` first) captures several frames in one image for
+  animations, transitions and loading states.
 
 ## Screenshots and tokens
 
