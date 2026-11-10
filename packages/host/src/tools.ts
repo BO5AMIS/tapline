@@ -496,6 +496,8 @@ export class TaplineTools {
   private readonly listed = new Set<string>();
   /** Sessions whose previous answer had an alert open, so the next change block can say `Alert: gone`. */
   private readonly alertOpen = new Set<string>();
+  /** Per session: how many actions answered with `look: false` since the agent was last given a list or a change block. */
+  private readonly unlistedActions = new Map<string, number>();
   /** The route of the latest element list, for recording and checking replays. */
   private lastLookRoute: string[] | undefined;
   /** A person acted (in the viewer, or a finger on the phone) since the agent's last full list: `{ref}` targets fail with `stale`. */
@@ -778,6 +780,14 @@ export class TaplineTools {
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [...alertNotes(tree)];
+    // The changes are measured from the agent's last list. When actions answered with `look: false`
+    // came in between, the block covers them too, and "No visible change." may hide a round trip
+    // (a sheet opened by one action and closed by this one): say how far back the list is.
+    const unlisted = this.unlistedActions.get(sid) ?? 0;
+    this.unlistedActions.delete(sid);
+    if (changesText !== null && unlisted > 0) {
+      notes.push(`Note: changes are since your last list, ${unlisted + 1} actions ago.`);
+    }
     if (tree.elements.length === 0) {
       notes.push(
         "Note: something outside the app (a system sheet or browser) may cover it. Tapline can't see it: ask the user, or use Tapwright.",
@@ -869,8 +879,10 @@ export class TaplineTools {
     const settled = typeof settledMs === "number" && Number.isFinite(settledMs) && settledMs >= 0
       ? `Settled in ${(settledMs / 1000).toFixed(2)} s.`
       : undefined;
-    if (withLook === false) response = text([line, ...this.takePersonNote()].join("\n"));
-    else {
+    if (withLook === false) {
+      this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
+      response = text([line, ...this.takePersonNote()].join("\n"));
+    } else {
       // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
       response = await this.withLook(session, line, screenshot === true);
       if (settled !== undefined) {

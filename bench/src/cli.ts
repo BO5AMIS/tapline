@@ -2,7 +2,7 @@
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.js";
 import { guardApp, learnLabApp } from "./guard.js";
-import { openLab } from "./lab.js";
+import { openLab, resetLab } from "./lab.js";
 import { startTool } from "./mcp.js";
 import {
   allPass,
@@ -69,6 +69,13 @@ async function main(): Promise<number> {
       const guarded = guardApp(tool, await learnLabApp(tool));
       for (const suite of selected) {
         results.push(...(await suite.run({ tool: guarded, config, samples, runs, labUrl })));
+      }
+      // Leave the lab as the next tester expects it: counters at zero, scrolled to the top. It goes
+      // through the guard too, and a reset that fails only gets a line: the results are kept.
+      try {
+        await resetLab(guarded);
+      } catch (error) {
+        console.error(`The lab was not reset at the end: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   } finally {
