@@ -106,7 +106,7 @@ describe('an element under the navigation bar iOS draws', () => {
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^covered: /);
     expect(error.message).toContain('is under the navigation bar iOS draws, at (200, 77): a real tap would hit the bar instead.');
-    expect(error.message).toContain('Scroll it down first, or pass force: true to call its handler anyway.');
+    expect(error.message).toContain('Scroll up to bring it below the bar, or pass force: true to call its handler anyway.');
     expect(onLab).not.toHaveBeenCalled();
     await run(() => press({ target: { testID: 'lab-under-header' }, force: true }));
     expect(onLab).toHaveBeenCalledTimes(1);

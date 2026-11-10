@@ -465,21 +465,18 @@ const MAX_CANDIDATES = 5;
 /**
  * The `ambiguous` block (AGENT-TOOLS §4): the message, `Candidates:` with up to 5 lines indented two
  * spaces, a `(+N more; …)` line when there are more, then the retry line. `total` is the number of
- * matches when known.
+ * matches when known. "N inputs on screen" (`type_text` without a target) has no `index` to add: its
+ * retry line and its `(+N more; …)` line say only to use a ref.
  */
-export function ambiguousBlock(
-  message: string,
-  candidates: string[],
-  total?: number,
-  retry = 'Retry with one of the refs, or add "index" (0-based).',
-): string {
+export function ambiguousBlock(message: string, candidates: string[], total?: number, retry?: string): string {
+  const inputsCase = /^\d+ inputs on screen/.test(message);
   const shown = candidates.slice(0, MAX_CANDIDATES);
   const count = Math.max(total ?? candidates.length, candidates.length);
   const more = count - shown.length;
   const lines = [`Error ambiguous: ${message}`];
   if (shown.length > 0) lines.push("Candidates:", ...shown.map((c) => `  ${c}`));
-  if (more > 0) lines.push(`  (+${more} more; use a ref or "index")`);
-  lines.push(retry);
+  if (more > 0) lines.push(inputsCase ? `  (+${more} more; use a ref)` : `  (+${more} more; use a ref or "index")`);
+  lines.push(retry ?? (inputsCase ? "Retry with one of the refs as the target." : 'Retry with one of the refs, or add "index" (0-based).'));
   return lines.join("\n");
 }
 
@@ -508,7 +505,7 @@ export class TaplineTools {
   private readonly alertOpen = new Set<string>();
   /** The route of the latest element list, for recording and checking replays. */
   private lastLookRoute: string[] | undefined;
-  /** A person acted in the viewer since the agent's last full list: `{ref}` targets fail with `stale`. */
+  /** A person acted (in the viewer, or a finger on the phone) since the agent's last full list: `{ref}` targets fail with `stale`. */
   private personActed = false;
   /** The next answer to the agent says a person used the app, once. */
   private personNotePending = false;
@@ -525,6 +522,17 @@ export class TaplineTools {
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
+    // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
+    // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
+    host.on("touch", (session) => {
+      if (this.host.current()?.id === session.id) this.markPersonUsedApp();
+    });
+  }
+
+  /** A person used the app: the next answer says so once, and `{ref}` targets are stale until the next full list. */
+  private markPersonUsedApp(): void {
+    this.personActed = true;
+    this.personNotePending = true;
   }
 
   private notConnected(): CallToolResult {
@@ -999,8 +1007,7 @@ export class TaplineTools {
       if (size === undefined) return { ok: false, code: "unsupported", message: "Couldn't read the screen size yet." };
       const { method, params, point } = this.mapInput(input, size);
       // The request reaches the app from here on, whether it succeeds or is refused.
-      this.personActed = true;
-      this.personNotePending = true;
+      this.markPersonUsedApp();
       try {
         const result = await this.host.request(method, params, { sessionId: session.id });
         return { ok: true, action: this.describeAction(method, result, point) };

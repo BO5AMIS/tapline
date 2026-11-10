@@ -1206,10 +1206,23 @@ function framesDiffer(a: Frame | null, b: Frame | null): boolean {
   );
 }
 
+/**
+ * Whether an element's line shows its label apart from its text (`label="…"`): only when both are
+ * there and they differ (ignoring case). A label that just repeats the text is not a second value.
+ * With no text, the label is what the line names the element by, so it is shown.
+ */
+function showsLabel(element: TaplineElement): boolean {
+  const label = element.label ?? '';
+  if (label === '') return false;
+  const text = element.text;
+  return text === '' || label.toLowerCase() !== text.toLowerCase();
+}
+
 function changedFields(old: TaplineElement, now: TaplineElement): ChangedFields {
   const was: ChangedFields = {};
   if (old.text !== now.text) was.text = old.text;
-  if (old.label !== now.label) was.label = old.label;
+  // A label counts as changed only when the line shows it, before or after.
+  if (old.label !== now.label && (showsLabel(old) || showsLabel(now))) was.label = old.label;
   if (old.value !== now.value) was.value = old.value;
   if (old.checked !== now.checked) was.checked = old.checked;
   if (old.selected !== now.selected) was.selected = old.selected;

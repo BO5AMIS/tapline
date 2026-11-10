@@ -1,7 +1,8 @@
 import { AppState, Platform } from 'react-native';
 import { screenshotAvailable } from './actions';
 import { keepAwake } from './awake';
-import { setEventSink } from './events';
+import { emitEvent, setEventSink } from './events';
+import { onRealTouch } from './touches';
 import { stopLiveFeed } from './live';
 import { forgetLastTree } from './inspect';
 import { originalLog, setLogSink } from './logs';
@@ -142,6 +143,7 @@ export class TaplineClient {
   private token: string | undefined;
   private pairCode: string | undefined;
   private appStateSubscription: { remove: () => void } | null = null;
+  private stopTouchWatch: (() => void) | null = null;
 
   constructor(options: ClientOptions, deps: ClientDeps = {}) {
     this.options = options;
@@ -159,12 +161,17 @@ export class TaplineClient {
     this.running = true;
     this.attempt = 0;
     this.watchAppState();
+    // A person's finger on the screen: the host tells the agent (the event goes nowhere while disconnected).
+    this.stopTouchWatch = onRealTouch((at) => emitEvent('touch', { at }));
     this.connect();
   }
 
   stop(): void {
     this.running = false;
     this.clearTimers();
+    const stopTouchWatch = this.stopTouchWatch;
+    this.stopTouchWatch = null;
+    if (stopTouchWatch) this.safely(stopTouchWatch);
     const socket = this.socket;
     this.socket = null;
     if (this.ready) this.status('disconnected');

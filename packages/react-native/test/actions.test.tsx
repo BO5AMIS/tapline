@@ -317,7 +317,7 @@ describe('press / longPress', () => {
     useFrames({ 'off-bare': frame(0, 0, 100, 40), 'off-handler': frame(0, 50, 100, 40), plain: frame(0, 100, 100, 40) });
     const bare = await failure(run(() => press({ target: { testID: 'off-bare' } })));
     expect(bare.code).toBe('not_actionable');
-    expect(bare.message).toMatch(/^disabled: e\d+ \w+ "Off" is disabled$/);
+    expect(bare.message).toMatch(/^disabled: e\d+ \w+ "Off" is disabled; the app has to enable it first \(force doesn't apply\)\.$/);
     const withHandler = await failure(run(() => press({ target: { testID: 'off-handler' } })));
     expect(withHandler.message).toMatch(/^disabled: /);
     const plain = await failure(run(() => press({ target: { testID: 'plain' } })));

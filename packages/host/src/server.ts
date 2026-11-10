@@ -136,6 +136,8 @@ interface HostEvents {
   frame: [session: SessionInfo, frame: AppFrame];
   /** The app went to the background or came back ("background", "active", "inactive"). */
   appState: [session: SessionInfo, state: string];
+  /** A person touched the app's screen (the app saw a real touch; at most about two a second). */
+  touch: [session: SessionInfo];
   /** A request to a connected app ended with `not_answering`. */
   notAnswering: [session: SessionInfo];
   /** An app that had stopped answering answered again. */
@@ -645,6 +647,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     if (event === "frame") {
       const frame = appFrameSchema.safeParse(data);
       if (frame.success) this.safely(() => this.emit("frame", { ...session.info }, frame.data));
+      return;
+    }
+    if (event === "touch") {
+      // Not a log line: touches come as often as twice a second. Listeners decide what it means.
+      this.safely(() => this.emit("touch", { ...session.info }));
       return;
     }
     if (event === "appState") {

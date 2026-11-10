@@ -54,6 +54,9 @@ export { tree } from './inspect';
 /** The reasons AGENT-TOOLS §4 names for a `not_actionable` refusal; the message starts with one. */
 type NotActionable = 'disabled' | 'off_screen' | 'covered' | 'under_tab_bar' | 'behind_alert' | 'no_action';
 
+/** What follows `disabled`: `force` never acts on a disabled element (the check comes first), so the app has to enable it. */
+const ENABLE_FIRST = 'the app has to enable it first (force doesn\'t apply)';
+
 function notActionable(reason: NotActionable, message: string): TaplineError {
   return new TaplineError('not_actionable', `${reason}: ${message}`);
 }
@@ -437,7 +440,7 @@ async function refuseBehindSheet(snapshot: Snapshot, target: ParsedTarget): Prom
   const matches = matchEntries({ ...snapshot, nodes: behind.nodes, entries: behind.hidden }, target);
   const hidden = matches[target.index ?? 0];
   if (!hidden) return;
-  assertNoOsAlert();
+  assertNoBlockingAlert();
   const front = snapshot.entries.find(
     (entry) => entry.info.interesting && !entry.tab && (entry.info.text.trim() !== '' || entry.info.testID),
   );
@@ -656,8 +659,24 @@ function withoutBox(box: Box | null, cut: Box): Box | null {
   return best;
 }
 
-/** An OS alert sits on top of everything: a person has to answer it first. */
-function assertNoOsAlert(): void {
+/** The testID of the view Tapline's in-app alert draws (`TaplineAlertHost`); its buttons and input sit inside it. */
+const STAND_IN_ALERT_ID = 'tapline-alert';
+
+/** Whether a fiber is inside the stand-in alert's own view. */
+function inStandInAlert(fiber: Fiber): boolean {
+  for (let up: Fiber | null = fiber; up; up = up.return) {
+    const props = up.memoizedProps;
+    if (isRecord(props) && props.testID === STAND_IN_ALERT_ID) return true;
+  }
+  return false;
+}
+
+/**
+ * An alert sits on top of everything: a person has to answer it first. An OS alert can't be pressed
+ * from here; Tapline's stand-in covers the whole screen, so anything outside it is behind it, and
+ * its own buttons are what to tap. `actor` is the element about to be touched, when there is one.
+ */
+function assertNoBlockingAlert(actor?: Entry): void {
   const blocking = openAlerts().find((alert) => !alert.standIn);
   if (blocking) {
     const buttons = blocking.buttons.map((button) => `[${button.text}]`).join(' ');
@@ -667,6 +686,11 @@ function assertNoOsAlert(): void {
         "ask the user to tap a button, or start Tapline with alerts: 'stand-in' so its buttons can be pressed. force: true acts anyway.",
     );
   }
+  const standIn = openAlerts().find((alert) => alert.standIn);
+  if (standIn && !(actor && inStandInAlert(actor.node.fiber))) {
+    const buttons = standIn.buttons.map((button) => `[${button.text}]`).join(' ');
+    throw notActionable('behind_alert', `"${standIn.title}" is open with ${buttons}; tap one of them first.`);
+  }
 }
 
 /**
@@ -674,7 +698,7 @@ function assertNoOsAlert(): void {
  * at the centre of its visible part (Fabric's hit test). Unknown hit results let it through.
  */
 async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | null): Promise<void> {
-  assertNoOsAlert();
+  assertNoBlockingAlert(actor);
   if (frame === null) return;
   const { width, height } = snapshot.screen;
   const left = Math.max(frame.x, 0);
@@ -706,14 +730,14 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
       return notActionable(
         'under_tab_bar',
         `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
-          'Scroll it up first, or pass force: true to call its handler anyway.',
+          'Scroll down to bring it above the bar, or pass force: true to call its handler anyway.',
       );
     }
     if (underNavBar(y)) {
       return notActionable(
         'covered',
         `${name} is under the navigation bar iOS draws, at (${x}, ${y}): a real tap would hit the bar instead. ` +
-          'Scroll it down first, or pass force: true to call its handler anyway.',
+          'Scroll up to bring it below the bar, or pass force: true to call its handler anyway.',
       );
     }
     const hit = await hitAt(x, y);
@@ -879,11 +903,11 @@ async function pressLike(
   const handlerName = kind === 'press' ? 'onPress' : 'onLongPress';
   const actionName = kind === 'press' ? 'tap' : 'long-press';
   if (!actor) {
-    if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is disabled`);
+    if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is disabled; ${ENABLE_FIRST}.`);
     throw notActionable('no_action', `${describe(entry)} has no ${actionName} action`);
   }
   if (actor.info.disabled || entry.info.disabled) {
-    throw notActionable('disabled', `${describe(actor)} is disabled`);
+    throw notActionable('disabled', `${describe(actor)} is disabled; ${ENABLE_FIRST}.`);
   }
   // A finger on an input focuses it (AGENT-TOOLS v1.3): an input never answers no_action to a tap.
   const focusing = kind === 'press' && actor.info.actions.includes('type');
@@ -1072,7 +1096,7 @@ export async function typeText(
   const replace = params.replace !== false && !deleting;
 
   const { entry } = await resolveInput(null, params.target);
-  if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable`);
+  if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
   // Typing into the input that has focus leaves the keyboard alone; another input closes it first.
   const closedKeyboard = closeKeyboardFor(entry);
 
@@ -1370,7 +1394,7 @@ export async function toggle(
   const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
   const control = findActionable(snapshot, entry, 'toggle', true);
   if (!control) throw notActionable('no_action', `${describe(entry)} is not a switch`);
-  if (control.info.disabled) throw notActionable('disabled', `${describe(control)} is disabled`);
+  if (control.info.disabled) throw notActionable('disabled', `${describe(control)} is disabled; ${ENABLE_FIRST}.`);
   const handler = findHandler(control.node, 'onValueChange');
   if (!handler) throw notActionable('no_action', `${describe(control)} is not a switch`);
   const current = control.info.checked === true;

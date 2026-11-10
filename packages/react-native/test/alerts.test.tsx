@@ -211,9 +211,19 @@ describe('tracking (standIn false)', () => {
     expect(openAlerts()).toHaveLength(0);
   });
 
-  it('does not set a wrapper component provider', () => {
+  it('sets the one wrapper component provider (it watches real touches), whose wrapper draws no alert host', async () => {
     installAlertTracking();
-    expect(wrapperSpy).not.toHaveBeenCalled();
+    expect(wrapperSpy).toHaveBeenCalledTimes(1);
+    const provider = wrapperSpy.mock.calls[0][0] as () => React.ComponentType<{ children?: React.ReactNode }>;
+    const Wrapper = provider();
+    Alert.alert('Not drawn', 'message');
+    const renderer = await mount(
+      <Wrapper>
+        <View testID="app-content" />
+      </Wrapper>,
+    );
+    expect(byTestID(renderer.root, 'app-content').length).toBeGreaterThan(0);
+    expect(byTestID(renderer.root, 'tapline-alert')).toHaveLength(0);
   });
 });
 

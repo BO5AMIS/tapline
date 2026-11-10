@@ -13,6 +13,7 @@ import {
   type AlertButton,
   type AlertOptions,
 } from 'react-native';
+import { noteRealTouch } from './touches';
 
 export interface AlertButtonInfo {
   text: string;
@@ -238,13 +239,24 @@ function trackedPrompt(...args: Parameters<PromptFn>): void {
   }
 }
 
+/**
+ * Watches for real touches: it sees a touch start on its way down and says "not mine" (false), so
+ * the app's own views get the touch as if this view were not there. A `Modal` is another native
+ * window, so touches inside one never pass through here.
+ */
+function watchTouch(): boolean {
+  if (installed) noteRealTouch(Date.now());
+  return false;
+}
+
+/** The one wrapper around the app's root: it watches touches and, in stand-in mode, hosts the alert. */
 function Wrapper({ children }: { children?: React.ReactNode }): React.ReactElement {
-  // The provider cannot be unset, so after uninstall the wrapper just passes children through.
-  if (!installed || !standInMode) return <>{children}</>;
+  // The provider cannot be unset, so after uninstall the wrapper stays (the tree must not change
+  // shape under a running app) but does nothing. Children keep one position either way.
   return (
-    <View style={styles.fill}>
+    <View style={styles.fill} onStartShouldSetResponderCapture={watchTouch}>
       {children}
-      <TaplineAlertHost />
+      {installed && standInMode ? <TaplineAlertHost /> : null}
     </View>
   );
 }
@@ -261,7 +273,7 @@ export function installAlertTracking(options?: { standIn?: boolean }): void {
     }
   }
   standInMode = standIn;
-  if (standIn && !wrapperRegistered) {
+  if (!wrapperRegistered) {
     wrapperRegistered = true;
     AppRegistry.setWrapperComponentProvider(() => Wrapper);
   }
