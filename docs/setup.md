@@ -283,6 +283,8 @@ and Metro over https, and says how to fix what's missing.
 | an element isn't in `look` | it has no text, label, `testID` or handler (give it a `testID`), or it's hidden: tabs that aren't selected and screens covered by another are left out |
 | the tab bar isn't in `look` | native tab bars (Expo Router's `NativeTabs`) are drawn by iOS, not React; switch tabs with `open_url` and the tab's route (`myapp://settings`) |
 | `type` didn't change an input | inputs without `onChangeText` keep their native text; target the input by `id` (its `testID`) |
+| the agent gets `not_answering` | the app is connected but stopped answering (a frozen screen, or its JavaScript is stuck): try once more, then close the app and open it again |
+| the app shows a red "Metro has encountered an error: EMFILE" screen (Windows, development builds) | Metro ran out of open files while rebuilding after a file change, which happens in large projects on Windows; it isn't Tapline. Stop Metro, start it again, then close the app and open it (a cold start); avoid saving files Metro watches while a test runs |
 
 ## Undo
 
