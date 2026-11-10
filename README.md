@@ -196,6 +196,12 @@ order, pair again (or give each agent a fixed `--port`).
   builds you test with.
 - To unpair one phone, open `<your-scheme>://tapline/forget` on it. To unpair every phone,
   delete `~/.tapline/token`; phones then need a new pairing code.
+- **With a tool that makes real touches** (Tapwright) driving the same app, that tool tells the
+  host before each touch, so its agent's touches aren't reported as a person's:
+  `POST http://127.0.0.1:<port>/agent-touch` with `Authorization: Bearer <~/.tapline/token>`
+  and `{"ms": <the touch's length, 0 to 10000>}`, answered 204. It is accepted only from this
+  computer, and touch reports from then until the touch's end plus 1.5 s don't leave the
+  "a person used the app" note. Hosts use the first free port of 7210–7219.
 
 ## Limits
 
