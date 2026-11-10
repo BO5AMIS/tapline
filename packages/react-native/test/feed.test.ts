@@ -42,10 +42,11 @@ interface EnvOptions extends FeedOptions {
   withRaf?: boolean;
   captureThrows?: boolean;
   sendThrows?: boolean;
+  canSend?: () => boolean;
 }
 
 function start(options: EnvOptions = {}): Env {
-  const { withRaf = false, captureThrows = false, sendThrows = false, ...feedOptions } = options;
+  const { withRaf = false, captureThrows = false, sendThrows = false, canSend, ...feedOptions } = options;
   const clock = { now: 0 };
   const sent: FeedFrame[] = [];
   const captures: PendingCapture[] = [];
@@ -90,6 +91,7 @@ function start(options: EnvOptions = {}): Env {
       timers = timers.filter((timer) => timer.id !== handle);
     },
   };
+  if (canSend !== undefined) deps.canSend = canSend;
   if (withRaf) {
     deps.requestAnimationFrame = (fn) => {
       const id = nextRaf++;
@@ -155,6 +157,28 @@ function start(options: EnvOptions = {}): Env {
     cancelledFrames: () => cancelled,
   };
 }
+
+describe('flow control (canSend)', () => {
+  it('holds a due capture while the link is busy and takes it as soon as the link frees', async () => {
+    let free = false;
+    const env = start({ settleMs: 20, minIntervalMs: 10, maxWaitMs: 50, canSend: () => free });
+    env.commit();
+    await env.advance(200);
+    expect(env.captures).toHaveLength(0);
+    free = true;
+    await env.advance(10);
+    expect(env.captures).toHaveLength(1);
+    env.feed.stop();
+  });
+
+  it('without canSend the feed captures as before', async () => {
+    const env = start({ settleMs: 20, minIntervalMs: 10, maxWaitMs: 50 });
+    env.commit();
+    await env.advance(30);
+    expect(env.captures).toHaveLength(1);
+    env.feed.stop();
+  });
+});
 
 describe('startFrameFeed', () => {
   it('captures one frame right away on start', async () => {

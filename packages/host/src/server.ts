@@ -659,7 +659,9 @@ export class TaplineHost extends EventEmitter<HostEvents> {
 
     this.sessionMap.set(info.id, session);
     // A paired app gets the token so it can reconnect later without a new code.
-    const welcome = { type: "welcome", protocol: PROTOCOL_VERSION, session: info.id, ...(paired ? { token: this.token } : {}) };
+    // `frameAcks`: this host answers each live-viewer frame with `frameAck`, so the app can hold back
+    // while frames are still on their way (no pile-up on a slow link).
+    const welcome = { type: "welcome", protocol: PROTOCOL_VERSION, session: info.id, frameAcks: true, ...(paired ? { token: this.token } : {}) };
     socket.send(JSON.stringify(welcome));
     this.safely(() => this.emit("connect", { ...info }));
     return session;
@@ -720,6 +722,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private recordEvent(session: Session, event: string, data: unknown): void {
     if (event === "frame") {
       const frame = appFrameSchema.safeParse(data);
+      // Acknowledged on arrival, valid or not: the app counts frames in flight.
+      this.safely(() => session.socket.send(JSON.stringify({ type: "frameAck", seq: frame.success ? frame.data.seq : null })));
       if (frame.success) this.safely(() => this.emit("frame", { ...session.info }, frame.data));
       return;
     }

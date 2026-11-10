@@ -72,7 +72,15 @@ export interface FeedDeps {
   clearTimer: (handle: unknown) => void;
   requestAnimationFrame?: (fn: (t: number) => void) => unknown;
   cancelAnimationFrame?: (handle: unknown) => void;
+  /**
+   * Whether the link can take another frame now (flow control): false while earlier frames are
+   * still on their way to the host. A capture that is due then waits and is tried again shortly.
+   */
+  canSend?: () => boolean;
 }
+
+/** How soon a capture held back by `canSend` is tried again. */
+const FLOW_RETRY_MS = 10;
 
 export interface FeedOptions {
   quality?: QualityPreset;
@@ -322,6 +330,16 @@ export function startFrameFeed(options: FeedOptions, deps: FeedDeps): FrameFeed 
   function startCapture(): void {
     if (stopped || capturing) return;
     clearCaptureTimer();
+    // Frames still on their way: a new one would only queue behind them and arrive in a bunch.
+    let linkBusy = false;
+    safely(() => {
+      linkBusy = deps.canSend !== undefined && !deps.canSend();
+    });
+    if (linkBusy) {
+      captureTimer = deps.setTimer(onCaptureTimer, FLOW_RETRY_MS);
+      hasCaptureTimer = true;
+      return;
+    }
     pending = false;
     wantNow = false;
     pendingSince = null;

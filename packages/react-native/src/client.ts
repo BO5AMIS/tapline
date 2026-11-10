@@ -3,7 +3,7 @@ import { screenshotAvailable } from './actions';
 import { keepAwake } from './awake';
 import { emitEvent, setEventSink } from './events';
 import { onRealTouch } from './touches';
-import { stopLiveFeed } from './live';
+import { onFrameAck, setFrameAcks, stopLiveFeed } from './live';
 import { forgetLastTree } from './inspect';
 import { originalLog, setLogSink } from './logs';
 import { methods as defaultMethods, type MethodFn } from './methods';
@@ -316,7 +316,11 @@ export class TaplineClient {
     if (!isRecord(message)) return;
     switch (message.type) {
       case 'welcome':
+        setFrameAcks(message.frameAcks === true);
         this.onWelcome(message.token);
+        break;
+      case 'frameAck':
+        onFrameAck();
         break;
       case 'ping':
         this.send({ type: 'pong' });

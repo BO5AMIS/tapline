@@ -35,6 +35,19 @@ function announce(port: number, body: unknown, token: string | null = TOKEN, met
 const touch = (app: FakeApp): void => app.send({ type: "event", event: "touch", data: { at: Date.now() } });
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+describe("frame acknowledgements (flow control)", () => {
+  it("the welcome says frames are acknowledged, and each frame is", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app, welcome } = await FakeApp.connect(port, {});
+    apps.push(app);
+    expect(welcome["frameAcks"]).toBe(true);
+    app.send({ type: "event", event: "frame", data: { seq: 7, capturedAt: 1, mime: "image/jpeg", data: "AAAA" } });
+    await wait(50);
+    expect(app.received).toContainEqual({ type: "frameAck", seq: 7 });
+  });
+});
+
 describe("POST /agent-touch", () => {
   it("a touch inside the announced window is the agent's; one after it is a person's again", async () => {
     const { port, app, touches } = await setup(200);

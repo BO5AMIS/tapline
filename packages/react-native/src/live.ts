@@ -44,14 +44,19 @@ const LIVE_PACE: FeedOptions = {
 const NATIVE_PACE: FeedOptions = {
   ...LIVE_PACE,
   settleMs: 40,
-  minIntervalMs: 66,
-  burstIntervalMs: 66,
-  maxWaitMs: 66,
+  minIntervalMs: 60,
+  burstIntervalMs: 60,
+  // While the screen keeps changing, the wait counts from the first commit after the last capture
+  // started (about 8 ms in), so 66 here (with a 66 ms gap) gave a frame every 74 to 80 ms: 12 fps,
+  // and 50 gave 14. 44 lets the 60 ms gap between capture starts decide.
+  maxWaitMs: 44,
   // A native capture holds the main thread only while it draws (the JPEG is made off it), so its
   // whole time may take a larger share. Measured with the first native build: captures of 42 ms on
   // average with the JPEG on the main thread, 1 slow animation frame of 928 and none during a
-  // capture; at a third the feed couldn't go past 7.5 fps.
-  dutyCycle: 0.6,
+  // capture; at a third the feed couldn't go past 7.5 fps, at 0.6 it gave 12 fps (V6 (a) 23.5%).
+  // With the JPEG off the main thread (the second native build) a capture's 46 ms are mostly
+  // off it, so the share counts less against the app's own frames.
+  dutyCycle: 0.75,
   backoffSoftMs: 120,
 };
 /** Bounds of the `gapMs` override, which replaces the pace's gaps (for measuring). */
@@ -62,6 +67,119 @@ function paceFor(gapMs: number | undefined): FeedOptions {
   const pace = nativeModule() !== null ? NATIVE_PACE : LIVE_PACE;
   if (gapMs === undefined) return pace;
   return { ...pace, minIntervalMs: gapMs, burstIntervalMs: gapMs, maxWaitMs: gapMs };
+}
+
+/**
+ * Flow control with a host that acknowledges frames (`frameAcks` in its welcome): at most
+ * `MAX_IN_FLIGHT` frames on their way. On a link slower than the feed, frames would otherwise pile
+ * up and arrive in bunches with long gaps between them (V3); held back, the frame rate follows the
+ * link and every frame that arrives is recent. Measured on the phone over Wi-Fi at 15 fps: 100 KB
+ * frames arrived with gaps up to 300 ms, 35 KB frames with none over 80 ms.
+ */
+const MAX_IN_FLIGHT = 2;
+/** An acknowledgement that doesn't come within this long is taken as lost (the link moves on). */
+const ACK_TIMEOUT_MS = 2000;
+let frameAcks = false;
+let inFlight = 0;
+let lastFlowAt = 0;
+
+/** Whether the host acknowledges frames (from its welcome); resets the count either way. */
+export function setFrameAcks(on: boolean): void {
+  frameAcks = on;
+  resetLink();
+}
+
+/**
+ * Adaptive quality (with acknowledgements): when frames take long to reach the host, the feed
+ * steps down a preset (smaller frames), and steps back up to the chosen one once the link is quick
+ * again, as video players do. Measured on the phone over Wi-Fi: at 15 fps, balanced frames (about
+ * 100 KB) arrived with gaps near 300 ms even with flow control, light frames (35 KB) with none over
+ * 80 ms. The chosen preset stays the ceiling; a still screen soon gets it back.
+ */
+const LADDER: QualityPreset[] = ['light', 'balanced', 'sharp'];
+/** A smoothed send-to-acknowledgement time above this steps the quality down. */
+const SLOW_LINK_MS = 150;
+/** Below this, held for `RECOVER_AFTER_MS`, the quality steps back up. */
+const QUICK_LINK_MS = 70;
+const RECOVER_AFTER_MS = 2000;
+/**
+ * Stepping back up waits until the screen is nearly still (at most this many frames sent in the
+ * last second): during motion the link already showed it can't carry the bigger frames, and going
+ * up and down every few seconds brought back the long gaps (measured: 17 gaps over 150 ms in 20 s).
+ */
+const STILL_FRAMES_PER_S = 3;
+const LATENCY_WEIGHT = 0.3;
+let chosenQuality: QualityPreset = 'balanced';
+let appliedQuality: QualityPreset = 'balanced';
+let sentAt: number[] = [];
+/** When the latest frames were sent (the last second's worth): how much the screen is moving. */
+let recentSends: number[] = [];
+let latencyMs: number | null = null;
+let lastQualityChangeAt = 0;
+
+function resetLink(): void {
+  inFlight = 0;
+  sentAt = [];
+  recentSends = [];
+  latencyMs = null;
+}
+
+/** The host received a frame. */
+export function onFrameAck(): void {
+  inFlight = Math.max(0, inFlight - 1);
+  const now = Date.now();
+  lastFlowAt = now;
+  const sent = sentAt.shift();
+  if (sent === undefined) return;
+  const latency = now - sent;
+  latencyMs = latencyMs === null ? latency : latencyMs * (1 - LATENCY_WEIGHT) + latency * LATENCY_WEIGHT;
+  adaptQuality(now);
+}
+
+/**
+ * The adaptive step: one preset down while the link is slow, one up (to at most `chosen`) once it
+ * has been quick for a while and the screen is nearly still; else `applied` as it is.
+ */
+export function nextQuality(
+  applied: QualityPreset,
+  chosen: QualityPreset,
+  link: { latencyMs: number; sinceChangeMs: number; framesLastSecond: number },
+): QualityPreset {
+  const step = LADDER.indexOf(applied);
+  const ceiling = LADDER.indexOf(chosen);
+  if (step > ceiling) return chosen;
+  if (link.latencyMs > SLOW_LINK_MS && step > 0) return LADDER[step - 1] ?? applied;
+  if (
+    link.latencyMs < QUICK_LINK_MS &&
+    step < ceiling &&
+    link.sinceChangeMs >= RECOVER_AFTER_MS &&
+    link.framesLastSecond <= STILL_FRAMES_PER_S
+  ) {
+    return LADDER[step + 1] ?? applied;
+  }
+  return applied;
+}
+
+function adaptQuality(now: number): void {
+  if (feed === null || latencyMs === null) return;
+  const next = nextQuality(appliedQuality, chosenQuality, {
+    latencyMs,
+    sinceChangeMs: now - lastQualityChangeAt,
+    framesLastSecond: recentSends.filter((t) => now - t <= 1000).length,
+  });
+  if (next === appliedQuality) return;
+  appliedQuality = next;
+  lastQualityChangeAt = now;
+  feed.setQuality(next);
+}
+
+function canSend(): boolean {
+  if (!frameAcks || inFlight < MAX_IN_FLIGHT) return true;
+  if (Date.now() - lastFlowAt > ACK_TIMEOUT_MS) {
+    resetLink();
+    return true;
+  }
+  return false;
 }
 
 /** Replace parts of what the feed uses (tests). */
@@ -76,7 +194,16 @@ function deps(): FeedDeps {
   const base: FeedDeps = {
     // A viewer's frame shows what is on screen; it must not make iOS render one (native module only).
     capture: (params) => screenshot({ ...params, fresh: false }),
-    send: (frame) => emitEvent('frame', frame),
+    send: (frame) => {
+      if (frameAcks) {
+        inFlight += 1;
+        lastFlowAt = Date.now();
+        sentAt.push(lastFlowAt);
+        recentSends = [...recentSends.filter((t) => lastFlowAt - t <= 1000), lastFlowAt];
+      }
+      emitEvent('frame', frame);
+    },
+    canSend,
     onCommit,
     commitRevision,
     now: () => Date.now(),
@@ -117,6 +244,11 @@ export async function feedMethod(raw: unknown): Promise<{ on: boolean; quality?:
   }
   const quality: QualityPreset = isPreset(raw.quality) ? raw.quality : 'balanced';
   if (raw.on) {
+    // The viewer's choice is the ceiling of the adaptive quality, and applies at once.
+    chosenQuality = quality;
+    appliedQuality = quality;
+    lastQualityChangeAt = Date.now();
+    latencyMs = null;
     if (feed && feedGapMs !== gapMs) stopLiveFeed();
     if (feed) feed.setQuality(quality);
     else {

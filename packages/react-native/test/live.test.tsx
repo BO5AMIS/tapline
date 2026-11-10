@@ -119,3 +119,26 @@ describe('overlay', () => {
     expect((await tree({ changes: true })).elements.find((e) => e.testID === 'save')?.ref).toBe(saveRef);
   });
 });
+
+describe('adaptive quality (nextQuality)', () => {
+  const { nextQuality } = jest.requireActual<typeof import('../src/live')>('../src/live');
+  const link = (latencyMs: number, sinceChangeMs = 5000, framesLastSecond = 0) => ({ latencyMs, sinceChangeMs, framesLastSecond });
+
+  test('a slow link steps down one preset at a time, never below light', () => {
+    expect(nextQuality('sharp', 'sharp', link(300))).toBe('balanced');
+    expect(nextQuality('balanced', 'sharp', link(300))).toBe('light');
+    expect(nextQuality('light', 'sharp', link(300))).toBe('light');
+  });
+
+  test('a quick link steps back up only when the screen is nearly still, and not past the choice', () => {
+    expect(nextQuality('light', 'balanced', link(30, 5000, 15))).toBe('light');
+    expect(nextQuality('light', 'balanced', link(30, 5000, 2))).toBe('balanced');
+    expect(nextQuality('balanced', 'balanced', link(30, 5000, 0))).toBe('balanced');
+  });
+
+  test('it waits after a change before stepping up, and a lower choice wins at once', () => {
+    expect(nextQuality('light', 'sharp', link(30, 500, 0))).toBe('light');
+    expect(nextQuality('sharp', 'light', link(30))).toBe('light');
+    expect(nextQuality('balanced', 'balanced', link(100))).toBe('balanced');
+  });
+});
