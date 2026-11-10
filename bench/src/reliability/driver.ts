@@ -213,6 +213,12 @@ export async function runRefuse(env: Env, c: RefuseCheck): Promise<Outcome | nul
   }
   const problems: string[] = [];
   let ready = true;
+  // Under OS-drawn UI the state can't be read; what `pressed=` says is read now, while it can.
+  let pressedBefore: string | undefined;
+  if (c.needsAlert) {
+    await showState(env.tool);
+    pressedBefore = fieldParts(await readStateFields(env.tool)).find((part) => part.startsWith("pressed="));
+  }
   for (const s of c.setup ?? []) {
     const { result, missing } = await runStateCall(env, s);
     if (failed(result) || missing.length > 0) {
@@ -222,15 +228,12 @@ export async function runRefuse(env: Env, c: RefuseCheck): Promise<Outcome | nul
   }
   let dirty = false;
   let tapped = false;
-  let pressedBefore: string | undefined;
   if (ready) {
     for (const b of c.before ?? []) await env.tool.call(b.tool, b.args);
     const bring = c.bring === undefined ? idOf(c.target) : c.bring;
     if (bring) await bringIntoView(env.tool, bring);
     const look = await env.tool.call("look", { screenshot: false });
     const baseline = fieldParts(parseStateFields(look.text));
-    // Under OS-drawn UI the look may not show lab-state: what the setup tap pressed is known anyway.
-    pressedBefore = baseline.find((part) => part.startsWith("pressed=")) ?? setupPressed(c);
     if (c.needsAlert && !seesOsCover(look.text)) {
       // A real touch here would land on what the OS drew (a share target opens another app).
       problems.push(
@@ -264,12 +267,6 @@ export function seesOsCover(lookText: string): boolean {
   if (/^Alert:/m.test(lookText)) return true;
   if (/^Note: something outside the app/m.test(lookText)) return true;
   return !/\bid=lab-/.test(lookText);
-}
-
-/** `pressed=<id>` that the check's setup taps set (the lab names a press by the id without `lab-`). */
-function setupPressed(c: RefuseCheck): string | undefined {
-  const id = idOf(c.setup?.[0]?.target);
-  return id == null ? undefined : `pressed=${id.replace(/^lab-/, "")}`;
 }
 
 /**

@@ -116,6 +116,19 @@ export interface FakeOptions {
   freeze?: { ms: number; kind: "in-app" | "real-touch" | "hangs" | "silent-success" };
 }
 
+/** The lab's buttons that don't write `pressed=` (lab.tsx: LabButton without setPressed). */
+const RECORDS_NO_PRESS = new Set([
+  "lab-taps",
+  "lab-open-sheet",
+  "lab-sheet-close",
+  "lab-alert",
+  "lab-native-alert",
+  "lab-share",
+  "lab-reset",
+  "lab-freeze",
+  "lab-long",
+]);
+
 /** Where lab-state sits on the lab's content when it scrolls (`stateScrolls`). */
 const STATE_Y = 120;
 
@@ -240,7 +253,9 @@ export class FakeLab {
   }
 
   private press(el: El): void {
-    this.pressed = el.id.replace(/^lab-/, "");
+    // As in the real lab: only the plain buttons record `pressed=`; the ones that do something else
+    // (open a sheet or an alert, count taps, reset, freeze) leave it as it was.
+    if (!RECORDS_NO_PRESS.has(el.id)) this.pressed = el.id.replace(/^lab-/, "");
     switch (el.id) {
       case "lab-taps":
         this.taps++;
