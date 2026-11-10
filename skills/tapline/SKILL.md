@@ -118,6 +118,8 @@ and `y` only for things with no element.
 | see an animation or a loading state | `filmstrip`: several frames in one picture |
 | let the user watch, or do a step themselves (their own password) | `viewer`, and give them the link |
 
+**With both tools connected:** when the two tools answer differently, both are right about their own way in: Tapwright does what a finger can do, Tapline what the app's own code allows (Tapline's `back` calls a sheet's own close; Tapwright's needs a gesture the sheet accepts). Test what the user can do with Tapwright; use Tapline to get there faster. Each tool's `was` is from its own last answer: after the other tool acted, read the current value, not the old one.
+
 ## 5. Errors
 
 Every failure is `Error <code>: <message>`, and the message says what to do next.
