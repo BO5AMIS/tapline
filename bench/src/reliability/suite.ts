@@ -103,12 +103,14 @@ export async function runReliability(tool: ToolSession, opts: ReliabilityOptions
       await resetLab(tool);
       add(await runR3(env, false));
       add([await runR5(env)]);
-      const r6 = await runR6(env, r6opts);
-      if (r6) add([r6]);
       add(await runR3(env, true));
       await resetLab(tool);
       add(await runR4(env, idleMs));
     }
+    // R6 once, after the last pass: a 20 s freeze must not be able to disturb the checks that follow it.
+    await resetLab(tool);
+    const r6 = await runR6(env, r6opts);
+    if (r6) all.push({ run: opts.runs, outcome: r6 });
   } catch (e) {
     left = e instanceof LeftLabError;
     throw e;
