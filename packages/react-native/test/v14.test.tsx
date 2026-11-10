@@ -78,9 +78,9 @@ describe('the keyboard closes first', () => {
       ...(options.top !== undefined
         ? {
             top: () => options.top ?? null,
-            focus: (input: unknown) => {
+            focus: (instances: unknown[]) => {
               calls.push('focus');
-              if (options.focusTakes !== false) current = input;
+              if (options.focusTakes !== false) current = instances[0];
             },
           }
         : {}),

@@ -943,8 +943,13 @@ function callInstanceMethod(instances: unknown[], name: string): boolean {
  * instance (Paper: the fiber's stateNode; Fabric: `stateNode.canonical`), and `TextInput.State.focusTextInput`
  * takes the same instance. Without either, the app's own onPressIn / onFocus handlers run.
  */
+/** An input's instances, the host's and its components': the ones a `focus()` may be called on. */
+function inputInstances(entry: Entry): unknown[] {
+  return [...publicInstancesOf(entry.node.fiber), ...entry.node.owners.map((owner) => owner.stateNode)];
+}
+
 function focusInput(entry: Entry, frame: Frame | null): void {
-  const instances = [...publicInstancesOf(entry.node.fiber), ...entry.node.owners.map((owner) => owner.stateNode)];
+  const instances = inputInstances(entry);
   if (callInstanceMethod(instances, 'focus')) return;
   try {
     const state = (TextInput as unknown as { State?: unknown }).State;
@@ -1068,8 +1073,11 @@ export interface KeyboardControl {
   blur(input: unknown): void;
   /** The keyboard's top edge in window points, or null when it isn't known. */
   top?(): number | null;
-  /** Gives `input` (a text input's host instance) the focus, as a finger on it does. */
-  focus?(input: unknown): void;
+  /**
+   * Gives a text input the focus, as a finger on it does. `instances` are the input's instances,
+   * public ones and its component's included (see `inputInstances`).
+   */
+  focus?(instances: unknown[]): void;
 }
 
 const defaultKeyboard: KeyboardControl = {
@@ -1095,17 +1103,10 @@ const defaultKeyboard: KeyboardControl = {
     callInstanceMethod([input], 'blur');
   },
   top: () => keyboardState()?.top ?? null,
-  focus: (input) => {
-    try {
-      const state = (TextInput as unknown as { State?: unknown }).State;
-      if (isRecord(state) && typeof state.focusTextInput === 'function') {
-        (state.focusTextInput as (instance: unknown) => void)(input);
-        return;
-      }
-    } catch {
-      // fall through to the instance's own focus
-    }
-    callInstanceMethod([input], 'focus');
+  // The instance's own focus() first: on Fabric only the public instance reaches the native field,
+  // and handing TextInputState the internal node moves the focus in JavaScript's books alone.
+  focus: (instances) => {
+    callInstanceMethod(instances, 'focus');
   },
 };
 
@@ -1142,11 +1143,10 @@ async function moveFocusAboveKeyboard(entry: Entry): Promise<boolean> {
   const focused = keyboard.focusedInput();
   if (focused == null || !keyboard.visible() || ownsInstance(entry, focused)) return false;
   const top = keyboard.top?.() ?? null;
-  const host = publicInstancesOf(entry.node.fiber).find(isRecord);
-  if (top === null || keyboard.focus === undefined || host === undefined) return false;
+  if (top === null || keyboard.focus === undefined) return false;
   const frame = await measureFiber(entry.node.fiber);
   if (frame === null || frame.y + frame.height > top) return false;
-  keyboard.focus(host);
+  keyboard.focus(inputInstances(entry));
   return ownsInstance(entry, keyboard.focusedInput());
 }
 
