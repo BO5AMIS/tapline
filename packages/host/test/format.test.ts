@@ -83,6 +83,36 @@ describe("formatElement", () => {
   });
 });
 
+describe("changes off screen (AGENT-TOOLS v1.6)", () => {
+  const STATE = { ref: "", type: "Text", role: null, testID: "lab-state", text: "taps=1 row=30", frame: { x: 16, y: -900, width: 398, height: 68 } };
+  const base = { sameRoute: true, added: [], removed: [], changed: [], moved: [] };
+
+  it("lists them without a ref, marked off screen, with the old value", () => {
+    const block = formatChanges({ ...tree, changes: { ...base, offScreen: [{ element: STATE, was: { text: "taps=1 row=-" } }] } });
+    expect(block).toBe(
+      ['Same screen. Changes:', '~ text "taps=1 row=30" id=lab-state @16,-900 398x68 (off screen; was "taps=1 row=-")'].join("\n"),
+    );
+  });
+
+  it("counts the ones beyond five", () => {
+    const block = formatChanges({
+      ...tree,
+      changes: { ...base, offScreen: [{ element: STATE, was: { text: "x" } }], offScreenMore: 2 },
+    });
+    expect(block?.split("\n").at(-1)).toBe("~ 2 more changed off screen");
+  });
+
+  it("several fields are named, as on screen", () => {
+    const sw = { ref: "", type: "Switch", role: "switch", label: "Notify", checked: true, disabled: false, frame: { x: 16, y: 1200, width: 60, height: 32 } };
+    const block = formatChanges({ ...tree, changes: { ...base, offScreen: [{ element: sw, was: { checked: false, disabled: true } }] } });
+    expect(block?.split("\n")[1]).toBe('~ switch "Notify" checked=true @16,1200 60x32 (off screen; was checked=false, disabled=true)');
+  });
+
+  it("with nothing on screen or off it: No visible change.", () => {
+    expect(formatChanges({ ...tree, changes: base })).toBe("Same screen. Changes:\nNo visible change.");
+  });
+});
+
 describe("the screen line counts what is off screen (AGENT-TOOLS v1.5)", () => {
   const first = (result: TreeResult): string => formatTree(result).split("\n")[0] ?? "";
 

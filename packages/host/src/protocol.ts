@@ -156,6 +156,10 @@ export const treeResultSchema = z.object({
       removed: z.array(elementSchema),
       changed: z.array(z.object({ ref: z.string(), was: z.record(z.string(), z.unknown()) })),
       moved: z.array(z.string()),
+      /** Elements off screen whose text, label, value or state changed, as they are now (no ref), with the old values. */
+      offScreen: z.array(z.object({ element: elementSchema, was: z.record(z.string(), z.unknown()) })).nullish(),
+      /** How many more changed off screen than `offScreen` holds. */
+      offScreenMore: z.number().nullish(),
     })
     .optional(),
 });

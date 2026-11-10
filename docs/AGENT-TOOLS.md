@@ -14,8 +14,8 @@ into: the header counts what lies off screen, text is cut at 200 characters and 
 much is missing, a match in the alert in front wins over matches behind it, a person's touch on
 the phone leaves the same note as viewer input, `type_text` takes `force`, and a call outside the
 apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds what a second first-time agent ran into: `scroll` with
-`to: "target"` brings an element onto the screen, a note says when a change block covers more than
-one action, and a forced action says so. Each repo keeps an
+`to: "target"` brings an element onto the screen, changes off screen are shown, a note says when a
+change block covers more than one action, and a forced action says so. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -105,9 +105,16 @@ Settled in 0.31 s.
   - `~ <element line> (was "<old>")` when exactly one field changed. When several changed:
     `(was text="…", value="…")`, naming each one. The fields are text, label, value,
     checked, selected, disabled and actions. **A frame never appears in `~`**;
+  - `~ <element line without a ref> (off screen; was "<old>")` for an element that lies above
+    or below the screen, before and now, whose text, label, value, checked, selected or
+    disabled changed (v1.6): the effect of a tap that is scrolled out of view. Off-screen
+    elements that are new, gone or moved aren't listed (a scroll moves all of them). Up to 5
+    are listed, then `~ N more changed off screen`. What an open sheet hides is left out.
+    Tapwright matches an element off screen by its identifier, or by its role and place; a
+    changed text with neither isn't shown;
   - `↕ <element line>` for a frame-only change of more than 1 pt in x, y, width or height,
     size included. Up to 5 are listed; more become the single line `↕ N elements moved`;
-  - `No visible change.` when nothing changed.
+  - `No visible change.` when nothing changed, on screen or (v1.6) off it.
 - **The baseline** is the agent's list as of its last answer: the last `look`, or the list
   carried through every action answer since. It's never just the last full list. Scroll
   down and then back up gives `↕` both times.

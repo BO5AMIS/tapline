@@ -1183,11 +1183,12 @@ export function fiberForRef(ref: string): Fiber | null {
   return refToFiber.get(ref) ?? null;
 }
 
-export function toElement(entry: Entry, frame: Frame | null): TaplineElement {
+/** An entry as an element. `ref` is the fiber's ref unless one is passed ('' for an element that isn't listed). */
+export function toElement(entry: Entry, frame: Frame | null, ref: string = refFor(entry.node.fiber)): TaplineElement {
   const { info } = entry;
   const more = info.text.length - MAX_KEPT_TEXT;
   return {
-    ref: refFor(entry.node.fiber),
+    ref,
     type: info.type,
     role: info.role,
     testID: info.testID,
@@ -1203,8 +1204,11 @@ export function toElement(entry: Entry, frame: Frame | null): TaplineElement {
   };
 }
 
-/** The previous `tree` result, keyed by host instance, for `changes`. */
-let lastTree: { byKey: Map<object, TaplineElement>; route: string } | null = null;
+/** The previous `tree` result, keyed by host instance, for `changes`: what was listed, and what lay above or below the screen. */
+let lastTree: { byKey: Map<object, TaplineElement>; offKey: Map<object, TaplineElement>; route: string } | null = null;
+
+/** How many changed off-screen elements a change block lists one by one (AGENT-TOOLS v1.6). */
+const MAX_OFF_SCREEN_CHANGES = 5;
 
 /** Forget the previous tree (tests; a new connection). */
 export function forgetLastTree(): void {
@@ -1249,11 +1253,24 @@ function changedFields(old: TaplineElement, now: TaplineElement): ChangedFields 
 }
 
 function diffTrees(
-  previous: { byKey: Map<object, TaplineElement>; route: string },
+  previous: { byKey: Map<object, TaplineElement>; offKey: Map<object, TaplineElement>; route: string },
   byKey: Map<object, TaplineElement>,
+  offKey: Map<object, TaplineElement>,
   route: string,
 ): TreeChanges {
   const changes: TreeChanges = { sameRoute: previous.route === route, added: [], removed: [], changed: [], moved: [] };
+  // Off screen before and now: only what changed in it counts (a scroll moves all of them, and a
+  // lazy list makes and drops rows out of view all the time).
+  let offScreenChanged = 0;
+  for (const [key, now] of offKey) {
+    const old = previous.offKey.get(key);
+    if (!old) continue;
+    const { actions: _actions, ...was } = changedFields(old, now);
+    if (Object.keys(was).length === 0) continue;
+    offScreenChanged++;
+    if (offScreenChanged <= MAX_OFF_SCREEN_CHANGES) (changes.offScreen ??= []).push({ element: now, was });
+  }
+  if (offScreenChanged > MAX_OFF_SCREEN_CHANGES) changes.offScreenMore = offScreenChanged - MAX_OFF_SCREEN_CHANGES;
   for (const [key, now] of byKey) {
     const old = previous.byKey.get(key);
     if (!old) {
@@ -1362,6 +1379,9 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   }
   const result: TreeResult = { screen: snapshot.screen, elements };
   if (above.length > 0 || below.length > 0) result.offScreen = { above: above.length, below: below.length };
+  // What lies above and below, without refs (it isn't listed): the baseline for changes off screen.
+  const offKey = new Map<object, TaplineElement>();
+  for (const { entry, frame } of [...above, ...below]) offKey.set(stableKey(entry), toElement(entry, frame, ''));
   const current = currentRoute(snapshot.routes);
   if (current) {
     const params = simpleParams(current.params);
@@ -1374,7 +1394,7 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   const busy = inFlight();
   if (busy > 0) result.network = { inFlight: busy };
   const routeKey = current ? `${current.chain.join('/')}#${current.key}` : '';
-  if (wantChanges && lastTree !== null) result.changes = diffTrees(lastTree, byKey, routeKey);
-  lastTree = { byKey, route: routeKey };
+  if (wantChanges && lastTree !== null) result.changes = diffTrees(lastTree, byKey, offKey, routeKey);
+  lastTree = { byKey, offKey, route: routeKey };
   return result;
 }

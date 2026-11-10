@@ -102,6 +102,13 @@ export interface TreeChanges {
   changed: Array<{ ref: string; was: ChangedFields }>;
   /** Refs of elements that only moved. */
   moved: string[];
+  /**
+   * Elements off screen (above or below it, before and now) whose text, label, value or state
+   * changed, as they are now and without a ref, with the old values. At most 5; absent when none.
+   */
+  offScreen?: Array<{ element: TaplineElement; was: ChangedFields }>;
+  /** How many more changed off screen than `offScreen` holds; absent when none. */
+  offScreenMore?: number;
 }
 
 /** An alert the app showed and nobody has answered yet. */

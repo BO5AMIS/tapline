@@ -91,7 +91,8 @@ export function actionsOf(element: Pick<TreeElement, "actions">): string[] {
 
 /** One compact line for an element, e.g. `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`. */
 export function formatElement(element: TreeElement, options: { actions?: boolean } = {}): string {
-  const parts: string[] = [element.ref];
+  // An element that isn't on the list (one that changed off screen) has no ref.
+  const parts: string[] = element.ref !== "" ? [element.ref] : [];
   const kind = roleOf(element);
   if (kind !== null) parts.push(kind);
 
@@ -224,17 +225,25 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean }
     if (element !== undefined) lines.push(`+ ${formatElement(element)}`);
   }
   for (const element of changes.removed) lines.push(`- ${describeGone(element)}`);
+  // One changed field reads `"old"`; several read `text="old", value="old"`.
+  const before = (was: Record<string, unknown>): string => {
+    const entries = Object.entries(was);
+    const [only] = entries;
+    return entries.length === 1 && only !== undefined
+      ? formatWas(only[0], only[1])
+      : entries.map(([key, value]) => `${key}=${formatWas(key, value)}`).join(", ");
+  };
   for (const { ref, was } of changes.changed) {
     const element = byRef.get(ref);
     if (element === undefined) continue;
-    const entries = Object.entries(was);
-    const [only] = entries;
-    const before =
-      entries.length === 1 && only !== undefined
-        ? formatWas(only[0], only[1])
-        : entries.map(([key, value]) => `${key}=${formatWas(key, value)}`).join(", ");
-    lines.push(`~ ${formatElement(element)} (was ${before})`);
+    lines.push(`~ ${formatElement(element)} (was ${before(was)})`);
   }
+  // What changed out of view (v1.6): the tap worked, its effect just isn't on screen.
+  for (const { element, was } of changes.offScreen ?? []) {
+    lines.push(`~ ${formatElement({ ...element, ref: "" })} (off screen; was ${before(was)})`);
+  }
+  const more = changes.offScreenMore ?? 0;
+  if (more > 0) lines.push(`~ ${more} more changed off screen`);
   if (changes.moved.length > MAX_MOVED_LINES) {
     lines.push(`↕ ${changes.moved.length} elements moved`);
   } else {
