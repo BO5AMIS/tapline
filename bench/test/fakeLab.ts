@@ -76,6 +76,11 @@ export interface Bugs {
    * lands on a share target, which opens another app (the incident this guards against).
    */
   shareTouchThrough?: boolean;
+  /**
+   * Behind OS-drawn UI (the share sheet, a native alert) a tap answers the right refusal but presses
+   * the element anyway. The cover hides lab-state, so only a read after it closes shows it.
+   */
+  pressesBehindCover?: boolean;
 }
 
 export const LAB_APP = "Lab (com.example.lab)";
@@ -396,6 +401,10 @@ export class FakeLab {
       return `Tapped ${first.id}.\nSettled in 0.10 s.`;
     }
     const refused = this.refusal(first);
+    if (refused && this.options.bugs?.pressesBehindCover && (this.shareOpen || this.nativeAlert)) {
+      this.pressed = first.id.replace(/^lab-/, "");
+      return refused;
+    }
     if (refused) return refused;
     this.press(first);
     return `Tapped ${first.id}.\nSettled in 0.10 s.${this.standIn ? '\nAlert: "Alert" buttons OK, Cancel' : ""}`;

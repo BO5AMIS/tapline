@@ -413,6 +413,14 @@ describe("the whole suite on the fake lab", () => {
     expect(r3.notes).toContain("not_found instead of not_actionable (AGENT-TOOLS v1.4)");
   }, 60_000);
 
+  it("behind OS-drawn UI, judges the state after the cover is closed (the cover hides lab-state)", async () => {
+    const { rows } = await runWith({ alertTool: true, bugs: { pressesBehindCover: true } }, 1);
+    const r3 = rowOf(rows, "R3");
+    expect(r3.pass).toBe(false);
+    expect(r3.notes).toContain("tap lab-save behind the share sheet");
+    expect(r3.notes).toContain("pressed=save appeared once the cover was closed");
+  }, 60_000);
+
   it("fails R4 when the viewer's taps land nowhere", async () => {
     const lab = new FakeLab({ alertTool: true });
     viewer = await startViewer(lab, true);

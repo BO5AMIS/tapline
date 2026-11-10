@@ -221,18 +221,23 @@ export async function runRefuse(env: Env, c: RefuseCheck): Promise<Outcome | nul
     }
   }
   let dirty = false;
+  let tapped = false;
+  let pressedBefore: string | undefined;
   if (ready) {
     for (const b of c.before ?? []) await env.tool.call(b.tool, b.args);
     const bring = c.bring === undefined ? idOf(c.target) : c.bring;
     if (bring) await bringIntoView(env.tool, bring);
     const look = await env.tool.call("look", { screenshot: false });
     const baseline = fieldParts(parseStateFields(look.text));
+    // Under OS-drawn UI the look may not show lab-state: what the setup tap pressed is known anyway.
+    pressedBefore = baseline.find((part) => part.startsWith("pressed=")) ?? setupPressed(c);
     if (c.needsAlert && !seesOsCover(look.text)) {
       // A real touch here would land on what the OS drew (a share target opens another app).
       problems.push(
         "the tool's look shows nothing covering the target while the OS UI is open; the runner sent no tap",
       );
     } else {
+      tapped = true;
       dirty = await tapAndJudge(env, c, baseline, problems);
     }
   }
@@ -245,6 +250,7 @@ export async function runRefuse(env: Env, c: RefuseCheck): Promise<Outcome | nul
   if (c.dismissShare && !(await dismissShare(env))) {
     env.skipNotes.add("note: the share sheet could not be dismissed generically (alert dismiss, back)");
   }
+  if (tapped && c.needsAlert) dirty = (await judgeAfterCover(env, c, pressedBefore, problems)) || dirty;
   if (dirty || problems.some((p) => p.startsWith("teardown"))) await resetLab(env.tool);
   return { id: "R3", name: c.name, ok: problems.length === 0, ...(problems.length ? { note: problems.join("; ") } : {}) };
 }
@@ -258,6 +264,25 @@ export function seesOsCover(lookText: string): boolean {
   if (/^Alert:/m.test(lookText)) return true;
   if (/^Note: something outside the app/m.test(lookText)) return true;
   return !/\bid=lab-/.test(lookText);
+}
+
+/** `pressed=<id>` that the check's setup taps set (the lab names a press by the id without `lab-`). */
+function setupPressed(c: RefuseCheck): string | undefined {
+  const id = idOf(c.setup?.[0]?.target);
+  return id == null ? undefined : `pressed=${id.replace(/^lab-/, "")}`;
+}
+
+/**
+ * The state check of a refusal under OS-drawn UI, once the cover is closed and lab-state can be
+ * read: what the setup pressed is still the last press, and the refused target's press never came.
+ * Closing the cover sets its own fields (alert=…, shared=…), so only `pressed=` is compared.
+ */
+async function judgeAfterCover(env: Env, c: RefuseCheck, pressedBefore: string | undefined, problems: string[]): Promise<boolean> {
+  await showState(env.tool);
+  const changed = await checkUnchanged(env.tool, pressedBefore ? [pressedBefore] : [], [`pressed=${c.notPressed}`]);
+  if (changed.length === 0) return false;
+  problems.push(`lab state changed (${changed.map((part) => `${part} once the cover was closed`).join(", ")})`);
+  return true;
 }
 
 /** Taps the target that must be refused and notes what went wrong. True when the lab state changed. */
@@ -275,6 +300,9 @@ async function tapAndJudge(env: Env, c: RefuseCheck, baseline: string[], problem
   } else {
     problems.push(`acted instead of refusing: ${line(env, r)}`);
   }
+  // OS-drawn UI hides lab-state from a tool that sees it, so "it didn't appear" proves nothing while
+  // it is open: the state is judged once the cover is closed (`judgeAfterCover`).
+  if (c.needsAlert) return false;
   const changed = await checkUnchanged(env.tool, baseline, [`pressed=${c.notPressed}`]);
   if (changed.length === 0) return false;
   problems.push(`lab state changed (${changed.join(", ")})`);
