@@ -148,6 +148,8 @@ export const treeResultSchema = z.object({
     .optional(),
   /** Network requests still running. */
   network: z.object({ inFlight: z.number() }).optional(),
+  /** True while the software keyboard is up (absent from older SDKs and when it is down). */
+  keyboard: z.boolean().nullish(),
   /** With `changes: true`: what changed since the previous tree call. */
   changes: z
     .object({
@@ -160,6 +162,8 @@ export const treeResultSchema = z.object({
       offScreen: z.array(z.object({ element: elementSchema, was: z.record(z.string(), z.unknown()) })).nullish(),
       /** How many more changed off screen than `offScreen` holds. */
       offScreenMore: z.number().nullish(),
+      /** The keyboard came up or went down since then. */
+      keyboard: z.enum(["shown", "hidden"]).nullish(),
     })
     .optional(),
 });

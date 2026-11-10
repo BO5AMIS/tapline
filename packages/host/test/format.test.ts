@@ -346,6 +346,30 @@ describe("formatTree", () => {
     expect(formatChanges(open, { alertGone: true })).not.toContain("Alert: gone");
   });
 
+  it("Keyboard: shown in a list's header while it is up, between the alert and the network lines", () => {
+    const up = {
+      ...tree,
+      keyboard: true,
+      alerts: [{ kind: "alert" as const, title: "Hi", message: null, buttons: [], standIn: true }],
+      network: { inFlight: 1 },
+    };
+    const lines = formatTree(up).split("\n");
+    const at = lines.indexOf("Keyboard: shown");
+    expect(lines[at - 1]).toMatch(/^Alert: "Hi"/);
+    expect(lines[at + 1]).toBe("Network: 1 request in flight");
+    expect(formatTree(tree)).not.toContain("Keyboard:");
+  });
+
+  it("a change block says Keyboard: shown or hidden only when it came or went, and that is a change", () => {
+    const same = { sameRoute: true, added: [], removed: [], changed: [], moved: [] };
+    expect(formatChanges({ ...tree, keyboard: true, changes: { ...same, keyboard: "shown" as const } })).toBe(
+      "Same screen. Changes:\nKeyboard: shown",
+    );
+    expect(formatChanges({ ...tree, changes: { ...same, keyboard: "hidden" as const } })).toBe("Same screen. Changes:\nKeyboard: hidden");
+    // Still up, as before: nothing to say about it.
+    expect(formatChanges({ ...tree, keyboard: true, changes: same })).toBe("Same screen. Changes:\nNo visible change.");
+  });
+
   it("an alert closing alone is a change, not 'No visible change'", () => {
     const t = { ...tree, changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] } };
     expect(formatChanges(t, { alertGone: true })).toBe("Same screen. Changes:\nAlert: gone");

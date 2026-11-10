@@ -254,8 +254,9 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean }
   if (churn > Math.max(8, count / 2)) return null;
 
   const byRef = new Map(tree.elements.map((element) => [element.ref, element]));
-  // Header lines come first (§3.1). An alert open in the previous answer and not now is "gone".
-  const header = formatStatus(tree);
+  // Header lines come first (§3.1). An alert open in the previous answer and not now is "gone"; the
+  // keyboard only when it came or went.
+  const header = formatStatus(tree, changes.keyboard ?? null);
   const alertGone = options.alertGone === true && (tree.alerts ?? []).length === 0;
   if (alertGone) header.unshift("Alert: gone");
   const lines = ["Same screen. Changes:", ...header];
@@ -279,13 +280,17 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean }
       if (element !== undefined) lines.push(`↕ ${formatElement(element)}`);
     }
   }
-  // A closed alert is itself a change.
-  if (lines.length === statusLines && !alertGone) lines.push("No visible change.");
+  // A closed alert is itself a change, and so is the keyboard coming or going.
+  if (lines.length === statusLines && !alertGone && changes.keyboard == null) lines.push("No visible change.");
   return lines.join("\n");
 }
 
-/** Lines for open alerts and requests in flight: things that block or explain the screen. */
-export function formatStatus(tree: TreeResult): string[] {
+/**
+ * Lines for open alerts, the keyboard and requests in flight: things that block or explain the
+ * screen, in §3.2's order. `keyboard` is the keyboard line's word: by default `shown` while it is up
+ * (a list's header); a change block passes what changed.
+ */
+export function formatStatus(tree: TreeResult, keyboard: "shown" | "hidden" | null = tree.keyboard === true ? "shown" : null): string[] {
   const lines: string[] = [];
   for (const alert of tree.alerts ?? []) {
     const buttons = alert.buttons
@@ -294,6 +299,7 @@ export function formatStatus(tree: TreeResult): string[] {
     const message = alert.message !== null && alert.message !== "" ? ` ${clip(alert.message, 160)}` : "";
     lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons}`);
   }
+  if (keyboard !== null) lines.push(`Keyboard: ${keyboard}`);
   const busy = tree.network?.inFlight ?? 0;
   if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);
   return lines;

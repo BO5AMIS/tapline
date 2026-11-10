@@ -87,6 +87,10 @@ and `y` only for things with no element.
   so after a `look` use the new list's refs.
 - **Long text is cut** and says by how much: `"…(+57)"`. `wait_for` with the text checks all
   of it.
+- **The keyboard:** `Keyboard: shown` or `Keyboard: hidden` in an answer says it came or went.
+  While it is up, a touch on anything but the field you are typing in closes it first, as a
+  person would, and the answer ends with `Note: closed the keyboard first.` Typing into the
+  next field of a form leaves it up.
 - **`Note:` lines come last.** Read them: they say when something didn't go the plain way
   (a person touched the phone, the keyboard was closed first, an action was forced).
 
@@ -98,7 +102,7 @@ and `y` only for things with no element.
 | wait for a load, a spinner or a new screen | `wait_for` with `text`, `id` or `label` (`gone: true` for a spinner; `network_idle` for requests), not `wait` |
 | set a switch, or read it | `toggle` with `value: true` or `false`. It does nothing if the switch is already there, and its answer says the switch's state either way |
 | fill a field and send it | `type_text` with `submit: true` |
-| leave a screen, or close a sheet | `back`. If it answers `no_action`, the sheet has a close control of its own: tap that |
+| leave a screen, or close a sheet | `back`. Not every sheet closes that way: if it answers `no_action`, the sheet has only its own close control, and the message names the sheet. Tap that control |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
 | see pixels (layout, colours, images) | `check_layout` first: it finds small tap areas, cut-off or overlapping text and low contrast without a picture. Then `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
@@ -107,7 +111,7 @@ and `y` only for things with no element.
 | reach a state quickly (a language, a test sign-in, sample data, dark mode) | `app_command`; without a name it lists what the app offers. Put things back when you're done |
 | find out why a screen is broken | `logs`: JavaScript errors and failed requests (`[network]` lines) |
 | start from a fresh state | `reload` (development builds) |
-| answer an alert | when its buttons are in the list, tap them. An alert drawn by iOS can't be tapped from Tapline: ask the user to tap the button you name |
+| answer an alert | the app's alert shows as an `Alert:` line in the header. With Tapline's stand-in its buttons are also in the list: tap them. When the note says it is an OS alert, Tapline can't tap it: ask the user to tap the button you name |
 | keep a flow to run again after a change | `record` with `start`, act, `record` with `stop`; later `replay` |
 | compare a screen with how it looked before | `compare_screen` with a name |
 | see an animation or a loading state | `filmstrip`: several frames in one picture |

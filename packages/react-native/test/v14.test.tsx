@@ -60,7 +60,7 @@ describe('the keyboard closes first', () => {
   /** A keyboard with the given input focused; records what the SDK asked of it. */
   function fakeKeyboard(
     focused: unknown,
-    options: { visible?: boolean; dismissBlurs?: boolean } = {},
+    options: { visible?: boolean; dismissBlurs?: boolean; top?: number; focusTakes?: boolean } = {},
   ): { calls: string[]; control: KeyboardControl } {
     const calls: string[] = [];
     let current = focused;
@@ -75,6 +75,15 @@ describe('the keyboard closes first', () => {
         calls.push('blur');
         current = null;
       },
+      ...(options.top !== undefined
+        ? {
+            top: () => options.top ?? null,
+            focus: (input: unknown) => {
+              calls.push('focus');
+              if (options.focusTakes !== false) current = input;
+            },
+          }
+        : {}),
     };
     return { calls, control };
   }
@@ -158,7 +167,51 @@ describe('the keyboard closes first', () => {
     expect(result).not.toHaveProperty('closedKeyboard');
   });
 
-  test('typing into another input closes the keyboard first', async () => {
+  test('typing into another input above the keyboard moves the focus there and leaves the keyboard up (v1.6)', async () => {
+    const spies = makeSpies();
+    await mountForm(spies);
+    // The keyboard's top edge at y 400: "second" (150 to 190) shows above it.
+    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 400 });
+    setKeyboardControl(control);
+    const result = await run(() => typeText({ target: { testID: 'second' }, text: 'hi' }));
+    expect(calls).toEqual(['focus']);
+    expect(control.focusedInput()).toBe(hostInstance('second'));
+    expect(result).not.toHaveProperty('closedKeyboard');
+    expect(result.value).toBe('hi');
+  });
+
+  test('another input the keyboard covers, even in part, closes the keyboard first', async () => {
+    const spies = makeSpies();
+    await mountForm(spies);
+    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 170 });
+    setKeyboardControl(control);
+    const result = await run(() => typeText({ target: { testID: 'second' }, text: 'hi' }));
+    expect(calls).toEqual(['dismiss']);
+    expect(result.closedKeyboard).toBe(true);
+  });
+
+  test('when the focus does not move, the keyboard is closed the old way', async () => {
+    const spies = makeSpies();
+    await mountForm(spies);
+    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 400, focusTakes: false });
+    setKeyboardControl(control);
+    const result = await run(() => typeText({ target: { testID: 'second' }, text: 'hi' }));
+    expect(calls).toEqual(['focus', 'dismiss']);
+    expect(result.closedKeyboard).toBe(true);
+    expect(result.value).toBe('hi');
+  });
+
+  test('a tap on another input still closes the keyboard: only typing moves the focus', async () => {
+    const spies = makeSpies();
+    await mountForm(spies);
+    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 400 });
+    setKeyboardControl(control);
+    const result = await run(() => press({ target: { testID: 'second' } }));
+    expect(calls).toEqual(['dismiss']);
+    expect(result.closedKeyboard).toBe(true);
+  });
+
+  test('typing into another input closes the keyboard first when it is not known where the keyboard is', async () => {
     const spies = makeSpies();
     await mountForm(spies);
     const { calls, control } = fakeKeyboard(hostInstance('first'));
@@ -372,10 +425,19 @@ describe('a target behind an open sheet is covered', () => {
       expect(result.settledMs).toBe(0);
     });
 
-    test('a Modal without onRequestClose: no_action, nothing is called', async () => {
+    test('a Modal without onRequestClose: no_action naming the sheet by what it shows, nothing is called', async () => {
       await mountScreen({ withRequestClose: false });
       const error = await failure(run(() => back({})));
       expect(error.code).toBe('not_actionable');
+      expect(error.message).toBe(
+        'no_action: the open sheet (in front: e1 text "Lab sheet" @20,620 390x22) has nothing for back to call (its Modal has no onRequestClose); tap its close control.',
+      );
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    test('a sheet with nothing to name it by: the same answer without the brackets', async () => {
+      await mount(<View>{React.createElement('RCTModalHostView', { visible: true }, <View />)}</View>);
+      const error = await failure(run(() => back({})));
       expect(error.message).toBe(
         'no_action: the open sheet has nothing for back to call (its Modal has no onRequestClose); tap its close control.',
       );

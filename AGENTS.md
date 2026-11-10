@@ -113,9 +113,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    element you know (by `id` or text), `scroll` with it as `target` and `to: "target"`: one
    call brings it onto the screen, clear of the bars. Otherwise `scroll` until what you need
    appears (`down` shows what is below), or `to: "end"`. `amount` is a share of the scroll
-   area, 0.1 to 1 (default 0.8). When the on-screen keyboard is up and you act on something
-   outside the focused field, Tapline closes the keyboard first and the answer ends with
-   `Note: closed the keyboard first.`
+   area, 0.1 to 1 (default 0.8). `Keyboard: shown` or `Keyboard: hidden` in an answer says the
+   on-screen keyboard came or went. While it is up and you act on something outside the focused
+   field, Tapline closes the keyboard first and the answer ends with
+   `Note: closed the keyboard first.` Typing into another field that shows above the keyboard
+   moves the focus there and leaves the keyboard up, as a person filling a form does.
 7. Read `logs` after anything that misbehaves: JavaScript errors and warnings often
    explain a broken screen. Check them at the end of a run too.
 8. Deep links (`open_url`) jump straight to a screen; `back` goes back like the back

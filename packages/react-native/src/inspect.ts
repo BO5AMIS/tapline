@@ -10,6 +10,7 @@ import {
   type FiberRootLike,
 } from './fiber';
 import { openAlerts } from './alerts';
+import { keyboardState } from './keyboard';
 import { inFlight } from './network';
 import { commitRevision, getRoots } from './register';
 import {
@@ -1211,8 +1212,16 @@ export function toElement(entry: Entry, frame: Frame | null, ref: string = refFo
   };
 }
 
-/** The previous `tree` result, keyed by host instance, for `changes`: what was listed, and what lay above or below the screen. */
-let lastTree: { byKey: Map<object, TaplineElement>; offKey: Map<object, TaplineElement>; route: string } | null = null;
+/**
+ * The previous `tree` result, keyed by host instance, for `changes`: what was listed, what lay
+ * above or below the screen, and whether the keyboard was up (undefined: not known).
+ */
+let lastTree: {
+  byKey: Map<object, TaplineElement>;
+  offKey: Map<object, TaplineElement>;
+  route: string;
+  keyboard: boolean | undefined;
+} | null = null;
 
 /** How many changed off-screen elements a change block lists one by one (AGENT-TOOLS v1.6). */
 const MAX_OFF_SCREEN_CHANGES = 5;
@@ -1409,8 +1418,16 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   }
   const busy = inFlight();
   if (busy > 0) result.network = { inFlight: busy };
+  // `Keyboard: shown` in the header while it is up; in a change block only when it came or went.
+  const keyboard = keyboardState()?.shown;
+  if (keyboard === true) result.keyboard = true;
   const routeKey = current ? `${current.chain.join('/')}#${current.key}` : '';
-  if (wantChanges && lastTree !== null) result.changes = diffTrees(lastTree, byKey, offKey, routeKey);
-  if (!peek) lastTree = { byKey, offKey, route: routeKey };
+  if (wantChanges && lastTree !== null) {
+    result.changes = diffTrees(lastTree, byKey, offKey, routeKey);
+    if (keyboard !== undefined && lastTree.keyboard !== undefined && keyboard !== lastTree.keyboard) {
+      result.changes.keyboard = keyboard ? 'shown' : 'hidden';
+    }
+  }
+  if (!peek) lastTree = { byKey, offKey, route: routeKey, keyboard };
   return result;
 }

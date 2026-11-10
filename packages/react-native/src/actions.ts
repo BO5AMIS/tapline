@@ -1,4 +1,5 @@
 import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
+import { keyboardState } from './keyboard';
 import {
   closingModalHosts,
   currentInputValue,
@@ -468,15 +469,19 @@ async function refuseBehindSheet(snapshot: Snapshot, target: ParsedTarget): Prom
   const hidden = matches[target.index ?? 0];
   if (!hidden) return;
   assertNoBlockingAlert();
+  const [hiddenFrame, inFront] = await Promise.all([measureFiber(hidden.node.fiber), frontLine(snapshot)]);
+  throw notActionable('covered', `${elementLine(hidden, hiddenFrame, false)} is behind ${inFront ?? 'the open sheet'}; close that first.`);
+}
+
+/**
+ * The line of the first element in front that has a text or an id (with its ref, so the agent can
+ * act on it): what names an open sheet in an answer. Undefined when nothing in front has either.
+ */
+async function frontLine(snapshot: Snapshot): Promise<string | undefined> {
   const front = snapshot.entries.find(
     (entry) => entry.info.interesting && !entry.tab && (entry.info.text.trim() !== '' || entry.info.testID),
   );
-  const [hiddenFrame, frontFrame] = await Promise.all([
-    measureFiber(hidden.node.fiber),
-    front ? measureFiber(front.node.fiber) : Promise.resolve(null),
-  ]);
-  const inFront = front ? elementLine(front, frontFrame, true) : 'the open sheet';
-  throw notActionable('covered', `${elementLine(hidden, hiddenFrame, false)} is behind ${inFront}; close that first.`);
+  return front ? elementLine(front, await measureFiber(front.node.fiber), true) : undefined;
 }
 
 /**
@@ -861,9 +866,11 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; close
   if (sheet) {
     const onRequestClose = requestCloseOf(sheet);
     if (!onRequestClose) {
+      // Named by what it shows, as `covered` names what is in front, so the agent finds its close control.
+      const shows = await frontLine(snapshot);
       throw notActionable(
         'no_action',
-        'the open sheet has nothing for back to call (its Modal has no onRequestClose); tap its close control.',
+        `the open sheet${shows !== undefined ? ` (in front: ${shows})` : ''} has nothing for back to call (its Modal has no onRequestClose); tap its close control.`,
       );
     }
     callHandler('onRequestClose', onRequestClose, []);
@@ -1028,18 +1035,15 @@ export interface KeyboardControl {
   dismiss(): void;
   /** Takes focus off `input`. */
   blur(input: unknown): void;
+  /** The keyboard's top edge in window points, or null when it isn't known. */
+  top?(): number | null;
+  /** Gives `input` (a text input's host instance) the focus, as a finger on it does. */
+  focus?(input: unknown): void;
 }
 
 const defaultKeyboard: KeyboardControl = {
   focusedInput: focusedInputInstance,
-  visible: () => {
-    try {
-      const { isVisible } = Keyboard as unknown as { isVisible?: () => boolean };
-      return typeof isVisible === 'function' ? isVisible.call(Keyboard) !== false : true;
-    } catch {
-      return true;
-    }
-  },
+  visible: () => keyboardState()?.shown ?? true,
   dismiss: () => {
     try {
       Keyboard.dismiss();
@@ -1058,6 +1062,19 @@ const defaultKeyboard: KeyboardControl = {
       // fall through to the instance's own blur
     }
     callInstanceMethod([input], 'blur');
+  },
+  top: () => keyboardState()?.top ?? null,
+  focus: (input) => {
+    try {
+      const state = (TextInput as unknown as { State?: unknown }).State;
+      if (isRecord(state) && typeof state.focusTextInput === 'function') {
+        (state.focusTextInput as (instance: unknown) => void)(input);
+        return;
+      }
+    } catch {
+      // fall through to the instance's own focus
+    }
+    callInstanceMethod([input], 'focus');
   },
 };
 
@@ -1081,6 +1098,25 @@ function closeKeyboardFor(actor: Entry): boolean {
   // `Keyboard.dismiss()` blurs the focused input itself; when it didn't, do it.
   if (keyboard.focusedInput() != null) keyboard.blur(focused);
   return true;
+}
+
+/**
+ * AGENT-TOOLS v1.6 §4: typing into another input that shows above the keyboard is what a person
+ * does to fill the next field of a form: the tap moves the focus there and the keyboard stays up.
+ * Moves the focus and returns true; false when the keyboard covers the input (even in part), when
+ * it isn't known where the keyboard is, or when the focus didn't move, and then the caller closes
+ * the keyboard the old way.
+ */
+async function moveFocusAboveKeyboard(entry: Entry): Promise<boolean> {
+  const focused = keyboard.focusedInput();
+  if (focused == null || !keyboard.visible() || ownsInstance(entry, focused)) return false;
+  const top = keyboard.top?.() ?? null;
+  const host = publicInstancesOf(entry.node.fiber).find(isRecord);
+  if (top === null || keyboard.focus === undefined || host === undefined) return false;
+  const frame = await measureFiber(entry.node.fiber);
+  if (frame === null || frame.y + frame.height > top) return false;
+  keyboard.focus(host);
+  return ownsInstance(entry, keyboard.focusedInput());
 }
 
 /** `{ closedKeyboard: true }` for a result when the keyboard was closed, nothing otherwise. */
@@ -1153,8 +1189,9 @@ export async function typeText(
       await assertReachable(snapshot, entry, await measureFiber(entry.node.fiber));
     }
   });
-  // Typing into the input that has focus leaves the keyboard alone; another input closes it first.
-  const closedKeyboard = closeKeyboardFor(entry);
+  // Typing into the input that has focus leaves the keyboard alone. Another input above the keyboard
+  // takes the focus with the keyboard up; one the keyboard covers closes it first.
+  const closedKeyboard = !(await moveFocusAboveKeyboard(entry)) && closeKeyboardFor(entry);
 
   const current = currentInputValue(entry.node);
   // Characters, not UTF-16 units: an emoji is one.

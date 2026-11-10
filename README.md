@@ -127,6 +127,8 @@ runs anyway and the answer says it was forced. A target hidden by an open
 sheet or modal answers `covered: … is behind …; close that first.`; close the sheet and try
 again. When the on-screen keyboard is up and an action targets something outside the focused
 field, Tapline closes the keyboard first and says so (`Note: closed the keyboard first.`).
+Typing into the next field of a form leaves the keyboard up, and answers say `Keyboard: shown`
+or `Keyboard: hidden` when it comes or goes.
 A look reads like this:
 
 ```

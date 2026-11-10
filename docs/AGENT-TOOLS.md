@@ -15,7 +15,8 @@ much is missing, a match in the alert in front wins over matches behind it, a pe
 the phone leaves the same note as viewer input, `type_text` takes `force`, and a call outside the
 apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds what a second first-time agent ran into: `scroll` with
 `to: "target"` brings an element onto the screen, changes off screen are shown, a note says when a
-change block covers more than one action, and a forced action says so. Each repo keeps an
+change block covers more than one action, a forced action says so, typing into the next field of
+a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -97,7 +98,7 @@ Settled in 0.31 s.
 - **Then the changes.** The block always starts with `Same screen. Changes:`.
 - **Header lines that changed come first:** `Alert: "<title>" [Button] …` when an OS or app
   alert appears or changes, `Alert: gone` when it closes, `Keyboard: shown` or
-  `Keyboard: hidden` (Tapwright), and `Network: N requests in flight` (Tapline). `Note:`
+  `Keyboard: hidden` when the keyboard came or went, and `Network: N requests in flight` (Tapline). `Note:`
   lines stay at the end of the answer. Then:
   - `+ <element line>` for a new element, with its ref and `[actions]`;
   - `- <role> "<text>"` for a gone element, with no ref and no position. Without text it's
@@ -174,7 +175,7 @@ Network: 2 requests in flight
   scroll into view has more below than the count says. Scroll to reach them. What an open
   sheet or popover hides isn't counted: scrolling can't reach it until the sheet is closed.
 - `Route:` and `Network:` are Tapline only.
-- `Keyboard:` is Tapwright only. Its keys aren't listed; type with `type_text`.
+- `Keyboard:` comes from both (Tapline since v1.6). Its keys aren't listed; type with `type_text`.
 - `Alert:` comes from both. Tapwright can press its buttons with `alert`; Tapline can't press
   OS alerts and says so.
 - An empty screen shows `(nothing visible; the app may still be loading)`.
@@ -321,15 +322,18 @@ text items.
     one, `off_screen`, then `not_found`. A covering sheet comes before `off_screen`, because
     scrolling can't help until it is closed.
 - **Closing the keyboard first (v1.4).** When the keyboard is up and the target of a touch (`tap`,
-  `long_press`, `toggle`, or `type_text`'s focusing tap on another input) lies outside the focused
-  input, the tool closes the keyboard first, without pressing return, and the answer ends with
-  `Note: closed the keyboard first.` A person's first tap outside the field often only closes the
-  keyboard, and the keyboard covers controls near the bottom; the tool does both steps in one and
-  says so. With a hardware keyboard connected no keyboard shows, and nothing is closed. Nothing is
+  `long_press`, `toggle`, or `type_text`'s focusing tap on another input that the keyboard covers)
+  lies outside the focused input, the tool closes the keyboard first, without pressing return, and
+  the answer ends with `Note: closed the keyboard first.` A person's first tap outside the field
+  often only closes the keyboard, and the keyboard covers controls near the bottom; the tool does
+  both steps in one and says so. For another input that shows above the keyboard, nothing is closed
+  (v1.6): focus moves to it, as a person's tap moves it, and there is no note. If the focus doesn't
+  move, the keyboard is closed the old way. With a hardware keyboard connected no keyboard shows,
+  and nothing is closed. Nothing is
   closed for a call the tool refuses, or while a system alert is in front. The note is given only
-  when the keyboard is still closed as the call answers: Tapwright's `type_text` focuses the new
-  input, so the keyboard is up again and it leaves the note out; Tapline's `type_text` sets the
-  value without focusing, so it keeps the note.
+  when the keyboard is still closed as the call answers: Tapwright's `type_text` into a covered
+  input focuses it after closing, so the keyboard is up again and it leaves the note out; Tapline's
+  `type_text` sets the value without focusing, so it keeps the note.
 - `no_action` means the element, or the screen for `back`, doesn't take this action, and
   `force` doesn't help. Examples:
   - `type_text` into something that isn't an input;

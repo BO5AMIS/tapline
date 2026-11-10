@@ -109,6 +109,8 @@ export interface TreeChanges {
   offScreen?: Array<{ element: TaplineElement; was: ChangedFields }>;
   /** How many more changed off screen than `offScreen` holds; absent when none. */
   offScreenMore?: number;
+  /** The software keyboard came up or went down since then; absent when it didn't, or isn't known. */
+  keyboard?: 'shown' | 'hidden';
 }
 
 /** An alert the app showed and nobody has answered yet. */
@@ -130,6 +132,8 @@ export interface TreeResult {
   alerts?: TreeAlert[];
   /** Network requests still running (fetch / XMLHttpRequest); absent when none. */
   network?: { inFlight: number };
+  /** True while the software keyboard is up; absent when it is down or isn't known. */
+  keyboard?: true;
   /** The focused screen, when the app uses React Navigation (Expo Router included). */
   route?: RouteInfo;
   /** With `changes: true` and a previous tree: what changed since then. */
