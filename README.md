@@ -59,6 +59,8 @@ detail, including installing from the clone.
 
 ```sh
 claude mcp add tapline -- tapline mcp         # give Tapline to your agent (Claude Code)
+# without a global install, from the clone:
+claude mcp add tapline -- node <clone>/packages/host/dist/cli.js mcp
 ```
 
 **The app**, first lines of its entry file:
