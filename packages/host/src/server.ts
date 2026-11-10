@@ -97,6 +97,19 @@ export interface TaplineHostOptions {
   helloTimeoutMs?: number;
   /** Events kept per session. Default 500. */
   logBufferSize?: number;
+  /**
+   * How long after an announced agent touch ends a touch report still counts as the agent's
+   * (the report crosses the network, and the app passes on at most one touch per 500 ms). Default 1500 ms.
+   */
+  agentTouchSlackMs?: number;
+}
+
+/** The longest touch another tool may announce (`POST /agent-touch`), in milliseconds. */
+export const MAX_AGENT_TOUCH_MS = 10_000;
+
+/** Whether a socket's peer is this computer. */
+export function isLoopback(address: string | undefined): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
 export interface RequestOptions {
@@ -206,6 +219,9 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly sweepIntervalMs: number;
   private readonly helloTimeoutMs: number;
   private readonly logBufferSize: number;
+  private readonly agentTouchSlackMs: number;
+  /** Until when (this computer's clock) touch reports are another tool's agent touches, not a person's. */
+  private agentTouchUntil = 0;
 
   private readonly servers: Array<{ http: HttpServer; wss: WebSocketServer; host: string; port: number }> = [];
   private readonly sessionMap = new Map<string, Session>();
@@ -227,6 +243,63 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     this.sweepIntervalMs = options.sweepIntervalMs ?? 5_000;
     this.helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
     this.logBufferSize = options.logBufferSize ?? 500;
+    this.agentTouchSlackMs = options.agentTouchSlackMs ?? 1500;
+  }
+
+  /**
+   * Another tool on this computer (Tapwright) is about to touch the phone for an agent, for about
+   * `ms`: touch reports that arrive until then (plus the slack) are that agent's, not a person's.
+   */
+  noteAgentTouch(ms: number): void {
+    this.agentTouchUntil = Math.max(this.agentTouchUntil, Date.now() + ms + this.agentTouchSlackMs);
+  }
+
+  /**
+   * `POST /agent-touch` with `Authorization: Bearer <the host token>` and `{"ms": N}`: only from
+   * this computer, answered 204. Returns false for any other path.
+   */
+  private handleAgentTouch(req: IncomingMessage, res: ServerResponse): boolean {
+    if (new URL(req.url ?? "/", "http://host").pathname !== "/agent-touch") return false;
+    const answer = (status: number, text?: string): void => {
+      res.writeHead(status, text === undefined ? {} : { "content-type": "text/plain" });
+      res.end(text === undefined ? undefined : `${text}\n`);
+    };
+    if (!isLoopback(req.socket.remoteAddress)) {
+      answer(403, "Only from this computer.");
+      return true;
+    }
+    if (req.method !== "POST") {
+      answer(405, "POST only.");
+      return true;
+    }
+    const auth = req.headers.authorization;
+    if (typeof auth !== "string" || !auth.startsWith("Bearer ") || !safeEqual(auth.slice(7).trim(), this.token)) {
+      answer(401, "Bearer token required.");
+      return true;
+    }
+    let body = "";
+    let tooLong = false;
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => {
+      body += chunk;
+      if (body.length > 1024) tooLong = true;
+    });
+    req.on("end", () => {
+      let ms: unknown;
+      try {
+        const parsed: unknown = tooLong ? undefined : JSON.parse(body);
+        ms = typeof parsed === "object" && parsed !== null ? (parsed as { ms?: unknown }).ms : undefined;
+      } catch {
+        ms = undefined;
+      }
+      if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > MAX_AGENT_TOUCH_MS) {
+        answer(400, `Body: {"ms": 0 to ${MAX_AGENT_TOUCH_MS}}.`);
+        return;
+      }
+      this.noteAgentTouch(ms);
+      answer(204);
+    });
+    return true;
   }
 
   // ---- lifecycle ------------------------------------------------------------
@@ -294,6 +367,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return new Promise((resolve, reject) => {
       const http = createServer((req, res) => {
         try {
+          if (this.handleAgentTouch(req, res)) return;
           if (this.httpExtension?.onRequest(req, res) === true) return;
         } catch {
           if (!res.headersSent) res.writeHead(500);
@@ -651,6 +725,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     }
     if (event === "touch") {
       // Not a log line: touches come as often as twice a second. Listeners decide what it means.
+      // One another tool announced for its agent (POST /agent-touch) is no person's.
+      if (Date.now() <= this.agentTouchUntil) return;
       this.safely(() => this.emit("touch", { ...session.info }));
       return;
     }

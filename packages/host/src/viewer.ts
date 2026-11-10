@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ControlQueue } from "./control.js";
-import type { AppFrame, HttpExtension, TaplineHost } from "./server.js";
+import { isLoopback, type AppFrame, type HttpExtension, type TaplineHost } from "./server.js";
 
 /**
  * The live viewer, server side, as docs/VIEWER-PROTOCOL.md describes: `/viewer` (the page),
@@ -153,10 +153,6 @@ function parseCookies(header: string | undefined): Map<string, string> {
     if (at > 0) out.set(part.slice(0, at).trim(), decodeURIComponent(part.slice(at + 1).trim()));
   }
   return out;
-}
-
-function isLoopback(address: string | undefined): boolean {
-  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
 function isNumber(value: unknown): value is number {
