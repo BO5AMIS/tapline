@@ -93,8 +93,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    answer is a full list. So a ref you still remember never points at another element: it
    answers `not_found`. Use `{x, y}` only when nothing else fits. An `ambiguous` error lists
    `Candidates:`: pick one by its ref or add `index` (it works with `id`, `label` and
-   `text`). After a person acts in the live viewer, `{ref}` targets fail with `stale` until
-   you `look` again; `id`, `label` and `text` keep working.
+   `text`). After a person acts in the live viewer or touches the phone itself, `{ref}`
+   targets fail with `stale` until you `look` again; `id`, `label` and `text` keep working.
 5. Screens load and animate. Actions already wait for the screen to settle. If a spinner
    shows or content is missing, `wait_for` what you expect (`text`, `id` or `label`;
    `gone: true` for a spinner; `network_idle` for loading) instead of acting on a
@@ -102,7 +102,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    failed requests show up in `logs` as `[network]` lines. Use a fixed `wait` only for
    animations.
 6. Inputs: `type_text` with the input as target; `replace` (default) clears it first,
-   `submit` presses return. Toggles: `toggle`. Lists: `scroll` until what you need
+   `submit` presses return. Typing is refused where a person couldn't type (an input that is
+   off screen, covered or behind an alert), with the same reasons and `force` as a tap. Toggles: `toggle`. Lists: `scroll` until what you need
    appears (`down` shows what is below), or `to: "end"`. `amount` is a share of the scroll
    area, 0.1 to 1 (default 0.8). When the on-screen keyboard is up and you act on something
    outside the focused field, Tapline closes the keyboard first and the answer ends with

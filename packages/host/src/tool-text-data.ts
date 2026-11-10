@@ -22,7 +22,7 @@ export const CORE_TOOL_TEXT = {
     "tapline": "Tapline: ignores `seconds` and calls `onLongPress`."
   },
   "type_text": {
-    "shared": "Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. `submit: true` then presses the keyboard's submit key. Answers `Typed into <element>. Value is now \"…\"` and what changed.",
+    "shared": "Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now \"…\"` and what changed.",
     "tapline": "Tapline: sets the value through the input's handlers."
   },
   "scroll": {
@@ -34,7 +34,7 @@ export const CORE_TOOL_TEXT = {
     "tapline": "Tapline: sets it through the handler."
   },
   "back": {
-    "shared": "Go back one screen. Answers what changed; `not_actionable: no_action` when there is nothing to go back to.",
+    "shared": "Go back one screen. An open sheet or popover closes first, where it can be closed. Answers what changed; `not_actionable: no_action` when there is nothing to go back to.",
     "tapline": "Tapline: uses the router (React Navigation or Expo Router)."
   },
   "open_url": {
