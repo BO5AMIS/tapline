@@ -141,9 +141,10 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    couldn't have done this.`, which belongs in your report. A target hidden by an open sheet or modal answers
    `covered: … is behind <the line of what is in front>; close that first.` Here `force`
    doesn't help: close the sheet (its own close control, or `back`) and try again.
-10. An `Alert:` line means the app showed an alert. An OS alert can't be tapped from
-   Tapline: ask the user to tap the button you need (say which), and actions are refused
-   (`behind_alert`) until it's answered. When the app runs with Tapline's stand-in, the
+10. An `Alert:` line means the app showed an alert, or (in a build with Tapline's native
+   module) that iOS shows one over the app or the share sheet is open (`Alert: "Share sheet"`).
+   An OS alert can't be tapped from Tapline: ask the user to tap the button you need (say
+   which), or use Tapwright, and actions are refused (`behind_alert`) until it's answered. When the app runs with Tapline's stand-in, the
    alert's buttons are ordinary elements: tap them.
 11. `app_command` without a name lists what the app offers for testing (for example
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
@@ -173,10 +174,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 - `viewer` gives a link the user opens in a browser on their computer: the app's screen as
   it changes, with your taps and scrolls marked. The link carries a key: show it to the user
   only. Offer it when they want to watch, or to do a step themselves (sign in with their own
-  password, finish a step you can't). The page is at `/viewer` and `/`. It shows about 10
-  frames a second for a second after each action or tap, about 6 a second while the screen
-  keeps changing, and one a second when it's still; it can show video when a server offers
-  it (Tapline's own doesn't yet).
+  password, finish a step you can't). The page is at `/viewer` and `/`. In a build with
+  Tapline's native module it shows about 15 frames a second while the screen changes (smaller
+  frames while it moves on a slow link) and one a second when it's still; in an older build
+  about 6 a second while the screen changes. It can show video when a server offers it
+  (Tapline's own doesn't yet).
 - The user can tap, scroll and type there too, and their input goes first: your next action
   waits until they've been idle for 3 seconds. It fails with `busy` after 30 seconds of their
   input, and with `paused` while they've paused you. Then wait, or ask them.

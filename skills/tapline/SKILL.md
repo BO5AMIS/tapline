@@ -112,7 +112,7 @@ and `y` only for things with no element.
 | reach a state quickly (a language, a test sign-in, sample data, dark mode) | `app_command`; without a name it lists what the app offers. Put things back when you're done |
 | find out why a screen is broken | `logs`: JavaScript errors and failed requests (`[network]` lines) |
 | start from a fresh state | `reload` (development builds) |
-| answer an alert | the app's alert shows as an `Alert:` line in the header. With Tapline's stand-in its buttons are also in the list: tap them. When the note says it is an OS alert, Tapline can't tap it: ask the user to tap the button you name |
+| answer an alert | the app's alert shows as an `Alert:` line in the header (in a build with Tapline's native module, also an alert iOS draws, and the share sheet as `Alert: "Share sheet"`). With Tapline's stand-in its buttons are also in the list: tap them. When the note says it is an OS alert, Tapline can't tap it: ask the user to tap the button you name |
 | keep a flow to run again after a change | `record` with `start`, act, `record` with `stop`; later `replay` |
 | compare a screen with how it looked before | `compare_screen` with a name |
 | see an animation or a loading state | `filmstrip`: several frames in one picture |

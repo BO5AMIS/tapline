@@ -205,8 +205,11 @@ order, pair again (or give each agent a fixed `--port`).
 
 ## Limits
 
-- Only your app's own UI: no system dialogs (permission prompts, the share sheet, Face
-  ID), no keyboard, no other apps, no home screen. Tapwright covers those.
+- Only your app's own UI: it can't answer system dialogs (permission prompts, the share
+  sheet, Face ID), type on the keyboard's keys, or reach other apps or the home screen.
+  Tapwright covers those. Built with Tapline's native module (any new build of an Expo app
+  with the SDK installed), an alert UIKit shows and the share sheet are seen: the agent gets an
+  `Alert:` line and taps behind them are refused.
 - Actions call your components' handlers; they aren't real touches. Gesture-only controls
   (swipe-to-delete, drag, pinch) and native views React doesn't render (maps, web view
   contents) are out of reach.
@@ -226,18 +229,21 @@ order, pair again (or give each agent a fixed `--port`).
   the phone. An open app finds a server that has just started within about 2 seconds. While
   an agent is connected, the screen stays on (with `expo-keep-awake`).
 - Screenshots come from inside the app: about 25-65 ms each at the viewer's size on an
-  iPhone once the app has settled, a few hundred while it starts up (measured). The live
-  viewer shows about 10 frames a second for a second after each action or tap, about 6 a
-  second while the screen keeps changing, and one a second when it's still; filmstrips show
-  a few frames a second. Each frame makes iOS draw the screen once more, so the rate is held
-  where the phone pays under a third of one core for it (measured on an iPhone 14 Pro Max).
-  That's enough to follow what happens and to see loading states, not for quick animations.
+  iPhone once the app has settled, a few hundred while it starts up (measured). With Tapline's
+  native module in the build, the live viewer shows about 15 frames a second while the screen
+  changes, and one a second when it's still: its frames draw what is on screen without making
+  iOS render again, and the phone pays about 12% of one core for it under a running animation
+  (measured on an iPhone 14 Pro Max). Frames go out only as fast as the link takes them; on a
+  slow link they are smaller while the screen moves and sharp again once it settles. Without
+  the module (an older build), about 6 frames a second while the screen changes, since each
+  frame then makes iOS draw the screen once more. Filmstrips show a few frames a second.
 - The live viewer shows only the app's window: not the keyboard, the status bar or system
   alerts. Open it on another device than the phone: switching apps on the phone pauses the
   app.
 - iOS alerts can't be pressed from inside the app. Tapline shows them to the agent and stops
-  it from tapping behind them; with `alerts: 'stand-in'` (test builds) it shows its own in-app
-  alert instead, which the agent can tap.
+  it from tapping behind them (an `Alert.alert` always; one from native code, and the share
+  sheet, with the native module); with `alerts: 'stand-in'` (test builds) it shows its own
+  in-app alert instead, which the agent can tap.
 - Release builds shorten component names, so element types read best in development
   builds. Elements with a `testID` (targeted as `id`) stay reliable everywhere.
 - Screenshots need `react-native-view-shot` in the app; remembering the pairing across
@@ -249,7 +255,8 @@ order, pair again (or give each agent a fixed `--port`).
 |---|---|
 | Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.6 answers, the shared tool text and the agent skill with its installer: 470 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.6 behaviour, the viewer feed's pace, a person's touches: 624 tests); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (123 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
 | On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured); `long_press` and `toggle`; the keyboard closing before a tap outside the focused field; `covered` for what an open sheet hides, and `back` closing the sheet; an app frozen for 20 seconds (`not_answering`, then working again by itself); the off-screen counts, the longer text cut and the in-app alert in front; scrolling to an element in one call, changes off screen, and the notes after a forced action and after actions without a list. Measured there by the shared benchmark over the local network: a tap, typing, a scroll and a toggle each answer in about 0.2 s, a look in 0.02 s, and the reliability checks (the right element, no false refusals, refusing what a person couldn't do) had no misses in three passes |
-| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), the note after a person's touch (on a device; tested with simulated touches), 15 frames a second in the live viewer (it shows about 6), 5G through Tailscale with the current build, a second phone, scanning the QR code with the camera, Android |
+| Also on that iPhone (2026-11-10 and 11) | the note after a person's real touch on the phone; the native module in a new development build: an alert from native code and the share sheet seen as `Alert:` lines with taps behind them refused, and the live viewer at 15 frames a second under the lab animation over Wi-Fi with every viewer row of the benchmark passing (the longest gap 0.07 s, the phone paying about 12% of one core); typing into the next field with the keyboard up, `Keyboard:` lines, and `back` closing a sheet by its backdrop |
+| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), 5G through Tailscale with the current build, a second phone, scanning the QR code with the camera, Android |
 
 ## Repository
 
