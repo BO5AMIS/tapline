@@ -230,8 +230,12 @@ export interface ToolsOptions {
   viewerFeed?: () => { on: boolean; quality: QualityPreset };
 }
 
-/** Under this many points, a pointer path is a tap or a hold, not a drag. */
-const TAP_SLOP = 12;
+/**
+ * Under this many points from its first point, a pointer path is a tap or a hold, not a drag.
+ * Tapwright uses the same number, and the viewer page's pending ring (TAP_SLOP in viewer.html)
+ * follows it: change all three together.
+ */
+const TAP_SLOP = 10;
 /** Held at least this long, a tap is a long press. */
 const LONG_PRESS_MS = 500;
 

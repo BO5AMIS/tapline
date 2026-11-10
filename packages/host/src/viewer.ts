@@ -104,7 +104,8 @@ export function viewerStatusFor(
   if (session.appState?.state === "background") {
     return {
       state: "locked",
-      detail: `${session.app.name} is in the background (the phone is locked or another app is open). Open it on the phone to carry on.`,
+      // The page words the state "Phone locked" and appends this.
+      detail: "the app is in the background",
     };
   }
   if (context.notAnswering === true) return { state: "not-answering", detail: session.app.name };
@@ -136,6 +137,12 @@ interface WsClient {
 }
 
 const COOKIE = "tapline_viewer";
+
+/** The name the page shows in its title and heading ("Tapline live view"): `tool` in every status. */
+export const VIEWER_TOOL = "Tapline";
+
+/** The input this host takes from the viewer page (`overlay`: it answers the Boxes control). */
+export const VIEWER_ACCEPTS: readonly string[] = ["tap", "longPress", "scroll", "text", "enter", "backspace", "overlay", "quality"];
 
 function parseCookies(header: string | undefined): Map<string, string> {
   const out = new Map<string, string>();
@@ -458,6 +465,7 @@ export class ViewerHub implements HttpExtension {
     return {
       type: "status",
       protocol: 1,
+      tool: VIEWER_TOOL,
       state: this.status.state,
       ...(this.status.detail ? { detail: this.status.detail } : {}),
       via: this.status.via,

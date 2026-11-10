@@ -317,6 +317,18 @@ describe("the live viewer's side of the tools", () => {
     ]);
   });
 
+  it("calls a path a tap under 10 points from its first point and a drag from there on (the viewer page uses the same number)", async () => {
+    const { app, tools } = await viewerTools();
+    const params = (method: string) => app.requests.filter((r) => r.method === method).map((r) => r.params);
+    // The app is 400 x 800 points: 9 points across is 0.0225 of the width, 11 points is 0.0275.
+    await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [60, 0.5225, 0.25]] });
+    expect(params("press")).toHaveLength(1);
+    expect(params("scroll")).toHaveLength(0);
+    await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [60, 0.5275, 0.25]] });
+    expect(params("press")).toHaveLength(1);
+    expect(params("scroll")).toHaveLength(1);
+  });
+
   it("reports a person's action with where it happened, in 0..1", async () => {
     const { tools } = await viewerTools();
     const outcome = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [90, 0.5, 0.25]] });

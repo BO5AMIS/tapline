@@ -3,7 +3,14 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { ControlQueue } from "../src/control.js";
-import { ViewerHub, viewerStatusFor, type PersonInput, type ViewerHubOptions } from "../src/viewer.js";
+import {
+  VIEWER_ACCEPTS,
+  VIEWER_TOOL,
+  ViewerHub,
+  viewerStatusFor,
+  type PersonInput,
+  type ViewerHubOptions,
+} from "../src/viewer.js";
 
 const TOKEN = "viewer-token-123";
 const servers: Server[] = [];
@@ -118,8 +125,35 @@ describe("viewerStatusFor", () => {
     expect(viewerStatusFor({ app: { name: "Demo" }, appState: { state: "active", at: 1 } })).toEqual({ state: "live", detail: undefined });
     const away = viewerStatusFor({ app: { name: "Demo" }, appState: { state: "background", at: 1 } });
     expect(away.state).toBe("locked");
-    expect(away.detail).toContain("Demo is in the background");
+    // The page words the state "Phone locked" and appends this detail to it.
+    expect(away.detail).toBe("the app is in the background");
     expect(away.detail).not.toMatch(/Error|in_background/);
+  });
+});
+
+describe("what the host's status tells the page (protocol 1.3)", () => {
+  it("names the tool and offers overlay in the accepts list it runs with", () => {
+    expect(VIEWER_TOOL).toBe("Tapline");
+    expect(VIEWER_ACCEPTS).toContain("overlay");
+    expect([...VIEWER_ACCEPTS].sort()).toEqual(
+      ["tap", "longPress", "scroll", "text", "enter", "backspace", "overlay", "quality"].sort(),
+    );
+  });
+
+  it("sends tool: Tapline in every status, and the locked detail when the app is in the background", async () => {
+    const { hub, port } = await startHub({ accepts: [...VIEWER_ACCEPTS] });
+    const { messages } = await openWs(port);
+    await until(() => messages.some((m) => m["type"] === "status"));
+    expect(messages.find((m) => m["type"] === "status")).toMatchObject({ tool: "Tapline", accepts: [...VIEWER_ACCEPTS] });
+    const away = viewerStatusFor({ app: { name: "Demo" }, appState: { state: "background", at: 1 } });
+    hub.setStatus({ state: away.state, detail: away.detail });
+    await until(() => messages.some((m) => m["type"] === "status" && m["state"] === "locked"));
+    expect(messages.filter((m) => m["type"] === "status").at(-1)).toMatchObject({
+      tool: "Tapline",
+      state: "locked",
+      detail: "the app is in the background",
+    });
+    for (const m of messages.filter((x) => x["type"] === "status")) expect(m["tool"]).toBe("Tapline");
   });
 });
 
@@ -360,7 +394,7 @@ describe("the WebSocket", () => {
     const { ws, messages } = await openWs(port);
     await until(() => messages.some((m) => m["type"] === "status"));
     const status = messages.find((m) => m["type"] === "status");
-    expect(status).toMatchObject({ protocol: 1, accepts: ["tap", "longPress", "scroll", "text", "enter", "backspace", "quality"] });
+    expect(status).toMatchObject({ protocol: 1, tool: "Tapline", accepts: ["tap", "longPress", "scroll", "text", "enter", "backspace", "quality"] });
     ws.send(JSON.stringify({ type: "overlay", on: true }));
     hub.pushFrame(FRAME);
     await until(() => messages.some((m) => m["type"] === "overlay"));

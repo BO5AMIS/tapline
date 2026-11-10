@@ -17,7 +17,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "gen:viewer": "node scripts/gen-viewer-page.mjs",
+    "build": "node scripts/gen-viewer-page.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

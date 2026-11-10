@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { generateViewerPage, HTML_PATH, TS_PATH } from "../scripts/gen-viewer-page.mjs";
 import { VIEWER_HTML } from "../src/viewer-page.js";
 
 interface Part {
@@ -122,16 +124,72 @@ function expectBothParts(parts: Part[]): void {
 
 const ICON = '<link rel="icon" href="data:,">';
 
+/* Every literal address in a src or href, a url(...), an @import, an import, a fetch or a
+   WebSocket call that points off the page: a scheme with // (http, https, ws, wss, ...), a
+   protocol-relative //, or a bare http: or https:. Addresses the page builds from `location`
+   at run time are not literals, so they are not looked at. */
+const OFF_PAGE = /^\s*(?:(?:[a-z][a-z0-9+.-]*:)?\/\/|https?:)/i;
+
+function externalRefs(html: string): string[] {
+  const found: string[] = [];
+  const collect = (re: RegExp, group: number): void => {
+    for (const m of html.matchAll(re)) {
+      const value = m[group] ?? "";
+      if (OFF_PAGE.test(value)) found.push(value);
+    }
+  };
+  collect(/\b(?:src|href|action|poster|srcset)\s*=\s*(["'])(.*?)\1/gi, 2);
+  collect(/url\(\s*(["']?)([^)"']*)\1\s*\)/gi, 2);
+  collect(/@import\s+(?:url\(\s*)?(["']?)([^"')\s;]+)\1/gi, 2);
+  collect(/\bimport\s*\(\s*(["'`])(.*?)\1/g, 2);
+  collect(/(?<!@)\bimport\s+(?:[\w*{}\s,]+\s+from\s+)?(["'])(.*?)\1/g, 2);
+  collect(/\bfetch\(\s*(["'`])(.*?)\1/g, 2);
+  collect(/new\s+WebSocket\(\s*(["'`])(.*?)\1/g, 2);
+  return found;
+}
+
 describe("viewer page document", () => {
   it("is one self-contained HTML document with no external references", () => {
     expect(VIEWER_HTML.toLowerCase()).toContain("<!doctype html>");
-    expect(VIEWER_HTML).not.toContain("http://");
-    expect(VIEWER_HTML).not.toContain("https://");
-    expect(VIEWER_HTML).not.toContain("//");
+    expect(externalRefs(VIEWER_HTML)).toEqual([]);
+    expect(VIEWER_HTML).not.toMatch(/https?:\/\//);
     expect(VIEWER_HTML.replace(ICON, "")).not.toMatch(/<link\b/i);
     expect(VIEWER_HTML).not.toMatch(/@import/i);
-    expect(VIEWER_HTML).not.toMatch(/(^|[\s:,])url\(/);
     expect(VIEWER_HTML).not.toMatch(/<script[^>]*\ssrc=/i);
+    // It builds its own ws: or wss: address from location, which is fine.
+    expect(scriptBody()).toContain("new WebSocket(");
+  });
+
+  it("finds off-page literals when there are any (the check itself works)", () => {
+    const bad = [
+      '<img src="https://x.test/a.png">',
+      '<a href="//cdn.test/a">x</a>',
+      '<style>.a { background: url("http://x.test/b.png"); } @import "https://x.test/c.css";</style>',
+      '<script>fetch("//x.test/d"); new WebSocket("wss://x.test/ws"); import("http://x.test/e.js");</script>',
+    ].join("\n");
+    expect(externalRefs(bad)).toHaveLength(7);
+    const fine = '<link rel="icon" href="data:,"><script>fetch("/stream"); new WebSocket(endpoint("/ws", true));</script>';
+    expect(externalRefs(fine)).toEqual([]);
+  });
+
+  it("is the HTML that src/viewer.html holds, and src/viewer-page.ts is in step with it", () => {
+    // A checkout with autocrlf may hand us CRLF line ends: the generator and this test read past them.
+    const html = readFileSync(HTML_PATH, "utf8").replace(/\r\n/g, "\n");
+    expect(readFileSync(TS_PATH, "utf8").replace(/\r\n/g, "\n")).toBe(generateViewerPage(html));
+    expect(VIEWER_HTML).toBe(html);
+  });
+
+  it("is plain ASCII, so any reader of the file gets the same text", () => {
+    expect([...VIEWER_HTML].filter((c) => c.charCodeAt(0) > 127)).toEqual([]);
+  });
+
+  it("keeps what the other tool's checks look for: the picture's id, the words live view, new WebSocket, no innerHTML", () => {
+    expect(VIEWER_HTML).toContain('id="screen"');
+    expect(VIEWER_HTML).toContain("live view");
+    expect(VIEWER_HTML).toContain("new WebSocket");
+    expect(VIEWER_HTML).not.toContain("innerHTML");
+    expect(VIEWER_HTML).toContain("history.replaceState");
+    expect(VIEWER_HTML).not.toContain('id="shot"');
   });
 
   it("has an inline script that is valid JavaScript", () => {
@@ -142,8 +200,9 @@ describe("viewer page document", () => {
     expect(VIEWER_HTML).toContain(ICON);
   });
 
-  it("says the app is paused on the phone when it can't be reached from here", () => {
-    expect(scriptBody()).toContain('locked: "Paused on the phone"');
+  it("words the locked state as Phone locked", () => {
+    expect(scriptBody()).toContain('locked: "Phone locked"');
+    expect(VIEWER_HTML).not.toContain("Paused on the phone");
   });
 
   it("tags a box with the element's ref only when it has one (never \"null\")", () => {
@@ -246,6 +305,7 @@ class FakeSocket {
   binaryType = "";
   sent: string[] = [];
   closed = false;
+  onopen: (() => void) | null = null;
   onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
@@ -720,7 +780,36 @@ describe("viewer page multipart parser", () => {
 
 /* The page's own script against a small fake DOM: what a person's click draws, and when. */
 
-type DomListener = (ev: Record<string, unknown>) => void;
+type DomListener = (this: DomEl, ev: Record<string, unknown>) => void;
+
+/* A canvas context that writes down what it is asked to do. */
+class FakeCtx {
+  ops: string[] = [];
+  strokes: Array<{ style: string; width: number }> = [];
+  lineCap = "";
+  lineJoin = "";
+  strokeStyle = "";
+  lineWidth = 0;
+  setTransform(...a: number[]): void {
+    this.ops.push(`setTransform ${a.join(",")}`);
+  }
+  clearRect(...a: number[]): void {
+    this.ops.push(`clearRect ${a.join(",")}`);
+  }
+  beginPath(): void {
+    this.ops.push("beginPath");
+  }
+  moveTo(x: number, y: number): void {
+    this.ops.push(`moveTo ${x},${y}`);
+  }
+  lineTo(x: number, y: number): void {
+    this.ops.push(`lineTo ${x},${y}`);
+  }
+  stroke(): void {
+    this.ops.push("stroke");
+    this.strokes.push({ style: this.strokeStyle, width: this.lineWidth });
+  }
+}
 
 class DomEl {
   children: DomEl[] = [];
@@ -735,6 +824,11 @@ class DomEl {
   clientHeight = 800;
   naturalWidth = 0;
   naturalHeight = 0;
+  width = 0;
+  height = 0;
+  blurs = 0;
+  attrs: Record<string, string> = {};
+  readonly ctx = new FakeCtx();
   private text = "";
   private listeners = new Map<string, DomListener[]>();
   readonly classList = {
@@ -785,9 +879,16 @@ class DomEl {
   insertBefore(el: DomEl): DomEl {
     return this.appendChild(el);
   }
-  setAttribute(): void {}
+  setAttribute(name: string, value: string): void {
+    this.attrs[name] = value;
+  }
   setPointerCapture(): void {}
-  blur(): void {}
+  blur(): void {
+    this.blurs++;
+  }
+  getContext(): FakeCtx {
+    return this.ctx;
+  }
   closest(): null {
     return null;
   }
@@ -797,9 +898,59 @@ class DomEl {
   addEventListener(type: string, fn: DomListener): void {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
   }
-  dispatch(type: string, ev: Record<string, unknown> = {}): void {
-    for (const fn of this.listeners.get(type) ?? []) fn({ preventDefault: () => undefined, ...ev });
+  dispatch(type: string, ev: Record<string, unknown> = {}): { prevented: boolean } {
+    const seen = { prevented: false };
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn.call(this, {
+        preventDefault: () => {
+          seen.prevented = true;
+        },
+        ...ev,
+      });
+    }
+    return seen;
   }
+}
+
+type PlainListener = (ev: Record<string, unknown>) => void;
+
+/* document and window: they keep their listeners so a test can fire an event. */
+class FakeTarget {
+  private listeners = new Map<string, PlainListener[]>();
+  addEventListener(type: string, fn: PlainListener): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  dispatch(type: string, ev: Record<string, unknown> = {}): { prevented: boolean } {
+    const seen = { prevented: false };
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn({
+        preventDefault: () => {
+          seen.prevented = true;
+        },
+        ...ev,
+      });
+    }
+    return seen;
+  }
+}
+
+class FakeDocument extends FakeTarget {
+  title = "";
+  activeElement: DomEl | null = null;
+  readonly els = new Map<string, DomEl>();
+  getElementById = (id: string): DomEl => {
+    let el = this.els.get(id);
+    if (!el) {
+      el = new DomEl();
+      this.els.set(id, el);
+    }
+    return el;
+  };
+  createElement = (): DomEl => new DomEl();
+}
+
+class FakeWindow extends FakeTarget {
+  devicePixelRatio = 2;
 }
 
 interface PageRig {
@@ -807,29 +958,22 @@ interface PageRig {
   marks: DomEl;
   notice: DomEl;
   sock: FakeSocket;
+  doc: FakeDocument;
+  win: FakeWindow;
+  el(id: string): DomEl;
+  /** Send a status message to the page (the default fields, then these). */
+  status(fields: Record<string, unknown>): void;
   gestures(): number;
+  /** What the page has sent over /ws, parsed. */
+  sent(): Array<Record<string, unknown>>;
 }
 
 const PAGE_ACCEPTS = ["tap", "longPress", "drag", "scroll"];
 
-function pageRig(accepts: string[] = PAGE_ACCEPTS): PageRig {
+function pageRig(accepts: string[] = PAGE_ACCEPTS, extra: Record<string, unknown> = {}): PageRig {
   FakeSocket.all = [];
-  const els = new Map<string, DomEl>();
-  const get = (id: string): DomEl => {
-    let el = els.get(id);
-    if (!el) {
-      el = new DomEl();
-      els.set(id, el);
-    }
-    return el;
-  };
-  const doc = {
-    getElementById: get,
-    createElement: (): DomEl => new DomEl(),
-    addEventListener: (): void => undefined,
-    activeElement: null,
-  };
-  const win = { addEventListener: (): void => undefined };
+  const doc = new FakeDocument();
+  const win = new FakeWindow();
   const loc = { search: "", pathname: "/viewer", protocol: "http:", href: "http://host/viewer" };
   const hist = { replaceState: (): void => undefined };
   const factory = new Function(
@@ -843,23 +987,33 @@ function pageRig(accepts: string[] = PAGE_ACCEPTS): PageRig {
   ) as (w: object, d: object, l: object, h: object, s: object, f: () => Promise<never>) => void;
   factory(win, doc, loc, hist, FakeSocket, () => new Promise<never>(() => undefined));
   const sock = FakeSocket.all[0]!;
-  sock.message(
-    JSON.stringify({
-      type: "status",
-      protocol: 1,
-      state: "live",
-      driver: null,
-      paused: false,
-      size: { w: 400, h: 800 },
-      accepts,
-    }),
-  );
+  sock.onopen?.();
+  const status = (fields: Record<string, unknown>): void =>
+    sock.message(
+      JSON.stringify({
+        type: "status",
+        protocol: 1,
+        state: "live",
+        driver: null,
+        paused: false,
+        size: { w: 400, h: 800 },
+        accepts,
+        ...fields,
+      }),
+    );
+  status(extra);
+  const sent = (): Array<Record<string, unknown>> => sock.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
   return {
-    frame: get("frame"),
-    marks: get("marks"),
-    notice: get("notice"),
+    frame: doc.getElementById("frame"),
+    marks: doc.getElementById("marks"),
+    notice: doc.getElementById("notice"),
     sock,
-    gestures: () => sock.sent.filter((s) => (JSON.parse(s) as { type: string }).type === "gesture").length,
+    doc,
+    win,
+    el: doc.getElementById,
+    status,
+    gestures: () => sent().filter((m) => m["type"] === "gesture").length,
+    sent,
   };
 }
 
@@ -1046,5 +1200,496 @@ describe("viewer page: a person's click shows a mark at once", () => {
     const rig = pageRig();
     action(rig, { by: "agent", kind: "press", point: { x: 0.2, y: 0.2 }, ok: false, code: "covered" });
     expect(rig.marks.children[0]!.className).toBe("mark agent fail ring");
+  });
+});
+
+/* ---- the merged page: wording, the tool's name, overlay, theme, and the input ports ---- */
+
+const DOT = String.fromCharCode(0xb7);
+const TEXT_ACCEPTS = ["tap", "longPress", "scroll", "text", "enter", "backspace"];
+
+describe("viewer page: wording of the states", () => {
+  it("shows a locked phone as Phone locked, followed by the server's detail", () => {
+    const rig = pageRig(PAGE_ACCEPTS, { state: "locked", detail: "the app is in the background" });
+    expect(rig.el("status").textContent).toBe(`Phone locked ${DOT} the app is in the background`);
+    expect(rig.el("status").title).toBe(rig.el("status").textContent);
+    expect(rig.el("dot").className).toBe("bad");
+    rig.status({ state: "locked" });
+    expect(rig.el("status").textContent).toBe("Phone locked");
+  });
+
+  it("keeps App not answering, with the app's name as the detail", () => {
+    const rig = pageRig(PAGE_ACCEPTS, { state: "not-answering", detail: "Demo" });
+    expect(rig.el("status").textContent).toBe(`App not answering ${DOT} Demo`);
+  });
+});
+
+describe("viewer page: the tool's name (protocol 1.3, status.tool)", () => {
+  it("starts as Live view in the title and the one heading, and names no tool in its text", () => {
+    expect(VIEWER_HTML).toContain("<title>Live view</title>");
+    expect(VIEWER_HTML).toContain('<h1 id="heading">Live view</h1>');
+    expect(VIEWER_HTML.match(/<h[1-6]\b/g)).toHaveLength(1);
+    expect(VIEWER_HTML).not.toMatch(/<h1[^>]*\shidden/);
+    expect(VIEWER_HTML).not.toMatch(/tapline|tapwright/i);
+  });
+
+  it("reads <tool> live view in the title and the heading once a status names the tool", () => {
+    const rig = pageRig(PAGE_ACCEPTS, { tool: "Tapline" });
+    expect(rig.doc.title).toBe("Tapline live view");
+    expect(rig.el("heading").textContent).toBe("Tapline live view");
+    rig.status({ tool: "  Other Tool " });
+    expect(rig.doc.title).toBe("Other Tool live view");
+    expect(rig.el("heading").textContent).toBe("Other Tool live view");
+  });
+
+  it("reads Live view without the field, or with one that isn't a non-empty string", () => {
+    const rig = pageRig(PAGE_ACCEPTS, { tool: "Tapline" });
+    rig.status({});
+    expect(rig.doc.title).toBe("Live view");
+    expect(rig.el("heading").textContent).toBe("Live view");
+    for (const odd of [42, null, "", "   ", { name: "x" }]) {
+      rig.status({ tool: "Tapline" });
+      rig.status({ tool: odd });
+      expect(rig.doc.title).toBe("Live view");
+    }
+  });
+});
+
+describe("viewer page: the Boxes control follows accepts (protocol 1.3, overlay)", () => {
+  it("starts hidden in the markup and shows only when accepts lists overlay", () => {
+    expect(VIEWER_HTML).toMatch(/<button[^>]*id="boxes"[^>]*\shidden/);
+    expect(pageRig(PAGE_ACCEPTS).el("boxes").hidden).toBe(true);
+    expect(pageRig([...PAGE_ACCEPTS, "overlay"]).el("boxes").hidden).toBe(false);
+  });
+
+  it("asks for overlays when clicked, and asks again after a reconnect", () => {
+    const rig = pageRig([...PAGE_ACCEPTS, "overlay"]);
+    rig.el("boxes").dispatch("click");
+    expect(rig.sent().filter((m) => m["type"] === "overlay")).toEqual([{ type: "overlay", on: true }]);
+    expect(rig.el("boxes").attrs["aria-pressed"]).toBe("true");
+    rig.sock.onopen?.();
+    expect(rig.sent().filter((m) => m["type"] === "overlay")).toHaveLength(2);
+  });
+
+  it("puts Boxes back to off, and asks for nothing, when the server stops offering overlays", () => {
+    const rig = pageRig([...PAGE_ACCEPTS, "overlay"]);
+    rig.el("boxes").dispatch("click");
+    rig.status({ accepts: PAGE_ACCEPTS });
+    expect(rig.el("boxes").hidden).toBe(true);
+    expect(rig.el("boxes").attrs["aria-pressed"]).toBe("false");
+    rig.sock.onopen?.();
+    expect(rig.sent().filter((m) => m["type"] === "overlay")).toEqual([{ type: "overlay", on: true }]);
+    rig.status({ accepts: [...PAGE_ACCEPTS, "overlay"] });
+    expect(rig.el("boxes").hidden).toBe(false);
+    expect(rig.el("boxes").attrs["aria-pressed"]).toBe("false");
+  });
+});
+
+/* WCAG contrast, for the tokens in the page's style. */
+function luminance(hex: string): number {
+  const [r, g, b] = [1, 3, 5].map((i) => {
+    const v = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+function hexTokens(block: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of block.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) out[m[1]!] = m[2]!;
+  return out;
+}
+
+describe("viewer page: light and dark themes", () => {
+  const style = /<style>([\s\S]*?)<\/style>/.exec(VIEWER_HTML)![1]!;
+  const lightBlock = /:root\s*\{([^}]*)\}/.exec(style)![1]!;
+  const darkMedia = /@media \(prefers-color-scheme: dark\)\s*\{\s*:root\s*\{([^}]*)\}/.exec(style);
+  const light = hexTokens(lightBlock);
+  const dark = { ...light, ...hexTokens(darkMedia?.[1] ?? "") };
+
+  it("follows the system setting: both schemes declared, and a dark set that replaces the light one", () => {
+    expect(VIEWER_HTML).toContain('<meta name="color-scheme" content="light dark">');
+    expect(lightBlock).toContain("color-scheme: light dark;");
+    expect(darkMedia).not.toBeNull();
+    for (const name of ["bg", "panel", "line", "text", "muted", "btn", "pressed", "notice-bg", "notice-text"]) {
+      expect(hexTokens(darkMedia![1]!)[name], `dark --${name}`).toBeDefined();
+    }
+    expect(luminance(dark["bg"]!)).toBeLessThan(0.1);
+    expect(luminance(light["bg"]!)).toBeGreaterThan(0.8);
+    expect(luminance(dark["text"]!)).toBeGreaterThan(luminance(dark["bg"]!));
+    expect(luminance(light["text"]!)).toBeLessThan(luminance(light["bg"]!));
+  });
+
+  it("gives the body an explicit background and uses only tokens it defines", () => {
+    expect(style).toMatch(/body\s*\{[^}]*background:\s*var\(--bg\)/);
+    const defined = new Set([...style.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]!));
+    for (const m of style.matchAll(/var\((--[\w-]+)\)/g)) expect(defined.has(m[1]!), m[1]).toBe(true);
+  });
+
+  const TEXT_PAIRS: Array<[string, string]> = [
+    ["text", "bg"],
+    ["text", "panel"],
+    ["muted", "bg"],
+    ["muted", "panel"],
+    ["text", "btn"],
+    ["text", "pressed"],
+    ["notice-text", "notice-bg"],
+    ["on-mark", "agent"],
+    ["on-mark", "person"],
+    ["on-mark", "fail"],
+    ["label-text", "label-bg"],
+  ];
+
+  for (const [theme, tokens] of [
+    ["light", light],
+    ["dark", dark],
+  ] as const) {
+    it(`keeps text, marks and overlay labels readable in the ${theme} theme (4.5:1)`, () => {
+      for (const [fg, bg] of TEXT_PAIRS) {
+        expect(contrast(tokens[fg]!, tokens[bg]!), `${theme}: --${fg} on --${bg}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+
+    it(`keeps the focus ring and the status dots visible in the ${theme} theme (3:1)`, () => {
+      for (const name of ["accent", "dot-idle", "dot-live", "dot-wait", "dot-bad"]) {
+        expect(contrast(tokens[name]!, tokens["panel"]!), `${theme}: --${name} on --panel`).toBeGreaterThanOrEqual(3);
+      }
+      expect(contrast(tokens["accent"]!, tokens["bg"]!), `${theme}: --accent on --bg`).toBeGreaterThanOrEqual(3);
+    });
+  }
+});
+
+function key(rig: PageRig, fields: Record<string, unknown>): { prevented: boolean } {
+  return rig.doc.dispatch("keydown", {
+    key: "",
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    isComposing: false,
+    defaultPrevented: false,
+    target: null,
+    ...fields,
+  });
+}
+
+const ALT_GR = (name: string): boolean => name === "AltGraph";
+
+function typedTexts(rig: PageRig): string[] {
+  return rig.sent().flatMap((m) => (m["type"] === "text" ? [String(m["text"])] : []));
+}
+
+describe("viewer page: port a, AltGr characters are typed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sends a character typed with AltGr (Windows reports Ctrl and Alt together), and takes the key", () => {
+    vi.useFakeTimers();
+    const rig = pageRig(TEXT_ACCEPTS);
+    const first = key(rig, { key: "@", ctrlKey: true, altKey: true, getModifierState: ALT_GR });
+    key(rig, { key: "{", ctrlKey: true, altKey: true, getModifierState: ALT_GR });
+    expect(first.prevented).toBe(true);
+    vi.advanceTimersByTime(300);
+    expect(typedTexts(rig)).toEqual(["@{"]);
+  });
+
+  it("still leaves shortcuts to the browser: Ctrl, Alt or Meta without AltGr, and Meta even with it", () => {
+    vi.useFakeTimers();
+    const rig = pageRig(TEXT_ACCEPTS);
+    const cases: Array<Record<string, unknown>> = [
+      { key: "c", ctrlKey: true },
+      { key: "x", ctrlKey: true, altKey: true, getModifierState: () => false },
+      { key: "x", altKey: true },
+      { key: "v", metaKey: true },
+      { key: "@", metaKey: true, ctrlKey: true, altKey: true, getModifierState: ALT_GR },
+    ];
+    for (const c of cases) expect(key(rig, c).prevented).toBe(false);
+    vi.advanceTimersByTime(1000);
+    expect(typedTexts(rig)).toEqual([]);
+  });
+
+  it("types plain keys as before, batches them, and sends Enter after the text", () => {
+    vi.useFakeTimers();
+    const rig = pageRig(TEXT_ACCEPTS);
+    key(rig, { key: "a" });
+    key(rig, { key: "b" });
+    key(rig, { key: "Enter" });
+    key(rig, { key: "Shift" });
+    expect(
+      rig.sent().map((m) => (m["type"] === "text" ? `text:${String(m["text"])}` : `${String(m["type"])}:${String(m["key"])}`)),
+    ).toEqual(["text:ab", "key:enter"]);
+  });
+});
+
+describe("viewer page: port b, toolbar controls let go of the focus after a click", () => {
+  const IDS = ["pause", "boxes", "home", "vol-up", "vol-down"];
+  const ACC = [...PAGE_ACCEPTS, "overlay", "home", "volume", "quality"];
+
+  it("blurs each control after a click with the mouse or a finger, so Enter and Space reach the phone", () => {
+    const rig = pageRig(ACC);
+    for (const id of IDS) {
+      rig.win.dispatch("pointerdown");
+      rig.el(id).dispatch("click");
+      expect(rig.el(id).blurs, id).toBe(1);
+    }
+    rig.win.dispatch("pointerdown");
+    rig.el("quality").value = "light";
+    rig.el("quality").dispatch("change");
+    expect(rig.el("quality").blurs).toBe(1);
+    expect(rig.sent().at(-1)).toEqual({ type: "quality", preset: "light" });
+  });
+
+  it("keeps the focus when the control was used from the keyboard", () => {
+    const rig = pageRig(ACC);
+    for (const id of IDS) {
+      rig.win.dispatch("keydown");
+      rig.el(id).dispatch("click");
+      expect(rig.el(id).blurs, id).toBe(0);
+    }
+  });
+
+  it("goes back to keeping the focus after a key press that follows a click", () => {
+    const rig = pageRig(ACC);
+    rig.win.dispatch("pointerdown");
+    rig.el("home").dispatch("click");
+    rig.win.dispatch("keydown");
+    rig.el("home").dispatch("click");
+    expect(rig.el("home").blurs).toBe(1);
+  });
+
+  it("leaves keys typed while a toolbar control has focus alone, and Escape lets go of it", () => {
+    vi.useFakeTimers();
+    try {
+      const rig = pageRig(TEXT_ACCEPTS);
+      const inBar = { closest: (sel: string): object | null => (sel === "#bar" ? {} : null) };
+      rig.doc.activeElement = rig.el("home");
+      expect(key(rig, { key: "a", target: inBar }).prevented).toBe(false);
+      expect(key(rig, { key: "Enter", target: inBar }).prevented).toBe(false);
+      vi.advanceTimersByTime(1000);
+      expect(rig.sent()).toEqual([]);
+      key(rig, { key: "Escape", target: inBar });
+      expect(rig.el("home").blurs).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("viewer page: port c, drag points are stored at least 16 ms apart", () => {
+  function gesturePoints(rig: PageRig): number[][] {
+    const g = rig.sent().find((m) => m["type"] === "gesture");
+    return (g?.["points"] ?? []) as number[][];
+  }
+
+  it("keeps a move only when 16 ms have passed since the last stored point; the release point always goes", () => {
+    const rig = pageRig();
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    for (const [x, t] of [
+      [101, 1005],
+      [102, 1016],
+      [103, 1020],
+      [104, 1031],
+      [105, 1032],
+    ] as const) {
+      pointer(rig, "pointermove", x, 100, t);
+    }
+    pointer(rig, "pointerup", 110, 100, 1040);
+    const points = gesturePoints(rig);
+    expect(points.map((p) => p[0])).toEqual([0, 16, 32, 40]);
+    expect(points.map((p) => p[1])).toEqual([0.5, 0.51, 0.525, 0.55]);
+  });
+
+  it("caps the path at 300 points, release point included, and keeps the newest move before it", () => {
+    const rig = pageRig();
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    for (let i = 1; i <= 600; i++) pointer(rig, "pointermove", 100 + (i % 50), 100 + (i % 70), 1000 + 20 * i);
+    pointer(rig, "pointerup", 150, 150, 1000 + 20 * 601);
+    const points = gesturePoints(rig);
+    expect(points).toHaveLength(300);
+    expect(points[points.length - 2]![0]).toBe(20 * 600);
+    expect(points[points.length - 1]![0]).toBe(20 * 601);
+    for (let i = 1; i < points.length; i++) expect(points[i]![0]).toBeGreaterThanOrEqual(points[i - 1]![0]!);
+  });
+});
+
+describe("viewer page: port d, wheel shares are held to 0.8 and never pass 1", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function wheel(rig: PageRig, fields: Record<string, unknown>): void {
+    rig.frame.dispatch("wheel", { deltaX: 0, deltaY: 0, deltaMode: 0, clientX: 100, clientY: 200, ...fields });
+  }
+  function scrolls(rig: PageRig): Array<Record<string, number>> {
+    return rig.sent().filter((m) => m["type"] === "scroll") as unknown as Array<Record<string, number>>;
+  }
+
+  it("clamps a fast fling to 0.8 in either direction", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    wheel(rig, { deltaY: 2000, deltaX: -3000 });
+    vi.advanceTimersByTime(120);
+    wheel(rig, { deltaY: -2000 });
+    vi.advanceTimersByTime(120);
+    expect(scrolls(rig)).toEqual([
+      { type: "scroll", x: 0.5, y: 0.5, dx: -0.8, dy: 0.8 },
+      { type: "scroll", x: 0.5, y: 0.5, dx: 0, dy: -0.8 },
+    ]);
+  });
+
+  it("sums the events of one 120 ms burst, then clamps the sum", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    wheel(rig, { deltaY: 100 });
+    wheel(rig, { deltaY: 100 });
+    vi.advanceTimersByTime(120);
+    for (let i = 0; i < 5; i++) wheel(rig, { deltaY: 100 });
+    vi.advanceTimersByTime(120);
+    expect(scrolls(rig).map((s) => s["dy"])).toEqual([0.5, 0.8]);
+  });
+
+  it("never sends a share beyond 1 in any wheel mode", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    for (const deltaMode of [0, 1, 2]) {
+      wheel(rig, { deltaMode, deltaY: 1e6, deltaX: -1e6 });
+      vi.advanceTimersByTime(120);
+    }
+    const all = scrolls(rig);
+    expect(all).toHaveLength(3);
+    for (const s of all) {
+      expect(Math.abs(s["dx"]!)).toBeLessThanOrEqual(0.8);
+      expect(Math.abs(s["dy"]!)).toBeLessThanOrEqual(0.8);
+    }
+  });
+
+  it("keeps small scrolls exact (lines count 16 points) and sends nothing for a scroll that comes to nothing", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    wheel(rig, { deltaMode: 1, deltaY: 3 });
+    vi.advanceTimersByTime(120);
+    wheel(rig, { deltaX: 0, deltaY: 0 });
+    vi.advanceTimersByTime(120);
+    wheel(rig, { deltaY: 0.00001 });
+    vi.advanceTimersByTime(120);
+    expect(scrolls(rig).map((s) => s["dy"])).toEqual([0.12]);
+  });
+
+  it("does nothing when the server doesn't take scrolls", () => {
+    vi.useFakeTimers();
+    const rig = pageRig(["tap"]);
+    wheel(rig, { deltaY: 100 });
+    vi.advanceTimersByTime(200);
+    expect(scrolls(rig)).toEqual([]);
+  });
+});
+
+describe("viewer page: port e, a drag trail while dragging", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sizes the trail canvas to the frame times the pixel ratio", () => {
+    const rig = pageRig();
+    const trail = rig.el("trail");
+    expect(rig.frame.style["width"]).toBe("384px");
+    expect(rig.frame.style["height"]).toBe("768px");
+    expect([trail.width, trail.height]).toEqual([768, 1536]);
+    expect(trail.ctx.ops).toContain("setTransform 2,0,0,2,0,0");
+  });
+
+  it("draws the path under the pointer once it has left the tap area, in two passes (dark edge, then the person's colour)", () => {
+    const rig = pageRig();
+    const ctx = rig.el("trail").ctx;
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    expect(ctx.strokes).toHaveLength(0);
+    pointer(rig, "pointermove", 102, 100, 1020);
+    expect(ctx.strokes).toHaveLength(0);
+    pointer(rig, "pointermove", 120, 100, 1040);
+    expect(ctx.strokes.map((s) => s.style)).toEqual(["rgba(0, 0, 0, 0.55)", "#8be28b"]);
+    expect(ctx.ops).toContain("moveTo 192,192");
+    const lines = ctx.ops.filter((op) => op.startsWith("lineTo ")).map((op) => op.slice(7).split(",").map(Number));
+    expect(lines.at(-1)![0]).toBeCloseTo(230.4, 5);
+    expect(lines.at(-1)![1]).toBe(192);
+    expect(rig.marks.children).toHaveLength(0);
+  });
+
+  it("draws no trail for a tap or a hold", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    pointer(rig, "pointermove", 102, 101, 1100);
+    pointer(rig, "pointerup", 102, 101, 1600);
+    expect(rig.el("trail").ctx.strokes).toHaveLength(0);
+  });
+
+  it("keeps the finished trail for 400 ms after release, then clears it", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    const ctx = rig.el("trail").ctx;
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    pointer(rig, "pointermove", 150, 200, 1030);
+    pointer(rig, "pointerup", 160, 220, 1060);
+    const after = ctx.ops.length;
+    expect(ctx.strokes.length).toBeGreaterThanOrEqual(4);
+    vi.advanceTimersByTime(399);
+    expect(ctx.ops.slice(after).some((op) => op.startsWith("clearRect"))).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(ctx.ops.slice(after).filter((op) => op.startsWith("clearRect"))).toEqual(["clearRect 0,0,384,768"]);
+  });
+
+  it("clears the trail at once when the pointer is cancelled", () => {
+    const rig = pageRig();
+    const ctx = rig.el("trail").ctx;
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    pointer(rig, "pointermove", 150, 200, 1030);
+    pointer(rig, "pointercancel", 150, 200, 1040);
+    expect(ctx.ops.at(-1)).toBe("clearRect 0,0,384,768");
+  });
+});
+
+describe("viewer page: the tap slop is 10 points, and the pending ring's match follows it", () => {
+  it("names 10 points, and a match tolerance defined from it", () => {
+    const script = scriptBody();
+    expect(script).toContain("var TAP_SLOP = 10;");
+    expect(script).toContain("var NEAR_POINTS = TAP_SLOP +");
+    expect(script).not.toMatch(/TAP_SLOP\s*=\s*12/);
+  });
+
+  it("calls a path of 9 points a tap (a ring at once) and one of 11 points a drag (none)", () => {
+    // The phone is 400 x 800 points and the frame 200 x 400 pixels: 1 pixel across is 2 points.
+    const tap = pageRig();
+    pointer(tap, "pointerdown", 100, 200, 1000);
+    pointer(tap, "pointerup", 104.5, 200, 1080);
+    expect(tap.marks.children).toHaveLength(1);
+    expect(tap.marks.children[0]!.style.left).toBe("52.250%");
+    const drag = pageRig();
+    pointer(drag, "pointerdown", 100, 200, 1000);
+    pointer(drag, "pointerup", 105.5, 200, 1080);
+    expect(drag.gestures()).toBe(1);
+    expect(drag.marks.children).toHaveLength(0);
+  });
+
+  it("takes over the ring for the server's point, which is the path's first point, 9 points from it", () => {
+    const rig = pageRig();
+    pointer(rig, "pointerdown", 100, 200, 1000);
+    pointer(rig, "pointerup", 104.5, 200, 1080);
+    action(rig, { by: "person", kind: "press", point: { x: 0.5, y: 0.5 } });
+    expect(rig.marks.children).toHaveLength(1);
+    expect(rig.marks.children[0]!.has("pending")).toBe(false);
+  });
+
+  it("leaves the ring when the server's point is more than the tolerance (16 points) away", () => {
+    const rig = pageRig();
+    pointer(rig, "pointerdown", 100, 200, 1000);
+    pointer(rig, "pointerup", 104.5, 200, 1080);
+    action(rig, { by: "person", kind: "press", point: { x: 0.5225 + 17 / 400, y: 0.5 } });
+    expect(rig.marks.children).toHaveLength(2);
+    expect(rig.marks.children[0]!.has("pending")).toBe(true);
   });
 });

@@ -1,0 +1,2 @@
+# The shared viewer page stays byte-identical across checkouts and repos: LF line ends always.
+packages/host/src/viewer.html text eol=lf

@@ -14,7 +14,7 @@ import {
 } from "./config.js";
 import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
-import { ViewerHub, viewerStatusForHost } from "./viewer.js";
+import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
 import { VIEWER_HTML } from "./viewer-page.js";
 import { TaplineHost } from "./server.js";
 import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
@@ -329,7 +329,7 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string; v
       html: VIEWER_HTML,
       allowedHosts: () => viewerHosts,
       allowRemote: remoteViewer,
-      accepts: ["tap", "longPress", "scroll", "text", "enter", "backspace", "quality"],
+      accepts: [...VIEWER_ACCEPTS],
       control,
       setFeed: (on, quality) => {
         void tools.setFeed(on, quality).then((outcome) => {
