@@ -225,14 +225,16 @@ function formatOffScreenChanges(changes: NonNullable<TreeResult["changes"]>): st
 }
 
 /**
- * The off-screen lines that follow a full list. Only for a full list that came because most of the
+ * The off-screen lines that follow a full list, under `Changes off screen:`. Only for a full list that came because most of the
  * same screen changed: on another screen, or with nothing listed, the old off-screen elements are
  * no baseline to compare with.
  */
 export function formatOffScreenAfterList(tree: TreeResult): string[] {
   const changes = tree.changes;
   if (changes === undefined || !changes.sameRoute || tree.elements.length === 0) return [];
-  return formatOffScreenChanges(changes);
+  const lines = formatOffScreenChanges(changes);
+  // Under a line of their own: after a list of elements, bare `~` lines read like a second, broken block.
+  return lines.length > 0 ? ["Changes off screen:", ...lines] : [];
 }
 
 /** Most moved elements listed one by one; more read as a scroll. */

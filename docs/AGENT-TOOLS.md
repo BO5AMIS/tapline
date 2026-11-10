@@ -138,8 +138,8 @@ Settled in 0.31 s.
     add what to do next; Tapline adds `Tapline can't see it: ask the user, or use Tapwright.`
 
   The full list starts with the header (§3.2).
-  - **Off-screen changes follow the full list too (v1.6):** the same `~ … (off screen; was "…")`
-    lines, after the list and before `Settled in`. Only when the list came because most of the
+  - **Off-screen changes follow the full list too (v1.6):** the line `Changes off screen:`, then
+    the same `~ … (off screen; was "…")` lines, after the list and before `Settled in`. Only when the list came because most of the
     same screen changed. Not when the screen or route changed, another app is in front, a
     person acted, the link dropped, or the agent had never looked: there the old off-screen
     elements are no baseline to compare with.

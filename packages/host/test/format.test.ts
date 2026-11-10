@@ -127,6 +127,7 @@ describe("off-screen changes after a full list", () => {
 
   it("gives the same lines when most of the same screen changed", () => {
     expect(formatOffScreenAfterList({ ...tree, changes })).toEqual([
+      "Changes off screen:",
       '~ text "row=5" id=lab-state @16,-900 398x68 (off screen; was "row=-")',
       "~ 1 more changed off screen",
     ]);

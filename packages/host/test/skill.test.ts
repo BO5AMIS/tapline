@@ -76,11 +76,18 @@ describe("the skill in the repository (Agent Skills format)", () => {
     for (const code of codes) expect(new RegExp(`["'\`]${code}["'\`]|Error ${code}\\b`).test(sources), code).toBe(true);
   });
 
-  it("is found from the built CLI's folder", () => {
-    // dist sits at packages/host/dist: the build's copy is next to it, the repository's three levels up.
-    const found = skillSource(resolve(here, "..", "dist"));
-    expect(isThisSkill(found)).toBe(true);
-    expect(readFileSync(join(found, "SKILL.md"), "utf8").replace(/\r\n/g, "\n")).toBe(text);
+  it("is found from the built CLI's folder: in a clone the repository's own copy, never a stale one", () => {
+    // dist sits at packages/host/dist: the repository's copy is three levels up.
+    expect(skillSource(resolve(here, "..", "dist"))).toBe(repoSkill);
+  });
+
+  it("in a published package, where no repository surrounds the CLI, the copy next to it is used", () => {
+    const pkg = temp();
+    mkdirSync(join(pkg, "dist"));
+    mkdirSync(join(pkg, "skills", SKILL_NAME), { recursive: true });
+    writeFileSync(join(pkg, "skills", SKILL_NAME, "SKILL.md"), `---\nname: ${SKILL_NAME}\ndescription: Use when testing.\n---\n`);
+    expect(skillSource(join(pkg, "dist"))).toBe(join(pkg, "skills", SKILL_NAME));
+    expect(() => skillSource(join(temp(), "dist"))).toThrow(/weren't found/);
   });
 });
 

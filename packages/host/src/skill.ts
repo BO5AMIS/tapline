@@ -25,11 +25,13 @@ export function isThisSkill(dir: string): boolean {
 }
 
 /**
- * The skill as it ships: next to the built CLI (`<package>/skills/tapline`, copied there by the
- * build), else in the repository this file runs from (`<repo>/skills/tapline`).
+ * Where the skill is. Running from a clone, that is the repository's own copy
+ * (`<repo>/skills/tapline`): the one people edit, so it is never stale. In the published package
+ * there is no repository around the CLI, and it is the copy the build put next to it
+ * (`<package>/skills/tapline`).
  */
 export function skillSource(from: string = dirname(fileURLToPath(import.meta.url))): string {
-  const candidates = [resolve(from, "..", "skills", SKILL_NAME), resolve(from, "..", "..", "..", "skills", SKILL_NAME)];
+  const candidates = [resolve(from, "..", "..", "..", "skills", SKILL_NAME), resolve(from, "..", "skills", SKILL_NAME)];
   const found = candidates.find((dir) => isThisSkill(dir));
   if (found === undefined) {
     throw new Error(`The skill's files weren't found (looked in ${candidates.join(" and ")}). Build Tapline first: npm run build.`);
