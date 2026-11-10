@@ -1436,8 +1436,6 @@ interface ViewShotModule {
     result: 'base64';
     width?: number;
     height?: number;
-    /** iOS: draw the layers inside the app instead of asking the system for the screen's picture. */
-    useRenderInContext?: boolean;
   }) => Promise<string>;
 }
 
@@ -1478,16 +1476,7 @@ export async function screenshot(
   const perUnit = Platform.OS === 'ios' && screen.scale > 0 ? screen.scale : 1;
   let data: string;
   try {
-    data = await viewShot.captureScreen({
-      format,
-      quality,
-      result: 'base64',
-      width: width / perUnit,
-      height: height / perUnit,
-      // `render: "layers"` (the live feed's experiment): cheaper for the phone, but blurs and system-drawn
-      // glass don't show.
-      ...(params.render === 'layers' ? { useRenderInContext: true } : {}),
-    });
+    data = await viewShot.captureScreen({ format, quality, result: 'base64', width: width / perUnit, height: height / perUnit });
   } catch (error) {
     throw new TaplineError('internal', `captureScreen failed: ${error instanceof Error ? error.message : String(error)}`);
   }

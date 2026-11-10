@@ -12,11 +12,6 @@ import { TaplineError, isRecord } from './types';
 let feed: FrameFeed | null = null;
 /** The gap override the running feed was started with (undefined: the live pace). */
 let feedGapMs: number | undefined;
-/**
- * How a frame is drawn: the system's picture of the screen (the default), or `layers`, drawn inside
- * the app (an experiment: cheaper for the phone, but blurs and system-drawn glass don't show).
- */
-let feedRender: 'screen' | 'layers' = 'screen';
 let overrides: Partial<FeedDeps> = {};
 
 /**
@@ -59,7 +54,7 @@ type Raf = (fn: (t: number) => void) => unknown;
 function deps(): FeedDeps {
   const g = globalThis as { requestAnimationFrame?: Raf; cancelAnimationFrame?: (handle: unknown) => void };
   const base: FeedDeps = {
-    capture: (params) => screenshot(feedRender === 'layers' ? { ...params, render: 'layers' } : params),
+    capture: (params) => screenshot(params),
     send: (frame) => emitEvent('frame', frame),
     onCommit,
     commitRevision,
@@ -100,7 +95,6 @@ export async function feedMethod(raw: unknown): Promise<{ on: boolean; quality?:
     gapMs = raw.gapMs;
   }
   const quality: QualityPreset = isPreset(raw.quality) ? raw.quality : 'balanced';
-  feedRender = raw.render === 'layers' ? 'layers' : 'screen';
   if (raw.on) {
     if (feed && feedGapMs !== gapMs) stopLiveFeed();
     if (feed) feed.setQuality(quality);

@@ -358,16 +358,13 @@ const MAX_FEED_GAP_MS = 2000;
 
 /**
  * The app's `feed` params. For measuring only, TAPLINE_FEED_GAP_MS (30–2000) replaces the app's
- * live pace with a fixed gap between captures; apps without it ignore it. TAPLINE_FEED_RENDER=layers
- * asks the app to draw its frames inside the app (an experiment: cheaper, but blurs don't show).
+ * live pace with a fixed gap between captures; apps without it ignore it.
  */
 export function feedParams(on: boolean, quality: QualityPreset, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
   const raw = env.TAPLINE_FEED_GAP_MS;
   const gapMs = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
-  const params: Record<string, unknown> = { on, quality };
-  if (gapMs >= MIN_FEED_GAP_MS && gapMs <= MAX_FEED_GAP_MS) params["gapMs"] = gapMs;
-  if (env.TAPLINE_FEED_RENDER === "layers") params["render"] = "layers";
-  return params;
+  if (gapMs >= MIN_FEED_GAP_MS && gapMs <= MAX_FEED_GAP_MS) return { on, quality, gapMs };
+  return { on, quality };
 }
 
 const commandsSchema = z.object({
