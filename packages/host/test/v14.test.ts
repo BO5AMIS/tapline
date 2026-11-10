@@ -160,7 +160,8 @@ describe("not_answering (v1.4)", () => {
     // The other tools that need an app say the same.
     expect(textOf(await tools.look({}))).toMatch(/^Error not_answering: Demo stopped answering at /);
     expect(textOf(tools.apps())).toContain("Demo stopped answering at ");
-    expect(app.ws.readyState).not.toBe(app.ws.OPEN);
+    // The host closed the socket; the client's side sees that a moment later.
+    await until(() => app.ws.readyState !== app.ws.OPEN);
     // A later connection clears it.
     const next = await FakeApp.connect(port, {}, answering({}));
     apps.push(next.app);
