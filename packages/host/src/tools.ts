@@ -119,8 +119,13 @@ export const toolShapes = {
   scroll: {
     direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction (default down when no `to`)"),
     amount: z.number().min(0.1).max(1).optional().describe("How far: a share of the scroll area, 0.1 to 1 (default 0.8)"),
-    to: z.enum(["start", "end"]).optional().describe("Jump to the start or end instead of using direction/amount"),
-    target: targetField.optional().describe("Scroll view to scroll, or an element inside it; default: the largest one on screen"),
+    to: z
+      .enum(["start", "end", "target"])
+      .optional()
+      .describe('Instead of direction/amount: "start" or "end" jumps there; "target" scrolls until the `target` element is on screen, clear of the bars'),
+    target: targetField
+      .optional()
+      .describe('Scroll view to scroll, or an element inside it; default: the largest one on screen. With to: "target", the element to bring onto the screen'),
     look: lookField,
     screenshot: screenshotField,
   },
@@ -905,6 +910,10 @@ export class TaplineTools {
     if (KEYBOARD_METHODS.has(method) && typeof result === "object" && result !== null && "closedKeyboard" in result && result.closedKeyboard === true) {
       extra.push("Note: closed the keyboard first.");
     }
+    // `force` let through what the checks refuse (AGENT-TOOLS v1.6): the answer mustn't read like any tap.
+    if (typeof result === "object" && result !== null && "forced" in result && typeof result.forced === "string" && /^[a-z_]+$/.test(result.forced)) {
+      extra.push(`Note: forced (${result.forced}): a person couldn't have done this.`);
+    }
     if (extra.length > 0) {
       const [first, ...rest] = response.content;
       if (first !== undefined && first.type === "text") {
@@ -1397,9 +1406,10 @@ export class TaplineTools {
     return { content: [{ type: "text", text: `${line}\n${head}` }, ...rest] };
   }
 
-  private elementName(result: unknown): string {
-    if (typeof result === "object" && result !== null && "element" in result) {
-      const element = elementSchema.safeParse((result as { element: unknown }).element);
+  /** The line (without its actions) of the element a result carries under `key`. */
+  private elementName(result: unknown, key: "element" | "target" = "element"): string {
+    if (typeof result === "object" && result !== null && key in result) {
+      const element = elementSchema.safeParse((result as Record<string, unknown>)[key]);
       if (element.success) return formatElement(element.data, { actions: false });
     }
     return "element";
@@ -1451,22 +1461,37 @@ export class TaplineTools {
     if (args.to !== undefined && (args.direction !== undefined || args.amount !== undefined)) {
       return Promise.resolve(fail("Error bad_params: use either `to` or `direction`/`amount`, not both."));
     }
+    const toTarget = args.to === "target";
+    if (toTarget && args.target === undefined) {
+      return Promise.resolve(fail('Error bad_params: to: "target" needs a target: the element to bring onto the screen.'));
+    }
     const params: Record<string, unknown> =
       args.to !== undefined ? { to: args.to } : { direction: args.direction ?? "down", fraction: args.amount ?? 0.8 };
     if (args.target !== undefined) params["target"] = toWireTarget(args.target);
+    const flag = (r: unknown, key: string): unknown =>
+      typeof r === "object" && r !== null && key in r ? (r as Record<string, unknown>)[key] : undefined;
+    // The element was on screen and clear already: nothing was scrolled, and the first line says so.
+    const alreadyThere = (r: unknown): boolean => toTarget && flag(r, "unchanged") === true;
     return this.act(
       "scroll",
       params,
       (r) => {
-        const offset =
-          typeof r === "object" && r !== null && "offset" in r ? (r as { offset: unknown }).offset : undefined;
+        if (alreadyThere(r)) return `${this.elementName(r, "target")} is already on screen.`;
+        const offset = flag(r, "offset");
         const at = offset !== undefined ? ` Offset now ${JSON.stringify(offset)}.` : "";
+        if (toTarget) return `Scrolled ${this.elementName(r)} to ${this.elementName(r, "target")}.${at}`;
         return `Scrolled ${this.elementName(r)} ${args.to !== undefined ? `to ${args.to}` : (args.direction ?? "down")}.${at}`;
       },
       args.look,
       args.screenshot,
       (r) => {
-        const moved = typeof r === "object" && r !== null && "moved" in r ? (r as { moved: unknown }).moved : undefined;
+        if (toTarget) {
+          // The same sentence as Tapwright's, for a list that ends with the element still under a bar or off screen.
+          return flag(r, "reached") === false
+            ? ["Note: it doesn't scroll further: the target is as far into view as it gets."]
+            : [];
+        }
+        const moved = flag(r, "moved");
         if (moved !== false) return [];
         const direction = args.to !== undefined ? (args.to === "start" ? "up" : "down") : (args.direction ?? "down");
         if (direction === "up") {

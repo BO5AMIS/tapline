@@ -63,6 +63,27 @@ function notActionable(reason: NotActionable, message: string): TaplineError {
   return new TaplineError('not_actionable', `${reason}: ${message}`);
 }
 
+/**
+ * Runs the checks for what a person could do. Without `force` a refusal is thrown as usual. With
+ * it the checks still run, and what they would have refused comes back as `{ forced: <reason> }`,
+ * so the answer can say that a person couldn't have done this (AGENT-TOOLS v1.6). Anything else
+ * that goes wrong inside a forced check is ignored: `force` means "act anyway".
+ */
+async function checkedOrForced(force: boolean, check: () => Promise<void> | void): Promise<{ forced?: string }> {
+  if (!force) {
+    await check();
+    return {};
+  }
+  try {
+    await check();
+  } catch (error) {
+    if (error instanceof TaplineError && error.code === 'not_actionable') {
+      return { forced: error.message.slice(0, Math.max(0, error.message.indexOf(':'))) || 'not_actionable' };
+    }
+  }
+  return {};
+}
+
 const settings = { quietMs: 100, capMs: 2000 };
 
 /** Tune how long the app must be free of React commits after an action, and the longest wait (AGENT-TOOLS §6). */
@@ -705,6 +726,9 @@ function assertNoBlockingAlert(actor?: Entry): void {
   }
 }
 
+/** How a refusal names the one call that brings an element onto the screen (AGENT-TOOLS v1.6, shared with Tapwright). */
+const SCROLL_TO_TARGET_HINT = '(scroll with this target and to: "target")';
+
 /**
  * Refuses what a person couldn't tap: an element off screen, or one with something else on top
  * at the centre of its visible part (Fabric's hit test). Unknown hit results let it through.
@@ -722,7 +746,7 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
     throw notActionable(
       'off_screen',
       `${name} is off screen (at ${Math.round(frame.x)},${Math.round(frame.y)}; the screen is ${width}x${height}). ` +
-        'Scroll to it first, or pass force: true to call its handler anyway.',
+        `Scroll to it first ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
     );
   }
   const bar = nativeTabBar(snapshot);
@@ -742,14 +766,14 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
       return notActionable(
         'under_tab_bar',
         `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
-          'Scroll down to bring it above the bar, or pass force: true to call its handler anyway.',
+          `Scroll it clear of the bar ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
       );
     }
     if (underNavBar(y)) {
       return notActionable(
         'covered',
         `${name} is under the navigation bar iOS draws, at (${x}, ${y}): a real tap would hit the bar instead. ` +
-          'Scroll up to bring it below the bar, or pass force: true to call its handler anyway.',
+          `Scroll it clear of the bar ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
       );
     }
     const hit = await hitAt(x, y);
@@ -928,7 +952,7 @@ async function pressLike(
     throw notActionable('no_action', `${describe(actor)} has no ${actionName} action`);
   }
   const { element, frame } = await elementFor(actor);
-  if (params.force !== true) await assertReachable(snapshot, actor, frame);
+  const forced = await checkedOrForced(params.force === true, () => assertReachable(snapshot, actor, frame));
   const closedKeyboard = closeKeyboardFor(actor);
   if (handler) callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
   else {
@@ -938,11 +962,14 @@ async function pressLike(
     const own = appHandler(actor, 'onPress');
     if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
   }
-  return { element, ...keyboardNote(closedKeyboard), ...(await settleOutcome()) };
+  return { element, ...keyboardNote(closedKeyboard), ...forced, ...(await settleOutcome()) };
 }
 
-/** What `press` and `longPress` answer: the element, and `closedKeyboard: true` when the keyboard was closed first. */
-export type PressResult = { element: TaplineElement; closedKeyboard?: true } & SettleOutcome;
+/**
+ * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
+ * closed first, and `forced` (the reason word) when `force` let through what the checks refuse.
+ */
+export type PressResult = { element: TaplineElement; closedKeyboard?: true; forced?: string } & SettleOutcome;
 
 export function press(params: unknown): Promise<PressResult> {
   return pressLike('press', params);
@@ -1094,7 +1121,7 @@ function setNativeText(entry: Entry, text: string): void {
 
 export async function typeText(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: string; closedKeyboard?: true } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: string; closedKeyboard?: true; forced?: string } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
@@ -1112,14 +1139,14 @@ export async function typeText(
   // Typing is a tap that focuses the input, then keys: a person couldn't do it where they couldn't tap,
   // so the checks are a tap's, with the same reasons and the same `force`. The input that already has
   // focus is the exception: the keyboard is up for it and a person types without touching it.
-  if (params.force !== true) {
+  const forced = await checkedOrForced(params.force === true, async () => {
     if (ownsInstance(entry, keyboard.focusedInput())) {
       // An alert takes the keyboard away even from the focused input: a person answers it first.
       assertNoBlockingAlert(entry);
     } else {
       await assertReachable(snapshot, entry, await measureFiber(entry.node.fiber));
     }
-  }
+  });
   // Typing into the input that has focus leaves the keyboard alone; another input closes it first.
   const closedKeyboard = closeKeyboardFor(entry);
 
@@ -1153,7 +1180,7 @@ export async function typeText(
 
   const outcome = await settleOutcome();
   const { element } = await elementFor(entry);
-  return { element: { ...element, value: displayText(next) }, value: displayText(next), ...keyboardNote(closedKeyboard), ...outcome };
+  return { element: { ...element, value: displayText(next) }, value: displayText(next), ...keyboardNote(closedKeyboard), ...forced, ...outcome };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1221,12 +1248,153 @@ function rememberKey(entry: Entry, candidates: Record<string, unknown>[]): objec
 const DIRECTIONS = ['down', 'up', 'left', 'right'] as const;
 type Direction = (typeof DIRECTIONS)[number];
 
-export async function scroll(
-  rawParams: unknown,
-): Promise<{ element: TaplineElement; offset: { x: number; y: number }; moved: boolean } & SettleOutcome> {
+/** What `scroll` answers; `target`, `reached` and `unchanged` only with `to: "target"`. */
+export type ScrollResult = {
+  /** The scroll view that was scrolled. */
+  element: TaplineElement;
+  offset: { x: number; y: number };
+  moved: boolean;
+  /** The element that was scrolled to, where it is now. */
+  target?: TaplineElement;
+  /** False when the scroll views are as far as they go and the element still isn't clear. */
+  reached?: boolean;
+  /** The element was clear already: nothing was scrolled. */
+  unchanged?: true;
+} & SettleOutcome;
+
+/** How far inside the clear area a scrolled-to element is placed, in points, when there is room (the same in Tapwright). */
+const TARGET_MARGIN = 8;
+
+/**
+ * How far content must move along one axis to bring [start, start + size] into [from, until], with
+ * the margin when it fits. Positive scrolls forward (down, right). 0 when it is clear already. An
+ * element longer than the area is lined up with its start.
+ */
+function axisShift(start: number, size: number, from: number, until: number): number {
+  const room = until - from;
+  const margin = Math.min(TARGET_MARGIN, Math.max(0, (room - size) / 2));
+  if (start < from) return start - (from + margin);
+  if (start + size > until) return Math.min(start + size - (until - margin), start - (from + margin));
+  return 0;
+}
+
+/**
+ * `scroll` with `to: "target"` (AGENT-TOOLS v1.6): scrolls the scroll views that hold the element,
+ * innermost first, until it is on screen and clear of the bars iOS draws. One `scrollTo` each, from
+ * measured positions; a second round corrects for a list that laid out more rows on the way.
+ */
+async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollResult> {
+  const raw = params.target;
+  if (raw === undefined || raw === null) throw badParams('to: "target" needs a target: the element to bring onto the screen');
+  if (isRecord(raw) && (raw.x !== undefined || raw.y !== undefined)) {
+    throw badParams('to: "target" needs an element (ref, id, label or text), not a point');
+  }
+  const { snapshot, entry: wanted } = await resolveTarget(raw);
+  const scrollers: Entry[] = [];
+  for (let p = wanted.node.parent; p >= 0; ) {
+    const candidate = snapshot.entries[p];
+    if (candidate?.info.actions.includes('scroll')) scrollers.push(candidate);
+    const node = snapshot.nodes[p];
+    if (!node) break;
+    p = node.parent;
+  }
+  const { width, height } = snapshot.screen;
+  const navBar = nativeNavBar(snapshot);
+  const tabBar = nativeTabBar(snapshot);
+  const clearTop = navBar && !inNavBarHeader(navBar, wanted.node.fiber) ? navBar.bottom : 0;
+  const clearBottom = tabBar ? tabBar.top : height;
+  // How far the element is from clear inside `area` (the whole screen without one), per axis.
+  const shiftsIn = (frame: Frame, area: Frame | null): { x: number; y: number } => ({
+    x: axisShift(frame.x, frame.width, Math.max(area?.x ?? 0, 0), Math.min(area ? area.x + area.width : width, width)),
+    y: axisShift(
+      frame.y,
+      frame.height,
+      Math.max(area?.y ?? 0, clearTop),
+      Math.min(area ? area.y + area.height : height, clearBottom),
+    ),
+  });
+
+  let settledMs = 0;
+  let settleCapMs: number | undefined;
+  let scrolled: { entry: Entry; offset: { x: number; y: number } } | null = null;
+  for (let round = 0; round < 2; round++) {
+    let movedThisRound = false;
+    for (const scroller of scrollers) {
+      const horizontal = findProp(scroller.node, 'horizontal') === true;
+      const [targetFrame, scrollFrame, state] = await Promise.all([
+        measureFiber(wanted.node.fiber),
+        measureFiber(scroller.node.fiber),
+        measureScrollState(scroller),
+      ]);
+      if (!targetFrame || !scrollFrame) continue;
+      const shifts = shiftsIn(targetFrame, scrollFrame);
+      const shift = horizontal ? shifts.x : shifts.y;
+      if (Math.abs(shift) < 1) continue;
+      const candidates = scrollCandidates(scroller);
+      const key = rememberKey(scroller, candidates);
+      const metrics = readMetrics(candidates);
+      const current =
+        state?.offset ??
+        (metrics ? (horizontal ? { x: metrics.offset, y: 0 } : { x: 0, y: metrics.offset }) : ((key ? rememberedOffsets.get(key) : undefined) ?? { x: 0, y: 0 }));
+      let x = Math.max(0, current.x + (horizontal ? shift : 0));
+      let y = Math.max(0, current.y + (horizontal ? 0 : shift));
+      if (state) {
+        x = Math.min(x, state.max.x);
+        y = Math.min(y, state.max.y);
+      }
+      // At its start or end already: this scroll view can't bring the element any closer.
+      if (Math.abs(x - current.x) < 1 && Math.abs(y - current.y) < 1) continue;
+      const scrollTo = method(candidates, 'scrollTo');
+      const scrollToOffset = method(candidates, 'scrollToOffset');
+      if (scrollTo) scrollTo({ x, y, animated: false });
+      else if (scrollToOffset) scrollToOffset({ offset: horizontal ? x : y, animated: false });
+      else throw new TaplineError('unsupported', 'This scroll view exposes no scrollTo');
+      const outcome = await settleOutcome();
+      settledMs += outcome.settledMs;
+      if (outcome.settleCapMs !== undefined) settleCapMs = outcome.settleCapMs;
+      const after = await measureScrollState(scroller);
+      const offset = after ? after.offset : { x, y };
+      if (key) rememberedOffsets.set(key, offset);
+      // The answer names the innermost scroll view that moved.
+      if (scrolled === null || scrollers.indexOf(scroller) < scrollers.indexOf(scrolled.entry)) scrolled = { entry: scroller, offset };
+      else if (scrolled.entry === scroller) scrolled.offset = offset;
+      movedThisRound = true;
+    }
+    if (!movedThisRound) break;
+  }
+
+  const finalFrame = await measureFiber(wanted.node.fiber);
+  let reached = finalFrame !== null && isOnScreen(finalFrame, snapshot.screen);
+  if (finalFrame !== null && reached) {
+    const inner = scrollers[0];
+    const innerFrame = inner ? await measureFiber(inner.node.fiber) : null;
+    const left = shiftsIn(finalFrame, innerFrame);
+    reached = Math.abs(left.x) < 1 && Math.abs(left.y) < 1;
+  }
+  const target = toElement(wanted, finalFrame);
+  const settle: SettleOutcome = { settledMs, ...(settleCapMs !== undefined ? { settleCapMs } : {}) };
+  if (scrolled === null) {
+    if (reached) return { element: target, target, offset: { x: 0, y: 0 }, moved: false, reached: true, unchanged: true, ...settle };
+    const first = scrollers[0];
+    if (!first) throw notActionable('no_action', `${describe(wanted)} is not inside a scroll view`);
+    const state = await measureScrollState(first);
+    const { element } = await elementFor(first);
+    return { element, target, offset: state?.offset ?? { x: 0, y: 0 }, moved: false, reached: false, ...settle };
+  }
+  const { element } = await elementFor(scrolled.entry);
+  return { element, target, offset: scrolled.offset, moved: true, reached, ...settle };
+}
+
+export async function scroll(rawParams: unknown): Promise<ScrollResult> {
   const params = paramsOf(rawParams);
   const to = params.to;
-  if (to !== undefined && to !== 'start' && to !== 'end') throw badParams('to must be "start" or "end"');
+  if (to !== undefined && to !== 'start' && to !== 'end' && to !== 'target') throw badParams('to must be "start", "end" or "target"');
+  if (to === 'target') {
+    if (params.direction !== undefined || params.amount !== undefined || params.fraction !== undefined) {
+      throw badParams('to: "target" takes no direction or amount');
+    }
+    return scrollToTarget(params);
+  }
   const direction: Direction = params.direction === undefined ? 'down' : (params.direction as Direction);
   if (!DIRECTIONS.includes(direction)) throw badParams('direction must be down, up, left or right');
   if (params.amount !== undefined && (typeof params.amount !== 'number' || !(params.amount > 0))) {
@@ -1411,7 +1579,7 @@ async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
 
 export async function toggle(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
   const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
@@ -1422,7 +1590,9 @@ export async function toggle(
   if (!handler) throw notActionable('no_action', `${describe(control)} is not a switch`);
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
-  if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));
+  const forced = await checkedOrForced(params.force === true, async () =>
+    assertReachable(snapshot, control, await measureFiber(control.node.fiber)),
+  );
   if (typeof params.value === 'boolean' && control.info.checked === params.value) {
     // Already there: a person wouldn't touch it, so the handler isn't called and the keyboard stays.
     const { element } = await elementFor(control);
@@ -1432,7 +1602,7 @@ export async function toggle(
   callHandler('onValueChange', handler, [next]);
   const outcome = await settleOutcome();
   const { element } = await elementFor(control);
-  return { element: { ...element, checked: next }, value: next, ...keyboardNote(closedKeyboard), ...outcome };
+  return { element: { ...element, checked: next }, value: next, ...keyboardNote(closedKeyboard), ...forced, ...outcome };
 }
 
 /* -------------------------------------------------------------------------- */

@@ -226,7 +226,7 @@ describe('under the bars iOS draws', () => {
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^covered: /);
     expect(error.message).toContain('is under the navigation bar iOS draws, at (200, 77): a real tap would hit the bar instead.');
-    expect(error.message).toContain('Scroll up to bring it below the bar, or pass force: true to call its handler anyway.');
+    expect(error.message).toContain('Scroll it clear of the bar (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
     expectUntouched(onChangeText, calls);
     await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }));
     expect(onChangeText).toHaveBeenCalledWith('x');
@@ -256,7 +256,7 @@ describe('under the bars iOS draws', () => {
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^under_tab_bar: /);
     expect(error.message).toContain('is under the tab bar iOS draws, at (200, 749): a real tap would switch tabs instead.');
-    expect(error.message).toContain('Scroll down to bring it above the bar, or pass force: true to call its handler anyway.');
+    expect(error.message).toContain('Scroll it clear of the bar (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
     expectUntouched(onChangeText, calls);
     await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }));
     expect(onChangeText).toHaveBeenCalledWith('x');
@@ -294,7 +294,7 @@ describe('off screen', () => {
     const error = await failure(run(() => typeText({ target: { testID: 'field' }, text: 'x' })));
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^off_screen: e\d+ input id=field is off screen \(at 20,900; the screen is 400x800\)\. /);
-    expect(error.message).toContain('Scroll to it first, or pass force: true to call its handler anyway.');
+    expect(error.message).toContain('Scroll to it first (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
     expectUntouched(onChangeText, calls);
     await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }));
     expect(onChangeText).toHaveBeenCalledWith('x');

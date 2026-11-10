@@ -51,6 +51,35 @@ async function setup(treeAfter: (req: IncomingRequest) => unknown = () => SAME) 
 const NOTE = /^Note: changes are since your last list, (\d+) actions ago\.$/;
 const noteOf = (answer: string): string | undefined => answer.split("\n").find((line) => NOTE.test(line));
 
+describe("Note: forced (v1.6)", () => {
+  async function forcedApp(forced: string | undefined) {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const handler = (req: IncomingRequest): Reply =>
+      req.method === "press"
+        ? { ok: true, result: { element: BUTTON, settledMs: 100, ...(forced !== undefined ? { forced } : {}) } }
+        : { ok: true, result: TREE };
+    const { app } = await FakeApp.connect(port, {}, handler);
+    apps.push(app);
+    return new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" } });
+  }
+
+  it("ends the answer when the app says the checks would have refused", async () => {
+    const tools = await forcedApp("covered");
+    const lines = textOf(await tools.tap({ target: { id: "open-sheet" }, force: true })).split("\n");
+    expect(lines.at(-1)).toBe("Note: forced (covered): a person couldn't have done this.");
+  });
+
+  it("also with look: false, and not when nothing was forced", async () => {
+    const forced = await forcedApp("off_screen");
+    expect(textOf(await forced.tap({ target: { id: "open-sheet" }, force: true, look: false })).split("\n").at(-1)).toBe(
+      "Note: forced (off_screen): a person couldn't have done this.",
+    );
+    const plain = await forcedApp(undefined);
+    expect(textOf(await plain.tap({ target: { id: "open-sheet" }, force: true }))).not.toContain("Note: forced");
+  });
+});
+
 describe("Note: changes are since your last list", () => {
   it("is absent when every action answered with its changes", async () => {
     const { tools } = await setup();

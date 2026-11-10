@@ -286,7 +286,7 @@ describe('native tabs', () => {
       expect(error.code).toBe('not_actionable');
       expect(error.message).toMatch(/^under_tab_bar: /);
       expect(error.message).toContain('tab bar');
-      expect(error.message).toContain('Scroll down to bring it above the bar, or pass force: true to call its handler anyway.');
+      expect(error.message).toContain('Scroll it clear of the bar (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
       expect(onLow).not.toHaveBeenCalled();
       await run(() => press({ target: { testID: 'low' }, force: true }));
       expect(onLow).toHaveBeenCalledTimes(1);

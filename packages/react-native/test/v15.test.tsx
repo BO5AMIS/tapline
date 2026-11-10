@@ -1,8 +1,8 @@
 import { frame, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
-import { Alert, Dimensions, PixelRatio, Pressable, ScrollView, Switch, Text, View } from 'react-native';
+import { Alert, Dimensions, PixelRatio, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { act } from 'react-test-renderer';
-import { configureActions, press, toggle } from '../src/actions';
+import { configureActions, press, toggle, typeText } from '../src/actions';
 import { installAlertTracking, openAlerts, TaplineAlertHost, uninstallAlertTracking } from '../src/alerts';
 import { cutText, forgetLastTree, MAX_KEPT_TEXT, resetRefs, setHitTester, setMeasurer, tree } from '../src/inspect';
 import { TaplineError } from '../src/types';
@@ -232,6 +232,52 @@ describe('toggle to the value the switch already has', () => {
     useFrames({ sw: frame(20, 2000, 60, 32) });
     const error = await failure(run(() => toggle({ target: { testID: 'sw' }, value: true })));
     expect(error.message).toMatch(/^off_screen: /);
+  });
+});
+
+describe('a forced action says what it was forced past (v1.6)', () => {
+  async function mountButton(onPress: jest.Mock, y: number): Promise<void> {
+    await mount(
+      <View>
+        <Pressable testID="go" onPress={onPress}>
+          <Text>Go</Text>
+        </Pressable>
+        <TextInput testID="field" onChangeText={onPress} />
+        <Switch testID="sw" value={false} onValueChange={onPress} />
+      </View>,
+    );
+    useFrames({ go: frame(20, y, 100, 40), field: frame(20, y + 60, 300, 40), sw: frame(20, y + 120, 60, 32) });
+  }
+
+  test('an off-screen button, forced: the handler runs and the result names the reason', async () => {
+    const onPress = jest.fn();
+    await mountButton(onPress, 2000);
+    const result = await run(() => press({ target: { testID: 'go' }, force: true }));
+    expect(onPress).toHaveBeenCalledTimes(1);
+    expect(result.forced).toBe('off_screen');
+  });
+
+  test('typing and toggling carry it too', async () => {
+    const onPress = jest.fn();
+    await mountButton(onPress, 2000);
+    expect((await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }))).forced).toBe('off_screen');
+    expect((await run(() => toggle({ target: { testID: 'sw' }, force: true }))).forced).toBe('off_screen');
+  });
+
+  test('force on something a person could have done leaves no mark', async () => {
+    const onPress = jest.fn();
+    await mountButton(onPress, 100);
+    const result = await run(() => press({ target: { testID: 'go' }, force: true }));
+    expect(onPress).toHaveBeenCalledTimes(1);
+    expect(result.forced).toBeUndefined();
+  });
+
+  test('without force the refusal is thrown, as before', async () => {
+    const onPress = jest.fn();
+    await mountButton(onPress, 2000);
+    const error = await failure(run(() => press({ target: { testID: 'go' } })));
+    expect(error.message).toMatch(/^off_screen: /);
+    expect(onPress).not.toHaveBeenCalled();
   });
 });
 
