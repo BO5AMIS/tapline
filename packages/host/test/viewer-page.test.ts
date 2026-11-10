@@ -1218,6 +1218,29 @@ describe("viewer page: wording of the states", () => {
     expect(rig.el("status").textContent).toBe("Phone locked");
   });
 
+  it("writes how the phone is reached as people do: USB, Wi-Fi, Tailscale", () => {
+    const rig = pageRig(PAGE_ACCEPTS, { state: "live", via: "usb" });
+    expect(rig.el("status").textContent).toContain("via USB");
+    rig.status({ state: "live", via: "wifi" });
+    expect(rig.el("status").textContent).toContain("via Wi-Fi");
+    rig.status({ state: "live", via: "tailscale" });
+    expect(rig.el("status").textContent).toContain("via Tailscale");
+    rig.status({ state: "live", via: "cable" });
+    expect(rig.el("status").textContent).toContain("via cable");
+  });
+
+  it("shows the server's frame rate while the JPEG stream shows", () => {
+    const rig = pageRig(PAGE_ACCEPTS, { state: "live", fps: 23.5 });
+    expect(rig.el("status").textContent).toContain("23.5 fps");
+  });
+
+  it("takes the frame rate from the video's own count while video shows", () => {
+    const body = scriptBody();
+    expect(body).toContain("var fps = videoOn ? videoFps : status && isNum(status.fps) ? status.fps : null;");
+    expect(body).toContain("startVideoFps();");
+    expect(body).toContain("stopVideoFps();");
+  });
+
   it("keeps App not answering, with the app's name as the detail", () => {
     const rig = pageRig(PAGE_ACCEPTS, { state: "not-answering", detail: "Demo" });
     expect(rig.el("status").textContent).toBe(`App not answering ${DOT} Demo`);
