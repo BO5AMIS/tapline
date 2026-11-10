@@ -32,7 +32,7 @@ describe("viewer status from the host (v1.4)", () => {
     host.on("answering", (s) => seen.push(`answering ${s.app.name}`));
     expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined, via: "wifi" });
     await expect(host.request("tree")).rejects.toMatchObject({ code: "not_answering" });
-    expect(viewerStatusForHost(host)).toEqual({ state: "not-answering", detail: "Demo" });
+    expect(viewerStatusForHost(host)).toEqual({ state: "not-answering", detail: "Demo", via: "wifi" });
     // A second miss doesn't announce it twice.
     await expect(host.request("tree")).rejects.toMatchObject({ code: "not_answering" });
     answer = true;
