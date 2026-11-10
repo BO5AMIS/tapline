@@ -2,3 +2,7 @@
 packages/host/src/viewer.html text eol=lf
 # The skill is copied onto other machines as it is: LF line ends always.
 skills/** text eol=lf
+# The documents shared with Tapwright stay byte-identical across checkouts and repos: LF always.
+docs/AGENT-TOOLS.md text eol=lf
+docs/QUALITY-BAR.md text eol=lf
+docs/VIEWER-PROTOCOL.md text eol=lf
