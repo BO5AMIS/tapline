@@ -85,7 +85,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    changed. Then `Settled in 0.31 s.`: the app answers once React hasn't committed for
    100 ms (2 s at most; when it's still changing then, a `Note:` says positions may be
    mid-change). **Read it before the next step**: check that the action did what
-   you meant, not just that it didn't fail. `look: false` returns only the first line. Call
+   you meant, not just that it didn't fail. `look: false` returns only the first line; the
+   next answer's changes then cover both actions, and a `Note:` says so. Call
    `look` when you need the full list or to see the screen (next section). The `Route:` line
    names the screen you're on. `Note:` lines at the end tell you things worth knowing, such
    as `Note: a person used the app since your last look.`
@@ -105,7 +106,9 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    animations.
 6. Inputs: `type_text` with the input as target; `replace` (default) clears it first,
    `submit` presses return. Typing is refused where a person couldn't type (an input that is
-   off screen, covered or behind an alert), with the same reasons and `force` as a tap. Toggles: `toggle`. Lists: `scroll` until what you need
+   off screen, covered or behind an alert), with the same reasons and `force` as a tap. Toggles: `toggle`. Lists: to reach an
+   element you know (by `id` or text), `scroll` with it as `target` and `to: "target"`: one
+   call brings it onto the screen, clear of the bars. Otherwise `scroll` until what you need
    appears (`down` shows what is below), or `to: "end"`. `amount` is a share of the scroll
    area, 0.1 to 1 (default 0.8). When the on-screen keyboard is up and you act on something
    outside the focused field, Tapline closes the keyboard first and the answer ends with
@@ -125,10 +128,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    `not_answering` means the app is connected but stopped answering: try once more; if it
    repeats, ask the user to close the app and open it again (Tapline can't close apps). An
    action that a person couldn't do is `not_actionable`, and the message starts with the
-   reason: `disabled`, `off_screen` (scroll to it), `covered` (dismiss what covers it),
-   `under_tab_bar`, `behind_alert` or `no_action` (nothing at that point takes the
-   action). That is often a real bug worth reporting. Pass `force: true` only when you've
-   decided the check is wrong. A target hidden by an open sheet or modal answers
+   reason: `disabled`, `off_screen` (scroll to it: `to: "target"`), `covered` (dismiss what
+   covers it), `under_tab_bar`, `behind_alert` or `no_action` (nothing at that point takes
+   the action). That is often a real bug worth reporting. Pass `force: true` only when you've
+   decided the check is wrong; the answer then ends `Note: forced (covered): a person
+   couldn't have done this.`, which belongs in your report. A target hidden by an open sheet or modal answers
    `covered: … is behind <the line of what is in front>; close that first.` Here `force`
    doesn't help: close the sheet (its own close control, or `back`) and try again.
 10. An `Alert:` line means the app showed an alert. An OS alert can't be tapped from
