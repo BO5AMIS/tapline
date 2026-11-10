@@ -23,8 +23,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    isn't installed or signed in, ask the user; it needs their account.
 3. `tapline info` prints this computer's address and the code the app needs. The token in
    `~/.tapline/token` is a secret: never print it or put it in chat, commits or files.
-4. Add the MCP server to your client (Claude Code: `claude mcp add tapline -- tapline mcp`).
-   Each agent's host takes its own port (7210, else up to 7219).
+4. Add the MCP server to your client (Claude Code: `claude mcp add tapline -- tapline mcp`;
+   Codex: `[mcp_servers.tapline]` with `command = "tapline"`, `args = ["mcp"]` in
+   `~/.codex/config.toml`). Each agent's host takes its own port (7210, else up to 7219).
+   `tapline skill install` gives the user's agents the skill in `skills/tapline` (the short
+   form of this guide, for Claude Code, Codex and other agents).
 5. Windows: if the phone can't connect later, the firewall is the usual cause; the rule
    (ports 7210-7219) is in docs/setup.md (it needs an admin prompt the user approves).
 

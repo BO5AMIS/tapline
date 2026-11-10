@@ -47,6 +47,26 @@ claude mcp add tapline -- tapline mcp           # Claude Code
 claude mcp add tapline -- node /path/to/tapline/packages/host/dist/cli.js mcp
 ```
 
+Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.tapline]
+command = "tapline"
+args = ["mcp"]
+```
+
+**Give your agents the skill.** It tells an agent how to set Tapline up, read its answers,
+test well and report:
+
+```sh
+tapline skill install                # for you: ~/.claude/skills and ~/.agents/skills
+tapline skill install --project .    # for one project: .claude/skills and .agents/skills
+```
+
+Claude Code reads `.claude/skills` (ask for `/tapline`); Codex and other agents read
+`.agents/skills` (in Codex, `$tapline`). Run it again after you update Tapline: it replaces
+its own older copy and nothing else.
+
 If your agent hands screenshots to smaller helper models, add `--screenshots file`: `look`
 then returns a file path instead of the image ([AGENTS.md](../AGENTS.md#screenshots-and-tokens)).
 The live viewer (the agent's `viewer` tool gives its link) opens on this computer only; add

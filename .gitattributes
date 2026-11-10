@@ -1,2 +1,4 @@
 # The shared viewer page stays byte-identical across checkouts and repos: LF line ends always.
 packages/host/src/viewer.html text eol=lf
+# The skill is copied onto other machines as it is: LF line ends always.
+skills/** text eol=lf

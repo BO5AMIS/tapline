@@ -11,6 +11,7 @@
   },
   "files": [
     "dist",
+    "skills",
     "README.md"
   ],
   "engines": {
@@ -18,7 +19,7 @@
   },
   "scripts": {
     "gen:viewer": "node scripts/gen-viewer-page.mjs",
-    "build": "node scripts/gen-viewer-page.mjs && tsc -p tsconfig.build.json",
+    "build": "node scripts/gen-viewer-page.mjs && node scripts/copy-skill.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

@@ -6,4 +6,6 @@ coverage/
 .tapline/
 HANDOFF.md
 bench/results/
+# a copy of skills/tapline, made by the host's build for the published package
+packages/host/skills/
 docs/superpowers/

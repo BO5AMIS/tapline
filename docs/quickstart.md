@@ -25,6 +25,7 @@ npm run build                      # about 10 s
 npm install -g ./packages/host     # puts `tapline` on your PATH
 tapline doctor                     # about 5 s
 claude mcp add tapline -- tapline mcp
+tapline skill install              # the skill that teaches agents to test with Tapline
 ```
 
 - `npm install` ends with a few `deprecated` warnings and "6 low severity
@@ -33,8 +34,11 @@ claude mcp add tapline -- tapline mcp
   firewall. It says how to fix anything that's missing. Fix that before you go on.
 - Without the global install, run `node /path/to/tapline/packages/host/dist/cli.js` where
   this page says `tapline`.
-- The last line gives Tapline to Claude Code. Other agents: run `tapline mcp` as an MCP
-  server on stdio.
+- `claude mcp add` gives Tapline to Claude Code. Codex: `[mcp_servers.tapline]` with
+  `command = "tapline"` and `args = ["mcp"]` in `~/.codex/config.toml`. Other agents: run
+  `tapline mcp` as an MCP server on stdio.
+- `tapline skill install` puts the skill in `~/.claude/skills` (Claude Code) and
+  `~/.agents/skills` (Codex and other agents).
 
 ## On the phone
 

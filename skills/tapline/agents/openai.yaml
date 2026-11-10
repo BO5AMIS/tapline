@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tapline"
+  short_description: "Test your own app on a real phone"
+  default_prompt: "Use $tapline to test my app on my phone and report what is broken."

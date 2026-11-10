@@ -61,7 +61,18 @@ detail, including installing from the clone.
 claude mcp add tapline -- tapline mcp         # give Tapline to your agent (Claude Code)
 # without a global install, from the clone:
 claude mcp add tapline -- node <clone>/packages/host/dist/cli.js mcp
+tapline skill install                         # teach your agents to test with it
 ```
+
+Codex: add `[mcp_servers.tapline]` with `command = "tapline"` and `args = ["mcp"]` to
+`~/.codex/config.toml`. Any other agent: run `tapline mcp` as an MCP server on stdio.
+
+**The skill.** `tapline skill install` copies an agent skill ([skills/tapline](skills/tapline),
+in the open [Agent Skills](https://agentskills.io) format) to `~/.claude/skills` for Claude
+Code and to `~/.agents/skills` for Codex and other agents; `--project <dir>` installs it
+for one project instead. It tells an agent how to set Tapline up, how to read its answers,
+how to test well and report, and the mistakes agents new to it make. Ask for it by name:
+`/tapline` in Claude Code, `$tapline` in Codex.
 
 **The app**, first lines of its entry file:
 
@@ -228,7 +239,7 @@ order, pair again (or give each agent a fixed `--port`).
 
 | | |
 |---|---|
-| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.6 answers and the shared tool text: 454 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.6 behaviour, the viewer feed's pace, a person's touches: 610 tests); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (123 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
+| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.6 answers, the shared tool text and the agent skill with its installer: 470 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.6 behaviour, the viewer feed's pace, a person's touches: 624 tests); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (123 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
 | On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured); `long_press` and `toggle`; the keyboard closing before a tap outside the focused field; `covered` for what an open sheet hides, and `back` closing the sheet; an app frozen for 20 seconds (`not_answering`, then working again by itself); the off-screen counts, the longer text cut and the in-app alert in front; scrolling to an element in one call, changes off screen, and the notes after a forced action and after actions without a list. Measured there by the shared benchmark over the local network: a tap, typing, a scroll and a toggle each answer in about 0.2 s, a look in 0.02 s, and the reliability checks (the right element, no false refusals, refusing what a person couldn't do) had no misses in three passes |
 | Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), the note after a person's touch (on a device; tested with simulated touches), 15 frames a second in the live viewer (it shows about 6), 5G through Tailscale with the current build, a second phone, scanning the QR code with the camera, Android |
 
@@ -241,6 +252,7 @@ docs/quickstart.md      the short way to start
 docs/setup.md           step-by-step setup
 docs/PROTOCOL.md        the wire protocol
 AGENTS.md               the guide for agents
+skills/tapline          the agent skill (Agent Skills format): `tapline skill install`
 ```
 
 `npm install`, `npm run build`, `npm test` from the repository root.

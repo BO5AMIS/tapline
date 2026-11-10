@@ -18,6 +18,7 @@ import { formatLogs } from "./format.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { TaplineHost } from "./server.js";
+import { formatInstalled, installSkill } from "./skill.js";
 import { TaplineTools } from "./tools.js";
 
 const HELP = `tapline - let agents see and drive your own app on your phone, over Tailscale
@@ -34,6 +35,8 @@ Commands:
            also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
   replay   Replay a recorded script without an agent: tapline replay <name>
   token    Print the token (only for connecting without pairing, e.g. a simulator)
+  skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
+           Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills)
 
 Options:
   --scheme <s>   The app's URL scheme, e.g. myapp (for pair; host also prints the QR code)
@@ -49,9 +52,12 @@ Options:
   --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
   --stop             For dev: stop serving Metro
   --wait <s>         For replay: how long to wait for the app to connect (default 60)
+  --project <dir>    For skill install: install into that project's .claude/skills and
+                     .agents/skills instead of your home folder
   -h, --help     Show this help
 
 Claude Code:  claude mcp add tapline -- tapline mcp
+Codex:        in ~/.codex/config.toml:  [mcp_servers.tapline]  command = "tapline"  args = ["mcp"]
 `;
 
 function printInfo(config: HostConfig): void {
@@ -202,6 +208,7 @@ async function main(argv: string[]): Promise<number> {
       "https-port": { type: "string" },
       stop: { type: "boolean" },
       wait: { type: "string" },
+      project: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -261,6 +268,15 @@ async function main(argv: string[]): Promise<number> {
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);
       return 0;
+    case "skill": {
+      if (positionals[1] !== "install") {
+        process.stderr.write("Usage: tapline skill install [--project <dir>]\n");
+        return 1;
+      }
+      const { written } = installSkill(values.project !== undefined ? { project: values.project } : {});
+      process.stdout.write(`${formatInstalled(written, values.project !== undefined)}\n`);
+      return 0;
+    }
     case "info":
       printInfo(await resolveConfig(options));
       return 0;
