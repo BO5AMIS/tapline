@@ -100,6 +100,15 @@ export interface FakeOptions {
    * (which sees only what's on screen) can't read it.
    */
   stateScrolls?: boolean;
+  /**
+   * Lists `lab-freeze` (below lab-reset): a tap blocks the app for `ms` of real time, and then
+   * `froze` goes up by one. How the tool answers during the freeze depends on `kind`:
+   * - `in-app` (like Tapline): the tap itself and every call until the freeze ends answer not_answering;
+   * - `real-touch` (like a fixed Tapwright): the tap succeeds, `look` and `wait_for` answer not_answering;
+   * - `hangs`: the tap succeeds, a `look` answers only when the freeze is over;
+   * - `silent-success`: the tap succeeds, but nothing froze (`froze` stays 0).
+   */
+  freeze?: { ms: number; kind: "in-app" | "real-touch" | "hangs" | "silent-success" };
 }
 
 /** Where lab-state sits on the lab's content when it scrolls (`stateScrolls`). */
@@ -130,21 +139,44 @@ export class FakeLab {
   foreground = LAB_APP;
   /** `back` on the lab itself went back to the app's previous screen (the lab's deep link brings it back). */
   offLab = false;
+  /** How many freezes happened since the last reset. */
+  froze = 0;
+  /** The app is frozen until this `performance.now()` time (`options.freeze`). */
+  private freezeUntil = 0;
   readonly calls: string[] = [];
   private readonly els = buildElements();
 
-  constructor(readonly options: FakeOptions = {}) {}
+  constructor(readonly options: FakeOptions = {}) {
+    if (options.freeze) {
+      this.els.push(col("lab-freeze", 1110));
+      // The fine print gives way: the freeze button takes its place below lab-reset.
+      const fine = this.els.find((e) => e.id === "lab-fineprint");
+      if (fine) Object.assign(fine, { y: 1150, h: 8 });
+    }
+  }
 
   state(): string {
     return (
       `pressed=${this.pressed} typed=${this.typed} typed2=${this.typed2} ` +
       `switch=${this.switchOn ? "on" : "off"} taps=${this.taps} long=${this.long} slow=0 ` +
       `anim=${this.anim ? "on" : "off"} sheet=${this.sheet ? "open" : "closed"} alert=${this.alert} ` +
-      `shared=${this.shared} row=${this.row}`
+      `shared=${this.shared} row=${this.row} froze=${this.froze}`
     );
   }
 
+  /** The app's JavaScript is blocked by a freeze right now. */
+  private frozen(): boolean {
+    return performance.now() < this.freezeUntil;
+  }
+
+  /** Resolves when the freeze is over. */
+  private async thawed(): Promise<void> {
+    const left = this.freezeUntil - performance.now();
+    if (left > 0) await new Promise((res) => setTimeout(res, left));
+  }
+
   private reset(): void {
+    this.froze = 0;
     this.pressed = "-";
     this.typed = "";
     this.typed2 = "";
@@ -227,6 +259,14 @@ export class FakeLab {
       case "lab-reset":
         this.reset();
         break;
+      case "lab-freeze": {
+        const freeze = this.options.freeze;
+        if (freeze && freeze.kind !== "silent-success") {
+          this.froze++;
+          this.freezeUntil = performance.now() + freeze.ms;
+        }
+        break;
+      }
       default: {
         const m = /^lab-row-(\d+)$/.exec(el.id);
         if (m?.[1]) this.row = m[1];
@@ -366,6 +406,13 @@ export class FakeLab {
     const ok = (text: string): CallResult => ({ text, images: 0, isError: false, ms: 1 });
     const err = (text: string): CallResult => ({ text, images: 0, isError: true, ms: 1 });
     const out = (text: string): CallResult => (text.startsWith("Error") ? err(text) : ok(text));
+    if (this.frozen()) {
+      const kind = this.options.freeze?.kind;
+      const reads = name === "look" || name === "wait_for";
+      if (kind === "in-app" || (kind === "real-touch" && reads)) {
+        return err("Error not_answering: the app is not answering");
+      }
+    }
     if (this.offLab && !["look", "open_url", "viewer", "back"].includes(name)) {
       return err("Error not_found: the lab isn't on screen");
     }
@@ -378,8 +425,15 @@ export class FakeLab {
         return ok("Opened.");
       case "viewer":
         return ok(this.options.viewerLink ?? "no viewer");
-      case "tap":
-        return out(this.tap(args));
+      case "tap": {
+        const frozeBefore = this.froze;
+        const answer = this.tap(args);
+        // A tool that works inside the app gets no answer to the tap that freezes it.
+        if (this.froze > frozeBefore && this.options.freeze?.kind === "in-app") {
+          return err("Error not_answering: the app did not answer the tap");
+        }
+        return out(answer);
+      }
       case "long_press": {
         const found = this.find(args.target);
         const el = found[0];
@@ -460,6 +514,8 @@ export class FakeLab {
     return {
       // wait_for polls for 100 ms, so a viewer tap that arrives a moment later is still seen
       call: async (name, args) => {
+        // This tool never answers a look during the freeze, until the app is back.
+        if (name === "look" && this.options.freeze?.kind === "hangs") await this.thawed();
         let r = this.call(name, args);
         for (let i = 0; name === "wait_for" && r.isError && i < 5; i++) {
           await new Promise((res) => setTimeout(res, 20));

@@ -167,7 +167,10 @@ export function guardApp(tool: ToolSession, labApp: string, opts: GuardOptions =
         // A look is only a reading: the fresh one stands in for it. Any other answer stays its own.
         r = { ...(name === "look" ? back : r), interrupted: "iOS's own UI was in front" };
       }
-      if (touching && r.isError) {
+      // An app that didn't answer the touch won't answer a look either: nothing to confirm, and the look
+      // would only add its own wait to the call.
+      const unanswered = /^\s*Error (?:not_answering|timeout|reconnecting)\b/.test(r.text);
+      if (touching && r.isError && !unanswered) {
         // A refused touch (a lab id not found, say) may mean the phone is elsewhere: confirm the app.
         const look = await tool.call("look", { screenshot: false });
         await vet(look, `the look after a refused ${name}`);

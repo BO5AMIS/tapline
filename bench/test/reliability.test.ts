@@ -410,6 +410,52 @@ describe("the whole suite on the fake lab", () => {
     expect(rowOf(rows, "R5")).toMatchObject({ misses: 0, pass: true });
   }, 60_000);
 
+  describe("R6, drops end clearly", () => {
+    const times = { freezeMs: 60, recoverMs: 30, callLimitMs: 40, afterLimitMs: 1000 };
+    const r6Run = async (
+      kind?: "in-app" | "real-touch" | "hangs" | "silent-success",
+    ): Promise<{ rows: ResultRow[]; lab: FakeLab }> => {
+      const lab = new FakeLab({ alertTool: true, ...(kind ? { freeze: { ms: times.freezeMs, kind } } : {}) });
+      viewer = await startViewer(lab);
+      const rows = await runReliability(guardApp(lab.tool(), LAB_APP), { runs: 1, link: "good", idleMs: 30, ...times });
+      return { rows, lab };
+    };
+
+    it("passes for a tool that works in the app (the tap answers not_answering)", async () => {
+      const { rows, lab } = await r6Run("in-app");
+      expect(rowOf(rows, "R6")).toMatchObject({ checks: 1, misses: 0, pass: true });
+      expect(rowOf(rows, "R7").pass).toBeNull();
+      expect(lab.froze).toBe(0); // reset afterwards
+      for (const id of ["R1", "R2", "R3", "R4", "R5"]) expect(rowOf(rows, id)).toMatchObject({ misses: 0, pass: true });
+    }, 60_000);
+
+    it("passes for a tool with real touches (the tap succeeds, looks answer not_answering)", async () => {
+      const { rows } = await r6Run("real-touch");
+      expect(rowOf(rows, "R6")).toMatchObject({ checks: 1, misses: 0, pass: true });
+    }, 60_000);
+
+    it("misses when a look hangs until the freeze is over", async () => {
+      const { rows } = await r6Run("hangs");
+      const r6 = rowOf(rows, "R6");
+      expect(r6).toMatchObject({ checks: 1, misses: 1, pass: false });
+      expect(r6.notes).toMatch(/look during the freeze took [\d.]+ s \(limit 0\.04 s\)/);
+    }, 60_000);
+
+    it("misses when the tap is claimed but nothing froze", async () => {
+      const { rows } = await r6Run("silent-success");
+      const r6 = rowOf(rows, "R6");
+      expect(r6).toMatchObject({ checks: 1, misses: 1, pass: false });
+      expect(r6.notes).toContain("state lacks froze=1 (the freeze didn't happen, so nothing was tested)");
+    }, 60_000);
+
+    it("stays not measured without the fixture, and says so on the R6 row", async () => {
+      const { rows } = await r6Run();
+      expect(rowOf(rows, "R6")).toMatchObject({ checks: 0, misses: 0, pass: null });
+      expect(rowOf(rows, "R6").notes).toContain("R6: the lab has no lab-freeze fixture");
+      expect(rowOf(rows, "R3").notes ?? "").not.toContain("R6:");
+    }, 60_000);
+  });
+
   it("reports a miss when there is no viewer", async () => {
     const lab = new FakeLab({ alertTool: true });
     const rows = await runReliability(lab.tool(), { runs: 1, link: "good", idleMs: 30 });

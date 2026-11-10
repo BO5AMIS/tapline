@@ -5,6 +5,7 @@ import {
   R1_STEPS,
   R3_CHECKS,
   R5_CHECK,
+  R6_CHECK,
   NO_ALERT_NOTE,
   type ActStep,
   type RefuseCheck,
@@ -25,7 +26,7 @@ import {
   startsWithReason,
 } from "./helpers.js";
 
-export type CheckGroup = "R1" | "R2" | "R3" | "R4" | "R5";
+export type CheckGroup = "R1" | "R2" | "R3" | "R4" | "R5" | "R6";
 
 /** One check's result. `note` says what went wrong when `ok` is false. */
 export interface Outcome {
@@ -315,4 +316,108 @@ export async function runR5(env: Env): Promise<Outcome> {
     await resetLab(env.tool);
   }
   return { id: "R5", name: R5_CHECK.name, ok: problems.length === 0, ...(problems.length ? { note: problems.join("; ") } : {}) };
+}
+
+/* ---------- R6 ---------- */
+
+/** Times for R6, all in ms. */
+export interface R6Options {
+  /** How long the lab's freeze blocks the app (the lab's own 20 s). */
+  freezeMs: number;
+  /** Extra wait after the freeze before the look that must work again. */
+  recoverMs: number;
+  /** A call made during the freeze must end within this. */
+  callLimitMs: number;
+  /** The look after the freeze must succeed within this. */
+  afterLimitMs: number;
+}
+
+export const R6_DEFAULTS: R6Options = { freezeMs: 20_000, recoverMs: 2_000, callLimitMs: 20_000, afterLimitMs: 5_000 };
+
+/** A real timer: tests replace `env.sleep`, but R6 waits for the app's own clock. */
+const realWait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** `0.06 s`: seconds, at most two decimals. */
+const seconds = (ms: number): string => `${Number((ms / 1000).toFixed(2))} s`;
+
+/** The call's answer and how long it took. */
+async function timedCall(
+  env: Env,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ result: CallResult; ms: number }> {
+  const start = performance.now();
+  const result = await env.tool.call(name, args);
+  return { result, ms: performance.now() - start };
+}
+
+/** The answer is a success or an error that ends a call on a frozen app clearly. */
+const endsClearly = (r: CallResult): boolean =>
+  !failed(r) || R6_CHECK.clearCodes.includes(parseError(r.text)?.code ?? "");
+
+const listsLab = (r: CallResult): boolean => !failed(r) && /\bid=lab-/.test(r.text);
+
+/**
+ * R6, drops end clearly: freezes the app's JavaScript for `freezeMs` (the lab's `lab-freeze`), then
+ * checks that calls during the freeze end in time and clearly, that the tool works again afterwards,
+ * that the freeze really happened (`froze=1`) and that the next action lands. Null (and a skip note)
+ * when the lab has no `lab-freeze`. The lab is reset afterwards, so `froze` goes back to 0.
+ */
+export async function runR6(env: Env, opts: R6Options): Promise<Outcome | null> {
+  markStep(env, "R6", R6_CHECK.step);
+  if (!(await bringIntoView(env.tool, R6_CHECK.freezeId))) {
+    env.skipNotes.add(R6_CHECK.noFixtureNote);
+    return null;
+  }
+  const problems: string[] = [];
+  const started = performance.now();
+  const tapped = await timedCall(env, "tap", { target: { id: R6_CHECK.freezeId }, look: false });
+  if (!endsClearly(tapped.result)) {
+    problems.push(`the freezing tap answered ${parseError(tapped.result.text)?.code ?? line(env, tapped.result)}`);
+  }
+  if (tapped.ms > opts.callLimitMs) {
+    problems.push(`the freezing tap took ${seconds(tapped.ms)} (limit ${seconds(opts.callLimitMs)})`);
+  }
+  // The app is frozen now: a look must end in time, as a normal look or a clear error.
+  const during = await timedCall(env, "look", { screenshot: false });
+  if (!listsLab(during.result) && !endsClearly(during.result)) {
+    problems.push(`the look during the freeze answered: ${line(env, during.result)}`);
+  } else if (!failed(during.result) && !listsLab(during.result)) {
+    problems.push("the look during the freeze lists no lab elements");
+  }
+  if (during.ms > opts.callLimitMs) {
+    problems.push(`look during the freeze took ${seconds(during.ms)} (limit ${seconds(opts.callLimitMs)})`);
+  }
+  const wait = started + opts.freezeMs + opts.recoverMs - performance.now();
+  if (wait > 0) await realWait(wait);
+  const after = await timedCall(env, "look", { screenshot: false });
+  if (!listsLab(after.result)) {
+    problems.push(`after the freeze the look failed: ${line(env, after.result)}`);
+  } else if (after.ms > opts.afterLimitMs) {
+    problems.push(`after the freeze the look took ${seconds(after.ms)} (limit ${seconds(opts.afterLimitMs)})`);
+  }
+  if (listsLab(after.result)) await judgeAfterFreeze(env, problems);
+  await resetLab(env.tool);
+  return { id: "R6", name: R6_CHECK.name, ok: problems.length === 0, ...(problems.length ? { note: problems.join("; ") } : {}) };
+}
+
+/** The state says the freeze happened, and the next action (a tap on lab-taps) still lands. */
+async function judgeAfterFreeze(env: Env, problems: string[]): Promise<void> {
+  await showState(env.tool);
+  if (!(await expectState(env.tool, "froze=1", 2))) {
+    problems.push("state lacks froze=1 (the freeze didn't happen, so nothing was tested)");
+  }
+  // taps may not be 0 here, so the expected value is read first.
+  const taps = Number((await readStateFields(env.tool)).taps);
+  if (!Number.isInteger(taps)) {
+    problems.push("the next action was not tested: taps= is not readable in the state");
+    return;
+  }
+  const { result, missing } = await runStateCall(env, {
+    tool: "tap",
+    target: { id: "lab-taps" },
+    expect: [`taps=${taps + 1}`],
+  });
+  if (failed(result)) problems.push(`the next action after the freeze failed: ${line(env, result)}`);
+  else if (missing.length > 0) problems.push(`the next action after the freeze did not land: state lacks ${missing.join(", ")}`);
 }

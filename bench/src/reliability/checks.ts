@@ -230,10 +230,26 @@ export const R4_GRID: GridCheck[] = [
   },
 ];
 
+/* ---------- R6: drops end clearly ---------- */
+
+export const R6_CHECK = {
+  name: "the app freezes for 20 s",
+  step: "freeze the app for 20 s",
+  freezeId: "lab-freeze",
+  /** The lab has no freeze fixture: R6 stays "not measured". */
+  noFixtureNote: "R6: the lab has no lab-freeze fixture",
+  /** Answers that end a call on a frozen app clearly (besides success, for the freezing tap). */
+  clearCodes: ["not_answering", "timeout", "reconnecting"],
+};
+
+/** Shown for R6 when the lab has no freeze fixture, or the suite did not get that far. */
+export const R6_NOT_MEASURED =
+  "not measured by the runner: needs the lab's lab-freeze fixture (blocks the app for 20 s)";
+
 /* ---------- R6-R8: not measured here ---------- */
 
 export const NOT_MEASURED: { id: string; notes: string }[] = [
-  { id: "R6", notes: "not measured by the runner: needs backgrounding the app or cutting the link mid-action" },
+  { id: "R6", notes: R6_NOT_MEASURED },
   { id: "R7", notes: "not measured by the runner: needs the app's logs and the phone's crash list (pymobiledevice3 crash ls)" },
   { id: "R8", notes: "this suite with link: \"3g\" in the config (Network Link Conditioner on); not a separate run" },
 ];

@@ -79,6 +79,14 @@ describe("app guard", () => {
     expect(t.calls).toEqual(["tap", "look"]);
   });
 
+  it("doesn't look after a touch the app never answered", async () => {
+    const t = scripted((name) => (name === "tap" ? "Error not_answering: the app did not answer" : `Screen 1x1 pt
+App: ${LAB_APP}`));
+    const r = await guardApp(t, LAB_APP).call("tap", { target: { id: "lab-freeze" } });
+    expect(r.isError).toBe(true);
+    expect(t.calls).toEqual(["tap"]);
+  });
+
   it("stops on in_background", async () => {
     const t = scripted(() => "Error in_background: the app is in the background");
     await expect(guardApp(t, LAB_APP).call("look", {})).rejects.toBeInstanceOf(LeftLabError);

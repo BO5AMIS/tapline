@@ -4,17 +4,47 @@ import type { ToolSession } from "../mcp.js";
 import type { CheckRow, ResultRow } from "../scorecard.js";
 import type { Link } from "../targets.js";
 import { NOT_MEASURED } from "./checks.js";
-import { runR1, runR3, runR5, type CheckGroup, type Env, type Outcome } from "./driver.js";
+import {
+  R6_DEFAULTS,
+  runR1,
+  runR3,
+  runR5,
+  runR6,
+  type CheckGroup,
+  type Env,
+  type Outcome,
+  type R6Options,
+} from "./driver.js";
 import { hasAlertTool } from "./helpers.js";
 import { runR4 } from "./viewerInput.js";
 
-export interface ReliabilityOptions {
+/**
+ * Besides the fields here, the R6 times in ms (`Partial<R6Options>`): `freezeMs` how long the lab's
+ * freeze blocks the app (20000), `recoverMs` the wait after it (2000), `callLimitMs` the limit for a
+ * call during the freeze (20000), `afterLimitMs` the limit for the look after it (5000).
+ */
+export interface ReliabilityOptions extends Partial<R6Options> {
   /** Runs of the whole suite (default 3: a single miss in any run fails the row). */
   runs: number;
   link: Link;
   /** The agent's idle wait after a person's viewer input, ms (default 3500). */
   idleMs?: number;
   sleep?: (ms: number) => Promise<void>;
+}
+
+/** The R6 times with their defaults. */
+function r6Options(opts: ReliabilityOptions): R6Options {
+  return {
+    freezeMs: opts.freezeMs ?? R6_DEFAULTS.freezeMs,
+    recoverMs: opts.recoverMs ?? R6_DEFAULTS.recoverMs,
+    callLimitMs: opts.callLimitMs ?? R6_DEFAULTS.callLimitMs,
+    afterLimitMs: opts.afterLimitMs ?? R6_DEFAULTS.afterLimitMs,
+  };
+}
+
+/** Skip notes that belong to R6's row (they start with `R6:`) and the rest, for R3's row. */
+function splitSkipNotes(notes: string[]): { r6: string[]; rest: string[] } {
+  return { r6: notes.filter((n) => n.startsWith("R6:")), rest: notes.filter((n) => !n.startsWith("R6:")) };
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -44,7 +74,10 @@ export function checkRow(
   };
 }
 
-/** Reliability suite R1-R5 on the lab, `runs` times; R6-R8 as rows with `pass: null`. */
+/**
+ * Reliability suite R1-R6 on the lab, `runs` times; R7 and R8 (and R6 when the lab has no `lab-freeze`)
+ * as rows with `pass: null`.
+ */
 export async function runReliability(tool: ToolSession, opts: ReliabilityOptions): Promise<ResultRow[]> {
   const sleep = opts.sleep ?? realSleep;
   const idleMs = opts.idleMs ?? 3500;
@@ -56,6 +89,7 @@ export async function runReliability(tool: ToolSession, opts: ReliabilityOptions
     skipNotes: new Set(),
     ...(labApp !== undefined ? { labApp } : {}),
   };
+  const r6opts = r6Options(opts);
   const all: { run: number; outcome: Outcome }[] = [];
   let left = false;
   try {
@@ -69,6 +103,8 @@ export async function runReliability(tool: ToolSession, opts: ReliabilityOptions
       await resetLab(tool);
       add(await runR3(env, false));
       add([await runR5(env)]);
+      const r6 = await runR6(env, r6opts);
+      if (r6) add([r6]);
       add(await runR3(env, true));
       await resetLab(tool);
       add(await runR4(env, idleMs));
@@ -80,15 +116,23 @@ export async function runReliability(tool: ToolSession, opts: ReliabilityOptions
     // Never reset (touch) once the phone left the lab's app.
     if (!left) await resetLab(tool).catch(() => undefined);
   }
-  const skipNotes = [...env.skipNotes];
+  const { r6: r6Notes, rest: skipNotes } = splitSkipNotes([...env.skipNotes]);
+  const r6Measured = all.some((o) => o.outcome.id === "R6");
   return [
     checkRow("R1", all),
     checkRow("R2", all),
     checkRow("R3", all, skipNotes),
     checkRow("R4", all),
     checkRow("R5", all),
-    ...NOT_MEASURED.map(
-      (n): CheckRow => ({ id: n.id, checks: 0, misses: 0, pass: null, notes: n.notes }),
+    ...(r6Measured ? [checkRow("R6", all, r6Notes)] : []),
+    ...NOT_MEASURED.filter((n) => !(r6Measured && n.id === "R6")).map(
+      (n): CheckRow => ({
+        id: n.id,
+        checks: 0,
+        misses: 0,
+        pass: null,
+        notes: n.id === "R6" ? [n.notes, ...r6Notes].join("; ") : n.notes,
+      }),
     ),
   ];
 }
