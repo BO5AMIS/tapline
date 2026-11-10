@@ -58,7 +58,7 @@ tool's first answer line (token-redacted).
 - R4 sends a person's tap through the viewer `/ws` at points from `look` (buttons, edges, overlay,
   under the bar, empty space, inside the sheet) and waits for the agent's 3 s idle after each; `busy`
   is retried once.
-- R6 freezes the app's JavaScript for 20 s with the lab's `lab-freeze` button (once per run, after R5):
+- R6 freezes the app's JavaScript for 20 s with the lab's `lab-freeze` button (once, after the last pass):
   the freezing tap and a look during the freeze must each end within `callLimitMs` with a success or a
   clear error (`not_answering`, `timeout`, `reconnecting`), a look after the freeze must work again
   within `afterLimitMs`, the state must read `froze=1` and the next tap must land. The times are
