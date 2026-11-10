@@ -107,6 +107,7 @@ and `y` only for things with no element.
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
 | see pixels (layout, colours, images) | `check_layout` first: it finds small tap areas, cut-off or overlapping text and low contrast without a picture. Then `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
+| work with Tapwright and Tapline both connected | inside the app under test, Tapline's tools: its reads and actions are the fast ones. For what iOS draws (permission prompts, system alerts, the share sheet), other apps, real gestures, and the live view: Tapwright's. A ref belongs to the tool that gave it: never pass one tool's ref to the other; use the element's `id` with either |
 | jump straight to a screen | `open_url` with the app's deep link |
 | reach a state quickly (a language, a test sign-in, sample data, dark mode) | `app_command`; without a name it lists what the app offers. Put things back when you're done |
 | find out why a screen is broken | `logs`: JavaScript errors and failed requests (`[network]` lines) |
