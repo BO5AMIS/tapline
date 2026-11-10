@@ -99,7 +99,7 @@ your agent at it.
 | `record`, `replay` | save a test run as a script and replay it later, without an AI (also `tapline replay`) |
 | `viewer` | a link to watch the app live in a browser, with what the agent does marked on it; you can tap, scroll and type there too |
 | `tap`, `long_press` | by `id` (the `testID` prop), label, visible text, ref from the last look, or x/y (`long_press` takes `seconds`, which Tapline ignores) |
-| `type_text` | into an input; replace or append; optionally submit |
+| `type_text` | into an input; replace or append; optionally submit; refused where a person couldn't type |
 | `scroll` | by a direction and a share of the scroll area (0.1 to 1, default 0.8), or to the start or end |
 | `toggle` | switches |
 | `open_url` | deep links |
@@ -117,7 +117,7 @@ field, Tapline closes the keyboard first and says so (`Note: closed the keyboard
 A look reads like this:
 
 ```
-Screen 440x956 pt @3x · 4 elements
+Screen 440x956 pt @3x · 4 elements (+12 below)
 App: Demo (com.example.demo)
 Route: login
 e1 text "Welcome back" @24,120 200x32
@@ -125,6 +125,10 @@ e2 input "Email" id=email value="me@example.com" @24,200 354x44 [type]
 e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]
 e4 switch "Remember me" checked=true @330,301 51x31 [toggle]
 ```
+
+The first line also counts the elements below and above the screen, so the agent knows there
+is more to scroll to. Text longer than 200 characters is cut and ends with how much is
+missing (`…(+57)`).
 
 An action answers with the verb and the element, then what changed, then how long the
 screen took to settle:
@@ -136,6 +140,10 @@ Same screen. Changes:
 ~ e5 text "3 items" (was "2 items")
 Settled in 0.31 s.
 ```
+
+When you touch the phone yourself between two of the agent's calls, its next answer ends
+with `Note: a person used the app since your last look.`, and it has to look again before it
+uses element numbers from before.
 
 **Screenshots and tokens.** Images cost far more tokens than the element list, so agents
 drive by text and take screenshots at checkpoints (`width: 300` is enough for a layout).
@@ -187,8 +195,10 @@ order, pair again (or give each agent a fixed `--port`).
 - The real-touch check sees what React draws, plus open sheets and dialogs (React Native's
   `Modal`) and, on an iPhone in portrait, the native tab bar: Tapline places it 49 points above
   the home indicator with its tabs spread evenly, so a tap there switches tabs and an element
-  under it counts as covered. A navigation bar iOS draws can still cover an element without
-  Tapline noticing.
+  under it counts as covered. An element under the navigation bar iOS draws counts as covered
+  too.
+- A person's touch is noticed inside the app, but not inside a sheet with its own window
+  (React Native's `Modal`) and not on what iOS draws.
 - The app must be open on screen: iOS pauses apps in the background, and the connection
   comes back as soon as the app is opened again (the agent is told when it went to the
   background). Leaving or closing the app stops the agent at once; the forget link unpairs
@@ -216,9 +226,9 @@ order, pair again (or give each agent a fixed `--port`).
 
 | | |
 |---|---|
-| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 and v1.4 answers and the shared tool text: 356 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 and v1.4 behaviour, the viewer feed's pace: 516 tests); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (117 tests; the two together over a real WebSocket, paired and driven through MCP (7 tests) |
-| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured) |
-| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), `long_press` and `toggle` on a device, focused-input detection, scanning the QR code with the camera, Android |
+| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.5 answers and the shared tool text: 435 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.5 behaviour, the viewer feed's pace, a person's touches: 586 tests); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (123 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
+| On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured); `long_press` and `toggle`; the keyboard closing before a tap outside the focused field; `covered` for what an open sheet hides, and `back` closing the sheet; an app frozen for 20 seconds (`not_answering`, then working again by itself); the off-screen counts, the longer text cut and the in-app alert in front. Measured there by the shared benchmark over the local network: a tap, typing, a scroll and a toggle each answer in about 0.2 s, a look in 0.02 s, and the reliability checks (the right element, no false refusals, refusing what a person couldn't do) had no misses in three passes |
+| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), the note after a person's touch (on a device; tested with simulated touches), 15 frames a second in the live viewer (it shows about 6), 5G through Tailscale with the current build, a second phone, scanning the QR code with the camera, Android |
 
 ## Repository
 
