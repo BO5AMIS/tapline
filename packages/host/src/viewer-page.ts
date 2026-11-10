@@ -192,6 +192,8 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
 .mark.rect { border: 2px solid var(--c); border-radius: 4px; background: rgba(255, 255, 255, 0.08); }
 .mark.rect .tag { left: -2px; top: -20px; }
 .mark.pill .tag { position: absolute; left: 8px; top: 8px; }
+.mark.pending { animation: none; opacity: 0.55; }
+.mark.pending.gone { opacity: 0; transition: opacity 0.3s ease-out; }
 @keyframes markfade {
   0% { opacity: 1; }
   70% { opacity: 1; }
@@ -961,6 +963,91 @@ function createVideoBlock(io) {
     }
   }
 
+  /* Pending marks: a ring drawn the moment a person's tap or long press is released, before
+     the server answers. The person's action message then takes the ring over (claimPending);
+     with no answer it fades from 1.7 s and is gone at 2 s; an error message drops it at once. */
+  var PENDING_FADE_MS = 1700;
+  var PENDING_END_MS = 2000;
+  var NEAR_POINTS = 16;
+  var TAP_SLOP = 12;
+  var pendingMarks = [];
+
+  function phoneSize() {
+    var s = shown.size || (status && status.size) || null;
+    return s && isNum(s.w) && isNum(s.h) && s.w > 0 && s.h > 0 ? s : null;
+  }
+  function removeMark(el) {
+    if (el.parentNode) el.parentNode.removeChild(el);
+  }
+  function trimMarks() {
+    while (marks.children.length > 12) marks.removeChild(marks.firstChild);
+  }
+  function forgetPending(entry) {
+    clearTimeout(entry.fade);
+    clearTimeout(entry.end);
+    var i = pendingMarks.indexOf(entry);
+    if (i >= 0) pendingMarks.splice(i, 1);
+  }
+  function dropPending() {
+    var all = pendingMarks.slice();
+    for (var i = 0; i < all.length; i++) {
+      forgetPending(all[i]);
+      removeMark(all[i].el);
+    }
+  }
+  function addPending(x, y) {
+    var el = document.createElement("div");
+    el.className = "mark person ring pending";
+    el.style.left = pct(x);
+    el.style.top = pct(y);
+    marks.appendChild(el);
+    trimMarks();
+    var entry = { el: el, x: x, y: y, fade: 0, end: 0 };
+    entry.fade = setTimeout(function () {
+      var at = pendingMarks.indexOf(entry);
+      if (at >= 0) pendingMarks.splice(at, 1);
+      el.classList.add("gone");
+    }, PENDING_FADE_MS);
+    entry.end = setTimeout(function () {
+      forgetPending(entry);
+      removeMark(el);
+    }, PENDING_END_MS);
+    pendingMarks.push(entry);
+  }
+  /* The oldest pending mark that this person action belongs to: the action's point is within
+     a few points of it, or its rect holds it. A failed action with no position takes the oldest. */
+  function claimPending(m, r, p) {
+    if (m.by !== "person" || pendingMarks.length === 0) return null;
+    var size = phoneSize();
+    var tx = size ? NEAR_POINTS / size.w : 0.04;
+    var ty = size ? NEAR_POINTS / size.h : 0.04;
+    var lost = m.ok === false && !r && !p;
+    for (var i = 0; i < pendingMarks.length; i++) {
+      var e = pendingMarks[i];
+      if (!e.el.parentNode) continue;
+      var near = (p && Math.abs(p.x - e.x) <= tx && Math.abs(p.y - e.y) <= ty) ||
+        (r && e.x >= r.x - tx && e.x <= r.x + r.w + tx && e.y >= r.y - ty && e.y <= r.y + r.h + ty);
+      if (near || lost) {
+        forgetPending(e);
+        return e.el;
+      }
+    }
+    return null;
+  }
+  /* A tap or a long press stays within the slop the server uses; anything wider is a drag. */
+  function isTapPath(points) {
+    var box = frame.getBoundingClientRect();
+    var size = phoneSize();
+    var w = size ? size.w : Math.max(1, box.width);
+    var h = size ? size.h : Math.max(1, box.height);
+    var first = points[0];
+    var moved = 0;
+    for (var i = 1; i < points.length; i++) {
+      moved = Math.max(moved, Math.hypot((points[i][1] - first[1]) * w, (points[i][2] - first[2]) * h));
+    }
+    return moved < TAP_SLOP;
+  }
+
   /* Actions: short-lived marks. */
   function showAction(m) {
     if (isNum(m.at) && m.at > lastActionAt) {
@@ -970,17 +1057,27 @@ function createVideoBlock(io) {
     var ok = m.ok !== false;
     var label = String(m.label || m.kind || "");
     if (!ok && m.code) label = label ? label + " (" + m.code + ")" : String(m.code);
-    var el = document.createElement("div");
-    el.className = "mark " + (m.by === "person" ? "person" : "agent") + (ok ? "" : " fail");
     var r = m.rect;
     var p = m.point;
-    if (r && isNum(r.x) && isNum(r.y) && isNum(r.w) && isNum(r.h)) {
+    if (!(r && isNum(r.x) && isNum(r.y) && isNum(r.w) && isNum(r.h))) r = null;
+    if (!(p && isNum(p.x) && isNum(p.y))) p = null;
+    var el = claimPending(m, r, p);
+    var reused = !!el;
+    if (reused) {
+      el.textContent = "";
+      el.style.width = "";
+      el.style.height = "";
+    } else {
+      el = document.createElement("div");
+    }
+    el.className = "mark " + (m.by === "person" ? "person" : "agent") + (ok ? "" : " fail");
+    if (r) {
       el.classList.add("rect");
       el.style.left = pct(r.x);
       el.style.top = pct(r.y);
       el.style.width = pct(r.w);
       el.style.height = pct(r.h);
-    } else if (p && isNum(p.x) && isNum(p.y)) {
+    } else if (p) {
       el.classList.add("ring");
       el.style.left = pct(p.x);
       el.style.top = pct(p.y);
@@ -995,9 +1092,11 @@ function createVideoBlock(io) {
       tag.textContent = label;
       el.appendChild(tag);
     }
-    marks.appendChild(el);
-    while (marks.children.length > 12) marks.removeChild(marks.firstChild);
-    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, ok ? 1700 : 2700);
+    if (!reused) {
+      marks.appendChild(el);
+      trimMarks();
+    }
+    setTimeout(function () { removeMark(el); }, ok ? 1700 : 2700);
   }
 
   /* WebSocket. */
@@ -1030,6 +1129,7 @@ function createVideoBlock(io) {
       showAction(m);
     } else if (m.type === "error") {
       var text = String(m.message || "Error");
+      dropPending();
       notify(m.code ? text + " (" + m.code + ")" : text);
     }
   }
@@ -1054,6 +1154,7 @@ function createVideoBlock(io) {
       if (ws !== sock) return;
       ws = null;
       wsOpen = false;
+      dropPending();
       renderStatus();
       scheduleWs();
     };
@@ -1118,7 +1219,12 @@ function createVideoBlock(io) {
     drag.pts.push([Math.max(0, Math.round(ev.timeStamp - drag.t0)), p[0], p[1]]);
     var points = drag.pts;
     drag = null;
-    send({ type: "gesture", points: points });
+    var sent = send({ type: "gesture", points: points });
+    /* A tap or long press shows its ring at once; a drag has no single point. */
+    if (sent && (accepts.tap || accepts.longPress) && isTapPath(points)) {
+      var end = points[points.length - 1];
+      addPending(end[1], end[2]);
+    }
   });
   frame.addEventListener("pointercancel", function (ev) {
     if (drag && ev.pointerId === drag.id) drag = null;

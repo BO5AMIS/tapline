@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { VIEWER_HTML } from "../src/viewer-page.js";
 
 interface Part {
@@ -715,5 +715,336 @@ describe("viewer page multipart parser", () => {
     expect(parts).toHaveLength(1);
     expect(parts[0]!.headers["x-seq"]).toBe("7");
     expect(Array.from(parts[0]!.body)).toEqual(Array.from(body));
+  });
+});
+
+/* The page's own script against a small fake DOM: what a person's click draws, and when. */
+
+type DomListener = (ev: Record<string, unknown>) => void;
+
+class DomEl {
+  children: DomEl[] = [];
+  parentNode: DomEl | null = null;
+  style: Record<string, string> = {};
+  className = "";
+  hidden = false;
+  value = "";
+  title = "";
+  src = "";
+  clientWidth = 800;
+  clientHeight = 800;
+  naturalWidth = 0;
+  naturalHeight = 0;
+  private text = "";
+  private listeners = new Map<string, DomListener[]>();
+  readonly classList = {
+    add: (c: string): void => {
+      if (!this.has(c)) this.className = `${this.className} ${c}`.trim();
+    },
+    remove: (c: string): void => {
+      this.className = this.className
+        .split(" ")
+        .filter((x) => x !== c && x !== "")
+        .join(" ");
+    },
+    contains: (c: string): boolean => this.has(c),
+    toggle: (c: string, on?: boolean): void => {
+      const want = on ?? !this.has(c);
+      if (want) this.classList.add(c);
+      else this.classList.remove(c);
+    },
+  };
+  has(c: string): boolean {
+    return this.className.split(" ").includes(c);
+  }
+  get textContent(): string {
+    return this.text;
+  }
+  set textContent(v: string) {
+    this.text = v;
+    for (const c of this.children) c.parentNode = null;
+    this.children = [];
+  }
+  get firstChild(): DomEl | null {
+    return this.children[0] ?? null;
+  }
+  get nextSibling(): DomEl | null {
+    return null;
+  }
+  appendChild(el: DomEl): DomEl {
+    el.parentNode = this;
+    this.children.push(el);
+    return el;
+  }
+  removeChild(el: DomEl): DomEl {
+    const i = this.children.indexOf(el);
+    if (i >= 0) this.children.splice(i, 1);
+    el.parentNode = null;
+    return el;
+  }
+  insertBefore(el: DomEl): DomEl {
+    return this.appendChild(el);
+  }
+  setAttribute(): void {}
+  setPointerCapture(): void {}
+  blur(): void {}
+  closest(): null {
+    return null;
+  }
+  getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
+    return { left: 0, top: 0, width: 200, height: 400 };
+  }
+  addEventListener(type: string, fn: DomListener): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  dispatch(type: string, ev: Record<string, unknown> = {}): void {
+    for (const fn of this.listeners.get(type) ?? []) fn({ preventDefault: () => undefined, ...ev });
+  }
+}
+
+interface PageRig {
+  frame: DomEl;
+  marks: DomEl;
+  notice: DomEl;
+  sock: FakeSocket;
+  gestures(): number;
+}
+
+const PAGE_ACCEPTS = ["tap", "longPress", "drag", "scroll"];
+
+function pageRig(accepts: string[] = PAGE_ACCEPTS): PageRig {
+  FakeSocket.all = [];
+  const els = new Map<string, DomEl>();
+  const get = (id: string): DomEl => {
+    let el = els.get(id);
+    if (!el) {
+      el = new DomEl();
+      els.set(id, el);
+    }
+    return el;
+  };
+  const doc = {
+    getElementById: get,
+    createElement: (): DomEl => new DomEl(),
+    addEventListener: (): void => undefined,
+    activeElement: null,
+  };
+  const win = { addEventListener: (): void => undefined };
+  const loc = { search: "", pathname: "/viewer", protocol: "http:", href: "http://host/viewer" };
+  const hist = { replaceState: (): void => undefined };
+  const factory = new Function(
+    "window",
+    "document",
+    "location",
+    "history",
+    "WebSocket",
+    "fetch",
+    scriptBody(),
+  ) as (w: object, d: object, l: object, h: object, s: object, f: () => Promise<never>) => void;
+  factory(win, doc, loc, hist, FakeSocket, () => new Promise<never>(() => undefined));
+  const sock = FakeSocket.all[0]!;
+  sock.message(
+    JSON.stringify({
+      type: "status",
+      protocol: 1,
+      state: "live",
+      driver: null,
+      paused: false,
+      size: { w: 400, h: 800 },
+      accepts,
+    }),
+  );
+  return {
+    frame: get("frame"),
+    marks: get("marks"),
+    notice: get("notice"),
+    sock,
+    gestures: () => sock.sent.filter((s) => (JSON.parse(s) as { type: string }).type === "gesture").length,
+  };
+}
+
+function pointer(rig: PageRig, type: string, x: number, y: number, t: number): void {
+  rig.frame.dispatch(type, {
+    pointerId: 1,
+    isPrimary: true,
+    pointerType: "touch",
+    button: 0,
+    clientX: x,
+    clientY: y,
+    timeStamp: t,
+  });
+}
+
+/* A finger down and up at (x, y) of the 200 x 400 frame, held for ms. */
+function tapAt(rig: PageRig, x: number, y: number, ms = 80): void {
+  pointer(rig, "pointerdown", x, y, 1000);
+  pointer(rig, "pointerup", x, y, 1000 + ms);
+}
+
+function action(rig: PageRig, m: Record<string, unknown>): void {
+  rig.sock.message(JSON.stringify({ type: "action", at: 1731222000000, ...m }));
+}
+
+describe("viewer page: a person's click shows a mark at once", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("draws a pending mark synchronously when a tap is released, before any server message", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    expect(rig.gestures()).toBe(1);
+    expect(rig.marks.children).toHaveLength(1);
+    const el = rig.marks.children[0]!;
+    for (const c of ["mark", "person", "ring", "pending"]) expect(el.has(c)).toBe(true);
+    expect(el.style.left).toBe("50.000%");
+    expect(el.style.top).toBe("50.000%");
+  });
+
+  it("draws a pending mark at the release point of a long press", () => {
+    const rig = pageRig();
+    tapAt(rig, 50, 100, 700);
+    expect(rig.marks.children).toHaveLength(1);
+    expect(rig.marks.children[0]!.has("pending")).toBe(true);
+    expect(rig.marks.children[0]!.style.left).toBe("25.000%");
+  });
+
+  it("keeps exactly one mark, no longer pending, when the person's action arrives near the point", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    const pending = rig.marks.children[0]!;
+    action(rig, { by: "person", kind: "press", label: "Log in", point: { x: 0.5, y: 0.51 } });
+    expect(rig.marks.children).toHaveLength(1);
+    const el = rig.marks.children[0]!;
+    expect(el).toBe(pending);
+    expect(el.has("pending")).toBe(false);
+    expect(el.has("ring")).toBe(true);
+    expect(el.has("fail")).toBe(false);
+    expect(el.style.top).toBe("51.000%");
+    expect(el.children[0]!.textContent).toBe("Log in");
+  });
+
+  it("turns the pending mark into the element's rect when the action carries one around the point", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    const pending = rig.marks.children[0]!;
+    action(rig, {
+      by: "person",
+      kind: "press",
+      label: "Log in",
+      rect: { x: 0.4, y: 0.45, w: 0.2, h: 0.1 },
+      point: { x: 0.5, y: 0.5 },
+    });
+    expect(rig.marks.children).toHaveLength(1);
+    const el = rig.marks.children[0]!;
+    expect(el).toBe(pending);
+    expect(el.has("rect")).toBe(true);
+    expect(el.has("ring")).toBe(false);
+    expect(el.has("pending")).toBe(false);
+    expect(el.style.width).toBe("20.000%");
+  });
+
+  it("shows the failure mark and no pending one when the person's action failed", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    action(rig, { by: "person", kind: "press", point: { x: 0.5, y: 0.5 }, ok: false, code: "not_actionable" });
+    expect(rig.marks.children).toHaveLength(1);
+    const el = rig.marks.children[0]!;
+    expect(el.has("fail")).toBe(true);
+    expect(el.has("pending")).toBe(false);
+    expect(el.children[0]!.textContent).toBe("press (not_actionable)");
+  });
+
+  it("takes the pending mark for a failed action that has no position", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    action(rig, { by: "person", kind: "press", ok: false, code: "busy" });
+    expect(rig.marks.children).toHaveLength(1);
+    expect(rig.marks.children[0]!.has("pill")).toBe(true);
+    expect(rig.marks.children[0]!.has("pending")).toBe(false);
+  });
+
+  it("removes the pending mark at once on an error message", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    expect(rig.marks.children).toHaveLength(1);
+    rig.sock.message(JSON.stringify({ type: "error", message: "A person is driving", code: "busy" }));
+    expect(rig.marks.children).toHaveLength(0);
+    expect(rig.notice.textContent).toBe("A person is driving (busy)");
+  });
+
+  it("fades the pending mark out and removes it by 2 s when no answer comes", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    const el = rig.marks.children[0]!;
+    vi.advanceTimersByTime(1600);
+    expect(el.has("gone")).toBe(false);
+    vi.advanceTimersByTime(150);
+    expect(el.has("gone")).toBe(true);
+    expect(rig.marks.children).toHaveLength(1);
+    vi.advanceTimersByTime(250);
+    expect(rig.marks.children).toHaveLength(0);
+    action(rig, { by: "person", kind: "press", point: { x: 0.5, y: 0.5 } });
+    expect(rig.marks.children).toHaveLength(1);
+    expect(rig.marks.children[0]).not.toBe(el);
+  });
+
+  it("lets an answered mark run its own life, not the pending timers", () => {
+    vi.useFakeTimers();
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    action(rig, { by: "person", kind: "press", point: { x: 0.5, y: 0.5 } });
+    vi.advanceTimersByTime(1650);
+    expect(rig.marks.children).toHaveLength(1);
+    expect(rig.marks.children[0]!.has("gone")).toBe(false);
+    vi.advanceTimersByTime(100);
+    expect(rig.marks.children).toHaveLength(0);
+  });
+
+  it("draws nothing new for a drag", () => {
+    const rig = pageRig();
+    pointer(rig, "pointerdown", 100, 100, 1000);
+    pointer(rig, "pointermove", 100, 200, 1050);
+    pointer(rig, "pointerup", 100, 300, 1100);
+    expect(rig.gestures()).toBe(1);
+    expect(rig.marks.children).toHaveLength(0);
+  });
+
+  it("draws nothing when the gesture could not be sent", () => {
+    const rig = pageRig();
+    rig.sock.readyState = 3;
+    tapAt(rig, 100, 200);
+    expect(rig.marks.children).toHaveLength(0);
+  });
+
+  it("leaves the pending mark alone for a person's action far from it", () => {
+    const rig = pageRig();
+    tapAt(rig, 100, 200);
+    action(rig, { by: "person", kind: "press", point: { x: 0.9, y: 0.9 } });
+    expect(rig.marks.children).toHaveLength(2);
+    expect(rig.marks.children[0]!.has("pending")).toBe(true);
+    expect(rig.marks.children[1]!.has("pending")).toBe(false);
+  });
+
+  it("draws agent actions as before and never takes a pending mark", () => {
+    const rig = pageRig();
+    action(rig, { by: "agent", kind: "press", label: "Save", rect: { x: 0.1, y: 0.2, w: 0.3, h: 0.1 } });
+    expect(rig.marks.children).toHaveLength(1);
+    const agent = rig.marks.children[0]!;
+    expect(agent.className).toBe("mark agent rect");
+    expect(agent.style.left).toBe("10.000%");
+    expect(agent.children[0]!.textContent).toBe("Save");
+    tapAt(rig, 100, 200);
+    action(rig, { by: "agent", kind: "press", point: { x: 0.5, y: 0.5 } });
+    expect(rig.marks.children).toHaveLength(3);
+    expect(rig.marks.children[1]!.has("pending")).toBe(true);
+    expect(rig.marks.children[2]!.className).toBe("mark agent ring");
+  });
+
+  it("draws a failed agent action with the failure mark", () => {
+    const rig = pageRig();
+    action(rig, { by: "agent", kind: "press", point: { x: 0.2, y: 0.2 }, ok: false, code: "covered" });
+    expect(rig.marks.children[0]!.className).toBe("mark agent fail ring");
   });
 });
