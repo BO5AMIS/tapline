@@ -1481,7 +1481,8 @@ export class TaplineTools {
         if (alreadyThere(r)) return `${this.elementName(r, "target")} is already on screen.`;
         const offset = flag(r, "offset");
         const at = offset !== undefined ? ` Offset now ${JSON.stringify(offset)}.` : "";
-        if (toTarget) return `Scrolled ${this.elementName(r)} to ${this.elementName(r, "target")}.${at}`;
+        // "toward" when it stopped before the element was clear: the first line mustn't read like success.
+        if (toTarget) return `Scrolled ${this.elementName(r)} ${flag(r, "reached") === false ? "toward" : "to"} ${this.elementName(r, "target")}.${at}`;
         return `Scrolled ${this.elementName(r)} ${args.to !== undefined ? `to ${args.to}` : (args.direction ?? "down")}.${at}`;
       },
       args.look,

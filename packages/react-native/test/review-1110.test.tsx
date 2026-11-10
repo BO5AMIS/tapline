@@ -225,6 +225,17 @@ describe('changes off screen: the same element, or a recycled cell', () => {
     expect(changes?.offScreen?.[0]).toMatchObject({ element: { testID: 'state', text: 'taps=1' }, was: { text: 'taps=0' } });
   });
 
+  test('an element that was on the list and is off screen now (a scroll answered without a list came between) is reported too', async () => {
+    const renderer = await start({ state: frame(0, 200, 400, 40), 'row-5': frame(0, 900, 400, 40) }, { id: 'row-5', text: 'Row 5' });
+    // scrolled down by 700: the state line left the screen, and then a tap changed it
+    useFrames({ list: frame(0, 0, 400, 800), shown: frame(0, -600, 400, 40), state: frame(0, -500, 400, 40), 'row-5': frame(0, 200, 400, 40) });
+    await act(async () => {
+      renderer.update(<Rows a={{ id: 'state', text: 'taps=1' }} b={{ id: 'row-5', text: 'Row 5' }} />);
+    });
+    const changes = (await run(() => tree({ changes: true }))).changes;
+    expect(changes?.offScreen).toEqual([expect.objectContaining({ was: { text: 'taps=0' }, element: expect.objectContaining({ testID: 'state', ref: '' }) })]);
+  });
+
   test('without an identifier it must be in the same place', async () => {
     const renderer = await start({ state: frame(0, -500, 400, 40), 'Row 5': frame(0, 900, 400, 40) }, { id: undefined, text: 'Row 5' });
     // same place, new text: a change

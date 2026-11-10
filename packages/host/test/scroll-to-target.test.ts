@@ -65,6 +65,7 @@ describe('scroll with to: "target"', () => {
   it("says when the scroll view can't bring it clear", async () => {
     const { tools } = await setup({ element: LIST, target: RESET, offset: { x: 0, y: 0 }, moved: false, reached: false });
     const lines = textOf(await tools.scroll({ to: "target", target: { id: "lab-reset" } })).split("\n");
+    expect(lines[0]).toBe('Scrolled e1 scroll id=lab-scroll @0,0 430x932 toward e20 button "Reset" id=lab-reset @16,103 398x48. Offset now {"x":0,"y":0}.');
     expect(lines.at(-1)).toBe("Note: it doesn't scroll further: the target is as far into view as it gets.");
     expect(lines.some((line) => line.includes("already at the"))).toBe(false);
   });

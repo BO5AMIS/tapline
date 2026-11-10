@@ -1266,11 +1266,12 @@ function diffTrees(
   route: string,
 ): TreeChanges {
   const changes: TreeChanges = { sameRoute: previous.route === route, added: [], removed: [], changed: [], moved: [] };
-  // Off screen before and now: only what changed in it counts (a scroll moves all of them, and a
-  // lazy list makes and drops rows out of view all the time).
+  // Off screen now: only what changed in it counts (a scroll moves all of them, and a lazy list
+  // makes and drops rows out of view all the time). It may have been off screen before too, or on
+  // the list and scrolled away since (an action answered without a list, then this one).
   let offScreenChanged = 0;
   for (const [key, now] of offKey) {
-    const old = previous.offKey.get(key);
+    const old = previous.offKey.get(key) ?? previous.byKey.get(key);
     if (!old) continue;
     // The same element: the same identifier, or the same role in the same place (Tapwright's rule
     // too). A recycling list hands an off-screen cell to another row; that is not a change.
