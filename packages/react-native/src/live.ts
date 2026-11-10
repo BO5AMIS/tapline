@@ -30,6 +30,8 @@ const LIVE_PACE: FeedOptions = {
   maxWaitMs: 160,
   dutyCycle: 0.33,
   backoffMaxMs: 1000,
+  // A few slow frames only widen the gap to 220 ms, which keeps the longest gap under V3's 0.25 s.
+  backoffSoftMs: 220,
 };
 /** Bounds of the `gapMs` override, which replaces the pace's gaps (for measuring). */
 const MIN_GAP_MS = 30;

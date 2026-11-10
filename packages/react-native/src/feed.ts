@@ -58,6 +58,8 @@ export interface FeedStats {
   lastFailure?: string;
   /** Captures the heartbeat started (nothing else asked for one within heartbeatMs). */
   heartbeats: number;
+  /** Times a slow frame near a capture widened the gap between captures. */
+  backoffs: number;
 }
 
 export interface FeedDeps {
@@ -101,6 +103,11 @@ export interface FeedOptions {
    * many ms); each clean capture shrinks it again. Off when unset.
    */
   backoffMaxMs?: number;
+  /**
+   * With backoffMaxMs: the gap the first few slow frames give (the second to the fourth within 20
+   * clean captures); only from the fifth does the gap double. Unset: it doubles from the second.
+   */
+  backoffSoftMs?: number;
 }
 
 export interface FrameFeed {
@@ -132,6 +139,8 @@ const BACKOFF_DECAY = 0.85;
 const BACKOFF_STRIKES = 2;
 /** ...counted since this many clean captures in a row. */
 const BACKOFF_FORGET_AFTER = 20;
+/** With backoffSoftMs, the gap only doubles from this many slow frames near captures. */
+const BACKOFF_HARD_STRIKES = 5;
 
 function safely(fn: () => void): void {
   try {
@@ -152,6 +161,8 @@ export function startFrameFeed(options: FeedOptions, deps: FeedDeps): FrameFeed 
   const maxWaitMs = options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS;
   const dutyCycle = options.dutyCycle !== undefined && options.dutyCycle > 0 ? options.dutyCycle : undefined;
   const backoffMaxMs = options.backoffMaxMs;
+  const backoffSoftMs = options.backoffSoftMs;
+  let backoffs = 0;
   let preset: QualityPreset = options.quality ?? 'balanced';
   /** Recent capture time in ms (a moving average), or null before the first frame. */
   let recentCaptureMs: number | null = null;
@@ -260,6 +271,13 @@ export function startFrameFeed(options: FeedOptions, deps: FeedDeps): FrameFeed 
     jankStrikes += 1;
     // One slow frame can be anything (a GC, the app's own work); stutter that captures cause comes back.
     if (backoffMaxMs === undefined || jankStrikes < BACKOFF_STRIKES) return;
+    backoffs += 1;
+    // The first few slow frames only widen the gap a little: they are rare and usually not the
+    // capture's doing, and doubling the gap at once made the picture stall (V3) for nothing.
+    if (backoffSoftMs !== undefined && jankStrikes < BACKOFF_HARD_STRIKES) {
+      backoffMs = Math.max(backoffMs, Math.min(backoffMaxMs, backoffSoftMs));
+      return;
+    }
     backoffMs = Math.min(backoffMaxMs, Math.max(backoffMs * 2, minIntervalMs * 2));
   }
 
@@ -496,6 +514,7 @@ export function startFrameFeed(options: FeedOptions, deps: FeedDeps): FrameFeed 
         failures,
         ...(lastFailure !== undefined ? { lastFailure } : {}),
         heartbeats,
+        backoffs,
       };
     },
   };

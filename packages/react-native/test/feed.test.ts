@@ -1077,6 +1077,30 @@ describe('startFrameFeed', () => {
       expect(longest).toBeLessThanOrEqual(250);
     });
 
+    it('with backoffSoftMs the first slow frames only widen the gap to it; from the fifth it doubles', async () => {
+      const env = start({ ...pace, withRaf: true, backoffMaxMs: 1000, backoffSoftMs: 220 });
+      await flush();
+      env.frames(0);
+      env.frames(100); // strike 1: nothing
+      env.frames(200); // strike 2: the soft gap
+      await env.finish(0);
+      env.commit();
+      await env.advance(219);
+      expect(env.captures).toHaveLength(1);
+      await env.advance(1);
+      expect(env.captures[1]?.startedAt).toBe(220);
+      expect(env.feed.stats().backoffs).toBe(1);
+      env.frames(300); // strike 3, during capture 1: still the soft gap
+      env.frames(400); // strike 4: still soft
+      env.frames(500); // strike 5: now it doubles (220 x 2)
+      await env.finish(1);
+      env.commit();
+      await env.advance(439);
+      expect(env.captures).toHaveLength(2);
+      await env.advance(1);
+      expect(env.captures[2]?.startedAt).toBe(660);
+    });
+
     it('without backoffMaxMs a slow frame changes nothing', async () => {
       const env = start({ ...pace, withRaf: true });
       await flush();
@@ -1101,6 +1125,7 @@ describe('startFrameFeed', () => {
         jankyWhileCapturing: 0,
         failures: 0,
         heartbeats: 0,
+        backoffs: 0,
       });
       await env.finish(0, 40);
       await env.advance(1000);

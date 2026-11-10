@@ -347,6 +347,7 @@ const feedAnswerSchema = z.object({
       failures: z.number().optional(),
       lastFailure: z.string().optional(),
       heartbeats: z.number().optional(),
+      backoffs: z.number().optional(),
     })
     .optional(),
 });
@@ -1076,6 +1077,9 @@ export class TaplineTools {
           lines.push(
             `Capture: ${stats.frames} frames, ${Math.round(stats.avgCaptureMs)} ms each on average (longest ${Math.round(stats.maxCaptureMs)} ms). Stutter: ${stats.janky} of ${stats.observedFrames} animation frames were slow, ${stats.jankyWhileCapturing} of them during a capture.`,
           );
+          if (stats.backoffs !== undefined && stats.backoffs > 0) {
+            lines.push(`The feed slowed down ${stats.backoffs} time(s) after slow animation frames near a capture.`);
+          }
           if (stats.failures !== undefined && stats.failures > 0) {
             lines.push(
               `Failed captures: ${stats.failures}${stats.lastFailure ? ` (last: ${stats.lastFailure})` : ""}; while captures fail, the viewer gets about one frame a second.`,
