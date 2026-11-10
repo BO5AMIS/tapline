@@ -65,6 +65,20 @@ describe('the live feed', () => {
   test('validates its params', async () => {
     await expect(feedMethod({ on: 'yes' })).rejects.toBeInstanceOf(TaplineError);
     await expect(feedMethod({ on: true, quality: 'ultra' })).rejects.toBeInstanceOf(TaplineError);
+    await expect(feedMethod({ on: true, gapMs: 10 })).rejects.toBeInstanceOf(TaplineError);
+    await expect(feedMethod({ on: true, gapMs: '100' })).rejects.toBeInstanceOf(TaplineError);
+    await expect(feedMethod({ on: true, gapMs: Number.NaN })).rejects.toBeInstanceOf(TaplineError);
+  });
+
+  test('a different gapMs restarts the feed; the same one keeps it', async () => {
+    await feedMethod({ on: true, gapMs: 200 });
+    await later(20);
+    const same = await feedMethod({ on: true, gapMs: 200, quality: 'sharp' });
+    expect(same.stats?.frames).toBeGreaterThanOrEqual(1); // still the first feed
+    const restarted = await feedMethod({ on: true, gapMs: 100 });
+    expect(restarted.stats?.frames).toBe(0); // a new feed
+    const back = await feedMethod({ on: true });
+    expect(back.stats?.frames).toBe(0); // back to the live pace: new again
   });
 });
 

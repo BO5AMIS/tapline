@@ -23,7 +23,7 @@ startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
   (`<scheme>://tapline/pair?url=…&code=…&name=…`, from the computer's QR code): it asks
   "Connect for testing?", connects with the one-time code, and keeps the token the
   computer sends back. From then on it reconnects to that computer whenever it's open
-  (1, 2, 4 … 30 s between tries). `<scheme>://tapline/forget` unpairs. It never throws
+  (a new try one second after each failed one). `<scheme>://tapline/forget` unpairs. It never throws
   into the app.
 - Expo Router: add `app/+native-intent.ts` so the router leaves pairing links alone:
 

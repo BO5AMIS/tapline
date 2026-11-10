@@ -262,7 +262,7 @@ function cutOff(item: Measured, screenWidth: number): string | null {
 
 function noName(item: Measured): string | null {
   const { info } = item.entry;
-  if (!info.actions.includes('press') || info.text !== '' || info.label !== null) return null;
+  if (!info.actions.includes('press') || info.actions.includes('type') || info.text !== '' || info.label !== null) return null;
   return 'button has no text or accessibility label; VoiceOver would read nothing';
 }
 

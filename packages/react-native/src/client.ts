@@ -19,7 +19,14 @@ export const PING_INTERVAL_MS = 15_000;
 export const HOST_SILENCE_MS = 45_000;
 export const REQUEST_TIMEOUT_MS = 30_000;
 const BACKOFF_START_MS = 1_000;
-const BACKOFF_MAX_MS = 30_000;
+/**
+ * QUALITY-BAR S4/S5: a host that starts (a new agent session, often long after the app was opened on
+ * a dedicated device) is found within about 2 s: a new try one second after each failed one, and a
+ * failed try itself takes up to a second on iOS (measured: with a 2 s wait the app was found up to 3 s
+ * after the host began listening). A refused connection costs next to nothing; iOS pauses the app in
+ * the background, so this only runs while the app is open, and only in builds with Tapline turned on.
+ */
+const BACKOFF_MAX_MS = 1_000;
 
 /** The slice of the WebSocket API Tapline uses (React Native provides it globally). */
 export interface WebSocketLike {
@@ -70,6 +77,16 @@ export interface AppStateLike {
   addEventListener: (type: 'change', listener: (state: string) => void) => { remove: () => void } | undefined;
 }
 
+/**
+ * How long a connection try may take to open before it is dropped for a fresh one: 2 s, and 4 s on
+ * every fourth try, so a slow link that needs longer still gets through. iOS repeats an unanswered
+ * try after 1 s and 3 s, so with the 1 s wait between tries a host is never left unasked for more
+ * than about 2 s.
+ */
+export function connectTimeoutMs(attempt: number): number {
+  return attempt % 4 === 3 ? 4_000 : 2_000;
+}
+
 export function backoffDelay(attempt: number): number {
   return Math.min(BACKOFF_MAX_MS, BACKOFF_START_MS * 2 ** attempt);
 }
@@ -110,6 +127,10 @@ export class TaplineClient {
   private readonly deps: ClientDeps;
   private socket: WebSocketLike | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Gives up on a connection try that hasn't opened. */
+  private openTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The current socket has opened. */
+  private opened = false;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private attempt = 0;
   private running = false;
@@ -201,8 +222,10 @@ export class TaplineClient {
   private clearTimers(): void {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    if (this.openTimer !== null) clearTimeout(this.openTimer);
     this.reconnectTimer = null;
     this.pingTimer = null;
+    this.openTimer = null;
   }
 
   private connect(): void {
@@ -220,12 +243,31 @@ export class TaplineClient {
       return;
     }
     this.socket = socket;
+    this.opened = false;
     socket.onopen = () => this.safely(() => this.onOpen(socket));
     socket.onmessage = (event) => this.safely(() => this.onMessage(socket, event.data));
     socket.onerror = () => {
       // onclose follows; nothing to do
     };
     socket.onclose = (event) => this.safely(() => this.onClose(socket, event.code));
+    // A host that isn't there may not refuse the connection (a firewall drops it silently): the try
+    // then hangs while iOS repeats it at growing intervals, and a host that starts meanwhile is found
+    // late (measured: up to 6 s). Give up on a try that hasn't opened and start a fresh one.
+    if (this.openTimer !== null) clearTimeout(this.openTimer);
+    const attempt = this.attempt;
+    this.openTimer = setTimeout(() => {
+      this.openTimer = null;
+      this.safely(() => {
+        if (socket !== this.socket || this.opened) return;
+        detach(socket);
+        try {
+          socket.close();
+        } catch {
+          // already closed
+        }
+        this.handleLoss(undefined);
+      });
+    }, connectTimeoutMs(attempt));
   }
 
   private safely(fn: () => void): void {
@@ -238,6 +280,9 @@ export class TaplineClient {
 
   private onOpen(socket: WebSocketLike): void {
     if (socket !== this.socket) return;
+    this.opened = true;
+    if (this.openTimer !== null) clearTimeout(this.openTimer);
+    this.openTimer = null;
     this.lastHeard = Date.now();
     const device = this.deps.device ?? collectDeviceInfo();
     const deviceId = this.options.deviceId;

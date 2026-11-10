@@ -17,7 +17,7 @@ import {
   toggle,
   typeText,
 } from '../src/actions';
-import { collectNodes, resetRefs, roleName, setHitTester, setMeasurer, takeSnapshot, tree } from '../src/inspect';
+import { closingModalHosts, collectNodes, openModalHosts, resetRefs, roleName, setHitTester, setMeasurer, takeSnapshot, tree } from '../src/inspect';
 import { isRecord, TaplineError, type TaplineElement } from '../src/types';
 import { firstHostChild, sameFiber, type Fiber } from '../src/fiber';
 
@@ -300,6 +300,30 @@ describe('press / longPress', () => {
     expect(spies.onDisabled).not.toHaveBeenCalled();
   });
 
+  test('a disabled button without onPress says disabled; enabled without a handler says no_action', async () => {
+    await mount(
+      <View>
+        <Pressable testID="off-bare" disabled>
+          <Text>Off</Text>
+        </Pressable>
+        <Pressable testID="off-handler" disabled onPress={() => undefined}>
+          <Text>Off too</Text>
+        </Pressable>
+        <View testID="plain">
+          <Text>Plain</Text>
+        </View>
+      </View>,
+    );
+    useFrames({ 'off-bare': frame(0, 0, 100, 40), 'off-handler': frame(0, 50, 100, 40), plain: frame(0, 100, 100, 40) });
+    const bare = await failure(run(() => press({ target: { testID: 'off-bare' } })));
+    expect(bare.code).toBe('not_actionable');
+    expect(bare.message).toMatch(/^disabled: e\d+ \w+ "Off" is disabled$/);
+    const withHandler = await failure(run(() => press({ target: { testID: 'off-handler' } })));
+    expect(withHandler.message).toMatch(/^disabled: /);
+    const plain = await failure(run(() => press({ target: { testID: 'plain' } })));
+    expect(plain.message).toMatch(/^no_action: /);
+  });
+
   test('refuses an element with no handler anywhere above it', async () => {
     await mountSample();
     const error = await failure(run(() => press({ target: { testID: 'state-line' } })));
@@ -387,7 +411,7 @@ describe('target resolution', () => {
     const error = await failure(run(() => press({ target: { text: 'Delete' } })));
     expect(error.code).toBe('ambiguous');
     expect(error.refs).toHaveLength(2);
-    expect(error.message).toContain('button "Delete"');
+    expect(error.message).toBe('2 elements match text "Delete".');
     expect(spies.onDelete).not.toHaveBeenCalled();
     const [first, second] = error.refs ?? [];
     await run(() => press({ target: { ref: second } }));
@@ -773,7 +797,7 @@ describe('type', () => {
     const error = await failure(run(() => typeText({ text: 'x' })));
     expect(error.code).toBe('ambiguous');
     expect(error.refs).toHaveLength(2);
-    expect(error.message).toBe('2 inputs on screen; pass a target to pick one, and none is focused:');
+    expect(error.message).toBe('2 inputs on screen; pass a target to pick one:');
     expect(error.candidates).toHaveLength(2);
   });
 
@@ -1255,6 +1279,82 @@ describe('settle waits for an open sheet to stop moving', () => {
     await mountSheet();
     setMeasurer(async () => null);
     expect(await timedOpenURL(100)).toBe(100);
+  });
+
+  describe('a sheet that is closing', () => {
+    /** A modal host that stays mounted with `visible` as given, and unmounts `unmountAfterMs` later (never when null). */
+    async function mountModal(visible: boolean, unmountAfterMs: number | null): Promise<() => void> {
+      let hide: () => void = () => undefined;
+      function Screen(): React.ReactElement {
+        const [shown, setShown] = React.useState(true);
+        hide = () => setShown(false);
+        return (
+          <View>
+            <Text>behind</Text>
+            {shown ? React.createElement('RCTModalHostView', { visible }, <Text>sheet</Text>) : null}
+          </View>
+        );
+      }
+      await mount(<Screen />);
+      setMeasurer(async () => frame(0, 526, 100, 40));
+      return () => {
+        if (unmountAfterMs === null) return;
+        setTimeout(() => {
+          act(() => {
+            hide();
+          });
+        }, unmountAfterMs);
+      };
+    }
+
+    test('closingModalHosts lists only hosts whose visible is false', async () => {
+      await mountModal(false, null);
+      expect(closingModalHosts()).toHaveLength(1);
+      expect(openModalHosts()).toHaveLength(1);
+      await unmountAll();
+      await mountModal(true, null);
+      expect(closingModalHosts()).toHaveLength(0);
+      expect(openModalHosts()).toHaveLength(1);
+    });
+
+    test('waits until the modal is gone, and settledMs includes it', async () => {
+      const schedule = await mountModal(false, 500);
+      jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
+      configureActions({ quietMs: 100, capMs: 2000 });
+      jest.useFakeTimers();
+      try {
+        schedule();
+        const pending = openURL({ url: 'myapp://x' });
+        await jest.advanceTimersByTimeAsync(400);
+        expect(closingModalHosts()).toHaveLength(1);
+        let done = false;
+        void pending.then(() => {
+          done = true;
+        });
+        await jest.advanceTimersByTimeAsync(0);
+        expect(done).toBe(false);
+        await jest.advanceTimersByTimeAsync(1000);
+        const { settledMs } = await pending;
+        expect(closingModalHosts()).toHaveLength(0);
+        // gone at 500 (polled every 100), then 100 ms quiet for the unmount commit
+        expect(settledMs).toBeGreaterThanOrEqual(500);
+        expect(settledMs).toBeLessThanOrEqual(700);
+      } finally {
+        jest.useRealTimers();
+        configureActions({ quietMs: 0, capMs: 0 });
+      }
+    });
+
+    test('an open sheet (visible true) gets no extra wait beyond the steady probe', async () => {
+      await mountModal(true, null);
+      // 100 quiet, then the probe: first reading, one poll, readings agree
+      expect(await timedOpenURL(3000)).toBe(200);
+    });
+
+    test('a closing modal that never unmounts: stops at the cap', async () => {
+      await mountModal(false, null);
+      expect(await timedOpenURL(3000)).toBe(2000);
+    });
   });
 });
 

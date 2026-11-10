@@ -1,6 +1,6 @@
 import { screenshot } from './actions';
 import { emitEvent } from './events';
-import { startFrameFeed, type FeedDeps, type FeedStats, type FrameFeed, type QualityPreset } from './feed';
+import { startFrameFeed, type FeedDeps, type FeedOptions, type FeedStats, type FrameFeed, type QualityPreset } from './feed';
 import { commitRevision, onCommit } from './register';
 import { TaplineError, isRecord } from './types';
 
@@ -10,7 +10,35 @@ import { TaplineError, isRecord } from './types';
  */
 
 let feed: FrameFeed | null = null;
+/** The gap override the running feed was started with (undefined: the live pace). */
+let feedGapMs: number | undefined;
 let overrides: Partial<FeedDeps> = {};
+
+/**
+ * The live viewer's pace. After an action or a person's input, a frame every 100 ms for the burst,
+ * so a tap shows at once (V1). While the screen changes on its own, a frame every 160 ms: each
+ * capture makes iOS render a fresh frame (view-shot's drawViewHierarchy afterScreenUpdates:YES), and
+ * the whole phone pays about 4% of a core per frame a second (measured on an iPhone 14 Pro Max:
+ * 100 ms +36%, 150 ms +26%, 200 ms +18%), so 160 ms keeps V6 (a) under 30% and the longest gap
+ * near 0.2 s (V3 ≤ 0.25). Captures may also take at most a third of the time and must not make the
+ * app stutter.
+ */
+const LIVE_PACE: FeedOptions = {
+  settleMs: 80,
+  minIntervalMs: 160,
+  burstIntervalMs: 100,
+  maxWaitMs: 160,
+  dutyCycle: 0.33,
+  backoffMaxMs: 1000,
+};
+/** Bounds of the `gapMs` override, which replaces the pace's gaps (for measuring). */
+const MIN_GAP_MS = 30;
+const MAX_GAP_MS = 2000;
+
+function paceFor(gapMs: number | undefined): FeedOptions {
+  if (gapMs === undefined) return LIVE_PACE;
+  return { ...LIVE_PACE, minIntervalMs: gapMs, burstIntervalMs: gapMs, maxWaitMs: gapMs };
+}
 
 /** Replace parts of what the feed uses (tests). */
 export function configureLiveFeed(next: Partial<FeedDeps>): void {
@@ -45,16 +73,31 @@ function isPreset(value: unknown): value is QualityPreset {
   return value === 'sharp' || value === 'balanced' || value === 'light';
 }
 
-/** `feed`: { on, quality? } starts or stops the frames; the answer includes the capture and stutter stats. */
+/**
+ * `feed`: { on, quality?, gapMs? } starts or stops the frames; the answer includes the capture and
+ * stutter stats. `gapMs` (30–2000) replaces the live pace's gaps, for measuring; a different value
+ * restarts the feed.
+ */
 export async function feedMethod(raw: unknown): Promise<{ on: boolean; quality?: QualityPreset; stats?: FeedStats }> {
   if (!isRecord(raw) || typeof raw.on !== 'boolean') throw new TaplineError('bad_params', 'feed needs { on: true | false }');
   if (raw.quality !== undefined && !isPreset(raw.quality)) {
     throw new TaplineError('bad_params', 'quality is "sharp", "balanced" or "light"');
   }
+  let gapMs: number | undefined;
+  if (raw.gapMs !== undefined) {
+    if (typeof raw.gapMs !== 'number' || !(raw.gapMs >= MIN_GAP_MS && raw.gapMs <= MAX_GAP_MS)) {
+      throw new TaplineError('bad_params', `gapMs is a number of ms from ${MIN_GAP_MS} to ${MAX_GAP_MS}`);
+    }
+    gapMs = raw.gapMs;
+  }
   const quality: QualityPreset = isPreset(raw.quality) ? raw.quality : 'balanced';
   if (raw.on) {
+    if (feed && feedGapMs !== gapMs) stopLiveFeed();
     if (feed) feed.setQuality(quality);
-    else feed = startFrameFeed({ quality }, deps());
+    else {
+      feed = startFrameFeed({ quality, ...paceFor(gapMs) }, deps());
+      feedGapMs = gapMs;
+    }
     return { on: true, quality, stats: feed.stats() };
   }
   const stats = feed?.stats();
@@ -70,5 +113,6 @@ export function frameAfterAction(): void {
 export function stopLiveFeed(): void {
   const current = feed;
   feed = null;
+  feedGapMs = undefined;
   current?.stop();
 }

@@ -61,7 +61,7 @@ describe('tree', () => {
     expect(disabled.disabled).toBe(true);
 
     const controlled = byTestID(elements, 'name-input');
-    expect(controlled).toMatchObject({ type: 'TextInput', actions: ['type', 'submit'], value: '', text: '' });
+    expect(controlled).toMatchObject({ type: 'TextInput', actions: ['press', 'type', 'submit'], value: '', text: '' });
     const uncontrolled = byTestID(elements, 'notes-input');
     expect(uncontrolled.value).toBe('seed');
 
@@ -444,7 +444,9 @@ describe('behind an open modal', () => {
     expect(ids(open.elements)).toEqual(['done']);
     expect(open.elements.some((e) => e.role === 'tab')).toBe(false);
     expect(open.elements.some((e) => e.text === 'Behind')).toBe(false);
-    await expect(resolveTarget({ text: 'Behind' })).rejects.toMatchObject({ code: 'not_found' });
+    // v1.4: hidden only by the open sheet, so it is covered, not missing
+    await expect(resolveTarget({ text: 'Behind' })).rejects.toMatchObject({ code: 'not_actionable', message: expect.stringMatching(/^covered: .* "Behind" .*is behind /) });
+    await expect(resolveTarget({ text: 'Nothing like it' })).rejects.toMatchObject({ code: 'not_found' });
     expect((await resolveTarget({ text: 'Done' })).entry.info.testID).toBe('done');
     expect(nativeTabBar(takeSnapshot())).toBeNull();
 

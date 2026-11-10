@@ -1,6 +1,8 @@
-import { DevSettings, Linking, Platform, TextInput } from 'react-native';
+import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
 import {
+  closingModalHosts,
   currentInputValue,
+  displayText,
   findHandler,
   findProp,
   frameContains,
@@ -10,6 +12,8 @@ import {
   isWithin,
   isOnScreen,
   measureFiber,
+  inNavBarHeader,
+  nativeNavBar,
   nativeTabBar,
   openModalHosts,
   publicInstancesOf,
@@ -21,12 +25,14 @@ import {
   takeSnapshot,
   toElement,
   currentRoute,
+  type BehindSheet,
   type Entry,
+  type HostNode,
   type Snapshot,
   type TabFound,
 } from './inspect';
 import { openAlerts } from './alerts';
-import { firstHostChild, hostChildren, sameFiber, type Fiber } from './fiber';
+import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import { onCommit } from './register';
 import { waitUntilSteady, waitUntilStill } from './settle';
@@ -70,8 +76,14 @@ export function onActed(listener: () => void): () => void {
   };
 }
 
-/** Waits until the app is still after an action; resolves with the milliseconds that took. */
-export function settle(): Promise<number> {
+/** What an action reports about its settle: the milliseconds, and the cap when the screen never went quiet. */
+export interface SettleOutcome {
+  settledMs: number;
+  /** Set only when the wait ended at the cap with the screen still changing (AGENT-TOOLS v1.3, "The cap"). */
+  settleCapMs?: number;
+}
+
+function notifyActed(): void {
   for (const listener of [...actedListeners]) {
     try {
       listener();
@@ -79,6 +91,17 @@ export function settle(): Promise<number> {
       // a listener must never break the action
     }
   }
+}
+
+/** Waits until the app is still after an action; resolves with the milliseconds that took. */
+export async function settle(): Promise<number> {
+  notifyActed();
+  return (await settleNow()).settledMs;
+}
+
+/** Like `settle`, and says when the wait ended at the cap: spread it into an action's result. */
+export async function settleOutcome(): Promise<SettleOutcome> {
+  notifyActed();
   return settleNow();
 }
 
@@ -105,20 +128,48 @@ async function sheetProbe(): Promise<Fiber | null> {
   return null;
 }
 
-async function settleNow(): Promise<number> {
+async function settleNow(): Promise<SettleOutcome> {
   const started = Date.now();
+  let capped = false;
+  const onCap = (): void => {
+    capped = true;
+  };
   await waitUntilStill({
     ...settings,
     onCommit: (listener) => onCommit(() => listener()),
     now: Date.now,
+    onCap,
   });
   const left = settings.capMs - (Date.now() - started);
   if (left > 0) {
     // A sheet lifted by a native-driver animation makes no commits: wait for it to stop moving.
     const probe = await sheetProbe().catch(() => null);
-    if (probe) await waitUntilSteady(() => measureFiber(probe), { pollMs: SHEET_POLL_MS, capMs: left, now: Date.now });
+    if (probe) await waitUntilSteady(() => measureFiber(probe), { pollMs: SHEET_POLL_MS, capMs: left, now: Date.now, onCap });
   }
-  return Math.max(0, Math.min(settings.capMs, Date.now() - started));
+  // A sheet being dismissed stays mounted (and covering the screen) until iOS ends the animation.
+  if (closingModalHosts().length > 0) {
+    while (closingModalHosts().length > 0) {
+      const remaining = settings.capMs - (Date.now() - started);
+      if (remaining <= 0) {
+        capped = true;
+        break;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(SHEET_POLL_MS, remaining)));
+    }
+    // Unmounting the modal commits: let the app go quiet again, within the cap.
+    const afterwards = settings.capMs - (Date.now() - started);
+    if (afterwards > 0) {
+      await waitUntilStill({
+        quietMs: settings.quietMs,
+        capMs: afterwards,
+        onCommit: (listener) => onCommit(() => listener()),
+        now: Date.now,
+        onCap,
+      });
+    }
+  }
+  const settledMs = Math.max(0, Math.min(settings.capMs, Date.now() - started));
+  return capped && settings.capMs > 0 ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
 }
 
 function badParams(message: string): TaplineError {
@@ -186,7 +237,8 @@ export function parseTarget(raw: unknown): ParsedTarget {
     const value = raw[key];
     if (value === undefined) continue;
     if (typeof value !== 'string') throw badParams(`target.${key} must be a string`);
-    kinds.push(withIndex({ kind: key, value }));
+    // Invisible direction marks never match: strip them from what the agent typed, as the list does.
+    kinds.push(withIndex({ kind: key, value: key === 'testID' ? value : displayText(value) }));
   }
   if (raw.x !== undefined || raw.y !== undefined) {
     if (typeof raw.x !== 'number' || typeof raw.y !== 'number') {
@@ -311,6 +363,92 @@ async function candidateElements(entries: Entry[]): Promise<TaplineElement[]> {
   return entries.map((entry, i) => toElement(entry, entry.tab ? null : (frames[i] ?? null)));
 }
 
+/** How far from the left edge the native navigation bar's back button reaches, in points. */
+const BACK_BUTTON_WIDTH = 100;
+
+/** A stand-in fiber for the navigation bar's back button, which iOS draws outside React's tree. */
+const backButtonFiber: Fiber = {
+  tag: -1,
+  type: 'BackButton',
+  elementType: 'BackButton',
+  memoizedProps: {},
+  stateNode: null,
+  child: null,
+  sibling: null,
+  return: null,
+  alternate: null,
+};
+
+function backButtonEntry(snapshot: Snapshot): Entry {
+  const node: HostNode = {
+    index: snapshot.nodes.length,
+    parent: -1,
+    fiber: backButtonFiber,
+    hostType: 'BackButton',
+    owners: [],
+    text: 'Back',
+    isText: false,
+    insideText: false,
+  };
+  return {
+    node,
+    navBack: true,
+    info: {
+      type: 'BackButton',
+      role: 'button',
+      testID: null,
+      label: 'Back',
+      text: 'Back',
+      value: null,
+      actions: ['press'],
+      disabled: false,
+      selected: false,
+      checked: null,
+      interesting: true,
+    },
+  };
+}
+
+/** An element as the list words it: `[ref ]role "text" id=… @x,y WxH` (the position only when its frame is known). */
+function elementLine(entry: Entry, frame: Frame | null, withRef: boolean): string {
+  const { info } = entry;
+  const flat = (info.text !== '' ? info.text : (info.label ?? '')).replace(/\s+/g, ' ').trim();
+  const shown = flat.length > 80 ? `${flat.slice(0, 79)}…` : flat;
+  return [
+    withRef ? refFor(entry.node.fiber) : '',
+    roleName(info),
+    shown !== '' ? `"${shown}"` : '',
+    info.testID ? `id=${info.testID}` : '',
+    frame ? `@${Math.round(frame.x)},${Math.round(frame.y)} ${Math.round(frame.width)}x${Math.round(frame.height)}` : '',
+  ]
+    .filter((part) => part !== '')
+    .join(' ');
+}
+
+/**
+ * AGENT-TOOLS v1.4: a target that matches nothing in the list, but matches an element only hidden
+ * because an open sheet covers its screen, is `covered`, not `not_found`. The answer names what is
+ * in front (with its ref, so the agent can act on it); `force` doesn't help, the element isn't on
+ * the list. An OS alert still answers `behind_alert` first. Returns when nothing hidden matches.
+ */
+async function refuseBehindSheet(snapshot: Snapshot, target: ParsedTarget): Promise<void> {
+  const behind: BehindSheet | undefined = snapshot.behind?.();
+  if (!behind) return;
+  const matches = matchEntries({ ...snapshot, nodes: behind.nodes, entries: behind.hidden }, target);
+  const hidden = matches[target.index ?? 0];
+  if (!hidden) return;
+  assertNoOsAlert();
+  const front = snapshot.entries.find(
+    (entry) => entry.info.interesting && !entry.tab && (entry.info.text.trim() !== '' || entry.info.testID),
+  );
+  const [hiddenFrame, frontFrame] = await Promise.all([
+    measureFiber(hidden.node.fiber),
+    front ? measureFiber(front.node.fiber) : Promise.resolve(null),
+  ]);
+  const inFront = front ? elementLine(front, frontFrame, true) : 'the open sheet';
+  throw notActionable('covered', `${elementLine(hidden, hiddenFrame, false)} is behind ${inFront}; close that first.`);
+}
+
 /** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
 export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Resolved> {
   const target = parseTarget(raw);
@@ -328,6 +466,20 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
     const bar = nativeTabBar(snapshot);
     const tab = bar && target.y >= bar.top ? tabAt(bar, target.x, snapshot.screen.width) : undefined;
     if (tab) return { snapshot, entry: tab };
+    // Likewise the navigation bar at the top: a touch there hits the bar, unless it lands on one of
+    // the custom items the app put in the header.
+    const navBar = nativeNavBar(snapshot);
+    if (navBar && target.y < navBar.bottom) {
+      const inHeader = snapshot.entries.filter((e) => !e.tab && inNavBarHeader(navBar, e.node.fiber));
+      const headerFrames = await Promise.all(inHeader.map((e) => measureFiber(e.node.fiber)));
+      const onItem = headerFrames.some((frame) => frame !== null && frameContains(frame, target.x, target.y));
+      if (!onItem) {
+        if (navBar.canGoBack && target.x < BACK_BUTTON_WIDTH && (hint === undefined || hint === 'press')) {
+          return { snapshot, entry: backButtonEntry(snapshot) };
+        }
+        throw notActionable('no_action', `Nothing at (${target.x}, ${target.y}) takes ${hint === undefined ? 'a touch' : HINT_VERBS[hint]}: it's on the navigation bar iOS draws.`);
+      }
+    }
     const actionable = snapshot.entries.filter((e) =>
       hint === undefined ? e.info.actions.length > 0 : e.info.actions.includes(hint),
     );
@@ -345,6 +497,7 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
   }
 
   const matches = matchEntries(snapshot, target);
+  if (matches.length === 0) await refuseBehindSheet(snapshot, target);
   if (target.index !== undefined) {
     const picked = matches[target.index];
     if (!picked) {
@@ -359,10 +512,9 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
   if (!only) throw new TaplineError('not_found', notFoundMessage(target));
   if (rest.length > 0) {
     const shown = matches.slice(0, 5);
-    const list = shown.map((entry) => describe(entry)).join('; ');
     throw new TaplineError(
       'ambiguous',
-      `${matches.length} elements match ${describeTarget(target)}: ${list}. Use a ref or "index".`,
+      `${matches.length} elements match ${describeTarget(target)}.`,
       shown.map((entry) => refFor(entry.node.fiber)),
       await candidateElements(shown),
     );
@@ -469,12 +621,43 @@ export function describeHit(snapshot: Snapshot, hit: Fiber, actor?: Entry): stri
   return 'another view';
 }
 
-/**
- * Refuses what a person couldn't tap: an element off screen, or one with something else on top
- * at the centre of its visible part (Fabric's hit test). Unknown hit results let it through.
- */
-async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | null): Promise<void> {
-  // An OS alert sits on top of everything: a person has to answer it first.
+/** A rectangle by its edges, in points. */
+interface Box {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The part of an element a person can touch must be at least this wide and high. */
+const MIN_VISIBLE_PT = 10;
+/** How many covers are cut away from an element before giving up. */
+const MAX_COVER_CUTS = 4;
+
+/** `box` without `cut`: the largest of the strips above, below, left and right of it; null when nothing is left. */
+function withoutBox(box: Box | null, cut: Box): Box | null {
+  if (box === null) return null;
+  if (cut.right <= box.left || cut.left >= box.right || cut.bottom <= box.top || cut.top >= box.bottom) return box;
+  const strips: Box[] = [
+    { ...box, bottom: Math.min(box.bottom, cut.top) },
+    { ...box, top: Math.max(box.top, cut.bottom) },
+    { ...box, right: Math.min(box.right, cut.left) },
+    { ...box, left: Math.max(box.left, cut.right) },
+  ];
+  let best: Box | null = null;
+  let bestArea = 0;
+  for (const strip of strips) {
+    const area = Math.max(0, strip.right - strip.left) * Math.max(0, strip.bottom - strip.top);
+    if (area > bestArea) {
+      best = strip;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
+/** An OS alert sits on top of everything: a person has to answer it first. */
+function assertNoOsAlert(): void {
   const blocking = openAlerts().find((alert) => !alert.standIn);
   if (blocking) {
     const buttons = blocking.buttons.map((button) => `[${button.text}]`).join(' ');
@@ -484,6 +667,14 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
         "ask the user to tap a button, or start Tapline with alerts: 'stand-in' so its buttons can be pressed. force: true acts anyway.",
     );
   }
+}
+
+/**
+ * Refuses what a person couldn't tap: an element off screen, or one with something else on top
+ * at the centre of its visible part (Fabric's hit test). Unknown hit results let it through.
+ */
+async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | null): Promise<void> {
+  assertNoOsAlert();
   if (frame === null) return;
   const { width, height } = snapshot.screen;
   const left = Math.max(frame.x, 0);
@@ -498,24 +689,59 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
         'Scroll to it first, or pass force: true to call its handler anyway.',
     );
   }
-  const x = Math.round((left + right) / 2);
-  const y = Math.round((top + bottom) / 2);
   const bar = nativeTabBar(snapshot);
-  if (bar && y >= bar.top) {
-    throw notActionable(
-      'under_tab_bar',
-      `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
-        'Scroll it up first, or pass force: true to call its handler anyway.',
+  const navBar = nativeNavBar(snapshot);
+  const underNavBar = (y: number): boolean => navBar !== null && y < navBar.bottom && !inNavBarHeader(navBar, actor.node.fiber);
+  // The last hit test, so a point is never asked twice.
+  let asked: { x: number; y: number; hit: Fiber | null | undefined } | null = null;
+  const hitAt = async (x: number, y: number): Promise<Fiber | null | undefined> => {
+    if (asked && asked.x === x && asked.y === y) return asked.hit;
+    const hit = await hitTest(x, y);
+    asked = { x, y, hit };
+    return hit;
+  };
+  // Why a touch at (x, y) would not reach the actor, or null when it would (an unknown hit lets it through).
+  const refusalAt = async (x: number, y: number): Promise<TaplineError | null> => {
+    if (bar && y >= bar.top) {
+      return notActionable(
+        'under_tab_bar',
+        `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
+          'Scroll it up first, or pass force: true to call its handler anyway.',
+      );
+    }
+    if (underNavBar(y)) {
+      return notActionable(
+        'covered',
+        `${name} is under the navigation bar iOS draws, at (${x}, ${y}): a real tap would hit the bar instead. ` +
+          'Scroll it down first, or pass force: true to call its handler anyway.',
+      );
+    }
+    const hit = await hitAt(x, y);
+    if (!hit || isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return null;
+    return notActionable(
+      'covered',
+      `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit, actor)}: a real tap would land there instead. ` +
+        'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.',
     );
+  };
+  const refusal = await refusalAt(Math.round((left + right) / 2), Math.round((top + bottom) / 2));
+  if (refusal === null) return;
+
+  // Touch the visible part (AGENT-TOOLS v1.3): what's left of the element outside the bars and
+  // covers, if it is at least 10 x 10 pt, is touched at its centre, as a finger would.
+  let part: Box | null = { left, top, right, bottom };
+  if (bar) part = withoutBox(part, { left: 0, top: bar.top, right: width, bottom: height });
+  if (navBar && !inNavBarHeader(navBar, actor.node.fiber)) part = withoutBox(part, { left: 0, top: 0, right: width, bottom: navBar.bottom });
+  for (let attempt = 0; attempt < MAX_COVER_CUTS; attempt++) {
+    if (part === null || part.right - part.left < MIN_VISIBLE_PT || part.bottom - part.top < MIN_VISIBLE_PT) throw refusal;
+    const hit = await hitAt(Math.round((part.left + part.right) / 2), Math.round((part.top + part.bottom) / 2));
+    if (!hit || isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return;
+    // Something covers that point: cut its rect away and try what is left.
+    const cover = await measureFiber(hit);
+    if (!cover) throw refusal;
+    part = withoutBox(part, { left: cover.x, top: cover.y, right: cover.x + cover.width, bottom: cover.y + cover.height });
   }
-  const hit = await hitTest(x, y);
-  if (!hit) return;
-  if (isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return;
-  throw notActionable(
-    'covered',
-    `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit, actor)}: a real tap would land there instead. ` +
-      'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.',
-  );
+  throw refusal;
 }
 
 /** Switches native tabs the way the tab bar does: through the tab navigator that holds the tab. */
@@ -547,11 +773,36 @@ function selectTab(snapshot: Snapshot, tab: TabFound): void {
   );
 }
 
-/** `back`: what the back button or gesture does, on the focused screen. */
-export async function back(rawParams: unknown): Promise<{ route: string[]; settledMs: number }> {
+/** A Modal's `onRequestClose`: on its host fiber, else on the components that render it (the `Modal` itself). */
+function requestCloseOf(host: Fiber): ((...args: unknown[]) => unknown) | null {
+  // Up through the composites only: the first host above belongs to something else (maybe another Modal).
+  for (let fiber: Fiber | null = host; fiber; fiber = fiber.return) {
+    if (fiber !== host && !isCompositeTag(fiber.tag)) break;
+    const props = isRecord(fiber.memoizedProps) ? fiber.memoizedProps : {};
+    if (typeof props.onRequestClose === 'function') return props.onRequestClose as (...args: unknown[]) => unknown;
+  }
+  return null;
+}
+
+/** `back`: what the back button or gesture does, on the focused screen; with a sheet open, closes the sheet. */
+export async function back(rawParams: unknown): Promise<{ route: string[]; closed?: 'sheet' } & SettleOutcome> {
   paramsOf(rawParams);
   const snapshot = takeSnapshot();
   const current = currentRoute(snapshot.routes);
+  // An open sheet is what back closes first (AGENT-TOOLS v1.4): the top Modal's own onRequestClose,
+  // which is what the system back gesture or a swipe down calls. One already on its way out is left alone.
+  const sheet = openModalHosts().filter((host) => !closingModalHosts().includes(host)).pop();
+  if (sheet) {
+    const onRequestClose = requestCloseOf(sheet);
+    if (!onRequestClose) {
+      throw notActionable(
+        'no_action',
+        'the open sheet has nothing for back to call (its Modal has no onRequestClose); tap its close control.',
+      );
+    }
+    callHandler('onRequestClose', onRequestClose, []);
+    return { route: current?.chain ?? [], closed: 'sheet', ...(await settleOutcome()) };
+  }
   if (!current) {
     throw new TaplineError('unsupported', 'This app has no React Navigation screens Tapline can see, so there is no back.');
   }
@@ -566,45 +817,102 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; settl
     throw notActionable('no_action', `Nothing to go back to from ${current.chain.join(' › ')}.`);
   }
   callHandler('goBack', nav.goBack as (...args: unknown[]) => unknown, []);
-  const settledMs = await settle();
-  return { route: current.chain, settledMs };
+  return { route: current.chain, ...(await settleOutcome()) };
+}
+
+/** Calls `name()` on the first instance that has it; whether one did. */
+function callInstanceMethod(instances: unknown[], name: string): boolean {
+  for (const instance of instances) {
+    if (!isRecord(instance) || typeof instance[name] !== 'function') continue;
+    try {
+      (instance[name] as () => unknown).call(instance);
+      return true;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return false;
+}
+
+/**
+ * What a finger does to a text input: focus it. React Native's TextInput puts `focus()` on its host
+ * instance (Paper: the fiber's stateNode; Fabric: `stateNode.canonical`), and `TextInput.State.focusTextInput`
+ * takes the same instance. Without either, the app's own onPressIn / onFocus handlers run.
+ */
+function focusInput(entry: Entry, frame: Frame | null): void {
+  const instances = [...publicInstancesOf(entry.node.fiber), ...entry.node.owners.map((owner) => owner.stateNode)];
+  if (callInstanceMethod(instances, 'focus')) return;
+  try {
+    const state = (TextInput as unknown as { State?: unknown }).State;
+    if (isRecord(state) && typeof state.focusTextInput === 'function') {
+      const host = publicInstancesOf(entry.node.fiber).find(isRecord);
+      if (host) {
+        (state.focusTextInput as (instance: unknown) => void)(host);
+        return;
+      }
+    }
+  } catch {
+    // fall through to the handlers
+  }
+  for (const key of ['onPressIn', 'onFocus']) {
+    const handler = appHandler(entry, key);
+    if (handler) callHandler(key, handler, [pressEvent(entry.node.fiber, frame)]);
+  }
 }
 
 async function pressLike(
   kind: 'press' | 'longPress',
   rawParams: unknown,
-): Promise<{ element: TaplineElement; settledMs: number }> {
+): Promise<PressResult> {
   const params = paramsOf(rawParams);
   const { snapshot, entry } = await resolveTarget(params.target, kind);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     selectTab(snapshot, entry.tab);
-    return { element: toElement(entry, null), settledMs: await settle() };
+    return { element: toElement(entry, null), ...keyboardNote(closeKeyboardFor(entry)), ...(await settleOutcome()) };
+  }
+  if (entry.navBack) {
+    const { route: _route, ...outcome } = await back({});
+    return { element: toElement(entry, null), ...outcome };
   }
   const actor = findActionable(snapshot, entry, kind, false);
   const handlerName = kind === 'press' ? 'onPress' : 'onLongPress';
   const actionName = kind === 'press' ? 'tap' : 'long-press';
   if (!actor) {
+    if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is disabled`);
     throw notActionable('no_action', `${describe(entry)} has no ${actionName} action`);
   }
   if (actor.info.disabled || entry.info.disabled) {
     throw notActionable('disabled', `${describe(actor)} is disabled`);
   }
-  const handler = findHandler(actor.node, handlerName);
-  if (!handler) {
+  // A finger on an input focuses it (AGENT-TOOLS v1.3): an input never answers no_action to a tap.
+  const focusing = kind === 'press' && actor.info.actions.includes('type');
+  const handler = focusing ? null : findHandler(actor.node, handlerName);
+  if (!handler && !focusing) {
     throw notActionable('no_action', `${describe(actor)} has no ${actionName} action`);
   }
   const { element, frame } = await elementFor(actor);
   if (params.force !== true) await assertReachable(snapshot, actor, frame);
-  callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
-  return { element, settledMs: await settle() };
+  const closedKeyboard = closeKeyboardFor(actor);
+  if (handler) callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
+  else {
+    // A finger focuses the input and also fires the input's own onPress (not an ancestor's: the
+    // input takes the touch).
+    focusInput(actor, frame);
+    const own = appHandler(actor, 'onPress');
+    if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
+  }
+  return { element, ...keyboardNote(closedKeyboard), ...(await settleOutcome()) };
 }
 
-export function press(params: unknown): Promise<{ element: TaplineElement; settledMs: number }> {
+/** What `press` and `longPress` answer: the element, and `closedKeyboard: true` when the keyboard was closed first. */
+export type PressResult = { element: TaplineElement; closedKeyboard?: true } & SettleOutcome;
+
+export function press(params: unknown): Promise<PressResult> {
   return pressLike('press', params);
 }
 
-export function longPress(params: unknown): Promise<{ element: TaplineElement; settledMs: number }> {
+export function longPress(params: unknown): Promise<PressResult> {
   return pressLike('longPress', params);
 }
 
@@ -641,6 +949,76 @@ function ownsInstance(entry: Entry, instance: unknown): boolean {
   return entry.node.owners.some((owner) => owner.stateNode === instance);
 }
 
+/** What the SDK asks of the keyboard and the focused input; replaceable so tests need no native side. */
+export interface KeyboardControl {
+  /** The instance of the text input that has focus, or null. */
+  focusedInput(): unknown;
+  /** Whether the software keyboard is up (true when React Native can't say). */
+  visible(): boolean;
+  /** Closes the keyboard without submitting (`Keyboard.dismiss()`). */
+  dismiss(): void;
+  /** Takes focus off `input`. */
+  blur(input: unknown): void;
+}
+
+const defaultKeyboard: KeyboardControl = {
+  focusedInput: focusedInputInstance,
+  visible: () => {
+    try {
+      const { isVisible } = Keyboard as unknown as { isVisible?: () => boolean };
+      return typeof isVisible === 'function' ? isVisible.call(Keyboard) !== false : true;
+    } catch {
+      return true;
+    }
+  },
+  dismiss: () => {
+    try {
+      Keyboard.dismiss();
+    } catch {
+      // nothing to close
+    }
+  },
+  blur: (input) => {
+    try {
+      const state = (TextInput as unknown as { State?: unknown }).State;
+      if (isRecord(state) && typeof state.blurTextInput === 'function') {
+        (state.blurTextInput as (instance: unknown) => void)(input);
+        return;
+      }
+    } catch {
+      // fall through to the instance's own blur
+    }
+    callInstanceMethod([input], 'blur');
+  },
+};
+
+let keyboard: KeyboardControl = defaultKeyboard;
+
+/** Inject the keyboard and focus access (tests); pass null to restore the default. */
+export function setKeyboardControl(next: KeyboardControl | null): void {
+  keyboard = next ?? defaultKeyboard;
+}
+
+/**
+ * AGENT-TOOLS v1.4: with the keyboard up, an action on anything but the focused input closes it
+ * first, without submitting, as a person would. Call it after every refusal is decided. Returns
+ * whether it closed the keyboard (the result then says `closedKeyboard: true`).
+ */
+function closeKeyboardFor(actor: Entry): boolean {
+  const focused = keyboard.focusedInput();
+  if (focused == null || !keyboard.visible()) return false;
+  if (!actor.tab && !actor.navBack && ownsInstance(actor, focused)) return false;
+  keyboard.dismiss();
+  // `Keyboard.dismiss()` blurs the focused input itself; when it didn't, do it.
+  if (keyboard.focusedInput() != null) keyboard.blur(focused);
+  return true;
+}
+
+/** `{ closedKeyboard: true }` for a result when the keyboard was closed, nothing otherwise. */
+function keyboardNote(closed: boolean): { closedKeyboard?: true } {
+  return closed ? { closedKeyboard: true } : {};
+}
+
 async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Promise<Resolved> {
   if (rawTarget !== undefined && rawTarget !== null) {
     const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type');
@@ -651,7 +1029,7 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   const snap = snapshot ?? takeSnapshot();
   const inputs = snap.entries.filter((entry) => isInputNode(entry.node));
   if (inputs.length === 0) throw new TaplineError('not_found', 'No input on screen');
-  const focused = focusedInputInstance();
+  const focused = keyboard.focusedInput();
   const focusedEntry = inputs.find((entry) => ownsInstance(entry, focused));
   if (focusedEntry) return { snapshot: snap, entry: focusedEntry };
   const [only, ...rest] = inputs;
@@ -659,7 +1037,7 @@ async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Prom
   const shown = inputs.slice(0, 5);
   throw new TaplineError(
     'ambiguous',
-    `${inputs.length} inputs on screen; pass a target to pick one, and none is focused:`,
+    `${inputs.length} inputs on screen; pass a target to pick one:`,
     shown.map((entry) => refFor(entry.node.fiber)),
     await candidateElements(shown),
   );
@@ -680,7 +1058,7 @@ function setNativeText(entry: Entry, text: string): void {
 
 export async function typeText(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: string; settledMs: number }> {
+): Promise<{ element: TaplineElement; value: string; closedKeyboard?: true } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
@@ -695,6 +1073,8 @@ export async function typeText(
 
   const { entry } = await resolveInput(null, params.target);
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable`);
+  // Typing into the input that has focus leaves the keyboard alone; another input closes it first.
+  const closedKeyboard = closeKeyboardFor(entry);
 
   const current = currentInputValue(entry.node);
   // Characters, not UTF-16 units: an emoji is one.
@@ -724,9 +1104,9 @@ export async function typeText(
     if (onEnd) callHandler('onEndEditing', onEnd, [event]);
   }
 
-  const settledMs = await settle();
+  const outcome = await settleOutcome();
   const { element } = await elementFor(entry);
-  return { element: { ...element, value: next }, value: next, settledMs };
+  return { element: { ...element, value: displayText(next) }, value: displayText(next), ...keyboardNote(closedKeyboard), ...outcome };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -796,7 +1176,7 @@ type Direction = (typeof DIRECTIONS)[number];
 
 export async function scroll(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; offset: { x: number; y: number }; moved: boolean; settledMs: number }> {
+): Promise<{ element: TaplineElement; offset: { x: number; y: number }; moved: boolean } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const to = params.to;
   if (to !== undefined && to !== 'start' && to !== 'end') throw badParams('to must be "start" or "end"');
@@ -913,14 +1293,14 @@ export async function scroll(
     else throw new TaplineError('unsupported', 'This scroll view exposes no scrollTo');
   }
 
-  const settledMs = await settle();
+  const outcome = await settleOutcome();
   // Report where the content really is, not where we asked it to go.
   const after = await measureScrollState(entry);
   if (after) offset = after.offset;
   const moved = !known && !after ? true : Math.abs(offset.x - current.x) >= 1 || Math.abs(offset.y - current.y) >= 1;
   if (key) rememberedOffsets.set(key, offset);
   const { element } = await elementFor(entry, frame);
-  return { element, offset, moved, settledMs };
+  return { element, offset, moved, ...outcome };
 }
 
 interface ScrollState {
@@ -984,7 +1364,7 @@ async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
 
 export async function toggle(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: boolean; settledMs: number }> {
+): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
   const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
@@ -996,10 +1376,11 @@ export async function toggle(
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
   if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));
+  const closedKeyboard = closeKeyboardFor(control);
   callHandler('onValueChange', handler, [next]);
-  const settledMs = await settle();
+  const outcome = await settleOutcome();
   const { element } = await elementFor(control);
-  return { element: { ...element, checked: next }, value: next, settledMs };
+  return { element: { ...element, checked: next }, value: next, ...keyboardNote(closedKeyboard), ...outcome };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1008,7 +1389,7 @@ export async function toggle(
 
 const OPEN_URL_TIMEOUT_MS = 5000;
 
-export async function openURL(rawParams: unknown): Promise<{ settledMs: number }> {
+export async function openURL(rawParams: unknown): Promise<SettleOutcome> {
   const params = paramsOf(rawParams);
   if (typeof params.url !== 'string' || params.url === '') throw badParams('url must be a non-empty string');
   const url = params.url;
@@ -1024,7 +1405,7 @@ export async function openURL(rawParams: unknown): Promise<{ settledMs: number }
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
-  return { settledMs: await settle() };
+  return settleOutcome();
 }
 
 export async function getLogs(rawParams: unknown): Promise<{ entries: LogEntry[] }> {

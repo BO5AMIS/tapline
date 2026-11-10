@@ -48,8 +48,16 @@ export interface HostNode {
   insideText: boolean;
 }
 
+/** Invisible direction marks (AGENT-TOOLS v1.3): U+200E, U+200F, U+202A–U+202E, U+2066–U+2069. */
+const DIRECTION_MARKS = /[‎‏‪-‮⁦-⁩]/g;
+
+/** Text as an agent sees and matches it: without the invisible direction marks. */
+export function displayText(raw: string): string {
+  return raw.replace(DIRECTION_MARKS, '');
+}
+
 function normalizeText(raw: string): string {
-  const collapsed = raw.replace(/\s+/g, ' ').trim();
+  const collapsed = displayText(raw).replace(/\s+/g, ' ').trim();
   return collapsed.length > MAX_TEXT ? collapsed.slice(0, MAX_TEXT) : collapsed;
 }
 
@@ -118,6 +126,8 @@ interface Collected {
   tabs: TabFound[];
   /** Open modals' host fibers (not inside a hidden subtree), in tree order. */
   modals: Fiber[];
+  /** Set while a modal is open: the topmost modal's host, and the whole tree walked with it (the screen behind included). */
+  behind?: { sheet: Fiber; nodes: HostNode[] };
 }
 
 function routeOf(fiber: Fiber, chain: RouteFound[]): RouteFound | null {
@@ -216,7 +226,7 @@ function collect(roots: FiberRootLike[]): Collected {
   if (!top) return out;
   const only: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
   walk(top.child, -1, [], false, only, []);
-  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals };
+  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, behind: { sheet: top, nodes: out.nodes } };
 }
 
 export function collectNodes(roots: FiberRootLike[] = getRoots()): HostNode[] {
@@ -457,14 +467,17 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
     const actions: Action[] = [];
     const has = (key: string): boolean =>
       typeof findProp(node, key) === 'function' && !suppressed.has(`${node.index}:${key}`);
-    if (has('onPress')) actions.push('press');
+    // An input always takes a tap (focus) and then typing (AGENT-TOOLS v1.3): `tap, type`.
+    if (has('onPress') || input) actions.push('press');
     if (has('onLongPress')) actions.push('longPress');
     if (input) actions.push('type', 'submit');
     if (toggleable && has('onValueChange')) actions.push('toggle');
     if (isScrollNode(node)) actions.push('scroll');
 
     const testID = stringProp(node, 'testID');
-    const label = stringProp(node, 'accessibilityLabel') ?? stringProp(node, 'aria-label');
+    const rawLabel = stringProp(node, 'accessibilityLabel') ?? stringProp(node, 'aria-label');
+    const strippedLabel = rawLabel === null ? null : displayText(rawLabel);
+    const label = strippedLabel === '' ? null : strippedLabel;
 
     const disabled =
       findProp(node, 'disabled') === true ||
@@ -685,7 +698,11 @@ function firstHostFiber(first: Fiber | null): Fiber | null {
   return null;
 }
 
-/** The host fibers of open `Modal`s, in tree order (React Native renders a closed one as nothing). */
+/**
+ * The host fibers of mounted `Modal`s, in tree order. A closed `Modal` renders nothing, but one
+ * that is being dismissed stays mounted (with `visible` false) until iOS ends the animation; it
+ * still covers the screen, so it is listed here too (see `closingModalHosts`).
+ */
 export function openModalHosts(): Fiber[] {
   const hosts: Fiber[] = [];
   for (const root of getRoots()) {
@@ -697,6 +714,11 @@ export function openModalHosts(): Fiber[] {
     }
   }
   return hosts;
+}
+
+/** The mounted modal hosts that are on their way out: `visible` is false while the dismiss animation runs. */
+export function closingModalHosts(): Fiber[] {
+  return openModalHosts().filter((host) => isRecord(host.memoizedProps) && host.memoizedProps.visible === false);
 }
 
 /** Whether a `Modal` is open: its window covers the whole app, the native tab bar included. */
@@ -796,6 +818,8 @@ export interface Entry {
   info: NodeInfo;
   /** Set for a tab of a native tab bar: pressing it switches tabs through navigation. */
   tab?: TabFound;
+  /** Set for the back button of the native navigation bar: pressing it goes back. */
+  navBack?: true;
 }
 
 export interface Snapshot {
@@ -804,6 +828,23 @@ export interface Snapshot {
   screen: ScreenInfo;
   /** Visible screens that got React Navigation's props, in tree order. */
   routes: RouteFound[];
+  /**
+   * Set while a modal (a sheet) is open: what the open sheet hides, worked out on first call. The
+   * look leaves the screen behind a sheet out, so `entries` don't hold it; this does, with the
+   * `nodes` they index into (the sheet's own elements are among them, in tree order).
+   */
+  behind?: () => BehindSheet;
+}
+
+/** The screen behind the topmost open modal, which the element list leaves out. */
+export interface BehindSheet {
+  /** The topmost modal's host fiber. */
+  sheet: Fiber;
+  /** Everything walked (behind and inside the sheet); `entries[i]` describes `nodes[i]`. */
+  nodes: HostNode[];
+  entries: Entry[];
+  /** Only the elements outside the sheet: what it covers. */
+  hidden: Entry[];
 }
 
 /**
@@ -849,7 +890,7 @@ export function takeSnapshot(): Snapshot {
       "No React roots recorded. Import '@tapline/react-native/register' first in the app's entry file, before React.",
     );
   }
-  const { nodes, routes, tabs } = collect(roots);
+  const { nodes, routes, tabs, behind } = collect(roots);
   const infos = describeNodes(nodes);
   const entries: Entry[] = [];
   nodes.forEach((node, i) => {
@@ -886,7 +927,26 @@ export function takeSnapshot(): Snapshot {
       },
     });
   }
-  return { nodes, entries, screen: getScreen(), routes };
+  const snapshot: Snapshot = { nodes, entries, screen: getScreen(), routes };
+  if (behind) {
+    let worked: BehindSheet | undefined;
+    snapshot.behind = () => {
+      if (worked) return worked;
+      const all = describeNodes(behind.nodes);
+      const hidden: Entry[] = [];
+      const everything: Entry[] = [];
+      behind.nodes.forEach((node, i) => {
+        const info = all[i];
+        if (!info) return;
+        const entry: Entry = { node, info };
+        everything.push(entry);
+        if (!isWithin(node.fiber, behind.sheet)) hidden.push(entry);
+      });
+      worked = { sheet: behind.sheet, nodes: behind.nodes, entries: everything, hidden };
+      return worked;
+    };
+  }
+  return snapshot;
 }
 
 /** The height of iOS's tab bar on an iPhone in portrait, in points (the classic and iOS 26 bars). */
@@ -930,6 +990,106 @@ export function nativeTabBar(snapshot: Snapshot): NativeTabBar | null {
 export function tabAt(bar: NativeTabBar, x: number, width: number): Entry | undefined {
   const index = Math.floor(x / (width / bar.tabs.length));
   return bar.tabs[Math.min(bar.tabs.length - 1, Math.max(0, index))];
+}
+
+/** The height of the navigation bar iOS draws under the status bar, and what a large title adds. */
+const NAV_BAR_HEIGHT = 44;
+const NAV_BAR_LARGE_TITLE = 52;
+
+/** The status-bar (top safe-area) inset, from the app's safe-area library when it has one. */
+function topInset(screen: ScreenInfo): number {
+  try {
+    const safeArea: unknown = require('react-native-safe-area-context');
+    const metrics = isRecord(safeArea) ? safeArea.initialWindowMetrics : undefined;
+    const insets = isRecord(metrics) ? metrics.insets : undefined;
+    if (isRecord(insets) && typeof insets.top === 'number' && insets.top >= 0) return insets.top;
+  } catch {
+    // not installed
+  }
+  if (screen.height >= 852) return 59;
+  return screen.height >= 812 ? 47 : 20;
+}
+
+/** Where iOS draws the native navigation bar: from the top of the screen to `bottom`. */
+export interface NativeNavBar {
+  top: 0;
+  bottom: number;
+  title?: string;
+  canGoBack: boolean;
+  /** The header config fiber; what is inside it is drawn in the bar and stays reachable. */
+  header: Fiber;
+}
+
+function isHostType(fiber: Fiber, type: string): boolean {
+  return fiber.tag === HostComponent && fiber.type === type;
+}
+
+/** The screens of a stack (nearest `RNSScreen`s, in order), looking through wrappers. */
+function stackScreens(stack: Fiber): Fiber[] {
+  const screens: Fiber[] = [];
+  const pending: Fiber[] = stack.child ? [stack.child] : [];
+  for (let fiber = pending.pop(); fiber; fiber = pending.pop()) {
+    if (fiber.sibling) pending.push(fiber.sibling);
+    if (isHostType(fiber, 'RNSScreen')) screens.push(fiber);
+    else if (!isHostType(fiber, 'RNSScreenStack') && fiber.child) pending.push(fiber.child);
+  }
+  return screens;
+}
+
+/**
+ * The native navigation bar react-native-screens draws for the visible screen, outside React's
+ * layout. The visible header is the deepest `RNSScreenStackHeaderConfig` reached by walking each
+ * root and, at an `RNSScreenStack`, descending only into its last (top) `RNSScreen`. Null without
+ * one, with `hidden` set, on other platforms, in landscape, and while a modal's window covers it.
+ */
+export function nativeNavBar(snapshot: Snapshot): NativeNavBar | null {
+  if (Platform.OS !== 'ios' || Platform.isPad) return null;
+  const { width, height } = snapshot.screen;
+  if (height <= width || modalOpen()) return null;
+  interface Context {
+    firstScreen: boolean;
+  }
+  let found: { header: Fiber; context: Context } | null = null;
+  for (const root of getRoots()) {
+    const todo: Array<{ fiber: Fiber; context: Context }> = root.current.child
+      ? [{ fiber: root.current.child, context: { firstScreen: true } }]
+      : [];
+    for (let item = todo.pop(); item; item = todo.pop()) {
+      const { fiber, context } = item;
+      if (fiber.sibling) todo.push({ fiber: fiber.sibling, context });
+      // The same rule `look` uses: unselected native tabs, inactive screens and hidden subtrees don't count.
+      if (fiber.tag === HostComponent && typeof fiber.type === 'string' && hidesSubtree(fiber.type, propsOf(fiber))) continue;
+      if (isHostType(fiber, 'RNSScreenStackHeaderConfig')) {
+        const props = propsOf(fiber);
+        if (props.hidden !== true) found = { header: fiber, context };
+      }
+      if (isHostType(fiber, 'RNSScreenStack')) {
+        const screens = stackScreens(fiber);
+        const top = screens[screens.length - 1];
+        if (top?.child) todo.push({ fiber: top.child, context: { firstScreen: screens.length === 1 } });
+        continue;
+      }
+      if (fiber.child) {
+        todo.push({ fiber: fiber.child, context: isHostType(fiber, 'RNSScreen') ? { firstScreen: true } : context });
+      }
+    }
+  }
+  if (!found) return null;
+  const props = propsOf(found.header);
+  const bottom = topInset(snapshot.screen) + NAV_BAR_HEIGHT + (props.largeTitle === true ? NAV_BAR_LARGE_TITLE : 0);
+  const bar: NativeNavBar = {
+    top: 0,
+    bottom,
+    canGoBack: !found.context.firstScreen && props.hideBackButton !== true,
+    header: found.header,
+  };
+  if (typeof props.title === 'string') bar.title = props.title;
+  return bar;
+}
+
+/** Whether a fiber is drawn inside the navigation bar (a custom header item): it stays reachable. */
+export function inNavBarHeader(bar: NativeNavBar, fiber: Fiber): boolean {
+  return isWithin(fiber, bar.header);
 }
 
 let refCounter = 0;
@@ -1017,7 +1177,7 @@ export function toElement(entry: Entry, frame: Frame | null): TaplineElement {
     testID: info.testID,
     label: info.label,
     text: info.text,
-    value: info.value,
+    value: info.value === null ? null : displayText(info.value),
     frame,
     actions: info.actions,
     disabled: info.disabled,
@@ -1078,9 +1238,62 @@ function diffTrees(
   return changes;
 }
 
+/** An entry about to be listed, with its measured frame. */
+export interface Listed {
+  entry: Entry;
+  frame: Frame | null;
+}
+
+/** What an element line quotes: the text, else the label, whitespace flattened and clipped to 80. */
+function quotedText(entry: Entry): string {
+  const { info } = entry;
+  const flat = (info.text !== '' ? info.text : (info.label ?? '')).replace(/\s+/g, ' ').trim();
+  return flat.length > MAX_TEXT ? flat.slice(0, MAX_TEXT) : flat;
+}
+
+function sameRect(a: Frame, b: Frame): boolean {
+  return (
+    Math.abs(a.x - b.x) <= 1 && Math.abs(a.y - b.y) <= 1 && Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1
+  );
+}
+
 /**
- * `tree`: the screen as elements. Refs start at e1 again, except with `changes: true`, which
- * keeps the refs of elements still on screen and reports what changed since the previous call.
+ * AGENT-TOOLS v1.3 "Duplicates": when an element and its nearest listed ancestor have the same
+ * quoted text and the same rect (within 1 pt), only one is listed: the one that takes an action,
+ * else (both or neither do) the ancestor. Roles may differ: a labelled wrapper around an input
+ * lists only the input. Elements are in tree order, so an ancestor comes before its descendants.
+ */
+export function foldDuplicates(snapshot: Snapshot, listed: Listed[]): Listed[] {
+  const byNode = new Map<number, Listed>();
+  for (const item of listed) byNode.set(item.entry.node.index, item);
+  const dropped = new Set<Listed>();
+  for (const item of listed) {
+    if (item.frame === null) continue;
+    const text = quotedText(item.entry);
+    if (text === '') continue;
+    let ancestor: Listed | undefined;
+    for (let p = item.entry.node.parent; p >= 0; p = snapshot.nodes[p]?.parent ?? -1) {
+      const candidate = byNode.get(p);
+      if (candidate && !dropped.has(candidate)) {
+        ancestor = candidate;
+        break;
+      }
+    }
+    if (!ancestor || ancestor.frame === null) continue;
+    if (!sameRect(item.frame, ancestor.frame) || quotedText(ancestor.entry) !== text) continue;
+    const itemActs = item.entry.info.actions.length > 0;
+    const ancestorActs = ancestor.entry.info.actions.length > 0;
+    dropped.add(itemActs && !ancestorActs ? ancestor : item);
+  }
+  return dropped.size === 0 ? listed : listed.filter((item) => !dropped.has(item));
+}
+
+/**
+ * `tree`: the screen as elements. A look (no `changes`) starts the refs at e1 again. With
+ * `changes: true`, which the host asks for in an action's answer, elements still on screen keep
+ * their refs and new ones count on from the highest ref handed out since the last look, so an old
+ * ref never lands on another element; it also reports what changed since the previous call. A new
+ * host session has no previous call (`forgetLastTree`), so its first list starts over like a look.
  */
 export async function tree(params: unknown = {}): Promise<TreeResult> {
   const all = isRecord(params) && params.all === true;
@@ -1092,13 +1305,18 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   if (!wantChanges) resetRefs();
   const elements: TaplineElement[] = [];
   const byKey = new Map<object, TaplineElement>();
+  let listed: Listed[] = [];
   candidates.forEach((entry, i) => {
     const frame = entry.tab ? null : (frames[i] ?? null);
     if (!all && frame !== null && !isOnScreen(frame, snapshot.screen)) return;
+    listed.push({ entry, frame });
+  });
+  if (!all) listed = foldDuplicates(snapshot, listed);
+  for (const { entry, frame } of listed) {
     const element = toElement(entry, frame);
     elements.push(element);
     byKey.set(stableKey(entry), element);
-  });
+  }
   const result: TreeResult = { screen: snapshot.screen, elements };
   const current = currentRoute(snapshot.routes);
   if (current) {

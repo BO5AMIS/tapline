@@ -1,4 +1,4 @@
-import { back, getLogs, longPress, onActed, openURL, press, reload, screenshot, scroll, settle, toggle, typeText } from './actions';
+import { back, getLogs, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
@@ -35,7 +35,7 @@ export const methods: Record<string, MethodFn> = {
   commands: async () => ({ commands: listCommands() }),
   command: action(async (params) => {
     const ran = await runCommand(params);
-    return { ...ran, settledMs: await settle() };
+    return { ...ran, ...(await settleOutcome()) };
   }),
   waitFor: (params) => waitFor(params),
   logs: (params) => getLogs(params),

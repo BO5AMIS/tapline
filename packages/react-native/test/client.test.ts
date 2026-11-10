@@ -5,6 +5,7 @@ import {
   REQUEST_TIMEOUT_MS,
   TaplineClient,
   backoffDelay,
+  connectTimeoutMs,
   collectDeviceInfo,
   normalizeUrl,
   type ClientDeps,
@@ -491,14 +492,43 @@ describe('events', () => {
 });
 
 describe('reconnect', () => {
-  test('backoff is 1, 2, 4 ... capped at 30 seconds', () => {
-    expect([0, 1, 2, 3, 4, 5, 6, 10].map(backoffDelay)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+  test('a new try comes one second after each failed one, so a host that starts is found quickly (S4, S5)', () => {
+    expect([0, 1, 2, 3, 10, 50].map(backoffDelay)).toEqual([1000, 1000, 1000, 1000, 1000, 1000]);
+  });
+
+  test('a try that never opens is dropped after 2 s and a fresh one follows a second later', () => {
+    const harness = makeClient();
+    harness.client.start();
+    const first = last();
+    jest.advanceTimersByTime(1999);
+    expect(first.closed).toBe(false);
+    expect(MockSocket.instances).toHaveLength(1);
+    jest.advanceTimersByTime(1); // the try hung for 2 s
+    expect(first.closed).toBe(true);
+    jest.advanceTimersByTime(backoffDelay(0));
+    expect(MockSocket.instances).toHaveLength(2);
+    first.open(); // a late answer on the dropped socket changes nothing
+    expect(first.sent).toHaveLength(0);
+    harness.client.stop();
+  });
+
+  test('a try that opened in time is not dropped', () => {
+    const harness = makeClient();
+    const socket = connect(harness);
+    jest.advanceTimersByTime(10_000);
+    expect(socket.closed).toBe(false);
+    expect(MockSocket.instances).toHaveLength(1);
+    harness.client.stop();
+  });
+
+  test('every fourth try may take 4 s to open, for slow links', () => {
+    expect([0, 1, 2, 3, 4, 7].map(connectTimeoutMs)).toEqual([2000, 2000, 2000, 4000, 2000, 4000]);
   });
 
   test('retries a refused connection with growing delays', () => {
     const harness = makeClient();
     harness.client.start();
-    const expected = [1000, 2000, 4000, 8000, 16000, 30000, 30000];
+    const expected = [1000, 1000, 1000, 1000, 1000];
     expected.forEach((delay, i) => {
       expect(MockSocket.instances).toHaveLength(i + 1);
       last().drop(1006);

@@ -4,6 +4,7 @@ import { Alert, AppRegistry, View } from 'react-native';
 import { act, type ReactTestInstance } from 'react-test-renderer';
 import {
   installAlertTracking,
+  nativeAlert,
   openAlerts,
   TaplineAlertHost,
   uninstallAlertTracking,
@@ -191,6 +192,12 @@ describe('tracking (standIn false)', () => {
     expect(at(openAlerts(), 0).kind).toBe('alert');
   });
 
+  it('records a prompt of type "default" (no text field) as an alert', () => {
+    installAlertTracking();
+    Alert.prompt('Kept', 'from before Tapline', [{ text: 'OK' }], 'default');
+    expect(at(openAlerts(), 0)).toMatchObject({ kind: 'alert', title: 'Kept' });
+  });
+
   it('calls the original unchanged when recording fails', () => {
     installAlertTracking();
     const hostile = {
@@ -259,6 +266,31 @@ describe('stand-in (standIn true)', () => {
     );
     expect(byTestID(renderer.root, 'app-content').length).toBeGreaterThan(0);
     expect(byTestID(renderer.root, 'tapline-alert').length).toBeGreaterThan(0);
+  });
+
+  it("nativeAlert stays a real alert on iOS, where Alert.alert goes through Alert.prompt", () => {
+    alertSpy.mockImplementation((title, message, buttons) => {
+      Alert.prompt(title, message, buttons, 'default');
+    });
+    installAlertTracking({ standIn: true });
+    nativeAlert('Connect for testing?', 'Only the person holding the phone answers this', [{ text: 'Connect' }]);
+    expect(openAlerts()).toHaveLength(0);
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    expect(at(promptSpy.mock.calls, 0)[0]).toBe('Connect for testing?');
+  });
+
+  it("an original Alert.alert kept from before Tapline reaches the stand-in as an alert, with no text field", async () => {
+    alertSpy.mockImplementation((title, message, buttons) => {
+      Alert.prompt(title, message, buttons, 'default');
+    });
+    const kept = Alert.alert;
+    installAlertTracking({ standIn: true });
+    const renderer = await mount(<TaplineAlertHost />);
+    await act(async () => {
+      kept('Lab alert', 'Choose one', [{ text: 'Cancel', style: 'cancel' }, { text: 'OK' }]);
+    });
+    expect(at(openAlerts(), 0)).toMatchObject({ kind: 'alert', title: 'Lab alert', standIn: true });
+    expect(byTestID(renderer.root, 'tapline-alert-input')).toHaveLength(0);
   });
 
   it('does not call the original and queues the alert', () => {

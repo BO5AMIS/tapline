@@ -203,7 +203,10 @@ function trackedPrompt(...args: Parameters<PromptFn>): void {
   let forwarded: Parameters<PromptFn> | null = null;
   try {
     const [title, message, callbackOrButtons, type, defaultValue, keyboardType, options] = args;
-    entry = record('prompt', title, message, callbackOrButtons, standInMode);
+    // A prompt of type "default" has no text field: iOS shows a plain alert (it's how iOS's own
+    // Alert.alert works, reached here when code kept the original Alert.alert from before Tapline).
+    const kind = type === 'default' && typeof callbackOrButtons !== 'function' ? 'alert' : 'prompt';
+    entry = record(kind, title, message, callbackOrButtons, standInMode);
     if (!standInMode) {
       const id = entry.info.id;
       const wrapped = wrapButtons(id, callbackOrButtons);
@@ -286,7 +289,9 @@ export function uninstallAlertTracking(): void {
  */
 export function nativeAlert(...args: Parameters<AlertFn>): void {
   const show = originalAlert ?? Alert.alert;
-  show.apply(Alert, args);
+  // iOS's Alert.alert calls Alert.prompt, which is ours while tracking: pass it through untouched,
+  // or the stand-in would draw this alert and an agent could answer it.
+  runOriginal((...forwarded: Parameters<AlertFn>) => show.apply(Alert, forwarded), args);
 }
 
 export function openAlerts(): OpenAlert[] {

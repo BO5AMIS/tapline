@@ -8,6 +8,8 @@ export function waitUntilStill(options: {
   capMs: number;
   onCommit: (listener: () => void) => () => void;
   now: () => number;
+  /** Called when the wait ended at the cap, with the screen still changing. */
+  onCap?: () => void;
 }): Promise<number> {
   const started = options.now();
   return new Promise((resolve) => {
@@ -22,7 +24,10 @@ export function waitUntilStill(options: {
       unsubscribe();
       resolve(Math.max(0, Math.min(options.capMs, options.now() - started)));
     };
-    const cap = setTimeout(finish, options.capMs);
+    const cap = setTimeout(() => {
+      if (!done) options.onCap?.();
+      finish();
+    }, options.capMs);
     const restart = (): void => {
       if (done) return;
       if (quiet !== undefined) clearTimeout(quiet);
@@ -40,7 +45,7 @@ export function waitUntilStill(options: {
  */
 export async function waitUntilSteady(
   measure: () => Promise<{ x: number; y: number } | null>,
-  options: { pollMs: number; capMs: number; now: () => number },
+  options: { pollMs: number; capMs: number; now: () => number; onCap?: () => void },
 ): Promise<number> {
   const started = options.now();
   const elapsed = (): number => Math.max(0, Math.min(options.capMs, options.now() - started));
@@ -49,7 +54,10 @@ export async function waitUntilSteady(
   if (previous === null) return 0;
   for (;;) {
     const left = options.capMs - (options.now() - started);
-    if (left <= 0) return elapsed();
+    if (left <= 0) {
+      options.onCap?.();
+      return elapsed();
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, Math.min(options.pollMs, left)));
     const next = await measure();
     if (next === null) return elapsed();
