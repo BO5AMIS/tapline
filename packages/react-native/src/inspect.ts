@@ -11,6 +11,7 @@ import {
 } from './fiber';
 import { openAlerts } from './alerts';
 import { keyboardState } from './keyboard';
+import { refreshCover } from './native';
 import { inFlight } from './network';
 import { commitRevision, getRoots } from './register';
 import {
@@ -1370,6 +1371,8 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   // so its refs keep their meaning and the baseline for changes stays where it is.
   const peek = isRecord(params) && params.peek === true;
   const wantChanges = !peek && isRecord(params) && params.changes === true && lastTree !== null;
+  // An action may have opened (or closed) an alert or the share sheet UIKit draws: read it again.
+  await refreshCover();
   const snapshot = takeSnapshot();
   const candidates = snapshot.entries.filter((entry) => all || entry.info.interesting);
   const frames = await Promise.all(candidates.map((entry) => measureFiber(entry.node.fiber)));

@@ -7,6 +7,7 @@ import { stopLiveFeed } from './live';
 import { forgetLastTree } from './inspect';
 import { originalLog, setLogSink } from './logs';
 import { methods as defaultMethods, type MethodFn } from './methods';
+import { refreshCover } from './native';
 import {
   PROTOCOL_VERSION,
   TaplineError,
@@ -447,6 +448,9 @@ export class TaplineClient {
           REQUEST_TIMEOUT_MS,
         );
       });
+      // What UIKit shows over the app (when the app has Tapline's native module), so this request's
+      // checks see an alert or the share sheet in front.
+      await refreshCover();
       const result = await Promise.race([method(message.params), timeout]);
       respond({ ok: true, result: result === undefined ? {} : result });
     } catch (error) {

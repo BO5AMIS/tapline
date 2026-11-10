@@ -1,5 +1,6 @@
 import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
 import { keyboardState } from './keyboard';
+import { nativeModule } from './native';
 import {
   closingModalHosts,
   currentInputValue,
@@ -1774,7 +1775,7 @@ function loadViewShot(): ViewShotModule | null {
 }
 
 export function screenshotAvailable(): boolean {
-  return loadViewShot() !== null;
+  return (Platform.OS === 'ios' && nativeModule() !== null) || loadViewShot() !== null;
 }
 
 export async function screenshot(
@@ -1784,15 +1785,27 @@ export async function screenshot(
   const format = params.format === 'png' ? 'png' : 'jpg';
   const quality = typeof params.quality === 'number' && params.quality > 0 && params.quality <= 1 ? params.quality : 0.7;
   const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth > 0 ? Math.round(params.maxWidth) : 600;
+  // `fresh: false` (the live viewer's frames) draws what is on screen without making iOS render a
+  // new frame; only Tapline's native module can do that.
+  const fresh = params.fresh !== false;
 
-  const viewShot = loadViewShot();
-  if (!viewShot) {
-    throw new TaplineError('unsupported', 'Screenshots need react-native-view-shot in the app (npx expo install react-native-view-shot).');
-  }
   const screen = getScreen();
   const nativeWidth = Math.round(screen.width * screen.scale);
   const width = Math.min(maxWidth, nativeWidth);
   const height = Math.round((width * screen.height) / screen.width);
+  const native = Platform.OS === 'ios' && format === 'jpg' ? nativeModule() : null;
+  if (native !== null) {
+    try {
+      const data = await native.capture(width, quality, fresh);
+      if (data !== '') return { mime: 'image/jpeg', data, width, height };
+    } catch {
+      // fall back to view-shot below
+    }
+  }
+  const viewShot = loadViewShot();
+  if (!viewShot) {
+    throw new TaplineError('unsupported', 'Screenshots need react-native-view-shot in the app (npx expo install react-native-view-shot).');
+  }
   // iOS renders view-shot's size at the screen scale (400 gives 1200 px on a 3x phone); Android takes pixels.
   const perUnit = Platform.OS === 'ios' && screen.scale > 0 ? screen.scale : 1;
   let data: string;

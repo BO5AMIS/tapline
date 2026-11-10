@@ -13,6 +13,7 @@ import {
   type AlertButton,
   type AlertOptions,
 } from 'react-native';
+import { currentCover } from './native';
 import { noteRealTouch } from './touches';
 
 export interface AlertButtonInfo {
@@ -306,8 +307,25 @@ export function nativeAlert(...args: Parameters<AlertFn>): void {
   runOriginal((...forwarded: Parameters<AlertFn>) => show.apply(Alert, forwarded), args);
 }
 
+/** The id of an alert that only the native module saw (an alert or the share sheet UIKit shows). */
+export const NATIVE_COVER_ID = -1;
+
 export function openAlerts(): OpenAlert[] {
-  return queue.map((entry) => ({ ...entry.info, buttons: entry.info.buttons.map((button) => ({ ...button })) }));
+  const tracked = queue.map((entry) => ({ ...entry.info, buttons: entry.info.buttons.map((button) => ({ ...button })) }));
+  const cover = currentCover();
+  if (cover === null) return tracked;
+  // An Alert.alert tracked here (without the stand-in) is the same alert UIKit shows: listed once.
+  if (cover.kind !== 'share' && tracked.some((alert) => !alert.standIn && alert.title === cover.title)) return tracked;
+  const native: OpenAlert = {
+    id: NATIVE_COVER_ID,
+    kind: 'alert',
+    title: cover.kind === 'share' ? 'Share sheet' : cover.title,
+    message: cover.message === '' ? null : cover.message,
+    buttons: cover.buttons.map((button) => ({ text: button.text, style: button.destructive ? 'destructive' : 'default' })),
+    at: 0,
+    standIn: false,
+  };
+  return [...tracked, native];
 }
 
 function answer(entry: Entry, index: number, text: string | undefined): void {

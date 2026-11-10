@@ -1,0 +1,7 @@
+{
+  "platforms": ["apple"],
+  "apple": {
+    "podspecPath": "TaplineNative.podspec",
+    "modules": ["TaplineNativeModule"]
+  }
+}

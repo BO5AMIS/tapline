@@ -36,7 +36,10 @@
     "register.d.ts",
     "metro.js",
     "metro.d.ts",
-    "README.md"
+    "README.md",
+    "ios",
+    "expo-module.config.json",
+    "TaplineNative.podspec"
   ],
   "sideEffects": [
     "./dist/register.js",

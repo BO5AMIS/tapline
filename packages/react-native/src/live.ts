@@ -1,6 +1,7 @@
 import { screenshot } from './actions';
 import { emitEvent } from './events';
 import { startFrameFeed, type FeedDeps, type FeedOptions, type FeedStats, type FrameFeed, type QualityPreset } from './feed';
+import { nativeModule } from './native';
 import { commitRevision, onCommit } from './register';
 import { TaplineError, isRecord } from './types';
 
@@ -35,13 +36,27 @@ const LIVE_PACE: FeedOptions = {
   // 30 ms is usual, since a frame arrives one capture time after its start.)
   backoffSoftMs: 220,
 };
+/**
+ * The pace with Tapline's native module, whose frames draw what is on screen without making iOS
+ * render a new one (`fresh: false`): about 15 frames a second (V2) while the screen changes. To be
+ * measured on the phone against V6 (a); the duty cycle and the backoff still guard the app.
+ */
+const NATIVE_PACE: FeedOptions = {
+  ...LIVE_PACE,
+  settleMs: 40,
+  minIntervalMs: 66,
+  burstIntervalMs: 66,
+  maxWaitMs: 66,
+  backoffSoftMs: 120,
+};
 /** Bounds of the `gapMs` override, which replaces the pace's gaps (for measuring). */
 const MIN_GAP_MS = 30;
 const MAX_GAP_MS = 2000;
 
 function paceFor(gapMs: number | undefined): FeedOptions {
-  if (gapMs === undefined) return LIVE_PACE;
-  return { ...LIVE_PACE, minIntervalMs: gapMs, burstIntervalMs: gapMs, maxWaitMs: gapMs };
+  const pace = nativeModule() !== null ? NATIVE_PACE : LIVE_PACE;
+  if (gapMs === undefined) return pace;
+  return { ...pace, minIntervalMs: gapMs, burstIntervalMs: gapMs, maxWaitMs: gapMs };
 }
 
 /** Replace parts of what the feed uses (tests). */
@@ -54,7 +69,8 @@ type Raf = (fn: (t: number) => void) => unknown;
 function deps(): FeedDeps {
   const g = globalThis as { requestAnimationFrame?: Raf; cancelAnimationFrame?: (handle: unknown) => void };
   const base: FeedDeps = {
-    capture: (params) => screenshot(params),
+    // A viewer's frame shows what is on screen; it must not make iOS render one (native module only).
+    capture: (params) => screenshot({ ...params, fresh: false }),
     send: (frame) => emitEvent('frame', frame),
     onCommit,
     commitRevision,
