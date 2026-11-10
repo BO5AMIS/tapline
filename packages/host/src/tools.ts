@@ -112,6 +112,7 @@ export const toolShapes = {
     target: targetField.optional().describe("Input to type into; default: the focused input, else the only input on screen (else ambiguous; none at all is not_found)"),
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
+    force: forceField,
     look: lookField,
     screenshot: screenshotField,
   },
@@ -1425,6 +1426,7 @@ export class TaplineTools {
       submit: args.submit ?? false,
     };
     if (args.target !== undefined) params["target"] = toWireTarget(args.target);
+    if (args.force === true) params["force"] = true;
     return this.act(
       "type",
       params,

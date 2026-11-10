@@ -1095,8 +1095,19 @@ export async function typeText(
   // Deleting from the end edits what is there, so it never replaces the whole text.
   const replace = params.replace !== false && !deleting;
 
-  const { entry } = await resolveInput(null, params.target);
+  const { snapshot, entry } = await resolveInput(null, params.target);
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
+  // Typing is a tap that focuses the input, then keys: a person couldn't do it where they couldn't tap,
+  // so the checks are a tap's, with the same reasons and the same `force`. The input that already has
+  // focus is the exception: the keyboard is up for it and a person types without touching it.
+  if (params.force !== true) {
+    if (ownsInstance(entry, keyboard.focusedInput())) {
+      // An alert takes the keyboard away even from the focused input: a person answers it first.
+      assertNoBlockingAlert(entry);
+    } else {
+      await assertReachable(snapshot, entry, await measureFiber(entry.node.fiber));
+    }
+  }
   // Typing into the input that has focus leaves the keyboard alone; another input closes it first.
   const closedKeyboard = closeKeyboardFor(entry);
 

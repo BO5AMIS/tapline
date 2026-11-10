@@ -191,6 +191,16 @@ describe("press", () => {
     ]);
   });
 
+  it("passes force through to type_text only when set", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    await tools.typeText({ target: { ref: "e4" }, text: "Ann", force: true, look: false });
+    await tools.typeText({ target: { ref: "e4" }, text: "Ann", look: false });
+    expect(app.requests.map((r) => r.params)).toEqual([
+      { target: { ref: "e4" }, text: "Ann", replace: true, submit: false, force: true },
+      { target: { ref: "e4" }, text: "Ann", replace: true, submit: false },
+    ]);
+  });
+
   it("skips the look when look is false", async () => {
     const { app, tools } = await setup(defaultHandler)();
     const result = await tools.tap({ target: { ref: "e3" }, look: false });
