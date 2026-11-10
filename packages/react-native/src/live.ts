@@ -47,6 +47,11 @@ const NATIVE_PACE: FeedOptions = {
   minIntervalMs: 66,
   burstIntervalMs: 66,
   maxWaitMs: 66,
+  // A native capture holds the main thread only while it draws (the JPEG is made off it), so its
+  // whole time may take a larger share. Measured with the first native build: captures of 42 ms on
+  // average with the JPEG on the main thread, 1 slow animation frame of 928 and none during a
+  // capture; at a third the feed couldn't go past 7.5 fps.
+  dutyCycle: 0.6,
   backoffSoftMs: 120,
 };
 /** Bounds of the `gapMs` override, which replaces the pace's gaps (for measuring). */

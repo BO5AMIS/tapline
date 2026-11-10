@@ -35,8 +35,13 @@ public final class TaplineNativeModule: Module {
 
     /// Base64 JPEG of the key window at `pixelWidth` pixels wide (the height keeps the window's
     /// shape), or an empty string when there is no window to draw.
-    AsyncFunction("capture") { (pixelWidth: Double, quality: Double, fresh: Bool) -> String in
-      guard let window = TaplineWindows.keyWindow(), window.bounds.width > 0, pixelWidth > 0 else { return "" }
+    /// Only the drawing holds the main thread; the JPEG is made on a background queue, so the app's
+    /// own frames wait for the draw alone.
+    AsyncFunction("capture") { (pixelWidth: Double, quality: Double, fresh: Bool, promise: Promise) in
+      guard let window = TaplineWindows.keyWindow(), window.bounds.width > 0, pixelWidth > 0 else {
+        promise.resolve("")
+        return
+      }
       let bounds = window.bounds
       let size = CGSize(width: pixelWidth.rounded(), height: (pixelWidth * bounds.height / bounds.width).rounded())
       let format = UIGraphicsImageRendererFormat()
@@ -46,7 +51,9 @@ public final class TaplineNativeModule: Module {
         window.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: fresh)
       }
       let clamped = CGFloat(min(max(quality, 0.1), 1))
-      return image.jpegData(compressionQuality: clamped)?.base64EncodedString() ?? ""
+      DispatchQueue.global(qos: .userInitiated).async {
+        promise.resolve(image.jpegData(compressionQuality: clamped)?.base64EncodedString() ?? "")
+      }
     }.runOnQueue(.main)
 
     /// What UIKit shows in front of the app: `kind` is "alert", "actionSheet", "share" or "" (nothing).
