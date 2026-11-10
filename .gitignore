@@ -5,3 +5,5 @@ coverage/
 .DS_Store
 .tapline/
 HANDOFF.md
+bench/results/
+docs/superpowers/
