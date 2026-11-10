@@ -1179,8 +1179,11 @@ describe("apps and open_app", () => {
     const ambiguous = tools.openApp({ app: "demo" });
     expect(ambiguous.isError).toBe(true);
     const lines = textOf(ambiguous).split("\n");
-    expect(lines[0]).toBe('Error ambiguous: 2 connected apps match "demo". Pick one by its session id:');
-    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe('Error ambiguous: 2 connected apps match "demo".');
+    expect(lines[1]).toBe("Candidates:");
+    expect(lines[2]?.startsWith("  ")).toBe(true);
+    expect(lines.at(-1)).toBe("Retry with open_app and one of these session ids.");
+    expect(lines).toHaveLength(5);
     for (const id of ids) expect(lines.some((l) => l.includes(id) && l.includes("Demo") && l.includes("[com.example.demo]"))).toBe(true);
     expect(textOf(ambiguous)).toContain("Second iPhone");
     expect(textOf(tools.openApp({ app: ids[0] ?? "" }))).toMatch(/^Driving Demo/);

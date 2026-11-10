@@ -123,6 +123,67 @@ describe("viewerStatusFor", () => {
   });
 });
 
+describe("viewerStatusFor: not-answering (v1.4)", () => {
+  it("is not-answering, with the app's name, while a connected app doesn't answer", () => {
+    expect(viewerStatusFor({ app: { name: "Demo" } }, { notAnswering: true })).toEqual({ state: "not-answering", detail: "Demo" });
+    expect(viewerStatusFor({ app: { name: "Demo" } }, { notAnswering: false })).toEqual({ state: "live", detail: undefined });
+  });
+
+  it("is not-answering after the host dropped the app for silence, until one connects; other drops stay no-device", () => {
+    const silent = { session: { app: { name: "Demo" } }, silentForMs: 46_000 };
+    expect(viewerStatusFor(undefined, { lastDrop: silent })).toEqual({ state: "not-answering", detail: "Demo" });
+    expect(viewerStatusFor(undefined, { lastDrop: { session: { app: { name: "Demo" } } } }).state).toBe("no-device");
+    expect(viewerStatusFor({ app: { name: "Demo" } }, { lastDrop: silent })).toEqual({ state: "live", detail: undefined });
+  });
+
+  it("an app in the background is locked, not not-answering", () => {
+    expect(viewerStatusFor({ app: { name: "Demo" }, appState: { state: "background", at: 1 } }, { notAnswering: true }).state).toBe("locked");
+  });
+
+  it("the hub passes the state and the app's name on to the viewers", async () => {
+    const { hub, port } = await startHub();
+    const { messages } = await openWs(port);
+    await until(() => messages.some((m) => m["type"] === "status"));
+    hub.setStatus({ state: "not-answering", detail: "Demo" });
+    await until(() => messages.some((m) => m["type"] === "status" && m["state"] === "not-answering"));
+    expect(messages.filter((m) => m["state"] === "not-answering").at(-1)).toMatchObject({ detail: "Demo" });
+    hub.setStatus({ state: "live", detail: undefined });
+    await until(() => messages.at(-1)?.["state"] === "live");
+    expect(messages.at(-1)).not.toHaveProperty("detail");
+  });
+});
+
+describe("the page at / (v1.4)", () => {
+  it("answers at / exactly as at /viewer: token in the URL sets the cookie, the cookie works, no token is 401", async () => {
+    const { port } = await startHub();
+    expect((await get(port, "/")).status).toBe(401);
+    const first = await get(port, `/?token=${TOKEN}`, { "sec-fetch-site": "cross-site" });
+    expect(first.status).toBe(200);
+    expect(first.body).toContain("<title>viewer</title>");
+    expect(first.headers["location"]).toBeUndefined();
+    expect(first.headers["referrer-policy"]).toBe("no-referrer");
+    expect(first.headers["cache-control"]).toBe("no-store");
+    const cookie = String(first.headers["set-cookie"]);
+    expect(cookie).toContain(`tapline_viewer=${TOKEN}`);
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Strict");
+    expect((await get(port, "/", { cookie: `tapline_viewer=${TOKEN}`, "sec-fetch-site": "same-origin" })).status).toBe(200);
+    expect((await get(port, "/", { cookie: `tapline_viewer=${TOKEN}`, "sec-fetch-site": "none" })).status).toBe(200);
+    expect((await get(port, "/", { authorization: `Bearer ${TOKEN}` })).status).toBe(200);
+    expect((await get(port, "/?token=wrong")).status).toBe(401);
+    // Same refusals as /viewer: a cookie from another site, a foreign Host header.
+    expect((await get(port, "/", { cookie: `tapline_viewer=${TOKEN}`, "sec-fetch-site": "same-site" })).status).toBe(403);
+    expect((await get(port, `/?token=${TOKEN}`, { host: "evil.example:80" })).status).toBe(403);
+  });
+
+  it("serves the same page as /viewer", async () => {
+    const { port } = await startHub();
+    const a = await get(port, `/viewer?token=${TOKEN}`);
+    const b = await get(port, `/?token=${TOKEN}`);
+    expect(b.body).toBe(a.body);
+  });
+});
+
 describe("viewer access", () => {
   it("needs the token: the first load serves the page and sets a cookie (no redirect, which loses the cookie after a click on another site)", async () => {
     const { port } = await startHub();
@@ -196,6 +257,87 @@ describe("the stream", () => {
     expect(text).toContain("X-Tree-Rev: 7");
     req.destroy();
     await until(() => feed.some(([on]) => !on), 1000);
+  });
+
+  describe("part framing", () => {
+    const CLOSE = "\r\n--frame\r\n";
+
+    function openRaw(port: number): { chunks: Buffer[]; all: () => Buffer; close: () => void } {
+      const chunks: Buffer[] = [];
+      const req = request({ host: "127.0.0.1", port, path: "/stream", headers: { authorization: `Bearer ${TOKEN}` } }, (res) => {
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      });
+      req.on("error", () => undefined);
+      req.end();
+      return { chunks, all: () => Buffer.concat(chunks), close: () => req.destroy() };
+    }
+
+    function bigFrame(seq: number, fill: number): typeof FRAME {
+      return { ...FRAME, seq, data: Buffer.alloc(40_000, fill).toString("base64") };
+    }
+
+    // Parses by Content-Length, as a strict client would. Returns the complete parts and what is left.
+    function parseByLength(buf: Buffer): { parts: Array<{ headers: string; body: Buffer }>; rest: Buffer } {
+      const parts: Array<{ headers: string; body: Buffer }> = [];
+      let rest = buf.toString("latin1").startsWith("--frame\r\n") ? buf.subarray("--frame\r\n".length) : buf;
+      for (;;) {
+        const end = rest.indexOf("\r\n\r\n");
+        if (end < 0) break;
+        const headers = rest.subarray(0, end).toString("latin1");
+        const length = Number(/Content-Length: (\d+)/.exec(headers)?.[1]);
+        const bodyStart = end + 4;
+        const closeEnd = bodyStart + length + CLOSE.length;
+        if (rest.length < closeEnd) break;
+        expect(rest.subarray(bodyStart + length, closeEnd).toString("latin1")).toBe(CLOSE);
+        parts.push({ headers, body: rest.subarray(bodyStart, bodyStart + length) });
+        rest = rest.subarray(closeEnd);
+      }
+      return { parts, rest };
+    }
+
+    it("completes a frame larger than the write buffer at once, without a later frame", async () => {
+      const { hub, port, feed } = await startHub();
+      const raw = openRaw(port);
+      await until(() => feed.length > 0);
+      hub.pushFrame(bigFrame(1, 0x41));
+      await until(() => raw.all().toString("latin1").endsWith(CLOSE));
+      const parsed = parseByLength(raw.all());
+      expect(parsed.parts).toHaveLength(1);
+      expect(parsed.parts[0]?.body.length).toBe(40_000);
+      expect(parsed.rest.length).toBe(0);
+      raw.close();
+    });
+
+    it("opens the first part with --frame and does not repeat it; both parse by length and by boundary", async () => {
+      const { hub, port, feed } = await startHub();
+      const raw = openRaw(port);
+      await until(() => feed.length > 0);
+      hub.pushFrame(bigFrame(1, 0x41));
+      await until(() => raw.all().toString("latin1").endsWith(CLOSE));
+      hub.pushFrame(bigFrame(2, 0x42));
+      await until(() => raw.all().toString("latin1").includes("X-Seq: 2") && raw.all().toString("latin1").endsWith(CLOSE));
+      const all = raw.all();
+      expect(all.toString("latin1").startsWith("--frame\r\nContent-Type: image/jpeg\r\n")).toBe(true);
+      expect(all.toString("latin1").split("--frame\r\n").length - 1).toBe(3); // the opening one, then one closing each part
+      // by length
+      const parsed = parseByLength(all);
+      expect(parsed.parts.map((p) => /X-Seq: (\d+)/.exec(p.headers)?.[1])).toEqual(["1", "2"]);
+      expect(parsed.parts[0]?.body.every((b) => b === 0x41)).toBe(true);
+      expect(parsed.parts[1]?.body.every((b) => b === 0x42)).toBe(true);
+      expect(parsed.rest.length).toBe(0);
+      // by boundary, as a browser splits: everything between boundaries is a part
+      const pieces = all.toString("latin1").split(CLOSE);
+      expect(pieces).toHaveLength(3);
+      expect(pieces[2]).toBe("");
+      const first = pieces[0]?.replace(/^--frame\r\n/, "") ?? "";
+      const second = pieces[1] ?? "";
+      for (const [piece, fill] of [[first, "A"], [second, "B"]] as const) {
+        const split = piece.indexOf("\r\n\r\n");
+        expect(piece.slice(0, split)).toContain("Content-Type: image/jpeg");
+        expect(piece.slice(split + 4)).toBe(fill.repeat(40_000));
+      }
+      raw.close();
+    });
   });
 
   it("answers at once, before the first frame, so a viewer knows it is waiting rather than stuck", async () => {

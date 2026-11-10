@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { VIEWER_HTML } from "../src/viewer-page.js";
 
 interface Part {
@@ -154,11 +154,503 @@ describe("viewer page document", () => {
     expect(scriptBody()).toContain('history.replaceState(null, "", location.pathname)');
   });
 
-  it("talks to /stream and /ws and sets a viewport for phones", () => {
+  it("talks to /stream, /ws and /video and sets a viewport for phones", () => {
     const script = scriptBody();
     expect(script).toContain("/stream");
     expect(script).toContain("/ws");
+    expect(script).toContain("/video");
     expect(VIEWER_HTML).toContain("viewport");
+  });
+
+  it("words the not-answering state as App not answering", () => {
+    const script = scriptBody();
+    expect(script).toContain("not-answering");
+    expect(script).toContain("App not answering");
+  });
+});
+
+const START = "/* video-block:start */";
+const END = "/* video-block:end */";
+
+function videoBlock(): string {
+  const script = scriptBody();
+  const start = script.indexOf(START);
+  const end = script.indexOf(END);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return script.slice(start, end + END.length);
+}
+
+describe("viewer page video block", () => {
+  it("has each marker exactly once, in order", () => {
+    const script = scriptBody();
+    expect(script.split(START)).toHaveLength(2);
+    expect(script.split(END)).toHaveLength(2);
+    expect(script.indexOf(START)).toBeLessThan(script.indexOf(END));
+  });
+
+  it("holds no backtick, no dollar-brace and no double slash", () => {
+    const block = videoBlock();
+    expect(block).not.toContain("`");
+    expect(block).not.toContain("${");
+    expect(block).not.toContain("//");
+  });
+
+  it("is valid JavaScript on its own and defines only createVideoBlock", () => {
+    const factory = new Function(`${videoBlock()}\nreturn typeof createVideoBlock;`) as () => string;
+    expect(factory()).toBe("function");
+  });
+});
+
+interface VideoIo {
+  socketUrl(): string;
+  accepts(): boolean;
+  picture(): FakeElement;
+  onVideoConfig?(c: { width: number; height: number; coverage: string; source: string }): void;
+  onVideoStarted(): void;
+  onVideoStopped(why: string): void;
+}
+
+interface VideoApi {
+  update(): void;
+  stop(): void;
+  stats(): {
+    configs: number;
+    pictures: number;
+    frames: number;
+    ignored: number;
+    skipped: number;
+    errors: number;
+    keyRequests: number;
+    fallbacks: number;
+    hardware: string;
+    lastReason: string;
+    active: boolean;
+  };
+}
+
+interface FakeElement {
+  className: string;
+  style: { display: string };
+  parentNode: { insertBefore(el: FakeElement, ref: FakeElement | null): void } | null;
+  nextSibling: FakeElement | null;
+  width: number;
+  height: number;
+  setAttribute(name: string, value: string): void;
+  getContext(kind: string, opts: object): { drawImage(frame: object, x: number, y: number): void };
+}
+
+class FakeSocket {
+  static all: FakeSocket[] = [];
+  readyState = 0;
+  binaryType = "";
+  sent: string[] = [];
+  closed = false;
+  onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(readonly url: string) {
+    FakeSocket.all.push(this);
+    this.readyState = 1;
+  }
+  send(text: string): void {
+    this.sent.push(text);
+  }
+  close(): void {
+    this.closed = true;
+    this.readyState = 3;
+  }
+  message(data: string | ArrayBuffer): void {
+    this.onmessage?.({ data });
+  }
+  drop(): void {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+}
+
+interface FakeChunk {
+  type: string;
+  timestamp: number;
+  data: Uint8Array;
+}
+
+class FakeDecoder {
+  static all: FakeDecoder[] = [];
+  static supportedHardware = true;
+  static supportedAny = true;
+  static asked: string[] = [];
+  state = "unconfigured";
+  decodeQueueSize = 0;
+  chunks: FakeChunk[] = [];
+  configured: Record<string, unknown>[] = [];
+  closedCount = 0;
+  constructor(readonly init: { output(frame: object): void; error(err: Error): void }) {
+    FakeDecoder.all.push(this);
+  }
+  static isConfigSupported(c: { hardwareAcceleration: string }): Promise<{ supported: boolean }> {
+    FakeDecoder.asked.push(c.hardwareAcceleration);
+    const ok = c.hardwareAcceleration === "prefer-hardware" ? FakeDecoder.supportedHardware : FakeDecoder.supportedAny;
+    return Promise.resolve({ supported: ok });
+  }
+  configure(c: Record<string, unknown>): void {
+    this.configured.push(c);
+    this.state = "configured";
+  }
+  decode(chunk: FakeChunk): void {
+    this.chunks.push(chunk);
+  }
+  reset(): void {
+    this.state = "unconfigured";
+  }
+  close(): void {
+    this.state = "closed";
+    this.closedCount++;
+  }
+}
+
+class FakeChunkClass {
+  type: string;
+  timestamp: number;
+  data: Uint8Array;
+  constructor(init: FakeChunk) {
+    this.type = init.type;
+    this.timestamp = init.timestamp;
+    this.data = init.data;
+  }
+}
+
+interface Rig {
+  api: VideoApi;
+  state: { accepts: boolean };
+  events: string[];
+  pic: FakeElement;
+  canvases: FakeElement[];
+  drawn: object[];
+  configs: { width: number; height: number; coverage: string; source: string }[];
+}
+
+function makeRig(): Rig {
+  FakeSocket.all = [];
+  FakeDecoder.all = [];
+  FakeDecoder.asked = [];
+  FakeDecoder.supportedHardware = true;
+  FakeDecoder.supportedAny = true;
+  const canvases: FakeElement[] = [];
+  const drawn: object[] = [];
+  const children: FakeElement[] = [];
+  const parent = {
+    insertBefore(el: FakeElement): void {
+      children.push(el);
+    },
+  };
+  const makeEl = (): FakeElement => ({
+    className: "",
+    style: { display: "" },
+    parentNode: null,
+    nextSibling: null,
+    width: 300,
+    height: 150,
+    setAttribute(): void {},
+    getContext() {
+      return { drawImage: (frame: object): void => void drawn.push(frame) };
+    },
+  });
+  const pic = makeEl();
+  pic.className = "pic";
+  pic.parentNode = parent;
+  const doc = {
+    createElement(): FakeElement {
+      const el = makeEl();
+      canvases.push(el);
+      return el;
+    },
+  };
+  const win = { VideoDecoder: FakeDecoder, EncodedVideoChunk: FakeChunkClass };
+  const factory = new Function(
+    "window",
+    "document",
+    "WebSocket",
+    "atob",
+    `${videoBlock()}\nreturn createVideoBlock;`,
+  ) as (w: object, d: object, s: object, a: (s: string) => string) => (io: VideoIo) => VideoApi;
+  const state = { accepts: true };
+  const events: string[] = [];
+  const configs: Rig["configs"] = [];
+  const api = factory(win, doc, FakeSocket, (s) => Buffer.from(s, "base64").toString("binary"))({
+    socketUrl: () => "ws://host/video",
+    accepts: () => state.accepts,
+    picture: () => pic,
+    onVideoConfig: (c) => void configs.push(c),
+    onVideoStarted: () => void events.push("started"),
+    onVideoStopped: (why) => void events.push(`stopped:${why}`),
+  });
+  return { api, state, events, pic, canvases, drawn, configs };
+}
+
+const CONFIG = JSON.stringify({
+  type: "config",
+  codec: "avc1.64001f",
+  width: 660,
+  height: 1434,
+  description: Buffer.from([1, 100, 0, 31, 255]).toString("base64"),
+  at: 1731222000000,
+  coverage: "screen",
+  source: "airplay",
+});
+
+function picture(key: boolean, ms: number): ArrayBuffer {
+  const bytes = new Uint8Array(12);
+  bytes[0] = key ? 1 : 0;
+  new DataView(bytes.buffer).setUint32(4, ms, false);
+  bytes.set([0, 0, 0, 4], 8);
+  return bytes.buffer;
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+async function openWithConfig(rig: Rig): Promise<FakeSocket> {
+  rig.api.update();
+  const s = FakeSocket.all[0]!;
+  s.message(CONFIG);
+  await settle();
+  return s;
+}
+
+describe("viewer page video block behaviour", () => {
+  it("opens /video only while accepts has video and VideoDecoder exists", () => {
+    const rig = makeRig();
+    rig.state.accepts = false;
+    rig.api.update();
+    expect(FakeSocket.all).toHaveLength(0);
+    rig.state.accepts = true;
+    rig.api.update();
+    rig.api.update();
+    expect(FakeSocket.all).toHaveLength(1);
+    expect(FakeSocket.all[0]!.url).toBe("ws://host/video");
+    expect(FakeSocket.all[0]!.binaryType).toBe("arraybuffer");
+  });
+
+  it("does nothing when the browser has no VideoDecoder", () => {
+    const rig = makeRig();
+    const factory = new Function(
+      "window",
+      "document",
+      "WebSocket",
+      `${videoBlock()}\nreturn createVideoBlock;`,
+    ) as (w: object, d: object, s: object) => (io: VideoIo) => VideoApi;
+    const api = factory({}, {}, FakeSocket)({
+      socketUrl: () => "ws://host/video",
+      accepts: () => true,
+      picture: () => rig.pic,
+      onVideoStarted: () => undefined,
+      onVideoStopped: () => undefined,
+    });
+    FakeSocket.all = [];
+    api.update();
+    expect(FakeSocket.all).toHaveLength(0);
+  });
+
+  it("configures the decoder, ignores deltas until a key frame, then shows the canvas", async () => {
+    const rig = makeRig();
+    const s = await openWithConfig(rig);
+    const d = FakeDecoder.all[0]!;
+    expect(d.configured[0]).toMatchObject({
+      codec: "avc1.64001f",
+      codedWidth: 660,
+      codedHeight: 1434,
+      optimizeForLatency: true,
+      hardwareAcceleration: "prefer-hardware",
+    });
+    expect(Array.from(d.configured[0]!["description"] as Uint8Array)).toEqual([1, 100, 0, 31, 255]);
+    expect(rig.canvases).toHaveLength(1);
+    expect(rig.canvases[0]!.className).toBe("pic");
+    expect(rig.canvases[0]!.width).toBe(660);
+    expect(rig.canvases[0]!.height).toBe(1434);
+    expect(rig.configs).toEqual([{ width: 660, height: 1434, coverage: "screen", source: "airplay" }]);
+    s.message(picture(false, 5));
+    expect(d.chunks).toHaveLength(0);
+    s.message(picture(true, 40));
+    s.message(picture(false, 73));
+    expect(d.chunks.map((c) => [c.type, c.timestamp])).toEqual([
+      ["key", 40000],
+      ["delta", 73000],
+    ]);
+    expect(rig.events).toEqual([]);
+    d.init.output({ close: (): void => void rig.events.push("closed") });
+    expect(rig.events).toEqual(["started", "closed"]);
+    expect(rig.drawn).toHaveLength(1);
+    expect(rig.pic.style.display).toBe("none");
+    expect(rig.canvases[0]!.style.display).toBe("");
+    expect(rig.api.stats()).toMatchObject({ frames: 1, pictures: 2, ignored: 1, active: true });
+  });
+
+  it("buffers pictures that arrive while the config is being checked", async () => {
+    const rig = makeRig();
+    rig.api.update();
+    const s = FakeSocket.all[0]!;
+    s.message(CONFIG);
+    s.message(picture(true, 0));
+    s.message(picture(false, 33));
+    await settle();
+    expect(FakeDecoder.all[0]!.chunks).toHaveLength(2);
+  });
+
+  it("retries without hardware preference when prefer-hardware is not supported", async () => {
+    const rig = makeRig();
+    FakeDecoder.supportedHardware = false;
+    await openWithConfig(rig);
+    expect(FakeDecoder.asked).toEqual(["prefer-hardware", "no-preference"]);
+    expect(FakeDecoder.all[0]!.configured[0]).toMatchObject({ hardwareAcceleration: "no-preference" });
+    expect(rig.api.stats().hardware).toBe("no-preference");
+  });
+
+  it("falls back to JPEG, and never retries, when the config is unsupported", async () => {
+    vi.useFakeTimers();
+    try {
+      const rig = makeRig();
+      FakeDecoder.supportedHardware = false;
+      FakeDecoder.supportedAny = false;
+      const s = await openWithConfig(rig);
+      expect(s.closed).toBe(true);
+      expect(rig.api.stats().lastReason).toBe("unsupported");
+      vi.advanceTimersByTime(20000);
+      rig.api.update();
+      expect(FakeSocket.all).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips deltas when the decode queue grows, asks for a key frame once, and resumes at a key frame", async () => {
+    const rig = makeRig();
+    const s = await openWithConfig(rig);
+    const d = FakeDecoder.all[0]!;
+    s.message(picture(true, 0));
+    d.decodeQueueSize = 4;
+    s.message(picture(false, 33));
+    s.message(picture(false, 66));
+    expect(d.chunks).toHaveLength(1);
+    expect(s.sent).toEqual(['{"type":"key"}']);
+    d.decodeQueueSize = 0;
+    s.message(picture(false, 99));
+    expect(d.chunks).toHaveLength(1);
+    s.message(picture(true, 120));
+    s.message(picture(false, 150));
+    expect(d.chunks.map((c) => c.type)).toEqual(["key", "key", "delta"]);
+    expect(rig.api.stats().skipped).toBe(1);
+  });
+
+  it("after one decoder error asks for a key frame and waits for it", async () => {
+    const rig = makeRig();
+    const s = await openWithConfig(rig);
+    const d = FakeDecoder.all[0]!;
+    s.message(picture(true, 0));
+    d.init.error(new Error("bad data"));
+    expect(d.state).toBe("configured");
+    expect(s.sent).toEqual(['{"type":"key"}']);
+    s.message(picture(false, 33));
+    expect(d.chunks).toHaveLength(1);
+    s.message(picture(true, 66));
+    expect(d.chunks).toHaveLength(2);
+    expect(rig.api.stats().errors).toBe(1);
+  });
+
+  it("stops after 3 decoder errors within 10 s, restores the picture and retries after 5 s", async () => {
+    vi.useFakeTimers();
+    try {
+      const rig = makeRig();
+      const s = await openWithConfig(rig);
+      const d = FakeDecoder.all[0]!;
+      d.init.output({ close(): void {} });
+      expect(rig.events).toEqual(["started"]);
+      d.init.error(new Error("1"));
+      d.init.error(new Error("2"));
+      expect(rig.events).toEqual(["started"]);
+      d.init.error(new Error("3"));
+      expect(rig.events).toEqual(["started", "stopped:decoder errors"]);
+      expect(s.closed).toBe(true);
+      expect(rig.pic.style.display).toBe("");
+      expect(rig.canvases[0]!.style.display).toBe("none");
+      vi.advanceTimersByTime(4999);
+      expect(FakeSocket.all).toHaveLength(1);
+      vi.advanceTimersByTime(2);
+      expect(FakeSocket.all).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("errors spread over more than 10 s do not stop the video", async () => {
+    vi.useFakeTimers();
+    try {
+      const rig = makeRig();
+      await openWithConfig(rig);
+      const d = FakeDecoder.all[0]!;
+      d.init.error(new Error("1"));
+      vi.advanceTimersByTime(6000);
+      d.init.error(new Error("2"));
+      vi.advanceTimersByTime(6000);
+      d.init.error(new Error("3"));
+      expect(rig.api.stats().fallbacks).toBe(0);
+      expect(FakeDecoder.all[0]!.state).toBe("configured");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("goes back to JPEG when the socket closes and retries only while accepts has video", async () => {
+    vi.useFakeTimers();
+    try {
+      const rig = makeRig();
+      const s = await openWithConfig(rig);
+      FakeDecoder.all[0]!.init.output({ close(): void {} });
+      s.drop();
+      expect(rig.events).toEqual(["started", "stopped:closed"]);
+      rig.state.accepts = false;
+      vi.advanceTimersByTime(6000);
+      expect(FakeSocket.all).toHaveLength(1);
+
+      const rig2 = makeRig();
+      const s2 = await openWithConfig(rig2);
+      s2.drop();
+      vi.advanceTimersByTime(5001);
+      expect(FakeSocket.all).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops when accepts loses video", async () => {
+    const rig = makeRig();
+    const s = await openWithConfig(rig);
+    FakeDecoder.all[0]!.init.output({ close(): void {} });
+    rig.state.accepts = false;
+    rig.api.update();
+    expect(s.closed).toBe(true);
+    expect(rig.events).toEqual(["started", "stopped:not offered"]);
+    expect(rig.pic.style.display).toBe("");
+  });
+
+  it("reconfigures on a new config and drops frames from the old decoder", async () => {
+    const rig = makeRig();
+    const s = await openWithConfig(rig);
+    const first = FakeDecoder.all[0]!;
+    s.message(picture(true, 0));
+    s.message(CONFIG.replace("660", "720"));
+    await settle();
+    expect(first.state).toBe("closed");
+    expect(FakeDecoder.all).toHaveLength(2);
+    expect(rig.canvases).toHaveLength(1);
+    expect(rig.canvases[0]!.width).toBe(720);
+    let closed = 0;
+    first.init.output({ close: (): void => void closed++ });
+    expect(closed).toBe(1);
+    expect(rig.drawn).toHaveLength(0);
+    s.message(picture(false, 33));
+    expect(FakeDecoder.all[1]!.chunks).toHaveLength(0);
   });
 });
 

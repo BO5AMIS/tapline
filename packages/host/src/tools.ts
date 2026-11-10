@@ -61,7 +61,7 @@ const lookField = z
   .boolean()
   .optional()
   .describe(
-    "Set false to skip the element list normally returned after the action (only the changes once you've had a full list; no screenshot, call look for one)",
+    "Set false to answer only the first line, with no change list. Call look when you need the screen.",
   );
 
 const screenshotField = z.boolean().optional().describe("Add a screenshot to the answer (default false)");
@@ -70,7 +70,7 @@ const forceField = z
   .boolean()
   .optional()
   .describe(
-    "Act even when a real touch couldn't: the element is off screen or something covers it. Default false; prefer scrolling or dismissing what covers it, since a person would have to.",
+    "Skip the off-screen, covered, under-the-tab-bar and behind-an-alert checks (never disabled). Default false; prefer scrolling or dismissing what covers it, since a person would have to.",
   );
 
 export const toolShapes = {
@@ -80,18 +80,18 @@ export const toolShapes = {
     scheme: z.string().describe('The app\'s URL scheme ("scheme" in app.json or app.config), e.g. "myapp"'),
   },
   look: {
-    screenshot: z.boolean().optional().describe("Include a screenshot (default true)"),
+    screenshot: z.boolean().optional().describe("Include a screenshot (default true); false skips it"),
     width: z
       .number()
       .int()
       .min(160)
       .max(1320)
       .optional()
-      .describe("Screenshot width in pixels (default 600). Smaller costs fewer image tokens: 300 is enough to check a layout."),
+      .describe("Screenshot width in pixels, 160 to 1320 (default 600). Smaller costs fewer image tokens: 300 is enough to check a layout."),
     labels: z
       .boolean()
       .optional()
-      .describe("Draw each tappable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
+      .describe("Draw each actionable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
   },
   check_layout: {},
   tap: { target: targetField, force: forceField, look: lookField, screenshot: screenshotField },
@@ -109,7 +109,7 @@ export const toolShapes = {
   },
   type_text: {
     text: z.string().describe("Text to enter"),
-    target: targetField.optional().describe("Input to type into; default: the focused input, else the only input on screen"),
+    target: targetField.optional().describe("Input to type into; default: the focused input, else the only input on screen (else ambiguous; none at all is not_found)"),
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
     look: lookField,
@@ -119,7 +119,7 @@ export const toolShapes = {
     direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction (default down when no `to`)"),
     amount: z.number().min(0.1).max(1).optional().describe("How far: a share of the scroll area, 0.1 to 1 (default 0.8)"),
     to: z.enum(["start", "end"]).optional().describe("Jump to the start or end instead of using direction/amount"),
-    target: targetField.optional().describe("Scroll view to scroll; default: the largest one on screen"),
+    target: targetField.optional().describe("Scroll view to scroll, or an element inside it; default: the largest one on screen"),
     look: lookField,
     screenshot: screenshotField,
   },
@@ -151,7 +151,7 @@ export const toolShapes = {
       .min(160)
       .max(1320)
       .optional()
-      .describe("Screenshot width in pixels (default 600); keep it the same for a name"),
+      .describe("Screenshot width in pixels, 160 to 1320 (default 600); keep it the same for a name"),
   },
   filmstrip: {
     frames: z.number().int().min(2).max(9).optional().describe("How many frames (default 6)"),
@@ -170,12 +170,12 @@ export const toolShapes = {
     name: z.string().optional().describe("The script to replay; omit to list saved scripts"),
   },
   wait_for: {
-    text: z.string().optional().describe("Wait until an element whose text contains this is on screen (or gone)"),
+    text: z.string().optional().describe("Wait until this visible text is on screen (or gone)"),
     id: z.string().optional().describe("Wait until the element with this id is on screen (or gone)"),
     label: z.string().optional().describe("Wait until the element with this accessibility label is on screen (or gone)"),
     gone: z.boolean().optional().describe("Wait until it is gone instead, e.g. a spinner"),
     network_idle: z.boolean().optional().describe("Also (or only) wait until no network request is in flight"),
-    timeout: z.number().min(0.5).max(30).optional().describe("Seconds to wait at most (default 10)"),
+    timeout: z.number().min(0.5).max(30).optional().describe("Seconds to wait at most, 0.5 to 30 (default 10)"),
     look: lookField,
     screenshot: screenshotField,
   },
@@ -340,9 +340,27 @@ const feedAnswerSchema = z.object({
       observedFrames: z.number(),
       janky: z.number(),
       jankyWhileCapturing: z.number(),
+      failures: z.number().optional(),
+      lastFailure: z.string().optional(),
+      heartbeats: z.number().optional(),
     })
     .optional(),
 });
+
+/** Bounds of TAPLINE_FEED_GAP_MS, as the app checks them. */
+const MIN_FEED_GAP_MS = 30;
+const MAX_FEED_GAP_MS = 2000;
+
+/**
+ * The app's `feed` params. For measuring only, TAPLINE_FEED_GAP_MS (30–2000) replaces the app's
+ * live pace with a fixed gap between captures; apps without it ignore it.
+ */
+export function feedParams(on: boolean, quality: QualityPreset, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+  const raw = env.TAPLINE_FEED_GAP_MS;
+  const gapMs = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  if (gapMs >= MIN_FEED_GAP_MS && gapMs <= MAX_FEED_GAP_MS) return { on, quality, gapMs };
+  return { on, quality };
+}
 
 const commandsSchema = z.object({
   commands: z.array(z.object({ name: z.string(), description: z.string() })),
@@ -365,7 +383,18 @@ function deviceLabel(s: SessionInfo): string {
 /** Default screenshot width in pixels: readable, about 1,000 image tokens for a phone screen. */
 export const DEFAULT_SCREENSHOT_WIDTH = 600;
 
-const NO_SCREENSHOT_NOTE = "Note: no screenshot: this app doesn't support it; add react-native-view-shot.";
+/**
+ * Name of the `tree` param that makes the app keep numbering refs on (from the highest ref since
+ * the last look) in the list an action's answer carries; `look` never sends it and restarts at e1.
+ * Undefined means the app doesn't know such a param yet. To switch it on, set it to the SDK's name
+ * (probably "keepNumbering"); this is the only place.
+ */
+export const KEEP_NUMBERING_PARAM: string | undefined = undefined;
+
+/** The app methods whose result may say `closedKeyboard: true` (the app closed the keyboard before acting). */
+const KEYBOARD_METHODS: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "type"]);
+
+const NO_SCREENSHOT_NOTE ="Note: no screenshot: this app doesn't support it; add react-native-view-shot.";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -425,12 +454,35 @@ function candidateLines(details: unknown): string[] {
   return [...new Set(lines.length > 0 ? lines : bareRefs)];
 }
 
+/** At most this many candidates are listed in an `ambiguous` answer (AGENT-TOOLS §4). */
+const MAX_CANDIDATES = 5;
+
+/**
+ * The `ambiguous` block (AGENT-TOOLS §4): the message, `Candidates:` with up to 5 lines indented two
+ * spaces, a `(+N more; …)` line when there are more, then the retry line. `total` is the number of
+ * matches when known.
+ */
+export function ambiguousBlock(
+  message: string,
+  candidates: string[],
+  total?: number,
+  retry = 'Retry with one of the refs, or add "index" (0-based).',
+): string {
+  const shown = candidates.slice(0, MAX_CANDIDATES);
+  const count = Math.max(total ?? candidates.length, candidates.length);
+  const more = count - shown.length;
+  const lines = [`Error ambiguous: ${message}`];
+  if (shown.length > 0) lines.push("Candidates:", ...shown.map((c) => `  ${c}`));
+  if (more > 0) lines.push(`  (+${more} more; use a ref or "index")`);
+  lines.push(retry);
+  return lines.join("\n");
+}
+
 export function describeError(error: unknown): string {
   if (error instanceof TaplineError) {
     if (error.code === "ambiguous") {
-      const candidates = candidateLines(error.details);
-      const list = candidates.length > 0 ? `\nCandidates:\n${candidates.map((c) => `  ${c}`).join("\n")}` : "";
-      return `Error ambiguous: ${error.message}${list}\nRetry with one of the refs, or add "index" (0-based).`;
+      const counted = /^(\d+) (?:elements match|inputs on screen)/.exec(error.message);
+      return ambiguousBlock(error.message, candidateLines(error.details), counted?.[1] !== undefined ? Number(counted[1]) : undefined);
     }
     return `Error ${error.code}: ${error.message}`;
   }
@@ -471,7 +523,17 @@ export class TaplineTools {
   }
 
   private notConnected(): CallToolResult {
+    const silent = this.silentDropMessage();
+    if (silent !== undefined) return fail(`Error not_answering: ${silent}`);
     return fail(`Error not_connected: ${this.noAppMessage()}`);
+  }
+
+  /** Set when the silence sweep dropped the last app while it wasn't in the background: it stopped answering. */
+  private silentDropMessage(): string | undefined {
+    const last = this.host.lastDisconnect();
+    if (last === undefined || last.silentForMs === undefined) return undefined;
+    const when = new Date(last.at).toTimeString().slice(0, 8);
+    return `${last.session.app.name} stopped answering at ${when} (nothing from it for ${Math.round(last.silentForMs / 1000)} s while connected). Ask the user to close the app and open it again; it reconnects by itself then.`;
   }
 
   /** How to connect an app, shown when nothing is connected. */
@@ -482,8 +544,11 @@ export class TaplineTools {
     if (last !== undefined) {
       const when = new Date(last.at).toTimeString().slice(0, 8);
       const state = last.session.appState?.state;
+      const silent = this.silentDropMessage();
       lines.push(
-        state === "background" || state === "inactive"
+        silent !== undefined
+          ? silent
+          : state === "background" || state === "inactive"
           ? `${last.session.app.name} disconnected at ${when} after it went to the background (the user switched apps or locked the phone, and iOS paused it). Ask the user to open the app again: it reconnects by itself.`
           : `${last.session.app.name} disconnected at ${when} (${last.reason}). If the app is still open, it reconnects by itself.`,
       );
@@ -577,10 +642,12 @@ export class TaplineTools {
       const current = this.host.current();
       const now = Date.now();
       return fail(
-        [
-          `Error ambiguous: ${matches.length} connected apps match "${args.app}". Pick one by its session id:`,
-          ...matches.map((s) => this.appLine(s, current?.id === s.id, now)),
-        ].join("\n"),
+        ambiguousBlock(
+          `${matches.length} connected apps match "${args.app}".`,
+          matches.map((s) => this.appLine(s, current?.id === s.id, now).trim()),
+          undefined,
+          "Retry with open_app and one of these session ids.",
+        ),
       );
     }
     const session = matches[0];
@@ -666,7 +733,10 @@ export class TaplineTools {
     const sid = session.id;
     // Changes only make sense against a list this agent has already been given in this session.
     const askChanges = onlyChanges && this.listed.has(sid);
-    const treePromise = this.host.request("tree", askChanges ? { changes: true } : {}, { sessionId: sid });
+    // `onlyChanges` is the after-an-action call; `look` (onlyChanges false) always restarts at e1.
+    const treeParams: Record<string, unknown> = askChanges ? { changes: true } : {};
+    if (onlyChanges && KEEP_NUMBERING_PARAM !== undefined) treeParams[KEEP_NUMBERING_PARAM] = true;
+    const treePromise = this.host.request("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
         ? this.host
@@ -806,7 +876,14 @@ export class TaplineTools {
         }
       }
     }
-    const extra = extraNotes?.(result) ?? [];
+    const extra = [...(extraNotes?.(result) ?? [])];
+    const capMs = typeof result === "object" && result !== null && "settleCapMs" in result ? (result as { settleCapMs: unknown }).settleCapMs : undefined;
+    if (typeof capMs === "number" && Number.isFinite(capMs) && capMs > 0) {
+      extra.push(`Note: the screen was still changing after ${Number((capMs / 1000).toFixed(3))} s (an animation or video); positions may be mid-change.`);
+    }
+    if (KEYBOARD_METHODS.has(method) && typeof result === "object" && result !== null && "closedKeyboard" in result && result.closedKeyboard === true) {
+      extra.push("Note: closed the keyboard first.");
+    }
     if (extra.length > 0) {
       const [first, ...rest] = response.content;
       if (first !== undefined && first.type === "text") {
@@ -897,7 +974,7 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return { ok: false, message: "No app is connected." };
     try {
-      await this.host.request("feed", { on, quality }, { sessionId: session.id });
+      await this.host.request("feed", feedParams(on, quality), { sessionId: session.id });
       return { ok: true };
     } catch (error) {
       return {
@@ -989,12 +1066,17 @@ export class TaplineTools {
     const session = this.host.current();
     if (feed?.on === true && session !== undefined) {
       try {
-        const answer = feedAnswerSchema.safeParse(await this.host.request("feed", { on: true, quality: feed.quality }, { sessionId: session.id }));
+        const answer = feedAnswerSchema.safeParse(await this.host.request("feed", feedParams(true, feed.quality), { sessionId: session.id }));
         const stats = answer.success ? answer.data.stats : undefined;
         if (stats !== undefined) {
           lines.push(
             `Capture: ${stats.frames} frames, ${Math.round(stats.avgCaptureMs)} ms each on average (longest ${Math.round(stats.maxCaptureMs)} ms). Stutter: ${stats.janky} of ${stats.observedFrames} animation frames were slow, ${stats.jankyWhileCapturing} of them during a capture.`,
           );
+          if (stats.failures !== undefined && stats.failures > 0) {
+            lines.push(
+              `Failed captures: ${stats.failures}${stats.lastFailure ? ` (last: ${stats.lastFailure})` : ""}; while captures fail, the viewer gets about one frame a second.`,
+            );
+          }
         }
       } catch {
         // stats are a bonus
@@ -1447,6 +1529,7 @@ export class TaplineTools {
       "back",
       {},
       (r) => {
+        if (typeof r === "object" && r !== null && "closed" in r && r.closed === "sheet") return "Closed the sheet.";
         const route = typeof r === "object" && r !== null && "route" in r ? (r as { route: unknown }).route : undefined;
         const from = Array.isArray(route) && route.every((name) => typeof name === "string") ? ` from ${route.join(" › ")}` : "";
         return `Went back${from}.`;
@@ -1486,7 +1569,7 @@ export class TaplineTools {
       await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
     } catch (error) {
       // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
-      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout");
+      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
       if (!worked) return fail(describeError(error));
     }
     if (args.look === false) return text("Reload requested.");

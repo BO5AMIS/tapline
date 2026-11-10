@@ -121,7 +121,7 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
   -webkit-user-select: none;
 }
 #frame.can-point { cursor: crosshair; }
-#shot {
+.pic {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -241,7 +241,7 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
 </header>
 <main id="stage">
   <div id="frame" tabindex="0" role="img" aria-label="Live phone screen">
-    <img id="shot" alt="">
+    <img id="shot" class="pic" alt="">
     <div id="empty">Waiting for the first frame</div>
     <div id="overlay" aria-hidden="true"></div>
     <div id="marks" aria-hidden="true"></div>
@@ -355,6 +355,368 @@ function parseMultipartChunk(state, chunk) {
 }
 /* parser:end */
 
+/* video-block:start */
+/* Video block: H.264 over a WebSocket (WS /video in docs/VIEWER-PROTOCOL.md). It is self-contained:
+   paste it unchanged into another page. It reaches the page only through the object given to
+   createVideoBlock(io), whose members are:
+     io.socketUrl()          returns the ws or wss address of /video on the page's own origin
+     io.accepts()            returns true while the latest status lists video in accepts
+     io.picture()            returns the picture element (an img) the canvas stands in for. The canvas is
+                             inserted after it with the same className, so the img needs a class that
+                             carries its position and size (here: pic). Its style.display is toggled.
+     io.onVideoConfig(c)     optional. c is { width, height, coverage, source }; called on every accepted
+                             config, so the page can update its aspect ratio and coverage note
+     io.onVideoStarted()     the first decoded frame is on screen: stop downloading the JPEG stream
+     io.onVideoStopped(why)  video is gone (why is a short string) and the picture element shows again:
+                             start the JPEG stream again
+   It returns { update(), stop(), stats() }. Call update() once at start and whenever the status
+   changes. Fallback: unsupported config, 3 decoder errors within 10 s, a closed socket, or accepts
+   losing video all stop the block; it retries after 5 s only while io.accepts() is still true (an
+   unsupported config is not retried until the page is reloaded). */
+function createVideoBlock(io) {
+  var RETRY_MS = 5000;
+  var QUEUE_MAX = 3;
+  var ERRORS_MAX = 3;
+  var ERRORS_WINDOW_MS = 10000;
+  var PENDING_MAX = 120;
+  var sock = null;
+  var decoder = null;
+  var cfg = null;
+  var cfgSeq = 0;
+  var ready = false;
+  var pending = [];
+  var needKey = true;
+  var keyAsked = false;
+  var canvas = null;
+  var ctx = null;
+  var visible = false;
+  var blocked = false;
+  var retryTimer = 0;
+  var errorTimes = [];
+  var counts = {
+    configs: 0, pictures: 0, frames: 0, ignored: 0, skipped: 0,
+    errors: 0, keyRequests: 0, fallbacks: 0, hardware: "", lastReason: "", lastError: ""
+  };
+
+  function hasDecoder() {
+    return typeof window.VideoDecoder === "function" && typeof window.EncodedVideoChunk === "function";
+  }
+
+  function sendKey() {
+    if (!sock || sock.readyState !== 1) return;
+    try {
+      sock.send('{"type":"key"}');
+      counts.keyRequests++;
+    } catch (e) { /* the close handler follows */ }
+  }
+
+  function closeDecoder() {
+    var d = decoder;
+    decoder = null;
+    if (d) {
+      try { d.close(); } catch (e) { /* already closed */ }
+    }
+  }
+
+  function clearRetry() {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = 0;
+  }
+
+  /* Drop the socket and the decoder; if video was showing, put the picture element back. */
+  function teardown(reason) {
+    var s = sock;
+    sock = null;
+    if (s) {
+      s.onmessage = null;
+      s.onclose = null;
+      s.onerror = null;
+      try { s.close(); } catch (e) { /* already closed */ }
+    }
+    cfgSeq++;
+    ready = false;
+    pending = [];
+    closeDecoder();
+    if (visible) {
+      visible = false;
+      if (canvas) canvas.style.display = "none";
+      var pic = io.picture();
+      if (pic) pic.style.display = "";
+      counts.fallbacks++;
+      counts.lastReason = reason;
+      io.onVideoStopped(reason);
+    }
+  }
+
+  function fail(reason) {
+    counts.lastReason = reason;
+    teardown(reason);
+    clearRetry();
+    if (hasDecoder() && !blocked && io.accepts()) {
+      retryTimer = setTimeout(function () {
+        retryTimer = 0;
+        update();
+      }, RETRY_MS);
+    }
+  }
+
+  function update() {
+    var want = hasDecoder() && !blocked && !!io.accepts();
+    if (!want) {
+      clearRetry();
+      if (sock || visible) teardown("not offered");
+      return;
+    }
+    if (!sock && !retryTimer) open();
+  }
+
+  function stop() {
+    clearRetry();
+    teardown("stopped");
+  }
+
+  function open() {
+    var s;
+    try {
+      s = new WebSocket(io.socketUrl());
+      s.binaryType = "arraybuffer";
+    } catch (e) {
+      fail("socket");
+      return;
+    }
+    sock = s;
+    s.onmessage = function (ev) {
+      if (sock !== s) return;
+      if (typeof ev.data === "string") onText(ev.data);
+      else onPicture(ev.data);
+    };
+    s.onclose = function () {
+      if (sock !== s) return;
+      sock = null;
+      fail("closed");
+    };
+    s.onerror = function () { /* a close follows */ };
+  }
+
+  function positive(v) { return typeof v === "number" && isFinite(v) && v > 0; }
+
+  function onText(text) {
+    var m;
+    try { m = JSON.parse(text); } catch (e) { return; }
+    if (!m || typeof m !== "object" || m.type !== "config") return;
+    if (typeof m.codec !== "string" || !positive(m.width) || !positive(m.height) ||
+        typeof m.description !== "string" || m.description === "") {
+      fail("bad config");
+      return;
+    }
+    var description;
+    try {
+      var bin = atob(m.description);
+      description = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) description[i] = bin.charCodeAt(i);
+    } catch (e) {
+      fail("bad config");
+      return;
+    }
+    counts.configs++;
+    var seq = ++cfgSeq;
+    ready = false;
+    pending = [];
+    needKey = true;
+    keyAsked = false;
+    closeDecoder();
+    var base = {
+      codec: m.codec,
+      codedWidth: Math.round(m.width),
+      codedHeight: Math.round(m.height),
+      description: description,
+      optimizeForLatency: true
+    };
+    chooseConfig(base).then(function (chosen) {
+      if (seq !== cfgSeq) return;
+      if (!chosen) {
+        blocked = true;
+        fail("unsupported");
+        return;
+      }
+      begin(chosen, m);
+    }, function () {
+      if (seq === cfgSeq) {
+        blocked = true;
+        fail("unsupported");
+      }
+    });
+  }
+
+  /* Hardware first, then whatever the browser has; null when neither is supported. */
+  function chooseConfig(base) {
+    var hw = Object.assign({}, base, { hardwareAcceleration: "prefer-hardware" });
+    return window.VideoDecoder.isConfigSupported(hw).then(function (r) {
+      if (r && r.supported) return hw;
+      var any = Object.assign({}, base, { hardwareAcceleration: "no-preference" });
+      return window.VideoDecoder.isConfigSupported(any).then(function (r2) {
+        return r2 && r2.supported ? any : null;
+      });
+    });
+  }
+
+  function makeDecoder() {
+    var d = new window.VideoDecoder({
+      output: function (frame) { onFrame(frame, d); },
+      error: function (err) { onDecoderError(err, d); }
+    });
+    return d;
+  }
+
+  function begin(chosen, m) {
+    try {
+      if (!canvas) {
+        var pic = io.picture();
+        canvas = document.createElement("canvas");
+        canvas.className = pic.className;
+        canvas.style.display = "none";
+        canvas.setAttribute("aria-hidden", "true");
+        pic.parentNode.insertBefore(canvas, pic.nextSibling);
+        ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+      }
+      if (canvas.width !== chosen.codedWidth) canvas.width = chosen.codedWidth;
+      if (canvas.height !== chosen.codedHeight) canvas.height = chosen.codedHeight;
+      cfg = chosen;
+      counts.hardware = chosen.hardwareAcceleration;
+      decoder = makeDecoder();
+      decoder.configure(chosen);
+    } catch (e) {
+      counts.lastError = String(e && e.message ? e.message : e);
+      fail("decoder");
+      return;
+    }
+    ready = true;
+    if (typeof io.onVideoConfig === "function") {
+      io.onVideoConfig({
+        width: chosen.codedWidth,
+        height: chosen.codedHeight,
+        coverage: typeof m.coverage === "string" ? m.coverage : "",
+        source: typeof m.source === "string" ? m.source : ""
+      });
+    }
+    var queued = pending;
+    pending = [];
+    for (var i = 0; i < queued.length; i++) feed(queued[i]);
+  }
+
+  function onPicture(buf) {
+    if (!(buf instanceof ArrayBuffer) || buf.byteLength <= 8) return;
+    var head = new DataView(buf, 0, 8);
+    var item = {
+      key: (head.getUint8(0) & 1) === 1,
+      ms: head.getUint32(4, false),
+      data: new Uint8Array(buf, 8)
+    };
+    if (ready) {
+      feed(item);
+    } else {
+      /* Configuring still: keep the pictures, but if it takes too long start over at a key frame. */
+      if (pending.length >= PENDING_MAX) {
+        pending = [];
+        needKey = true;
+      }
+      pending.push(item);
+    }
+  }
+
+  function feed(item) {
+    if (!decoder || decoder.state !== "configured") return;
+    if (item.key) {
+      needKey = false;
+      keyAsked = false;
+    } else {
+      if (needKey) {
+        counts.ignored++;
+        return;
+      }
+      if (decoder.decodeQueueSize > QUEUE_MAX) {
+        needKey = true;
+        counts.skipped++;
+        if (!keyAsked) {
+          keyAsked = true;
+          sendKey();
+        }
+        return;
+      }
+    }
+    try {
+      decoder.decode(new window.EncodedVideoChunk({
+        type: item.key ? "key" : "delta",
+        timestamp: item.ms * 1000,
+        data: item.data
+      }));
+      counts.pictures++;
+    } catch (e) {
+      onDecoderError(e, decoder);
+    }
+  }
+
+  function onFrame(frame, d) {
+    try {
+      if (d !== decoder || !ctx) return;
+      ctx.drawImage(frame, 0, 0);
+      counts.frames++;
+      if (!visible) {
+        visible = true;
+        canvas.style.display = "";
+        var pic = io.picture();
+        if (pic) pic.style.display = "none";
+        io.onVideoStarted();
+      }
+    } finally {
+      frame.close();
+    }
+  }
+
+  /* A decoder error: reset, ask for a key frame and wait for it; too many errors give up. */
+  function onDecoderError(err, d) {
+    if (d !== decoder) return;
+    counts.errors++;
+    counts.lastError = String(err && err.message ? err.message : err);
+    var now = Date.now();
+    errorTimes.push(now);
+    errorTimes = errorTimes.filter(function (t) { return now - t <= ERRORS_WINDOW_MS; });
+    if (errorTimes.length >= ERRORS_MAX) {
+      fail("decoder errors");
+      return;
+    }
+    try {
+      if (d.state === "closed") {
+        decoder = makeDecoder();
+        decoder.configure(cfg);
+      } else {
+        d.reset();
+        d.configure(cfg);
+      }
+    } catch (e) {
+      fail("decoder");
+      return;
+    }
+    needKey = true;
+    keyAsked = true;
+    sendKey();
+  }
+
+  return {
+    update: update,
+    stop: stop,
+    stats: function () {
+      return {
+        configs: counts.configs, pictures: counts.pictures, frames: counts.frames,
+        ignored: counts.ignored, skipped: counts.skipped, errors: counts.errors,
+        keyRequests: counts.keyRequests, fallbacks: counts.fallbacks, hardware: counts.hardware,
+        lastReason: counts.lastReason, lastError: counts.lastError, active: visible
+      };
+    }
+  };
+}
+/* video-block:end */
+
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var frame = $("frame");
@@ -386,6 +748,10 @@ function parseMultipartChunk(state, chunk) {
   var lastActionAt = 0;
   var objectUrl = null;
   var streamLive = false;
+  var streamOn = true;
+  var streamAbort = null;
+  var streamWake = null;
+  var videoOn = false;
   var haveFrame = false;
   var shown = { rev: null, size: null, coverage: "", natural: null };
   var lastAnnounce = "";
@@ -430,7 +796,8 @@ function parseMultipartChunk(state, chunk) {
     connecting: "Connecting",
     reconnecting: "Reconnecting",
     locked: "Paused on the phone",
-    "no-device": "No device"
+    "no-device": "No device",
+    "not-answering": "App not answering"
   };
   function renderStatus() {
     var dot = $("dot");
@@ -445,7 +812,7 @@ function parseMultipartChunk(state, chunk) {
       if (status.detail) core.push(String(status.detail));
       if (status.via) core.push("via " + status.via);
       if (st === "live") cls = "live";
-      else if (st === "locked" || st === "no-device") cls = "bad";
+      else if (st === "locked" || st === "no-device" || st === "not-answering") cls = "bad";
       else cls = "wait";
     } else {
       core.push("Waiting for status");
@@ -455,7 +822,7 @@ function parseMultipartChunk(state, chunk) {
       if (status.driver === "agent" || status.driver === "person") core.push(status.driver + " driving");
       if (paused) core.push("agent paused");
     }
-    if (haveFrame && !streamLive) core.push("picture reconnecting");
+    if (haveFrame && !streamLive && !videoOn) core.push("picture reconnecting");
     if (shown.coverage === "app-window") core.push("app window only");
     var plain = core.join(" · ");
     var text = plain;
@@ -469,7 +836,7 @@ function parseMultipartChunk(state, chunk) {
     var pause = $("pause");
     pause.textContent = paused ? "Resume agent" : "Pause agent";
     pause.setAttribute("aria-pressed", paused ? "true" : "false");
-    $("empty").textContent = streamLive || haveFrame ? "Waiting for the next frame" : "Waiting for the first frame";
+    $("empty").textContent = streamLive || videoOn || haveFrame ? "Waiting for the next frame" : "Waiting for the first frame";
   }
 
   function canPoint() { return !!(accepts.tap || accepts.longPress || accepts.drag); }
@@ -509,17 +876,41 @@ function parseMultipartChunk(state, chunk) {
 
   function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
 
+  /* The JPEG stream runs unless video is showing: setStream(false) aborts the download and
+     parks the loop, setStream(true) wakes it. */
+  function setStream(on) {
+    streamOn = on;
+    if (!on) {
+      if (streamAbort) streamAbort.abort();
+    } else if (streamWake) {
+      var wake = streamWake;
+      streamWake = null;
+      wake();
+    }
+  }
+
   async function runStream() {
     var delay = 400;
     for (;;) {
+      if (!streamOn) {
+        await new Promise(function (resolve) { streamWake = resolve; });
+        delay = 400;
+        continue;
+      }
+      var abort = typeof AbortController === "function" ? new AbortController() : null;
+      streamAbort = abort;
       try {
-        var res = await fetch(endpoint("/stream", false), { cache: "no-store", credentials: "same-origin" });
+        var res = await fetch(endpoint("/stream", false), {
+          cache: "no-store",
+          credentials: "same-origin",
+          signal: abort ? abort.signal : undefined
+        });
         if (!res.ok || !res.body) throw new Error("stream " + res.status);
         var state = createParserState(boundaryFromContentType(res.headers.get("content-type")));
         var reader = res.body.getReader();
         for (;;) {
           var r = await reader.read();
-          if (r.done) break;
+          if (r.done || !streamOn) break;
           var parts = parseMultipartChunk(state, r.value);
           if (parts.length) {
             if (!streamLive) { streamLive = true; }
@@ -527,11 +918,15 @@ function parseMultipartChunk(state, chunk) {
             showPart(parts[parts.length - 1]);
           }
         }
+        if (!streamOn) {
+          try { reader.cancel(); } catch (e) { /* already closed */ }
+        }
       } catch (e) {
         /* fall through to the backoff */
       }
       streamLive = false;
       renderStatus();
+      if (!streamOn) continue;
       await sleep(delay);
       delay = Math.min(Math.round(delay * 1.6), 5000);
     }
@@ -624,6 +1019,7 @@ function parseMultipartChunk(state, chunk) {
       status = m;
       paused = m.paused === true;
       applyAccepts();
+      video.update();
       layout();
       renderStatus();
     } else if (m.type === "overlay") {
@@ -793,6 +1189,36 @@ function parseMultipartChunk(state, chunk) {
     ev.preventDefault();
     flushText();
     send({ type: "text", text: text });
+  });
+
+  /* Video: the self-contained block above, wired to this page. */
+  var video = createVideoBlock({
+    socketUrl: function () { return endpoint("/video", true); },
+    accepts: function () { return !!accepts.video; },
+    picture: function () { return shot; },
+    onVideoConfig: function (c) {
+      shown.rev = null;
+      shown.size = null;
+      shown.coverage = c.coverage || "";
+      shown.natural = { w: c.width, h: c.height };
+      layout();
+      drawOverlay();
+      renderStatus();
+    },
+    onVideoStarted: function () {
+      videoOn = true;
+      setStream(false);
+      streamLive = false;
+      haveFrame = true;
+      frame.classList.add("has-frame");
+      layout();
+      renderStatus();
+    },
+    onVideoStopped: function () {
+      videoOn = false;
+      setStream(true);
+      renderStatus();
+    }
   });
 
   layout();

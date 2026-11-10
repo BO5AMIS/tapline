@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ControlQueue } from "./control.js";
-import type { AppFrame, HttpExtension } from "./server.js";
+import type { AppFrame, HttpExtension, TaplineHost } from "./server.js";
 
 /**
  * The live viewer, server side, as docs/VIEWER-PROTOCOL.md describes: `/viewer` (the page),
@@ -72,20 +72,33 @@ export interface ViewerHubOptions {
 }
 
 interface StatusFields {
-  state: "live" | "connecting" | "reconnecting" | "locked" | "no-device";
+  state: "live" | "connecting" | "reconnecting" | "locked" | "no-device" | "not-answering";
   detail?: string;
   via: string;
   size?: { w: number; h: number };
 }
 
+/** What `viewerStatusFor` knows besides the current session. */
+export interface ViewerStatusContext {
+  /** A request to the current app ended with `not_answering` and nothing has come back since. */
+  notAnswering?: boolean;
+  /** The app that dropped last (`silentForMs` is set when the host dropped it for silence). */
+  lastDrop?: { session: { app: { name: string } }; silentForMs?: number } | undefined;
+}
+
 /**
  * The viewer's state for the current app: live; `locked` while iOS has it paused in the
- * background (only a person on the phone can bring it back); no-device without an app.
+ * background (only a person on the phone can bring it back); `not-answering` (detail: the app's
+ * name) while it is connected but doesn't answer, or the host dropped it for silence and no app
+ * has connected since; no-device without an app.
  */
 export function viewerStatusFor(
   session: { app: { name: string }; appState?: { state: string; at: number } } | undefined,
+  context: ViewerStatusContext = {},
 ): { state: StatusFields["state"]; detail: string | undefined } {
   if (session === undefined) {
+    const dropped = context.lastDrop;
+    if (dropped?.silentForMs !== undefined) return { state: "not-answering", detail: dropped.session.app.name };
     return { state: "no-device", detail: "The app isn't connected: open it on the phone, with Tailscale on." };
   }
   if (session.appState?.state === "background") {
@@ -94,13 +107,27 @@ export function viewerStatusFor(
       detail: `${session.app.name} is in the background (the phone is locked or another app is open). Open it on the phone to carry on.`,
     };
   }
+  if (context.notAnswering === true) return { state: "not-answering", detail: session.app.name };
   return { state: "live", detail: undefined };
+}
+
+/** The viewer's state for a host's current app, with the not-answering facts read from the host. */
+export function viewerStatusForHost(
+  host: Pick<TaplineHost, "current" | "lastDisconnect" | "isNotAnswering">,
+): { state: StatusFields["state"]; detail: string | undefined } {
+  const session = host.current();
+  return viewerStatusFor(session, {
+    notAnswering: session !== undefined && host.isNotAnswering(session.id),
+    lastDrop: host.lastDisconnect(),
+  });
 }
 
 interface StreamClient {
   res: ServerResponse;
   busy: boolean;
   sentSeq: number;
+  /** The opening "--frame" boundary has been sent (later parts open with the previous part's closing boundary). */
+  opened: boolean;
 }
 
 interface WsClient {
@@ -241,13 +268,15 @@ export class ViewerHub implements HttpExtension {
 
   onRequest(req: IncomingMessage, res: ServerResponse): boolean {
     const url = new URL(req.url ?? "/", "http://viewer");
-    if (url.pathname !== "/viewer" && url.pathname !== "/stream") return false;
+    // The page answers at `/` as well as `/viewer`, with the same token and cookie rules.
+    const isPage = url.pathname === "/viewer" || url.pathname === "/";
+    if (!isPage && url.pathname !== "/stream") return false;
     if (!this.hostAllowed(req) || !this.addressAllowed(req)) {
       res.writeHead(403, { "content-type": "text/plain" });
       res.end("Not allowed from here.\n");
       return true;
     }
-    const credential = this.credential(req, url, url.pathname === "/viewer");
+    const credential = this.credential(req, url, isPage);
     if (credential === null) {
       res.writeHead(401, { "content-type": "text/plain" });
       res.end("Open the viewer link the agent gave you (it has the token).\n");
@@ -258,7 +287,7 @@ export class ViewerHub implements HttpExtension {
       res.end("Not from another site.\n");
       return true;
     }
-    if (url.pathname === "/viewer") {
+    if (isPage) {
       // The link's load gets the page itself plus the cookie, not a redirect: after a click on
       // another site, the browser would send the redirected request without the Strict cookie.
       // The page then takes the token out of the address bar.
@@ -284,7 +313,7 @@ export class ViewerHub implements HttpExtension {
       connection: "close",
     });
     res.flushHeaders(); // answer now: the first frame may take a while
-    const client: StreamClient = { res, busy: false, sentSeq: 0 };
+    const client: StreamClient = { res, busy: false, sentSeq: 0, opened: false };
     this.streams.add(client);
     res.on("close", () => {
       this.streams.delete(client);
@@ -302,7 +331,6 @@ export class ViewerHub implements HttpExtension {
     const frame = this.latest;
     if (frame === null || client.busy || client.sentSeq >= frame.seq) return;
     const headers = [
-      "--frame",
       `Content-Type: ${frame.mime}`,
       `Content-Length: ${frame.bytes.length}`,
       `X-Seq: ${frame.seq}`,
@@ -314,9 +342,13 @@ export class ViewerHub implements HttpExtension {
       "",
       "",
     ].join("\r\n");
+    // One buffer per part, closed at once by the next boundary (as mjpg-streamer does), so a
+    // browser shows the frame as soon as it arrives instead of when the next one starts.
+    const opening = client.opened ? "" : "--frame\r\n";
+    client.opened = true;
+    const part = Buffer.concat([Buffer.from(opening + headers, "latin1"), frame.bytes, Buffer.from("\r\n--frame\r\n", "latin1")]);
     client.sentSeq = frame.seq;
-    const ok = client.res.write(headers) && client.res.write(frame.bytes) && client.res.write("\r\n");
-    if (!ok) client.busy = true; // newest frame wins: the next one goes out after "drain"
+    client.busy = !client.res.write(part); // newest frame wins: the next one goes out after "drain"
   }
 
   // ---- WebSocket --------------------------------------------------------------

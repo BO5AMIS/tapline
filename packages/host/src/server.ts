@@ -60,6 +60,8 @@ export interface LastDisconnect {
   session: SessionInfo;
   reason: string;
   at: number;
+  /** Set when the silence sweep dropped an app that wasn't in the background: how long it had sent nothing. */
+  silentForMs?: number;
 }
 
 export interface TaplineHostOptions {
@@ -96,6 +98,7 @@ export type TaplineErrorCode =
   | "not_connected"
   | "timeout"
   | "reconnecting"
+  | "not_answering"
   | "send_failed"
   | (string & {});
 
@@ -118,6 +121,10 @@ interface HostEvents {
   frame: [session: SessionInfo, frame: AppFrame];
   /** The app went to the background or came back ("background", "active", "inactive"). */
   appState: [session: SessionInfo, state: string];
+  /** A request to a connected app ended with `not_answering`. */
+  notAnswering: [session: SessionInfo];
+  /** An app that had stopped answering answered again. */
+  answering: [session: SessionInfo];
   selected: [session: SessionInfo | undefined];
   warning: [message: string];
 }
@@ -135,6 +142,8 @@ interface Session {
   pending: Map<number, Pending>;
   events: LogEntry[];
   nextId: number;
+  /** A request ended with `not_answering` and nothing has come back since. */
+  notAnswering: boolean;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -340,6 +349,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return this.lastDrop === undefined ? undefined : { ...this.lastDrop, session: { ...this.lastDrop.session } };
   }
 
+  /** Whether a request to this session ended with `not_answering` and nothing has come back since. */
+  isNotAnswering(sessionId: string): boolean {
+    return this.sessionMap.get(sessionId)?.notAnswering === true;
+  }
+
   /** The selected session, else the most recently connected one. */
   current(): SessionInfo | undefined {
     const session = this.currentSession();
@@ -423,10 +437,20 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         session.pending.delete(id);
+        const seconds = Math.round(timeoutMs / 100) / 10;
+        // An app in the background is paused by iOS, which is no fault of the app: that keeps `timeout`.
+        if (session.info.appState?.state === "background") {
+          reject(new TaplineError("timeout", `The app did not answer "${method}" within ${seconds}s.`));
+          return;
+        }
+        if (this.sessionMap.get(session.info.id) === session && !session.notAnswering) {
+          session.notAnswering = true;
+          this.safely(() => this.emit("notAnswering", { ...session.info }));
+        }
         reject(
           new TaplineError(
-            "timeout",
-            `The app did not answer "${method}" within ${Math.round(timeoutMs / 100) / 10}s.`,
+            "not_answering",
+            `${session.info.app.name} is connected but did not answer "${method}" within ${seconds} s. Try once more; if it repeats, ask the user to close the app and open it again.`,
           ),
         );
       }, timeoutMs);
@@ -523,7 +547,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     };
     while (this.sessionMap.has(info.id)) info.id = `s-${randomBytes(2).toString("hex")}`;
 
-    const session: Session = { info, socket, pending: new Map(), events: [], nextId: 1 };
+    const session: Session = { info, socket, pending: new Map(), events: [], nextId: 1, notAnswering: false };
 
     // Replace a previous session of the same app on the same device.
     const identity = identityOf(info);
@@ -561,6 +585,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       case "response": {
         const parsed = responseSchema.safeParse(message);
         if (!parsed.success) return;
+        // Any answer, even a late one or an error, shows the app is answering again.
+        if (session.notAnswering) {
+          session.notAnswering = false;
+          this.safely(() => this.emit("answering", { ...session.info }));
+        }
         const pending = session.pending.get(parsed.data.id);
         if (pending === undefined) return;
         clearTimeout(pending.timer);
@@ -625,19 +654,29 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   }
 
   /** Removes a session and rejects its pending requests. Safe to call twice. */
-  private dropSession(session: Session, reason: string): void {
+  private dropSession(session: Session, reason: string, silentForMs?: number): void {
     if (this.sessionMap.get(session.info.id) !== session) return;
     this.sessionMap.delete(session.info.id);
-    this.lastDrop = { session: { ...session.info }, reason, at: Date.now() };
+    this.lastDrop = {
+      session: { ...session.info },
+      reason,
+      at: Date.now(),
+      ...(silentForMs !== undefined ? { silentForMs } : {}),
+    };
     if (this.selectedId === session.info.id) this.selectedId = undefined;
     for (const [id, pending] of session.pending) {
       clearTimeout(pending.timer);
       session.pending.delete(id);
       pending.reject(
-        new TaplineError(
-          "reconnecting",
-          `The app disconnected before answering "${pending.method}" (${reason}). It reconnects by itself while it's open; look again in a few seconds.`,
-        ),
+        silentForMs !== undefined
+          ? new TaplineError(
+              "not_answering",
+              `${session.info.app.name} stopped answering (nothing from it for ${Math.round(silentForMs / 1000)} s while connected). Ask the user to close the app and open it again.`,
+            )
+          : new TaplineError(
+              "reconnecting",
+              `The app disconnected before answering "${pending.method}" (${reason}). It reconnects by itself while it's open; look again in a few seconds.`,
+            ),
       );
     }
     this.safely(() => this.emit("disconnect", { ...session.info }, reason));
@@ -647,7 +686,9 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     const now = Date.now();
     for (const session of [...this.sessionMap.values()]) {
       if (now - session.info.lastSeen > this.silenceTimeoutMs) {
-        this.dropSession(session, "silent too long");
+        // An app iOS has paused (background) is silent for a reason; any other silence is the app not answering.
+        const silentForMs = session.info.appState?.state === "background" ? undefined : now - session.info.lastSeen;
+        this.dropSession(session, "silent too long", silentForMs);
         session.socket.close(CLOSE_SILENT, "silent");
         const socket = session.socket;
         setTimeout(() => socket.terminate(), 1000).unref();

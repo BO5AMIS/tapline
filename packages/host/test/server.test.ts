@@ -176,18 +176,45 @@ describe("requests", () => {
     expect(error).toMatchObject({ code: "not_found", message: 'No element matches testID "x"' });
   });
 
-  it("times out with a clear error", async () => {
+  it("a connected app that doesn't answer fails with not_answering and says what to do", async () => {
     const { host, port } = await start();
     await connect(port, {}, () => "ignore");
     const error = await host.request("tree", {}, { timeoutMs: 80 }).catch((e: unknown) => e);
-    expect(error).toMatchObject({ code: "timeout" });
-    expect((error as Error).message).toContain('"tree"');
+    expect(error).toMatchObject({
+      code: "not_answering",
+      message:
+        'Demo is connected but did not answer "tree" within 0.1 s. Try once more; if it repeats, ask the user to close the app and open it again.',
+    });
   });
 
   it("uses the default request timeout from options", async () => {
     const { host, port } = await start({ requestTimeoutMs: 60 });
     await connect(port, {}, () => "ignore");
-    await expect(host.request("tree")).rejects.toMatchObject({ code: "timeout" });
+    await expect(host.request("tree")).rejects.toMatchObject({ code: "not_answering" });
+  });
+
+  it("an app in the foreground ('active') that doesn't answer is not_answering too", async () => {
+    const { host, port } = await start({ requestTimeoutMs: 60 });
+    const { app } = await connect(port, {}, () => "ignore");
+    app.send({ type: "event", event: "appState", data: { state: "active" } });
+    await until(() => host.sessions()[0]?.appState?.state === "active");
+    await expect(host.request("tree")).rejects.toMatchObject({ code: "not_answering" });
+  });
+
+  it("an app that went to the background while a request was out keeps the old timeout code", async () => {
+    const { host, port } = await start({ requestTimeoutMs: 150 });
+    const { app } = await connect(port, {}, () => "ignore");
+    const pending = host.request("tree");
+    await until(() => app.requests.length === 1);
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    const error = await pending.catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "timeout", message: 'The app did not answer "tree" within 0.2s.' });
+  });
+
+  it("an app's own timeout error is relayed with its code unchanged", async () => {
+    const { host, port } = await start();
+    await connect(port, {}, () => ({ ok: false, error: { code: "timeout", message: "Waited 5 s; it didn't happen." } }));
+    await expect(host.request("waitFor", {})).rejects.toMatchObject({ code: "timeout", message: "Waited 5 s; it didn't happen." });
   });
 
   it("rejects pending requests when the app disconnects", async () => {
@@ -299,6 +326,38 @@ describe("sessions", () => {
     } finally {
       clearInterval(timer);
     }
+  });
+
+  it("a silent drop rejects pending requests with not_answering and remembers how long it was silent", async () => {
+    const { host, port } = await start({ silenceTimeoutMs: 250, sweepIntervalMs: 40, requestTimeoutMs: 5000 });
+    const { app } = await connect(port, {}, () => "ignore");
+    const pending = host.request("tree", {}).catch((e: unknown) => e);
+    await until(() => app.requests.length === 1);
+    const error = await pending;
+    expect(error).toMatchObject({ code: "not_answering" });
+    expect((error as Error).message).toMatch(
+      /^Demo stopped answering \(nothing from it for \d+ s while connected\)\. Ask the user to close the app and open it again\.$/,
+    );
+    const last = host.lastDisconnect();
+    expect(last?.reason).toBe("silent too long");
+    expect(last?.silentForMs).toBeGreaterThan(250);
+  });
+
+  it("a silent app in the background is dropped the old way (reconnecting, no silentForMs)", async () => {
+    const { host, port } = await start({ silenceTimeoutMs: 250, sweepIntervalMs: 40, requestTimeoutMs: 5000 });
+    const { app } = await connect(port, {}, () => "ignore");
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    await until(() => host.sessions()[0]?.appState?.state === "background");
+    // A request already out when the app went quiet (the host refuses new ones while it is in the background).
+    app.send({ type: "event", event: "appState", data: { state: "active" } });
+    await until(() => host.sessions()[0]?.appState?.state === "active");
+    const pending = host.request("tree", {}).catch((e: unknown) => e);
+    await until(() => app.requests.length === 1);
+    app.send({ type: "event", event: "appState", data: { state: "background" } });
+    const error = await pending;
+    expect(error).toMatchObject({ code: "reconnecting" });
+    expect(host.lastDisconnect()?.reason).toBe("silent too long");
+    expect(host.lastDisconnect()?.silentForMs).toBeUndefined();
   });
 
   it("emits connect and disconnect events", async () => {
