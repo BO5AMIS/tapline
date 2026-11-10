@@ -23,6 +23,12 @@ export async function openLab(tool: ToolSession, labUrl: string = DEFAULT_LAB_UR
 /** The start of lab-state right after a reset. */
 export const RESET_STATE = "pressed=- typed= typed2= switch=off taps=0 long=0";
 
+/**
+ * How long the reset may take to show in lab-state, in seconds. It is a check that the reset landed,
+ * not a timing: 2 s was enough over USB and the local host, and too short for a tool over Wi-Fi.
+ */
+export const RESET_WAIT_S = 5;
+
 /** The first button (Cancel) of the lab's alert as the in-app stand-in draws it. */
 export const LAB_ALERT_CANCEL = "tapline-alert-button-0";
 
@@ -60,7 +66,7 @@ export async function resetLab(tool: ToolSession): Promise<void> {
   await step("scroll", { target: scroll, direction: "down", amount: 0.4, look: false });
   await step("tap", { target: { id: "lab-reset" }, look: false });
   await step("scroll", { target: scroll, to: "start", look: false });
-  if (!(await expectState(tool, RESET_STATE, 2))) {
+  if (!(await expectState(tool, RESET_STATE, RESET_WAIT_S))) {
     throw new Error(`resetLab${after}: lab-state did not read "${RESET_STATE}" after the reset`);
   }
 }
