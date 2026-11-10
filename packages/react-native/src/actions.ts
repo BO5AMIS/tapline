@@ -345,6 +345,15 @@ function notFoundMessage(target: ParsedTarget): string {
   }
 }
 
+/**
+ * What a `label` target matches: the element's own accessibility label, else its text. iOS forms
+ * the label of an element that has none from the text inside it, and Tapwright reads that label, so
+ * `{label: "OK"}` finds a button that only shows "OK" in both tools.
+ */
+export function labelOf(info: { label: string | null; text: string }): string {
+  return info.label ?? info.text;
+}
+
 function matchEntries(snapshot: Snapshot, target: ParsedTarget): Entry[] {
   const pool = snapshot.entries.filter((entry) => entry.info.interesting);
   switch (target.kind) {
@@ -352,11 +361,8 @@ function matchEntries(snapshot: Snapshot, target: ParsedTarget): Entry[] {
       return dedupe(snapshot, pool.filter((e) => e.info.testID === target.value), 'outer');
     case 'label': {
       const wanted = target.value.trim().toLowerCase();
-      return dedupe(
-        snapshot,
-        pool.filter((e) => e.info.label !== null && e.info.label.toLowerCase() === wanted),
-        'outer',
-      );
+      if (wanted === '') return [];
+      return dedupe(snapshot, pool.filter((e) => labelOf(e.info).toLowerCase() === wanted), 'outer');
     }
     case 'text': {
       const wanted = target.value.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -1303,21 +1309,33 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
   const tabBar = nativeTabBar(snapshot);
   const clearTop = navBar && !inNavBarHeader(navBar, wanted.node.fiber) ? navBar.bottom : 0;
   const clearBottom = tabBar ? tabBar.top : height;
-  // How far the element is from clear inside `area` (the whole screen without one), per axis.
-  const shiftsIn = (frame: Frame, area: Frame | null): { x: number; y: number } => ({
-    x: axisShift(frame.x, frame.width, Math.max(area?.x ?? 0, 0), Math.min(area ? area.x + area.width : width, width)),
-    y: axisShift(
-      frame.y,
-      frame.height,
-      Math.max(area?.y ?? 0, clearTop),
-      Math.min(area ? area.y + area.height : height, clearBottom),
-    ),
-  });
+  /**
+   * How far the element is from clear inside a scroll view, per axis. The area is the part of the
+   * scroll view that is on screen between the bars. A scroll view that is itself out of view (a
+   * list further down the page) has no such part: there the element only has to be inside the
+   * scroll view, and the outer one brings both onto the screen. Without a scroll view the area is
+   * the screen between the bars.
+   */
+  const shiftsIn = (frame: Frame, area: Frame | null): { x: number; y: number } => {
+    let left = Math.max(area?.x ?? 0, 0);
+    let right = Math.min(area ? area.x + area.width : width, width);
+    let top = Math.max(area?.y ?? 0, clearTop);
+    let bottom = Math.min(area ? area.y + area.height : height, clearBottom);
+    if (area && (right - left < 1 || bottom - top < 1)) {
+      left = area.x;
+      right = area.x + area.width;
+      top = area.y;
+      bottom = area.y + area.height;
+    }
+    return { x: axisShift(frame.x, frame.width, left, right), y: axisShift(frame.y, frame.height, top, bottom) };
+  };
 
   let settledMs = 0;
   let settleCapMs: number | undefined;
   let scrolled: { entry: Entry; offset: { x: number; y: number } } | null = null;
-  for (let round = 0; round < 2; round++) {
+  // A list drawn upside down (`inverted`) moves its content the other way: found out from the first move.
+  const inverted = new Set<Entry>();
+  for (let round = 0; round < 3; round++) {
     let movedThisRound = false;
     for (const scroller of scrollers) {
       const horizontal = findProp(scroller.node, 'horizontal') === true;
@@ -1328,19 +1346,22 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
       ]);
       if (!targetFrame || !scrollFrame) continue;
       const shifts = shiftsIn(targetFrame, scrollFrame);
-      const shift = horizontal ? shifts.x : shifts.y;
-      if (Math.abs(shift) < 1) continue;
+      const wantedShift = horizontal ? shifts.x : shifts.y;
+      if (Math.abs(wantedShift) < 1) continue;
+      const shift = inverted.has(scroller) ? -wantedShift : wantedShift;
       const candidates = scrollCandidates(scroller);
       const key = rememberKey(scroller, candidates);
       const metrics = readMetrics(candidates);
       const current =
         state?.offset ??
         (metrics ? (horizontal ? { x: metrics.offset, y: 0 } : { x: 0, y: metrics.offset }) : ((key ? rememberedOffsets.get(key) : undefined) ?? { x: 0, y: 0 }));
-      let x = Math.max(0, current.x + (horizontal ? shift : 0));
-      let y = Math.max(0, current.y + (horizontal ? 0 : shift));
+      // Never further back than the start. A scroll view resting at a negative offset (the system's
+      // inset under a large title) can't be asked to go back past where it rests.
+      let x = Math.max(Math.min(0, current.x), current.x + (horizontal ? shift : 0));
+      let y = Math.max(Math.min(0, current.y), current.y + (horizontal ? 0 : shift));
       if (state) {
-        x = Math.min(x, state.max.x);
-        y = Math.min(y, state.max.y);
+        x = Math.min(x, Math.max(state.max.x, current.x));
+        y = Math.min(y, Math.max(state.max.y, current.y));
       }
       // At its start or end already: this scroll view can't bring the element any closer.
       if (Math.abs(x - current.x) < 1 && Math.abs(y - current.y) < 1) continue;
@@ -1352,9 +1373,15 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
       const outcome = await settleOutcome();
       settledMs += outcome.settledMs;
       if (outcome.settleCapMs !== undefined) settleCapMs = outcome.settleCapMs;
-      const after = await measureScrollState(scroller);
+      const [after, movedFrame] = await Promise.all([measureScrollState(scroller), measureFiber(wanted.node.fiber)]);
       const offset = after ? after.offset : { x, y };
       if (key) rememberedOffsets.set(key, offset);
+      // What the element did, measured: the scroll view may have held it back, or gone the other way.
+      // (When it can't be measured now, it is taken to have moved as asked.)
+      const asked = horizontal ? x - current.x : y - current.y;
+      const travelled = movedFrame ? (horizontal ? movedFrame.x - targetFrame.x : movedFrame.y - targetFrame.y) : -asked;
+      if (Math.abs(travelled) < 1) continue;
+      if (travelled * asked > 0 && !inverted.has(scroller)) inverted.add(scroller);
       // The answer names the innermost scroll view that moved.
       if (scrolled === null || scrollers.indexOf(scroller) < scrollers.indexOf(scrolled.entry)) scrolled = { entry: scroller, offset };
       else if (scrolled.entry === scroller) scrolled.offset = offset;
@@ -1366,10 +1393,14 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
   const finalFrame = await measureFiber(wanted.node.fiber);
   let reached = finalFrame !== null && isOnScreen(finalFrame, snapshot.screen);
   if (finalFrame !== null && reached) {
-    const inner = scrollers[0];
-    const innerFrame = inner ? await measureFiber(inner.node.fiber) : null;
-    const left = shiftsIn(finalFrame, innerFrame);
-    reached = Math.abs(left.x) < 1 && Math.abs(left.y) < 1;
+    // Clear inside every scroll view that holds it, and on the screen between the bars.
+    const areas: Array<Frame | null> = scrollers.length > 0 ? await Promise.all(scrollers.map((s) => measureFiber(s.node.fiber))) : [null];
+    for (const area of areas) {
+      const left = shiftsIn(finalFrame, area);
+      if (Math.abs(left.x) >= 1 || Math.abs(left.y) >= 1) reached = false;
+    }
+    const onScreen = shiftsIn(finalFrame, null);
+    if (Math.abs(onScreen.x) >= 1 || Math.abs(onScreen.y) >= 1) reached = false;
   }
   const target = toElement(wanted, finalFrame);
   const settle: SettleOutcome = { settledMs, ...(settleCapMs !== undefined ? { settleCapMs } : {}) };

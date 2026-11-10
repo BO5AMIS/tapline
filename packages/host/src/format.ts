@@ -9,7 +9,12 @@ const MAX_TEXT = 200;
  */
 function clip(text: string, max = MAX_TEXT, more = 0): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  const shown = flat.length > max ? flat.slice(0, max) : flat;
+  let shown = flat;
+  if (flat.length > max) {
+    // Never half a character: a cut that lands inside an emoji's pair stops one unit earlier.
+    const last = flat.charCodeAt(max - 1);
+    shown = flat.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+  }
   const missing = flat.length - shown.length + more;
   return missing > 0 ? `${shown}…(+${missing})` : shown;
 }
@@ -123,7 +128,7 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
 
 /** Very short element description for action results, e.g. `e3 button "Log in"`. */
 export function describeElement(element: TreeElement): string {
-  const parts: string[] = [element.ref];
+  const parts: string[] = element.ref !== "" ? [element.ref] : [];
   const kind = roleOf(element);
   if (kind !== null) parts.push(kind);
   const text = element.text ?? "";
@@ -197,6 +202,39 @@ function formatWas(key: string, value: unknown): string {
   return formatValue(value);
 }
 
+/** The old values of a `~` line: one changed field reads `"old"`; several read `text="old", value="old"`. */
+function formatBefore(was: Record<string, unknown>): string {
+  const entries = Object.entries(was);
+  const [only] = entries;
+  return entries.length === 1 && only !== undefined
+    ? formatWas(only[0], only[1])
+    : entries.map(([key, value]) => `${key}=${formatWas(key, value)}`).join(", ");
+}
+
+/**
+ * What changed out of view (AGENT-TOOLS v1.6): `~ <line without a ref> (off screen; was "…")`, then
+ * `~ N more changed off screen`. The tap worked; its effect just isn't on screen.
+ */
+function formatOffScreenChanges(changes: NonNullable<TreeResult["changes"]>): string[] {
+  const lines = (changes.offScreen ?? []).map(
+    ({ element, was }) => `~ ${formatElement({ ...element, ref: "" })} (off screen; was ${formatBefore(was)})`,
+  );
+  const more = changes.offScreenMore ?? 0;
+  if (more > 0) lines.push(`~ ${more} more changed off screen`);
+  return lines;
+}
+
+/**
+ * The off-screen lines that follow a full list. Only for a full list that came because most of the
+ * same screen changed: on another screen, or with nothing listed, the old off-screen elements are
+ * no baseline to compare with.
+ */
+export function formatOffScreenAfterList(tree: TreeResult): string[] {
+  const changes = tree.changes;
+  if (changes === undefined || !changes.sameRoute || tree.elements.length === 0) return [];
+  return formatOffScreenChanges(changes);
+}
+
 /** Most moved elements listed one by one; more read as a scroll. */
 const MAX_MOVED_LINES = 5;
 
@@ -225,25 +263,12 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean }
     if (element !== undefined) lines.push(`+ ${formatElement(element)}`);
   }
   for (const element of changes.removed) lines.push(`- ${describeGone(element)}`);
-  // One changed field reads `"old"`; several read `text="old", value="old"`.
-  const before = (was: Record<string, unknown>): string => {
-    const entries = Object.entries(was);
-    const [only] = entries;
-    return entries.length === 1 && only !== undefined
-      ? formatWas(only[0], only[1])
-      : entries.map(([key, value]) => `${key}=${formatWas(key, value)}`).join(", ");
-  };
   for (const { ref, was } of changes.changed) {
     const element = byRef.get(ref);
     if (element === undefined) continue;
-    lines.push(`~ ${formatElement(element)} (was ${before(was)})`);
+    lines.push(`~ ${formatElement(element)} (was ${formatBefore(was)})`);
   }
-  // What changed out of view (v1.6): the tap worked, its effect just isn't on screen.
-  for (const { element, was } of changes.offScreen ?? []) {
-    lines.push(`~ ${formatElement({ ...element, ref: "" })} (off screen; was ${before(was)})`);
-  }
-  const more = changes.offScreenMore ?? 0;
-  if (more > 0) lines.push(`~ ${more} more changed off screen`);
+  lines.push(...formatOffScreenChanges(changes));
   if (changes.moved.length > MAX_MOVED_LINES) {
     lines.push(`↕ ${changes.moved.length} elements moved`);
   } else {

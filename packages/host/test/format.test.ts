@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alertNotes, formatChanges, formatElement, formatLogs, formatTree } from "../src/format.js";
+import { alertNotes, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "../src/format.js";
 import type { TreeResult } from "../src/protocol.js";
 
 const tree: TreeResult = {
@@ -110,6 +110,32 @@ describe("changes off screen (AGENT-TOOLS v1.6)", () => {
 
   it("with nothing on screen or off it: No visible change.", () => {
     expect(formatChanges({ ...tree, changes: base })).toBe("Same screen. Changes:\nNo visible change.");
+  });
+});
+
+describe("a cut never splits a character", () => {
+  it("leaves an emoji across the 200th place out whole, and counts it", () => {
+    const text = `${"a".repeat(199)}😀${"b".repeat(10)}`;
+    expect(formatElement({ ref: "e9", text })).toBe(`e9 "${"a".repeat(199)}…(+12)"`);
+    expect(formatElement({ ref: "e9", text: `${"a".repeat(198)}😀` })).toBe(`e9 "${"a".repeat(198)}😀"`);
+  });
+});
+
+describe("off-screen changes after a full list", () => {
+  const STATE = { ref: "", type: "Text", role: null, testID: "lab-state", text: "row=5", frame: { x: 16, y: -900, width: 398, height: 68 } };
+  const changes = { sameRoute: true, added: [], removed: [], changed: [], moved: [], offScreen: [{ element: STATE, was: { text: "row=-" } }], offScreenMore: 1 };
+
+  it("gives the same lines when most of the same screen changed", () => {
+    expect(formatOffScreenAfterList({ ...tree, changes })).toEqual([
+      '~ text "row=5" id=lab-state @16,-900 398x68 (off screen; was "row=-")',
+      "~ 1 more changed off screen",
+    ]);
+  });
+
+  it("gives nothing on another screen, with nothing listed, or without changes", () => {
+    expect(formatOffScreenAfterList({ ...tree, changes: { ...changes, sameRoute: false } })).toEqual([]);
+    expect(formatOffScreenAfterList({ ...tree, elements: [], changes })).toEqual([]);
+    expect(formatOffScreenAfterList(tree)).toEqual([]);
   });
 });
 

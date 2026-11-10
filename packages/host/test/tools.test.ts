@@ -447,13 +447,16 @@ describe("compare_screen and filmstrip", () => {
   }
 
   it("saves a baseline the first time, then reports what changed with a marked image", async () => {
-    const { tools, dir } = await screenTools([picture(false), picture(true)]);
+    const { app, tools, dir } = await screenTools([picture(false), picture(true)]);
     try {
       const first = textOf(await tools.compareScreen({ name: "home" }));
       expect(first).toContain("Saved");
       expect(existsSync(join(dir, "com.example.demo", "home.jpg"))).toBe(true);
       const second = await tools.compareScreen({ name: "home" });
       const text = textOf(second);
+      // The list it names elements from is the host's own: it must not renumber the agent's refs
+      // or move the baseline of its next changes.
+      expect(app.requests.filter((r) => r.method === "tree").map((r) => r.params)).toEqual([{ peek: true }]);
       expect(text).toMatch(/[0-9.]+% of the screen changed/);
       expect(text).toContain("1 region");
       expect(text).toMatch(/@\d+,\d+ \d+x\d+/);

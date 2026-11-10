@@ -39,10 +39,16 @@ export const MAX_TEXT = 200;
  */
 export const MAX_KEPT_TEXT = 2000;
 
+/** The first `max` UTF-16 units of a text, one fewer when that would cut a character (an emoji) in half. */
+export function sliceWhole(text: string, max: number): string {
+  const last = text.charCodeAt(max - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
 /** Text as a line quotes it: whitespace flattened, cut at `max` with `…(+N)` (N counts `more` too: what was cut off before). */
 export function cutText(raw: string, more = 0, max = MAX_TEXT): string {
   const flat = raw.replace(/\s+/g, ' ').trim();
-  const shown = flat.length > max ? flat.slice(0, max) : flat;
+  const shown = flat.length > max ? sliceWhole(flat, max) : flat;
   const missing = flat.length - shown.length + more;
   return missing > 0 ? `${shown}…(+${missing})` : shown;
 }
@@ -1186,14 +1192,15 @@ export function fiberForRef(ref: string): Fiber | null {
 /** An entry as an element. `ref` is the fiber's ref unless one is passed ('' for an element that isn't listed). */
 export function toElement(entry: Entry, frame: Frame | null, ref: string = refFor(entry.node.fiber)): TaplineElement {
   const { info } = entry;
-  const more = info.text.length - MAX_KEPT_TEXT;
+  const kept = info.text.length > MAX_KEPT_TEXT ? sliceWhole(info.text, MAX_KEPT_TEXT) : info.text;
+  const more = info.text.length - kept.length;
   return {
     ref,
     type: info.type,
     role: info.role,
     testID: info.testID,
     label: info.label,
-    text: more > 0 ? info.text.slice(0, MAX_KEPT_TEXT) : info.text,
+    text: kept,
     ...(more > 0 ? { textMore: more } : {}),
     value: info.value === null ? null : displayText(info.value),
     frame,
@@ -1265,6 +1272,11 @@ function diffTrees(
   for (const [key, now] of offKey) {
     const old = previous.offKey.get(key);
     if (!old) continue;
+    // The same element: the same identifier, or the same role in the same place (Tapwright's rule
+    // too). A recycling list hands an off-screen cell to another row; that is not a change.
+    const sameId = now.testID !== null && now.testID === old.testID;
+    const samePlace = now.role === old.role && now.type === old.type && !framesDiffer(old.frame, now.frame);
+    if (!sameId && !samePlace) continue;
     const { actions: _actions, ...was } = changedFields(old, now);
     if (Object.keys(was).length === 0) continue;
     offScreenChanged++;
@@ -1344,12 +1356,15 @@ export function foldDuplicates(snapshot: Snapshot, listed: Listed[]): Listed[] {
  */
 export async function tree(params: unknown = {}): Promise<TreeResult> {
   const all = isRecord(params) && params.all === true;
-  const wantChanges = isRecord(params) && params.changes === true && lastTree !== null;
+  // `peek`: a list for the host's own use (naming what a picture shows). The agent isn't given it,
+  // so its refs keep their meaning and the baseline for changes stays where it is.
+  const peek = isRecord(params) && params.peek === true;
+  const wantChanges = !peek && isRecord(params) && params.changes === true && lastTree !== null;
   const snapshot = takeSnapshot();
   const candidates = snapshot.entries.filter((entry) => all || entry.info.interesting);
   const frames = await Promise.all(candidates.map((entry) => measureFiber(entry.node.fiber)));
 
-  if (!wantChanges) resetRefs();
+  if (!wantChanges && !peek) resetRefs();
   const elements: TaplineElement[] = [];
   const byKey = new Map<object, TaplineElement>();
   let listed: Listed[] = [];
@@ -1373,7 +1388,7 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
     below = foldDuplicates(snapshot, below);
   }
   for (const { entry, frame } of listed) {
-    const element = toElement(entry, frame);
+    const element = peek ? toElement(entry, frame, peekRef(entry.node.fiber) ?? '') : toElement(entry, frame);
     elements.push(element);
     byKey.set(stableKey(entry), element);
   }
@@ -1395,6 +1410,6 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   if (busy > 0) result.network = { inFlight: busy };
   const routeKey = current ? `${current.chain.join('/')}#${current.key}` : '';
   if (wantChanges && lastTree !== null) result.changes = diffTrees(lastTree, byKey, offKey, routeKey);
-  lastTree = { byKey, offKey, route: routeKey };
+  if (!peek) lastTree = { byKey, offKey, route: routeKey };
   return result;
 }

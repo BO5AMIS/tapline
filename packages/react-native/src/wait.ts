@@ -58,7 +58,8 @@ function parse(raw: unknown): Condition {
 function matches(entry: Entry, condition: Condition): boolean {
   const { info } = entry;
   if (condition.testID !== undefined && info.testID !== condition.testID) return false;
-  if (condition.label !== undefined && (info.label ?? '').toLowerCase() !== condition.label.toLowerCase()) return false;
+  // As a `label` target matches: the element's own label, else its text.
+  if (condition.label !== undefined && (info.label ?? info.text).toLowerCase() !== condition.label.toLowerCase()) return false;
   if (condition.text !== undefined && !info.text.toLowerCase().includes(condition.text.toLowerCase())) return false;
   return true;
 }

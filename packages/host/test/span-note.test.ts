@@ -51,6 +51,39 @@ async function setup(treeAfter: (req: IncomingRequest) => unknown = () => SAME) 
 const NOTE = /^Note: changes are since your last list, (\d+) actions ago\.$/;
 const noteOf = (answer: string): string | undefined => answer.split("\n").find((line) => NOTE.test(line));
 
+describe("off-screen changes follow a full list", () => {
+  it("come after the list and before Settled in, when most of the same screen changed", async () => {
+    const state = { ref: "", type: "Text", role: null, testID: "lab-state", text: "row=5", frame: { x: 16, y: -900, width: 398, height: 68 } };
+    // Nine new elements against a list of one: the full list replaces the change block.
+    const much = {
+      ...TREE,
+      changes: {
+        sameRoute: true,
+        added: ["e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12"],
+        removed: [],
+        changed: [],
+        moved: [],
+        offScreen: [{ element: state, was: { text: "row=-" } }],
+      },
+    };
+    const { tools } = await setup(() => much);
+    await tools.look({ screenshot: false });
+    const lines = textOf(await tools.tap({ target: { id: "open-sheet" } })).split("\n");
+    expect(lines[1]).toBe("Screen 402x874 pt @3x · 1 element");
+    const at = lines.indexOf('~ text "row=5" id=lab-state @16,-900 398x68 (off screen; was "row=-")');
+    expect(at).toBeGreaterThan(1);
+    expect(lines[at + 1]).toBe("Settled in 0.10 s.");
+  });
+
+  it("not on another screen", async () => {
+    const state = { ref: "", type: "Text", role: null, testID: "lab-state", text: "row=5", frame: { x: 16, y: -900, width: 398, height: 68 } };
+    const other = { ...OTHER_ROUTE, changes: { ...OTHER_ROUTE.changes, offScreen: [{ element: state, was: { text: "row=-" } }] } };
+    const { tools } = await setup(() => other);
+    await tools.look({ screenshot: false });
+    expect(textOf(await tools.tap({ target: { id: "open-sheet" } }))).not.toContain("(off screen;");
+  });
+});
+
 describe("Note: forced (v1.6)", () => {
   async function forcedApp(forced: string | undefined) {
     const { host, port } = await startHost();

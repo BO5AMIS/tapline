@@ -7,7 +7,7 @@ import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
-import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatTree } from "./format.js";
+import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
 import {
   elementSchema,
@@ -782,6 +782,8 @@ export class TaplineTools {
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
+    // A full list in place of the changes (most of the screen changed) still says what changed out of view.
+    if (askChanges && changesText === null) lines.push(...formatOffScreenAfterList(tree));
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [...alertNotes(tree)];
@@ -1178,11 +1180,11 @@ export class TaplineTools {
     let scale = 1;
     let elements: TreeResult["elements"] = [];
     try {
-      const tree = treeResultSchema.safeParse(await this.host.request("tree", {}, { sessionId: session.id }));
+      // `peek`: the agent isn't given this list, so its refs and its baseline for changes must stay as they are.
+      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
       if (tree.success && tree.data.screen) {
         scale = diff.width / tree.data.screen.width;
         elements = tree.data.elements;
-        this.listed.add(session.id);
       }
     } catch {
       // positions stay in pixels
