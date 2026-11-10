@@ -2,6 +2,8 @@ import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-nativ
 import {
   closingModalHosts,
   currentInputValue,
+  cutText,
+  MAX_TEXT,
   displayText,
   findHandler,
   findProp,
@@ -186,10 +188,9 @@ function paramsOf(raw: unknown): Record<string, unknown> {
 }
 
 /** An element as element lines name it: `e6 button "Continue"`, or `id=<testID>` without text or label. */
-function describe(entry: Entry, maxText = 80): string {
+function describe(entry: Entry, maxText = MAX_TEXT): string {
   const { info } = entry;
-  const flat = (info.text !== '' ? info.text : (info.label ?? '')).replace(/\s+/g, ' ').trim();
-  const shown = flat.length > maxText ? `${flat.slice(0, maxText - 1)}…` : flat;
+  const shown = cutText(info.text !== '' ? info.text : (info.label ?? ''), 0, maxText);
   const name = shown !== '' ? `"${shown}"` : info.testID ? `id=${info.testID}` : '';
   return [refFor(entry.node.fiber), roleName(info), name].filter((part) => part !== '').join(' ');
 }
@@ -415,8 +416,7 @@ function backButtonEntry(snapshot: Snapshot): Entry {
 /** An element as the list words it: `[ref ]role "text" id=… @x,y WxH` (the position only when its frame is known). */
 function elementLine(entry: Entry, frame: Frame | null, withRef: boolean): string {
   const { info } = entry;
-  const flat = (info.text !== '' ? info.text : (info.label ?? '')).replace(/\s+/g, ' ').trim();
-  const shown = flat.length > 80 ? `${flat.slice(0, 79)}…` : flat;
+  const shown = cutText(info.text !== '' ? info.text : (info.label ?? ''));
   return [
     withRef ? refFor(entry.node.fiber) : '',
     roleName(info),
@@ -450,6 +450,18 @@ async function refuseBehindSheet(snapshot: Snapshot, target: ParsedTarget): Prom
   ]);
   const inFront = front ? elementLine(front, frontFrame, true) : 'the open sheet';
   throw notActionable('covered', `${elementLine(hidden, hiddenFrame, false)} is behind ${inFront}; close that first.`);
+}
+
+/**
+ * AGENT-TOOLS v1.5: when several elements match a target and some of them are in the alert that is
+ * in front, only those count; a person sees one "Cancel", not the one behind the alert too. With no
+ * match in the alert the list is left alone, so a target behind it still answers `behind_alert`.
+ * (What an open sheet hides isn't in the list at all, so a sheet needs no such rule.)
+ */
+function inFrontLayer(matches: Entry[]): Entry[] {
+  if (matches.length < 2 || !openAlerts().some((alert) => alert.standIn)) return matches;
+  const inAlert = matches.filter((entry) => inStandInAlert(entry.node.fiber));
+  return inAlert.length > 0 ? inAlert : matches;
 }
 
 /** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
@@ -499,7 +511,7 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
     return { snapshot, entry: hit };
   }
 
-  const matches = matchEntries(snapshot, target);
+  const matches = inFrontLayer(matchEntries(snapshot, target));
   if (matches.length === 0) await refuseBehindSheet(snapshot, target);
   if (target.index !== undefined) {
     const picked = matches[target.index];

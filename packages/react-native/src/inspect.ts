@@ -30,7 +30,22 @@ import {
 
 const TEXT_HOSTS = new Set(['Text', 'RCTText', 'RCTVirtualText', 'AndroidTextView', 'ReactTextView']);
 
+/** How much of an element's text a line shows (AGENT-TOOLS v1.5); a cut ends with `…(+N)`, the count left out. */
 export const MAX_TEXT = 200;
+
+/**
+ * How much text a container keeps for matching, and how much of any text goes over the wire. A Text
+ * host keeps all of its own text, so `wait_for` and `{text}` targets check all of it.
+ */
+export const MAX_KEPT_TEXT = 2000;
+
+/** Text as a line quotes it: whitespace flattened, cut at `max` with `…(+N)` (N counts `more` too: what was cut off before). */
+export function cutText(raw: string, more = 0, max = MAX_TEXT): string {
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  const shown = flat.length > max ? flat.slice(0, max) : flat;
+  const missing = flat.length - shown.length + more;
+  return missing > 0 ? `${shown}…(+${missing})` : shown;
+}
 
 /** One host component (View, Text, TextInput, ...) in the current fiber tree. */
 export interface HostNode {
@@ -42,7 +57,7 @@ export interface HostNode {
   hostType: string;
   /** Composite fibers between this host and the previous host, innermost first. */
   owners: Fiber[];
-  /** Descendant text, whitespace-collapsed, trimmed, at most MAX_TEXT chars. */
+  /** Descendant text, whitespace-collapsed and trimmed: all of it for a Text host, at most MAX_KEPT_TEXT chars otherwise. */
   text: string;
   isText: boolean;
   insideText: boolean;
@@ -56,9 +71,9 @@ export function displayText(raw: string): string {
   return raw.replace(DIRECTION_MARKS, '');
 }
 
-function normalizeText(raw: string): string {
+function normalizeText(raw: string, whole: boolean): string {
   const collapsed = displayText(raw).replace(/\s+/g, ' ').trim();
-  return collapsed.length > MAX_TEXT ? collapsed.slice(0, MAX_TEXT) : collapsed;
+  return !whole && collapsed.length > MAX_KEPT_TEXT ? collapsed.slice(0, MAX_KEPT_TEXT) : collapsed;
 }
 
 /** React Native Screens' tab screens (native tabs: iOS, Android, and the older bottom-tabs name). */
@@ -201,7 +216,7 @@ function walk(
       };
       out.nodes.push(node);
       const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain);
-      node.text = normalizeText(isText ? inner.join('') : inner.join(' '));
+      node.text = normalizeText(isText ? inner.join('') : inner.join(' '), isText);
       if (isText) segments.push(inner.join(''));
       else for (const piece of inner) segments.push(piece);
     } else if (isCompositeTag(fiber.tag)) {
@@ -1170,13 +1185,15 @@ export function fiberForRef(ref: string): Fiber | null {
 
 export function toElement(entry: Entry, frame: Frame | null): TaplineElement {
   const { info } = entry;
+  const more = info.text.length - MAX_KEPT_TEXT;
   return {
     ref: refFor(entry.node.fiber),
     type: info.type,
     role: info.role,
     testID: info.testID,
     label: info.label,
-    text: info.text,
+    text: more > 0 ? info.text.slice(0, MAX_KEPT_TEXT) : info.text,
+    ...(more > 0 ? { textMore: more } : {}),
     value: info.value === null ? null : displayText(info.value),
     frame,
     actions: info.actions,
@@ -1220,7 +1237,7 @@ function showsLabel(element: TaplineElement): boolean {
 
 function changedFields(old: TaplineElement, now: TaplineElement): ChangedFields {
   const was: ChangedFields = {};
-  if (old.text !== now.text) was.text = old.text;
+  if (old.text !== now.text || old.textMore !== now.textMore) was.text = old.text;
   // A label counts as changed only when the line shows it, before or after.
   if (old.label !== now.label && (showsLabel(old) || showsLabel(now))) was.label = old.label;
   if (old.value !== now.value) was.value = old.value;
@@ -1257,7 +1274,7 @@ export interface Listed {
   frame: Frame | null;
 }
 
-/** What an element line quotes: the text, else the label, whitespace flattened and clipped to 80. */
+/** What an element line quotes, for comparing two elements: the text, else the label, whitespace flattened, its first MAX_TEXT characters. */
 function quotedText(entry: Entry): string {
   const { info } = entry;
   const flat = (info.text !== '' ? info.text : (info.label ?? '')).replace(/\s+/g, ' ').trim();
@@ -1319,18 +1336,32 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   const elements: TaplineElement[] = [];
   const byKey = new Map<object, TaplineElement>();
   let listed: Listed[] = [];
+  // Elements with a size that lie wholly above or below the screen: counted, not listed (v1.5).
+  let above: Listed[] = [];
+  let below: Listed[] = [];
   candidates.forEach((entry, i) => {
     const frame = entry.tab ? null : (frames[i] ?? null);
-    if (!all && frame !== null && !isOnScreen(frame, snapshot.screen)) return;
+    if (!all && frame !== null && !isOnScreen(frame, snapshot.screen)) {
+      if (frame.width > 0 && frame.height > 0) {
+        if (frame.y + frame.height <= 0) above.push({ entry, frame });
+        else if (frame.y >= snapshot.screen.height) below.push({ entry, frame });
+      }
+      return;
+    }
     listed.push({ entry, frame });
   });
-  if (!all) listed = foldDuplicates(snapshot, listed);
+  if (!all) {
+    listed = foldDuplicates(snapshot, listed);
+    above = foldDuplicates(snapshot, above);
+    below = foldDuplicates(snapshot, below);
+  }
   for (const { entry, frame } of listed) {
     const element = toElement(entry, frame);
     elements.push(element);
     byKey.set(stableKey(entry), element);
   }
   const result: TreeResult = { screen: snapshot.screen, elements };
+  if (above.length > 0 || below.length > 0) result.offScreen = { above: above.length, below: below.length };
   const current = currentRoute(snapshot.routes);
   if (current) {
     const params = simpleParams(current.params);

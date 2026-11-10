@@ -188,11 +188,19 @@ describe('tree', () => {
     expect(byTestID(elements, 'b')).toMatchObject({ disabled: true, selected: true, checked: true, label: 'Bee' });
   });
 
-  test('truncates text to 200 characters', async () => {
-    await mount(<Text testID="long">{'x'.repeat(500)}</Text>);
+  test('sends at most 2000 characters of a text, and how many it left out', async () => {
+    await mount(
+      <View>
+        <Text testID="long">{'x'.repeat(500)}</Text>
+        <Text testID="longer">{'y'.repeat(2600)}</Text>
+      </View>,
+    );
     useFrames({});
     const { elements } = await tree({});
-    expect(byTestID(elements, 'long').text).toHaveLength(200);
+    expect(byTestID(elements, 'long').text).toHaveLength(500);
+    expect(byTestID(elements, 'long').textMore).toBeUndefined();
+    expect(byTestID(elements, 'longer').text).toHaveLength(2000);
+    expect(byTestID(elements, 'longer').textMore).toBe(600);
   });
 
   test('skips content hidden from accessibility or display', async () => {

@@ -1,14 +1,26 @@
 import type { LogEntry, TreeElement, TreeResult } from "./protocol.js";
 
-const MAX_TEXT = 80;
+/** How much of a text a line shows (AGENT-TOOLS v1.5). */
+const MAX_TEXT = 200;
 
-function clip(text: string, max = MAX_TEXT): string {
+/**
+ * Text as a line shows it: whitespace flattened, cut at `max` characters. A cut ends with how much is
+ * missing, `…(+57)`; `more` is what the app had already left out.
+ */
+function clip(text: string, max = MAX_TEXT, more = 0): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  const shown = flat.length > max ? flat.slice(0, max) : flat;
+  const missing = flat.length - shown.length + more;
+  return missing > 0 ? `${shown}…(+${missing})` : shown;
 }
 
-function quote(text: string): string {
-  return JSON.stringify(clip(text));
+function quote(text: string, more = 0): string {
+  return JSON.stringify(clip(text, MAX_TEXT, more));
+}
+
+/** An element's text in quotes, counting what the app left out of it. */
+function quoteText(element: Pick<TreeElement, "text" | "textMore">): string {
+  return quote(element.text ?? "", element.textMore ?? 0);
 }
 
 function formatValue(value: unknown): string {
@@ -85,7 +97,7 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
 
   const text = element.text ?? "";
   const label = element.label ?? "";
-  if (text !== "") parts.push(quote(text));
+  if (text !== "") parts.push(quoteText(element));
   else if (label !== "") parts.push(quote(label));
   if (text !== "" && label !== "" && label.toLowerCase() !== text.toLowerCase()) {
     parts.push(`label=${quote(label)}`);
@@ -114,8 +126,9 @@ export function describeElement(element: TreeElement): string {
   const kind = roleOf(element);
   if (kind !== null) parts.push(kind);
   const text = element.text ?? "";
-  const name = text !== "" ? text : (element.label ?? "");
-  if (name !== "") parts.push(quote(name));
+  const label = element.label ?? "";
+  if (text !== "") parts.push(quoteText(element));
+  else if (label !== "") parts.push(quote(label));
   else if (element.testID !== null && element.testID !== undefined && element.testID !== "") {
     parts.push(`id=${element.testID}`);
   }
@@ -135,7 +148,7 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
     ? `${Math.round(screen.width)}x${Math.round(screen.height)} pt${screen.scale !== undefined ? ` @${screen.scale}x` : ""}`
     : "unknown size";
   const count = tree.elements.length;
-  const lines = [`Screen ${size} · ${count} element${count === 1 ? "" : "s"}`];
+  const lines = [`Screen ${size} · ${count} element${count === 1 ? "" : "s"}${formatOffScreen(tree.offScreen)}`];
   if (app !== undefined) lines.push(`App: ${app.name}${app.id !== undefined ? ` (${app.id})` : ""}`);
   const route = formatRoute(tree.route);
   if (route !== null) lines.push(route);
@@ -146,13 +159,23 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
   return lines.join("\n");
 }
 
+/** What lies off screen, for the screen line: ` (+41 below, +2 above)`, or nothing. Left and right aren't counted. */
+function formatOffScreen(offScreen: TreeResult["offScreen"]): string {
+  const parts: string[] = [];
+  if (offScreen !== null && offScreen !== undefined) {
+    if (offScreen.below > 0) parts.push(`+${offScreen.below} below`);
+    if (offScreen.above > 0) parts.push(`+${offScreen.above} above`);
+  }
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+}
+
 /** A gone element as `<role> "<name>"`. It omits the ref and position on purpose: neither means anything now. */
 function describeGone(element: TreeElement): string {
   const kind = roleOf(element);
   const text = element.text ?? "";
-  const name = text !== "" ? text : (element.label ?? "");
+  const label = element.label ?? "";
   const id = element.testID ?? "";
-  const rest = name !== "" ? quote(name) : id !== "" ? `id=${id}` : "";
+  const rest = text !== "" ? quoteText(element) : label !== "" ? quote(label) : id !== "" ? `id=${id}` : "";
   const line = [kind, rest].filter((part) => part !== null && part !== "").join(" ");
   return line !== "" ? line : "element";
 }

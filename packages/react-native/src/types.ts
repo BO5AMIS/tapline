@@ -57,7 +57,10 @@ export interface TaplineElement {
   role: string | null;
   testID: string | null;
   label: string | null;
+  /** The element's text, whitespace-collapsed; at most 2000 characters of it. */
   text: string;
+  /** How many characters of the text were left out; absent when it is whole. */
+  textMore?: number;
   /** TextInput content; null for everything else. */
   value: string | null;
   /** Null only when the element could not be measured. */
@@ -114,6 +117,8 @@ export interface TreeAlert {
 export interface TreeResult {
   screen: ScreenInfo;
   elements: TaplineElement[];
+  /** How many elements lie wholly above and below the screen (scroll to reach them); absent when none. */
+  offScreen?: { above: number; below: number };
   /** Open alerts (Alert.alert / Alert.prompt) the app showed, oldest first. */
   alerts?: TreeAlert[];
   /** Network requests still running (fetch / XMLHttpRequest); absent when none. */

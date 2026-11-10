@@ -61,11 +61,40 @@ describe("formatElement", () => {
     expect(formatElement(tree.elements[3]!)).toBe('e4 switch "Remember me" disabled checked=true @330,301 51x31 [toggle]');
   });
 
-  it("clips very long text and flattens whitespace", () => {
-    const line = formatElement({ ref: "e9", text: `a\n${"b".repeat(200)}` });
-    expect(line.length).toBeLessThan(100);
-    expect(line).toContain("…");
-    expect(line).not.toContain("\n");
+  it("flattens whitespace and shows up to 200 characters whole", () => {
+    expect(formatElement({ ref: "e9", text: `a\n  b` })).toBe('e9 "a b"');
+    const text = "b".repeat(200);
+    expect(formatElement({ ref: "e9", text })).toBe(`e9 "${text}"`);
+  });
+
+  it("cuts longer text at 200 characters and says how much is missing", () => {
+    expect(formatElement({ ref: "e9", text: "b".repeat(257) })).toBe(`e9 "${"b".repeat(200)}…(+57)"`);
+  });
+
+  it("counts what the app had already left out of the text", () => {
+    expect(formatElement({ ref: "e9", text: "b".repeat(2000), textMore: 500 })).toBe(`e9 "${"b".repeat(200)}…(+2300)"`);
+  });
+
+  it("cuts a long label and a long value the same way", () => {
+    expect(formatElement({ ref: "e9", label: "c".repeat(210) })).toBe(`e9 "${"c".repeat(200)}…(+10)"`);
+    expect(formatElement({ ref: "e9", type: "TextInput", label: "Notes", value: "d".repeat(203) })).toBe(
+      `e9 input "Notes" value="${"d".repeat(200)}…(+3)"`,
+    );
+  });
+});
+
+describe("the screen line counts what is off screen (AGENT-TOOLS v1.5)", () => {
+  const first = (result: TreeResult): string => formatTree(result).split("\n")[0] ?? "";
+
+  it("says nothing when nothing is off screen", () => {
+    expect(first(tree)).toBe("Screen 402x874 pt @3x · 4 elements");
+    expect(first({ ...tree, offScreen: { above: 0, below: 0 } })).toBe("Screen 402x874 pt @3x · 4 elements");
+  });
+
+  it("counts below, then above", () => {
+    expect(first({ ...tree, offScreen: { above: 2, below: 41 } })).toBe("Screen 402x874 pt @3x · 4 elements (+41 below, +2 above)");
+    expect(first({ ...tree, offScreen: { above: 0, below: 41 } })).toBe("Screen 402x874 pt @3x · 4 elements (+41 below)");
+    expect(first({ ...tree, offScreen: { above: 2, below: 0 } })).toBe("Screen 402x874 pt @3x · 4 elements (+2 above)");
   });
 });
 

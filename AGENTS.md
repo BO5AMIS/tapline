@@ -68,13 +68,15 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    it in the background (also when the user switches to chat with you on the same phone).
    Tapline only works while its app is open in front, so when the user leaves or closes the
    app you stop at once; the forget link (`<scheme>://tapline/forget`) unpairs the phone.
-2. `look` first. The header reads `Screen 440x956 pt @3x · 49 elements`, then `App:`,
-   `Route:`, and `Alert:` or `Network:` when they apply. Elements read
+2. `look` first. The header reads `Screen 440x956 pt @3x · 49 elements (+12 below)`, then
+   `App:`, `Route:`, and `Alert:` or `Network:` when they apply. The brackets count the
+   elements below and above the screen: scroll to reach them. Elements read
    `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`: ref, role, text,
    `id` (the `testID` prop), position in points, size, actions. Roles are `button`, `input`,
    `text`, `header`, `switch`, `slider`, `image`, `scroll`, `tab` and so on. The actions are
    `tap`, `longPress`, `type`, `toggle` and `scroll`. A list holds up to 200 elements, then
-   `(+N more below; scroll)`. A screenshot comes with it (the app needs
+   `(+N more below; scroll)`. Text longer than 200 characters is cut and ends with what is
+   missing, `…(+57)`; `wait_for` with a `text` checks all of it. A screenshot comes with it (the app needs
    `react-native-view-shot`); pass `screenshot: false` when the list is enough.
 3. Every action answers with the verb and the element (`Tapped e3 button "Log in"
    id=login-button @24,610 354x48.`), then either `Same screen. Changes:` with lines for

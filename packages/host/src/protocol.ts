@@ -105,6 +105,8 @@ export const elementSchema = z.object({
   testID: z.string().nullish(),
   label: z.string().nullish(),
   text: z.string().nullish(),
+  /** How many characters of the text the app left out (it sends at most 2000). */
+  textMore: z.number().nullish(),
   value: z.unknown().nullish(),
   frame: frameSchema.nullish(),
   actions: z.array(z.string()).nullish(),
@@ -123,6 +125,8 @@ export const treeResultSchema = z.object({
     })
     .nullish(),
   elements: z.array(elementSchema),
+  /** How many elements lie wholly above and below the screen; absent when none. */
+  offScreen: z.object({ above: z.number(), below: z.number() }).nullish(),
   /** The focused screen (apps using React Navigation / Expo Router). */
   route: z
     .object({

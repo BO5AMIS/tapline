@@ -10,7 +10,7 @@ export const TAPLINE_ADDS = "Tapline works inside one React Native app and reads
 /** Core tools (TOOL-TEXT section 2): the shared paragraph, and the `Tapline:` line when the tool has one. */
 export const CORE_TOOL_TEXT = {
   "look": {
-    "shared": "Read the current screen: one line per element (ref, role, text, id, position and size in points, actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full list, starting with a header.",
+    "shared": "Read the current screen: one line per element (ref, role, text, id, position and size in points, actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full list, starting with a header. Long text is cut; `wait_for` with the text checks all of it.",
     "tapline": "Tapline: reads the app's React tree; the header may add `Route:` and `Network:`."
   },
   "tap": {
