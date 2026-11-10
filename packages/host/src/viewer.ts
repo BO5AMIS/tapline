@@ -115,12 +115,14 @@ export function viewerStatusFor(
 /** The viewer's state for a host's current app, with the not-answering facts read from the host. */
 export function viewerStatusForHost(
   host: Pick<TaplineHost, "current" | "lastDisconnect" | "isNotAnswering">,
-): { state: StatusFields["state"]; detail: string | undefined } {
+): { state: StatusFields["state"]; detail: string | undefined; via?: string } {
   const session = host.current();
-  return viewerStatusFor(session, {
+  const status = viewerStatusFor(session, {
     notAnswering: session !== undefined && host.isNotAnswering(session.id),
     lastDrop: host.lastDisconnect(),
   });
+  // How the connected app reaches the host (Tailscale or the local network); kept as it was otherwise.
+  return session?.via !== undefined ? { ...status, via: session.via } : status;
 }
 
 interface StreamClient {

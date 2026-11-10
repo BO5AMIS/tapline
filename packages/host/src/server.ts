@@ -33,6 +33,21 @@ export interface SessionInfo {
   lastSeen: number;
   /** The app's last reported state ("active", "background", "inactive"), when it sent one. */
   appState?: { state: string; at: number };
+  /** How the app reaches this host, from the address it connected from. */
+  via?: "tailscale" | "wifi";
+}
+
+/**
+ * How a phone at `address` reaches this host: Tailscale hands out 100.64.0.0/10; anything else is
+ * the local network.
+ */
+export function viaOf(address: string | undefined): "tailscale" | "wifi" | undefined {
+  if (address === undefined || address === "") return undefined;
+  const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.\d+\.\d+$/.exec(address);
+  if (v4 && Number(v4[1]) === 100 && Number(v4[2]) >= 64 && Number(v4[2]) <= 127) return "tailscale";
+  // Tailscale's IPv6 range.
+  if (/^fd7a:115c:a1e0:/i.test(address)) return "tailscale";
+  return "wifi";
 }
 
 /** Something that answers some HTTP requests and upgrades before the app connection does (the live viewer). */
@@ -184,6 +199,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly usedCodes = new Map<string, number>();
   private readonly requestTimeoutMs: number;
   private readonly silenceTimeoutMs: number;
+  /** The address each app socket connected from, for `via`. */
+  private readonly remoteOf = new WeakMap<WebSocket, string>();
   private readonly sweepIntervalMs: number;
   private readonly helloTimeoutMs: number;
   private readonly logBufferSize: number;
@@ -293,7 +310,10 @@ export class TaplineHost extends EventEmitter<HostEvents> {
         wss.on("error", () => {
           // reported by the HTTP server's handler
         });
-        wss.on("connection", (socket) => this.onConnection(socket));
+        wss.on("connection", (socket, req) => {
+          this.remoteOf.set(socket, req.socket.remoteAddress ?? "");
+          this.onConnection(socket);
+        });
         http.on("upgrade", (req, socket, head) => {
           try {
             if (this.httpExtension?.onUpgrade(req, socket, head) === true) return;
@@ -545,6 +565,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       connectedAt: now,
       lastSeen: now,
     };
+    const via = viaOf(this.remoteOf.get(socket));
+    if (via !== undefined) info.via = via;
     while (this.sessionMap.has(info.id)) info.id = `s-${randomBytes(2).toString("hex")}`;
 
     const session: Session = { info, socket, pending: new Map(), events: [], nextId: 1, notAnswering: false };

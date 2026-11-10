@@ -30,14 +30,14 @@ describe("viewer status from the host (v1.4)", () => {
     const seen: string[] = [];
     host.on("notAnswering", (s) => seen.push(`not-answering ${s.app.name}`));
     host.on("answering", (s) => seen.push(`answering ${s.app.name}`));
-    expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined });
+    expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined, via: "wifi" });
     await expect(host.request("tree")).rejects.toMatchObject({ code: "not_answering" });
     expect(viewerStatusForHost(host)).toEqual({ state: "not-answering", detail: "Demo" });
     // A second miss doesn't announce it twice.
     await expect(host.request("tree")).rejects.toMatchObject({ code: "not_answering" });
     answer = true;
     await expect(host.request("tree")).resolves.toEqual({ method: "tree" });
-    expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined });
+    expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined, via: "wifi" });
     expect(seen).toEqual(["not-answering Demo", "answering Demo"]);
   });
 
@@ -59,7 +59,7 @@ describe("viewer status from the host (v1.4)", () => {
     expect(viewerStatusForHost(host)).toEqual({ state: "not-answering", detail: "Demo" });
     const next = await FakeApp.connect(port);
     apps.push(next.app);
-    expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined });
+    expect(viewerStatusForHost(host)).toEqual({ state: "live", detail: undefined, via: "wifi" });
   });
 
   it("a plain disconnect is still no-device", async () => {
