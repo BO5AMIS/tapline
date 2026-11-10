@@ -91,9 +91,9 @@ and `y` only for things with no element.
 |---|---|
 | reach an element that is off screen | `scroll` with it as `target` and `to: "target"`. One call; don't scroll by guess |
 | wait for a load, a spinner or a new screen | `wait_for` with `text`, `id` or `label` (`gone: true` for a spinner; `network_idle` for requests), not `wait` |
-| set a switch | `toggle` with `value: true` or `false`; it does nothing if the switch is already there |
+| set a switch, or read it | `toggle` with `value: true` or `false`. It does nothing if the switch is already there, and its answer says the switch's state either way |
 | fill a field and send it | `type_text` with `submit: true` |
-| leave a screen, or close a sheet | `back` |
+| leave a screen, or close a sheet | `back`. If it answers `no_action`, the sheet has a close control of its own: tap that |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
 | see pixels (layout, colours, images) | `check_layout` first: it finds small tap areas, cut-off or overlapping text and low contrast without a picture. Then `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
@@ -187,7 +187,7 @@ took more than a few seconds (`Settled in` gives the time).
 | a `look` after every action | read the action's answer; it has the changes |
 | a `look` to read one value that an answer already showed | use the `~` line, also when it says `off screen` |
 | scrolling by guess to find something | `scroll` with the target and `to: "target"`; the header says whether more lies below |
-| `force: true` to get past a refusal | fix the cause. `force` runs the handler of something a person couldn't have touched, and the answer says so: that hides the bug you were sent to find |
+| `force: true` to get past a refusal | fix the cause. With `force` the handler runs although a person couldn't have pressed it, and the answer says so: that hides the bug you were sent to find |
 | retrying at once after `timeout` | `look` first: the action may have happened, and a retry would do it twice |
 | `wait` with a guessed number of seconds | `wait_for` what you are waiting for |
 | reading "No visible change." after `look: false` steps as "nothing happened" | read the note: the block covers all of them |

@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { formatInstalled, installSkill, isThisSkill, SKILL_NAME, skillSource } from "../src/skill.js";
+import { toolShapes } from "../src/tools.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoSkill = resolve(here, "..", "..", "..", "skills", SKILL_NAME);
@@ -47,6 +48,32 @@ describe("the skill in the repository (Agent Skills format)", () => {
   it("carries no token, address or name of a person or app of the owner's", () => {
     const all = [text, ...readdirSync(join(repoSkill, "references")).map((file) => readFileSync(join(repoSkill, "references", file), "utf8"))].join("\n");
     expect(all).not.toMatch(/100\.\d+\.\d+\.\d+|192\.168\.|C:\\Users\\/);
+  });
+
+  it("starts its description with when to use it", () => {
+    expect(field("description")).toMatch(/^Use when /);
+    expect(field("license")).toBe("MIT");
+    expect(frontmatter).toMatch(/^  interface: AGENT-TOOLS v\d+\.\d+$/m);
+  });
+
+  it("teaches only calls and error codes this server really has", () => {
+    // A skill that teaches a call the server refuses is worse than none.
+    const quoted = new Set([...text.matchAll(/`([a-z_]+)`/g)].map((match) => match[1] ?? ""));
+    const mine = new Set(Object.keys(toolShapes));
+    const tapwrightOnly = ["alert", "close_app", "swipe", "press_button"];
+    for (const tool of tapwrightOnly) expect(quoted.has(tool), `${tool} is Tapwright's`).toBe(false);
+    for (const tool of ["look", "tap", "type_text", "scroll", "toggle", "back", "wait_for", "open_url", "apps", "pair", "logs", "app_command", "check_layout", "viewer"]) {
+      expect(mine.has(tool), `${tool} is a tool`).toBe(true);
+      expect(quoted.has(tool), `the skill names ${tool}`).toBe(true);
+    }
+    // Every code in the Errors table is one this tool answers: it appears in the host's or the SDK's source.
+    const errors = /## 5\. Errors\n([\s\S]*?)\n## 6\./.exec(text)?.[1] ?? "";
+    const codes = [...errors.matchAll(/^\| ((?:`[a-z_]+`(?:, )?)+) \|/gm)].flatMap((row) => [...(row[1] ?? "").matchAll(/`([a-z_]+)`/g)].map((m) => m[1] ?? ""));
+    expect(codes.length).toBeGreaterThanOrEqual(12);
+    const sources = [resolve(here, "..", "src"), resolve(here, "..", "..", "react-native", "src")]
+      .flatMap((dir) => readdirSync(dir).filter((file) => /\.tsx?$/.test(file)).map((file) => readFileSync(join(dir, file), "utf8")))
+      .join("\n");
+    for (const code of codes) expect(new RegExp(`["'\`]${code}["'\`]|Error ${code}\\b`).test(sources), code).toBe(true);
   });
 
   it("is found from the built CLI's folder", () => {
@@ -99,11 +126,10 @@ describe("tapline skill install", () => {
     expect(() => installSkill({ home: temp(), project: join(temp(), "missing"), source: repoSkill })).toThrow(/is not a folder/);
   });
 
-  it("prints where it wrote and how each agent calls it", () => {
-    const text = formatInstalled(["A", "B"], false);
-    expect(text).toContain("  A\n  B");
+  it("prints where it wrote, in the same first lines as Tapwright's command, and how each agent calls it", () => {
+    const text = formatInstalled(["A", "B"]);
+    expect(text.split("\n").slice(0, 3)).toEqual(["Installed the tapline skill:", "  A", "  B"]);
     expect(text).toContain("/tapline");
     expect(text).toContain("$tapline");
-    expect(formatInstalled(["A"], true)).toContain("in this project");
   });
 });

@@ -18,7 +18,7 @@ import { formatLogs } from "./format.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { TaplineHost } from "./server.js";
-import { formatInstalled, installSkill } from "./skill.js";
+import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
 
 const HELP = `tapline - let agents see and drive your own app on your phone, over Tailscale
@@ -36,7 +36,8 @@ Commands:
   replay   Replay a recorded script without an agent: tapline replay <name>
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
-           Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills)
+           Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills);
+           \`tapline skill path\` prints where the skill ships
 
 Options:
   --scheme <s>   The app's URL scheme, e.g. myapp (for pair; host also prints the QR code)
@@ -269,12 +270,16 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);
       return 0;
     case "skill": {
+      if (positionals[1] === "path") {
+        process.stdout.write(`${skillSource()}\n`);
+        return 0;
+      }
       if (positionals[1] !== "install") {
-        process.stderr.write("Usage: tapline skill install [--project <dir>]\n");
+        process.stderr.write("Usage: tapline skill install [--project <dir>]\n       tapline skill path\n");
         return 1;
       }
       const { written } = installSkill(values.project !== undefined ? { project: values.project } : {});
-      process.stdout.write(`${formatInstalled(written, values.project !== undefined)}\n`);
+      process.stdout.write(`${formatInstalled(written)}\n`);
       return 0;
     }
     case "info":

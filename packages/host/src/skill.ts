@@ -73,9 +73,10 @@ export function installSkill(options: InstallSkillOptions = {}): { written: stri
 }
 
 /** What `tapline skill install` prints. */
-export function formatInstalled(written: string[], project: boolean): string {
+export function formatInstalled(written: string[]): string {
   return [
-    `Installed the ${SKILL_NAME} skill ${project ? "in this project" : "for this user"}:`,
+    // The first lines are the same as `tapwright skill install` prints.
+    `Installed the ${SKILL_NAME} skill:`,
     ...written.map((path) => `  ${path}`),
     "",
     `Claude Code reads the first (type /${SKILL_NAME}), Codex and other agents the second (in Codex: $${SKILL_NAME}).`,
