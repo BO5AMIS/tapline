@@ -389,14 +389,6 @@ function deviceLabel(s: SessionInfo): string {
 /** Default screenshot width in pixels: readable, about 1,000 image tokens for a phone screen. */
 export const DEFAULT_SCREENSHOT_WIDTH = 600;
 
-/**
- * Name of the `tree` param that makes the app keep numbering refs on (from the highest ref since
- * the last look) in the list an action's answer carries; `look` never sends it and restarts at e1.
- * Undefined means the app doesn't know such a param yet. To switch it on, set it to the SDK's name
- * (probably "keepNumbering"); this is the only place.
- */
-export const KEEP_NUMBERING_PARAM: string | undefined = undefined;
-
 /** The app methods whose result may say `closedKeyboard: true` (the app closed the keyboard before acting). */
 const KEYBOARD_METHODS: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "type"]);
 
@@ -747,9 +739,9 @@ export class TaplineTools {
     const sid = session.id;
     // Changes only make sense against a list this agent has already been given in this session.
     const askChanges = onlyChanges && this.listed.has(sid);
-    // `onlyChanges` is the after-an-action call; `look` (onlyChanges false) always restarts at e1.
+    // `onlyChanges` is the after-an-action call. With `changes: true` the app keeps the refs and
+    // counts on from the highest one; `look` (onlyChanges false) always restarts at e1.
     const treeParams: Record<string, unknown> = askChanges ? { changes: true } : {};
-    if (onlyChanges && KEEP_NUMBERING_PARAM !== undefined) treeParams[KEEP_NUMBERING_PARAM] = true;
     const treePromise = this.host.request("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)

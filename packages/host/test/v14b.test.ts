@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ControlQueue } from "../src/control.js";
 import type { TaplineHost } from "../src/server.js";
-import { KEEP_NUMBERING_PARAM, TaplineTools } from "../src/tools.js";
+import { TaplineTools } from "../src/tools.js";
 import { ViewerHub, viewerStatusForHost } from "../src/viewer.js";
 import { FakeApp, startHost, until, type IncomingRequest, type Reply } from "./helpers.js";
 
@@ -108,7 +108,7 @@ describe("the tree request after an action versus a look (v1.4 numbering)", () =
     elements: [{ ref: "e3", type: "Pressable", role: "button", label: "Log in", text: "Log in", frame: { x: 24, y: 610, width: 354, height: 48 }, actions: ["press"] }],
   };
 
-  it("look asks for a full list; an action's list asks for changes once a list was given; the numbering param is off until named", async () => {
+  it("look asks for a full list; an action's list asks for changes once a list was given", async () => {
     const { host, app, port } = await connected((req) =>
       req.method === "press" ? { ok: true, result: { settledMs: 100 } } : { ok: true, result: TREE },
     );
@@ -118,6 +118,5 @@ describe("the tree request after an action versus a look (v1.4 numbering)", () =
     await tools.tap({ target: { text: "Log in" } });
     const trees = app.requests.filter((r) => r.method === "tree").map((r) => r.params);
     expect(trees).toEqual([{}, {}, { changes: true }]);
-    expect(KEEP_NUMBERING_PARAM).toBeUndefined();
   });
 });
