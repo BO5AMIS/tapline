@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
-import { checkUnchanged, expectNoState, expectState, isTimeoutAnswer } from "../src/lab.js";
+import { checkUnchanged, expectNoState, expectState, isTimeoutAnswer, PRESENT_WAIT_S } from "../src/lab.js";
 import type { CallResult } from "../src/mcp.js";
 import { R1_STEPS, R3_CHECKS, R4_GRID } from "../src/reliability/checks.js";
 import { dismissShare, popoverDismissPoint, runR1, type Env } from "../src/reliability/driver.js";
@@ -209,6 +209,34 @@ describe("state helpers", () => {
     expect(isTimeoutAnswer("Error timeout: nope", true)).toBe(true);
     expect(isTimeoutAnswer("Error paused: x", true)).toBe(false);
   });
+  it("checkUnchanged gives a value that should still be there time for one slow read, and keeps the short window for one that must not appear", async () => {
+    const asked: Array<{ text: string; timeout: number }> = [];
+    const tool = {
+      call: (_name: string, args: Record<string, unknown>): Promise<CallResult> => {
+        asked.push({ text: String(args.text), timeout: Number(args.timeout) });
+        const present = args.text === "pressed=-";
+        return Promise.resolve(present ? { text: "Done after 0.9 s.", images: 0, isError: false, ms: 900 } : { text: "Error timeout: Waited 0.5 s", images: 0, isError: true, ms: 500 });
+      },
+    };
+    expect(await checkUnchanged(tool, ["pressed=-"], ["pressed=save"])).toEqual([]);
+    expect(asked).toEqual([
+      { text: "pressed=-", timeout: PRESENT_WAIT_S },
+      { text: "pressed=save", timeout: 0.5 },
+    ]);
+    expect(PRESENT_WAIT_S).toBeGreaterThanOrEqual(1.5);
+  });
+
+  it("an answer that says it isn't known is asked once more, and proves nothing either way", async () => {
+    const unknown = { text: "Error timeout: The phone didn't answer within 2 s, so it isn't known whether text \"x\" is on screen; look, then wait again.", images: 0, isError: true, ms: 2000 };
+    let calls = 0;
+    const flaky = { call: (): Promise<CallResult> => Promise.resolve(++calls === 1 ? unknown : { text: "Done after 0.1 s.", images: 0, isError: false, ms: 100 }) };
+    expect(await expectState(flaky, "x", 2)).toBe(true);
+    expect(calls).toBe(2);
+    const dead = { call: (): Promise<CallResult> => Promise.resolve(unknown) };
+    expect(await expectState(dead, "x", 2)).toBe(false);
+    expect(await expectNoState(dead, "x")).toBe(false);
+  });
+
   it("checkUnchanged reports what is wrong", async () => {
     const lab = new FakeLab();
     const tool = lab.tool();

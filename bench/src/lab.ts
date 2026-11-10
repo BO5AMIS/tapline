@@ -1,5 +1,5 @@
 import { stepOf } from "./guard.js";
-import type { ToolSession } from "./mcp.js";
+import type { CallResult, ToolSession } from "./mcp.js";
 
 /** A placeholder: every config names its own app's lab link in `labUrl`. */
 export const DEFAULT_LAB_URL = "example://lab";
@@ -87,13 +87,31 @@ export async function closeKeyboard(tool: ToolSession): Promise<void> {
   await tapOutsideField(tool);
 }
 
+/**
+ * How long a check waits for a value that should be on screen already (a state that a refused
+ * action must have left alone). Found on the first read, it costs nothing; the room is for a tool
+ * whose single read of the screen is slow (QUALITY-BAR S3 allows a look 1.5 s at the slowest).
+ */
+export const PRESENT_WAIT_S = 2;
+
+/** A `wait_for` answer that says the tool couldn't read the screen in time, so it proves nothing. */
+function notKnown(r: CallResult): boolean {
+  return isErrorAnswer(r.text, r.isError) && /isn't known/i.test(r.text.split("\n")[0] ?? "");
+}
+
+/** `wait_for` text; an answer that says it isn't known (a read that got no answer) is asked once more. */
+async function waitForText(tool: ToolSession, args: Record<string, unknown>): Promise<CallResult> {
+  const first = await tool.call("wait_for", args);
+  return notKnown(first) ? tool.call("wait_for", args) : first;
+}
+
 /** True when `part` shows up on screen within `timeoutS` seconds. */
 export async function expectState(
   tool: ToolSession,
   part: string,
   timeoutS = 2,
 ): Promise<boolean> {
-  const r = await tool.call("wait_for", { text: part, timeout: timeoutS, look: false });
+  const r = await waitForText(tool, { text: part, timeout: timeoutS, look: false });
   return !isErrorAnswer(r.text, r.isError);
 }
 
@@ -111,26 +129,27 @@ export async function expectNoState(
   part: string,
   timeoutS = 0.5,
 ): Promise<boolean> {
-  const r = await tool.call("wait_for", { text: part, gone: false, timeout: timeoutS, look: false });
-  return isTimeoutAnswer(r.text, r.isError);
+  const r = await waitForText(tool, { text: part, gone: false, timeout: timeoutS, look: false });
+  return isTimeoutAnswer(r.text, r.isError) && !notKnown(r);
 }
 
 /**
  * The state is unchanged: every `present` value is still there, and the `absent` value (the one a
- * wrong action would have set) is not. Returns what was wrong, empty when fine.
+ * wrong action would have set) is not. Returns what was wrong, empty when fine. A present value
+ * gets `PRESENT_WAIT_S` (it should be there at once); an absent one is watched for `absentS`.
  */
 export async function checkUnchanged(
   tool: ToolSession,
   present: string[],
   absent: string[],
-  timeoutS = 0.5,
+  absentS = 0.5,
 ): Promise<string[]> {
   const problems: string[] = [];
   for (const p of present) {
-    if (!(await expectState(tool, p, timeoutS))) problems.push(`${p} is gone`);
+    if (!(await expectState(tool, p, PRESENT_WAIT_S))) problems.push(`${p} is gone`);
   }
   for (const a of absent) {
-    if (!(await expectNoState(tool, a, timeoutS))) problems.push(`${a} appeared`);
+    if (!(await expectNoState(tool, a, absentS))) problems.push(`${a} appeared`);
   }
   return problems;
 }

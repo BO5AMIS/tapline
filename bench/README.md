@@ -68,5 +68,12 @@ tool's first answer line (token-redacted).
 - R7 and R8 are rows with `pass: null` (they need the app's logs and the phone's crash list, and a
   run with `link: "3g"`).
 
+**How long the state checks wait** (each is one `wait_for` with `text`): a state an action should
+set, 2 s (a viewer tap's, 3 s); a state a refused action must have left alone, 2 s
+(`PRESENT_WAIT_S`: it is there at once, so the room only serves a tool whose single read is slow);
+a state a refused action must not have set, 0.5 s (the whole window is always waited out). An answer
+that says it isn't known whether the text is on screen (the tool's read got no answer) is asked once
+more, and proves neither presence nor absence.
+
 The checks are a table in `src/reliability/checks.ts`; `driver.ts` runs them, `viewerInput.ts` is R4,
 `helpers.ts` has `bringIntoView`, answer parsing and the `alert` detection.
