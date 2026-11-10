@@ -78,7 +78,14 @@ test('times out with a plain message', async () => {
   useFrames({});
   const error = await failure(waitFor({ text: 'Never', timeout: 0.5 }));
   expect(error.code).toBe('timeout');
-  expect(error.message).toContain('"Never"');
+  expect(error.message).toBe('Waited 0.5 s for text "Never" to appear; it didn\'t happen.');
+});
+
+test('the timeout uses the shared words: id as the agent writes it, and "to disappear"', async () => {
+  await mount(<Screen saved={false} loading />);
+  useFrames({});
+  const error = await failure(waitFor({ testID: 'spinner', gone: true, timeout: 0.5 }));
+  expect(error.message).toMatch(/^Waited 0\.5 s for id "spinner" to disappear; it didn't happen\.$/);
 });
 
 test('waits for the network to go quiet', async () => {

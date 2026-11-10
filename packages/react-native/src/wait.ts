@@ -84,11 +84,12 @@ function describe(condition: Condition): string {
     condition.text !== undefined
       ? `text "${condition.text}"`
       : condition.testID !== undefined
-        ? `testID "${condition.testID}"`
+        ? `id "${condition.testID}"`
         : condition.label !== undefined
           ? `label "${condition.label}"`
           : null;
-  const element = what === null ? null : `${what} ${condition.gone ? 'to be gone' : 'to appear'}`;
+  // The words Tapwright uses too (AGENT-TOOLS §5): `id` as the agent writes it, "to disappear".
+  const element = what === null ? null : `${what} ${condition.gone ? 'to disappear' : 'to appear'}`;
   return [element, condition.networkIdle ? 'the network to be quiet' : null].filter((part) => part !== null).join(' and ');
 }
 
