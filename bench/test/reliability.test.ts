@@ -224,6 +224,8 @@ describe("state baseline", () => {
     expect(parseStateFields(full)).toEqual({ pressed: "save", taps: "2", sheet: "closed" });
     const cut = 'e1 text "pressed=edge-br taps=1 ty…" id=lab-state @0,0 10x10';
     expect(parseStateFields(cut)).toEqual({ pressed: "edge-br", taps: "1" });
+    const cutV15 = 'e1 text "pressed=edge-br taps=1 ty…(+57)" id=lab-state @0,0 10x10';
+    expect(parseStateFields(cutV15)).toEqual({ pressed: "edge-br", taps: "1" });
     expect(parseStateFields("no state here")).toEqual({});
   });
   it("falls back to lab-sheet-state while the sheet hides lab-state", () => {

@@ -66,10 +66,13 @@ export function isOnScreen(text: string, id: string): boolean {
   return cx >= 0 && cy >= 0 && cx <= screen.w && cy <= screen.h;
 }
 
+/** How a cut text ends: `…`, or since AGENT-TOOLS v1.5 `…(+57)`. */
+const CUT_END = /(…|\.\.\.)(\(\+\d+\))?\s*$/;
+
 /**
  * The `field=value` pairs visible in the lab's state line of a `look` answer: the quoted text of the
- * `id=lab-state` element, else (the sheet hides it) of `id=lab-sheet-state`. A long text may be cut
- * with `…`; the field cut at the end is unknown, so it is left out.
+ * `id=lab-state` element, else (the sheet hides it) of `id=lab-sheet-state`. A long text may be cut;
+ * the field cut at the end is unknown, so it is left out.
  */
 export function parseStateFields(lookText: string): Record<string, string> {
   const lines = lookText.split("\n");
@@ -78,8 +81,8 @@ export function parseStateFields(lookText: string): Record<string, string> {
   const line = find("lab-state") ?? find("lab-sheet-state");
   const quoted = line ? /"([^"]*)"/.exec(line)?.[1] : undefined;
   if (quoted === undefined) return {};
-  const cut = /(…|\.\.\.)\s*$/.test(quoted);
-  const tokens = quoted.replace(/(…|\.\.\.)\s*$/, "").trim().split(/\s+/).filter(Boolean);
+  const cut = CUT_END.test(quoted);
+  const tokens = quoted.replace(CUT_END, "").trim().split(/\s+/).filter(Boolean);
   if (cut) tokens.pop();
   const fields: Record<string, string> = {};
   for (const t of tokens) {

@@ -85,6 +85,35 @@ describe('what lies off screen is counted', () => {
     expect(result.offScreen).toBeUndefined();
   });
 
+  test('what an open sheet hides is not counted: scrolling cannot reach it until the sheet is closed', async () => {
+    await mount(
+      <View>
+        <Rows />
+        {React.createElement(
+          'RCTModalHostView',
+          { visible: true },
+          <View>
+            <Text>Sheet title</Text>
+            <Pressable testID="sheet-far" onPress={() => undefined}>
+              <Text>Far down the sheet</Text>
+            </Pressable>
+          </View>,
+        )}
+      </View>,
+    );
+    useFrames({
+      list: frame(0, 0, 400, 800),
+      'down-1': frame(0, 900, 400, 50),
+      'down-2': frame(0, 1000, 400, 50),
+      'Sheet title': frame(20, 600, 360, 24),
+      'sheet-far': frame(20, 900, 360, 40),
+    }, frame(0, 100, 400, 50));
+    const result = await run(() => tree());
+    expect(result.elements.map((element) => element.text)).toEqual(['Sheet title']);
+    // Only the sheet's own button below the screen: the two rows behind the sheet don't count.
+    expect(result.offScreen).toEqual({ above: 0, below: 1 });
+  });
+
   test('an element without a size is not counted', async () => {
     await mount(<Rows />);
     useFrames({ list: frame(0, 0, 400, 800), 'down-1': frame(0, 900, 0, 0) }, frame(0, 100, 400, 50));

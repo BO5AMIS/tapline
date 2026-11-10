@@ -12,7 +12,8 @@ an open sheet hides, numbering that carries through full lists, the code `not_an
 2026-11-10, and both agree on it. Version 1.5 (2026-11-10) adds what agents new to the tools ran
 into: the header counts what lies off screen, text is cut at 200 characters and a cut says how
 much is missing, a match in the alert in front wins over matches behind it, a person's touch on
-the phone leaves the same note as viewer input, and `type_text` takes `force`. Each repo keeps an
+the phone leaves the same note as viewer input, `type_text` takes `force`, and a call outside the
+apps an agent was given answers `not_allowed`. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -147,7 +148,8 @@ Network: 2 requests in flight
   the elements that lie wholly below and wholly above the screen: `(+41 below, +2 above)`,
   `(+41 below)` or `(+2 above)`; nothing when there are none. Below comes first. Left and
   right aren't counted. It counts what exists now: a long list that makes its rows as they
-  scroll into view has more below than the count says. Scroll to reach them.
+  scroll into view has more below than the count says. Scroll to reach them. What an open
+  sheet or popover hides isn't counted: scrolling can't reach it until the sheet is closed.
 - `Route:` and `Network:` are Tapline only.
 - `Keyboard:` is Tapwright only. Its keys aren't listed; type with `type_text`.
 - `Alert:` comes from both. Tapwright can press its buttons with `alert`; Tapline can't press
@@ -339,6 +341,7 @@ text items.
 | `timeout` | no answer in time; the action may have happened | look before retrying | both |
 | `bad_params` | the call's arguments are invalid | fix the call | both. **Change Tapwright:** it uses `unsupported` for this today |
 | `unsupported` | this tool, app or phone can't do it | use the alternative named in the message | both |
+| `not_allowed` | a read or a touch outside the apps the agent was given (v1.5). The message's first word is the reason: `outside_apps` (another app is in front, or the call names one), `no_apps` (the agent was given none) | for `outside_apps`, go back to a given app with `open_app`; for `no_apps`, tell the user | Tapwright, in personal mode (it was `unsupported` with the same reason words). Tapline drives one app and never answers it |
 | `internal` | a bug | report it | both |
 
 ## 5. Tools
