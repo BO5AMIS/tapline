@@ -865,6 +865,13 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; close
   const sheet = openModalHosts().filter((host) => !closingModalHosts().includes(host)).pop();
   if (sheet) {
     const onRequestClose = requestCloseOf(sheet);
+    // Most app sheets have no onRequestClose and close on a tap on the dimmed backdrop around them:
+    // a person taps that, so back does.
+    const backdrop = onRequestClose ? null : await backdropOf(snapshot);
+    if (backdrop) {
+      callHandler('onPress', backdrop.onPress, [pressEvent(backdrop.entry.node.fiber, backdrop.frame)]);
+      return { route: current?.chain ?? [], closed: 'sheet', ...(await settleOutcome()) };
+    }
     if (!onRequestClose) {
       // Named by what it shows, as `covered` names what is in front, so the agent finds its close control.
       const shows = await frontLine(snapshot);
@@ -891,6 +898,30 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; close
   }
   callHandler('goBack', nav.goBack as (...args: unknown[]) => unknown, []);
   return { route: current.chain, ...(await settleOutcome()) };
+}
+
+/** How much of the screen, across and down, an element in front must cover to count as a sheet's backdrop. */
+const BACKDROP_SHARE = 0.9;
+
+/**
+ * The backdrop of the open sheet: an element in front that takes a tap, covers (nearly) the whole
+ * screen and shows nothing of its own (no text, no label), the dimmed area a person taps to close
+ * the sheet. A full-screen control with a text ("Tap to continue") is no backdrop. Null when there is none.
+ */
+async function backdropOf(
+  snapshot: Snapshot,
+): Promise<{ entry: Entry; frame: Frame; onPress: (...args: unknown[]) => unknown } | null> {
+  const { width, height } = snapshot.screen;
+  for (const entry of snapshot.entries) {
+    if (entry.tab || entry.info.disabled || entry.info.text.trim() !== '' || (entry.info.label ?? '') !== '') continue;
+    const onPress = findHandler(entry.node, 'onPress');
+    if (!onPress) continue;
+    const frame = await measureFiber(entry.node.fiber);
+    if (frame !== null && frame.width >= width * BACKDROP_SHARE && frame.height >= height * BACKDROP_SHARE) {
+      return { entry, frame, onPress };
+    }
+  }
+  return null;
 }
 
 /** Calls `name()` on the first instance that has it; whether one did. */

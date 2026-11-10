@@ -435,6 +435,73 @@ describe('a target behind an open sheet is covered', () => {
       expect(onClose).not.toHaveBeenCalled();
     });
 
+    test('a sheet that closes on a tap on its backdrop: back taps the backdrop', async () => {
+      const onBackdrop = jest.fn();
+      await mount(
+        <View>
+          <Text>behind</Text>
+          {React.createElement(
+            'RCTModalHostView',
+            { visible: true },
+            <View>
+              <Pressable testID="backdrop" accessible={false} onPress={onBackdrop} />
+              <View testID="panel">
+                <Text>Backdrop sheet</Text>
+                <Pressable testID="inside" onPress={onClose}>
+                  <Text>Inside</Text>
+                </Pressable>
+              </View>
+            </View>,
+          )}
+        </View>,
+      );
+      useFrames({ backdrop: frame(0, 0, 400, 800), panel: frame(0, 560, 400, 240), inside: frame(20, 640, 360, 48) });
+      const result = await run(() => back({}));
+      expect(onBackdrop).toHaveBeenCalledTimes(1);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(result.closed).toBe('sheet');
+    });
+
+    test('a full-screen control with a text of its own is no backdrop', async () => {
+      const onContinue = jest.fn();
+      await mount(
+        <View>
+          {React.createElement(
+            'RCTModalHostView',
+            { visible: true },
+            <Pressable testID="whole" onPress={onContinue}>
+              <Text>Tap to continue</Text>
+            </Pressable>,
+          )}
+        </View>,
+      );
+      useFrames({ whole: frame(0, 0, 400, 800) });
+      expect((await failure(run(() => back({})))).message).toMatch(/^no_action: /);
+      expect(onContinue).not.toHaveBeenCalled();
+    });
+
+    test('a pressable that does not cover the screen is no backdrop: no_action', async () => {
+      const onSmall = jest.fn();
+      await mount(
+        <View>
+          {React.createElement(
+            'RCTModalHostView',
+            { visible: true },
+            <View>
+              <Text>Lab sheet</Text>
+              <Pressable testID="small" onPress={onSmall}>
+                <Text>Small</Text>
+              </Pressable>
+            </View>,
+          )}
+        </View>,
+      );
+      useFrames({ 'Lab sheet': frame(20, 620, 390, 22), small: frame(20, 660, 100, 40) });
+      const error = await failure(run(() => back({})));
+      expect(error.message).toMatch(/^no_action: the open sheet \(in front: /);
+      expect(onSmall).not.toHaveBeenCalled();
+    });
+
     test('a sheet with nothing to name it by: the same answer without the brackets', async () => {
       await mount(<View>{React.createElement('RCTModalHostView', { visible: true }, <View />)}</View>);
       const error = await failure(run(() => back({})));

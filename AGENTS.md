@@ -122,8 +122,9 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    explain a broken screen. Check them at the end of a run too.
 8. Deep links (`open_url`) jump straight to a screen; `back` goes back like the back
    button, and closes what is open on top first: with a sheet or modal open, its first line
-   is `Closed the sheet.`; when the sheet gives it nothing to call, it answers `no_action`
-   and you tap the sheet's own close control. Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS: their tabs appear
+   is `Closed the sheet.` It calls the sheet's own close request, or taps its backdrop as a
+   person would; when the sheet has neither, it answers `no_action`, names the sheet, and you
+   tap the sheet's own close control. Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS: their tabs appear
    as `tab` elements without a position, and tapping one switches tabs. `look` leaves out
    tabs that aren't selected and screens covered by another. In development builds, `reload`
    starts over from a fresh JavaScript state.
