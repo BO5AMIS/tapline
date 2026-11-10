@@ -1411,7 +1411,7 @@ async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
 
 export async function toggle(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
   const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
@@ -1423,6 +1423,11 @@ export async function toggle(
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
   if (params.force !== true) await assertReachable(snapshot, control, await measureFiber(control.node.fiber));
+  if (typeof params.value === 'boolean' && control.info.checked === params.value) {
+    // Already there: a person wouldn't touch it, so the handler isn't called and the keyboard stays.
+    const { element } = await elementFor(control);
+    return { element, value: params.value, unchanged: true, settledMs: 0 };
+  }
   const closedKeyboard = closeKeyboardFor(control);
   callHandler('onValueChange', handler, [next]);
   const outcome = await settleOutcome();

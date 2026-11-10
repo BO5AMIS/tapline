@@ -841,11 +841,12 @@ describe('toggle', () => {
     expect(byTestID(elements, 'notify-switch').checked).toBe(false);
   });
 
-  test('an explicit value is honoured even if it equals the current one', async () => {
+  test('an explicit value that equals the current one does nothing (the shared description: "nothing happens if it\'s already there")', async () => {
     await mountSample();
     const result = await run(() => toggle({ target: { testID: 'notify-switch' }, value: false }));
     expect(result.value).toBe(false);
-    expect(spies.onSwitch).toHaveBeenCalledWith(false);
+    expect(result.unchanged).toBe(true);
+    expect(spies.onSwitch).not.toHaveBeenCalled();
   });
 
   test('non-toggles are not_actionable; bad value is bad_params', async () => {

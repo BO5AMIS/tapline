@@ -1,8 +1,8 @@
 import { frame, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
-import { Alert, Dimensions, PixelRatio, Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, Dimensions, PixelRatio, Pressable, ScrollView, Switch, Text, View } from 'react-native';
 import { act } from 'react-test-renderer';
-import { configureActions, press } from '../src/actions';
+import { configureActions, press, toggle } from '../src/actions';
 import { installAlertTracking, openAlerts, TaplineAlertHost, uninstallAlertTracking } from '../src/alerts';
 import { cutText, forgetLastTree, MAX_KEPT_TEXT, resetRefs, setHitTester, setMeasurer, tree } from '../src/inspect';
 import { TaplineError } from '../src/types';
@@ -190,6 +190,48 @@ describe('long text', () => {
     const error = await failure(run(() => press({ target: { testID: 'far' } })));
     expect(error.message).toMatch(/^off_screen: /);
     expect(error.message).toContain(`"${text.slice(0, 200)}…(+57)"`);
+  });
+});
+
+describe('toggle to the value the switch already has', () => {
+  // The shared description: "`value` true or false sets it (nothing happens if it's already there)".
+  async function mountSwitch(value: boolean, onValueChange: jest.Mock): Promise<void> {
+    await mount(<Switch testID="sw" value={value} onValueChange={onValueChange} />);
+    useFrames({ sw: frame(20, 100, 60, 32) });
+  }
+
+  test('already on, asked for on: the handler is not called, and the answer says nothing was done', async () => {
+    const onValueChange = jest.fn();
+    await mountSwitch(true, onValueChange);
+    const result = await run(() => toggle({ target: { testID: 'sw' }, value: true }));
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ value: true, unchanged: true, element: { testID: 'sw', checked: true } });
+  });
+
+  test('already off, asked for off: the same', async () => {
+    const onValueChange = jest.fn();
+    await mountSwitch(false, onValueChange);
+    const result = await run(() => toggle({ target: { testID: 'sw' }, value: false }));
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ value: false, unchanged: true });
+  });
+
+  test('a different value, or no value, still calls the handler', async () => {
+    const onValueChange = jest.fn();
+    await mountSwitch(true, onValueChange);
+    const set = await run(() => toggle({ target: { testID: 'sw' }, value: false }));
+    expect(onValueChange).toHaveBeenLastCalledWith(false);
+    expect(set.unchanged).toBeUndefined();
+    await run(() => toggle({ target: { testID: 'sw' } }));
+    expect(onValueChange).toHaveBeenCalledTimes(2);
+  });
+
+  test('an off-screen switch is refused before its value is compared', async () => {
+    const onValueChange = jest.fn();
+    await mountSwitch(true, onValueChange);
+    useFrames({ sw: frame(20, 2000, 60, 32) });
+    const error = await failure(run(() => toggle({ target: { testID: 'sw' }, value: true })));
+    expect(error.message).toMatch(/^off_screen: /);
   });
 });
 

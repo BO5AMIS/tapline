@@ -833,6 +833,8 @@ export class TaplineTools {
     withLook: boolean | undefined,
     screenshot?: boolean,
     extraNotes?: (result: unknown) => string[],
+    /** True when the result means nothing was done: the first line is then the whole answer. */
+    nothingDone?: (result: unknown) => boolean,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -857,8 +859,9 @@ export class TaplineTools {
       this.showAction("agent", method, undefined, params, error instanceof TaplineError ? error.code : "internal");
       return fail(describeError(error));
     }
-    this.showAction("agent", method, result, params);
     const line = describe(result);
+    if (nothingDone?.(result) === true) return text([line, ...this.takePersonNote()].join("\n"));
+    this.showAction("agent", method, result, params);
     let response: CallToolResult;
     this.lastLookRoute = undefined;
     const settledMs =
@@ -1469,15 +1472,20 @@ export class TaplineTools {
     const params: Record<string, unknown> = { target: toWireTarget(args.target) };
     if (args.value !== undefined) params["value"] = args.value;
     if (args.force === true) params["force"] = true;
+    // The switch already had the asked value: the app touched nothing, and that line is the whole answer.
+    const unchanged = (r: unknown): boolean => typeof r === "object" && r !== null && "unchanged" in r && r.unchanged === true;
     return this.act(
       "toggle",
       params,
       (r) => {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
+        if (unchanged(r)) return `${this.elementName(r)} is already ${JSON.stringify(value)}.`;
         return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
       },
       args.look,
       args.screenshot,
+      undefined,
+      unchanged,
     );
   }
 
