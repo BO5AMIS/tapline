@@ -63,32 +63,38 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 1. `apps` shows the connected app (`open_app {app}` when there are several; `app` is a
    session id, app id or name, and several matches give `ambiguous`). If none is
    connected: a phone that never paired needs `pair`; a paired one only needs the user to
-   open the app with Tailscale on. The app must stay on screen while you work: iOS pauses
+   open the app with Tailscale on; after your server starts, an app that is open finds it
+   by itself within about 2 seconds. The app must stay on screen while you work: iOS pauses
    it in the background (also when the user switches to chat with you on the same phone).
+   Tapline only works while its app is open in front, so when the user leaves or closes the
+   app you stop at once; the forget link (`<scheme>://tapline/forget`) unpairs the phone.
 2. `look` first. The header reads `Screen 440x956 pt @3x · 49 elements`, then `App:`,
    `Route:`, and `Alert:` or `Network:` when they apply. Elements read
    `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`: ref, role, text,
    `id` (the `testID` prop), position in points, size, actions. Roles are `button`, `input`,
    `text`, `header`, `switch`, `slider`, `image`, `scroll`, `tab` and so on. The actions are
    `tap`, `longPress`, `type`, `toggle` and `scroll`. A list holds up to 200 elements, then
-   `(+N more below; scroll)`. No image comes with it: pass `screenshot: true` when you need
-   to see the screen (the app needs `react-native-view-shot`).
+   `(+N more below; scroll)`. A screenshot comes with it (the app needs
+   `react-native-view-shot`); pass `screenshot: false` when the list is enough.
 3. Every action answers with the verb and the element (`Tapped e3 button "Log in"
    id=login-button @24,610 354x48.`), then either `Same screen. Changes:` with lines for
    what changed (`+` new, `-` gone, `~` changed with its old value, `↕` moved; unchanged
    elements keep their refs) or `No visible change.`, or the full list when the screen
    changed. Then `Settled in 0.31 s.`: the app answers once React hasn't committed for
-   100 ms (2 s at most). **Read it before the next step**: check that the action did what
+   100 ms (2 s at most; when it's still changing then, a `Note:` says positions may be
+   mid-change). **Read it before the next step**: check that the action did what
    you meant, not just that it didn't fail. `look: false` returns only the first line. Call
    `look` when you need the full list or to see the screen (next section). The `Route:` line
    names the screen you're on. `Note:` lines at the end tell you things worth knowing, such
    as `Note: a person used the app since your last look.`
 4. Target by `{id}` when there is one, else by visible `{text}` or `{label}`, else by
-   `{ref}` from the latest look (refs change when the screen changes). Use `{x, y}` only
-   when nothing else fits. An `ambiguous` error lists `Candidates:`: pick one by its ref or
-   add `index` (it works with `id`, `label` and `text`). After a person acts in the live
-   viewer, `{ref}` targets fail with `stale` until you `look` again; `id`, `label` and
-   `text` keep working.
+   `{ref}` from the latest look. `look` numbers from `e1`; after an action, elements still
+   on screen keep their refs and new ones count on from the highest ref given, also when the
+   answer is a full list. So a ref you still remember never points at another element: it
+   answers `not_found`. Use `{x, y}` only when nothing else fits. An `ambiguous` error lists
+   `Candidates:`: pick one by its ref or add `index` (it works with `id`, `label` and
+   `text`). After a person acts in the live viewer, `{ref}` targets fail with `stale` until
+   you `look` again; `id`, `label` and `text` keep working.
 5. Screens load and animate. Actions already wait for the screen to settle. If a spinner
    shows or content is missing, `wait_for` what you expect (`text`, `id` or `label`;
    `gone: true` for a spinner; `network_idle` for loading) instead of acting on a
@@ -98,22 +104,30 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 6. Inputs: `type_text` with the input as target; `replace` (default) clears it first,
    `submit` presses return. Toggles: `toggle`. Lists: `scroll` until what you need
    appears (`down` shows what is below), or `to: "end"`. `amount` is a share of the scroll
-   area, 0.1 to 1 (default 0.8).
+   area, 0.1 to 1 (default 0.8). When the on-screen keyboard is up and you act on something
+   outside the focused field, Tapline closes the keyboard first and the answer ends with
+   `Note: closed the keyboard first.`
 7. Read `logs` after anything that misbehaves: JavaScript errors and warnings often
    explain a broken screen. Check them at the end of a run too.
 8. Deep links (`open_url`) jump straight to a screen; `back` goes back like the back
-   button. Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS: their tabs appear
+   button, and closes what is open on top first: with a sheet or modal open, its first line
+   is `Closed the sheet.`; when the sheet gives it nothing to call, it answers `no_action`
+   and you tap the sheet's own close control. Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS: their tabs appear
    as `tab` elements without a position, and tapping one switches tabs. `look` leaves out
    tabs that aren't selected and screens covered by another. In development builds, `reload`
    starts over from a fresh JavaScript state.
 9. Errors read `Error <code>: <message>`. The codes are `not_found`, `ambiguous`,
    `not_actionable`, `stale`, `busy`, `paused`, `in_background`, `reconnecting`,
-   `not_connected`, `timeout`, `bad_params`, `unsupported` and `internal`. An action that a
-   person couldn't do is `not_actionable`, and the message starts with the reason:
-   `disabled`, `off_screen` (scroll to it), `covered` (dismiss what covers it),
+   `not_connected`, `not_answering`, `timeout`, `bad_params`, `unsupported` and `internal`.
+   `not_answering` means the app is connected but stopped answering: try once more; if it
+   repeats, ask the user to close the app and open it again (Tapline can't close apps). An
+   action that a person couldn't do is `not_actionable`, and the message starts with the
+   reason: `disabled`, `off_screen` (scroll to it), `covered` (dismiss what covers it),
    `under_tab_bar`, `behind_alert` or `no_action` (nothing at that point takes the
    action). That is often a real bug worth reporting. Pass `force: true` only when you've
-   decided the check is wrong.
+   decided the check is wrong. A target hidden by an open sheet or modal answers
+   `covered: … is behind <the line of what is in front>; close that first.` Here `force`
+   doesn't help: close the sheet (its own close control, or `back`) and try again.
 10. An `Alert:` line means the app showed an alert. An OS alert can't be tapped from
    Tapline: ask the user to tap the button you need (say which), and actions are refused
    (`behind_alert`) until it's answered. When the app runs with Tapline's stand-in, the
@@ -146,7 +160,10 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 - `viewer` gives a link the user opens in a browser on their computer: the app's screen as
   it changes, with your taps and scrolls marked. The link carries a key: show it to the user
   only. Offer it when they want to watch, or to do a step themselves (sign in with their own
-  password, finish a step you can't).
+  password, finish a step you can't). The page is at `/viewer` and `/`. It shows about 10
+  frames a second for a second after each action or tap, about 6 a second while the screen
+  keeps changing, and one a second when it's still; it can show video when a server offers
+  it (Tapline's own doesn't yet).
 - The user can tap, scroll and type there too, and their input goes first: your next action
   waits until they've been idle for 3 seconds. It fails with `busy` after 30 seconds of their
   input, and with `paused` while they've paused you. Then wait, or ask them.
@@ -164,8 +181,9 @@ not on driving.
 - **Check by text first.** `check_layout` finds small tap areas, elements cut off at the
   edges, overlaps, low contrast, unnamed buttons and truncated text from the tree, without
   an image. Run it on each new screen; spend images on what it can't judge.
-- **Drive by text.** No image is sent unless you pass `screenshot: true`. Ask for one at
-  checkpoints only: a new screen, before and after a
+- **Drive by text.** Actions send no image unless you pass `screenshot: true`; `look` sends
+  one unless you pass `screenshot: false`. Look at a picture at checkpoints only: a new screen,
+  before and after a
   visual change, when the list suggests something is off, and at the end. `labels: true`
   draws each element's box and ref on the screenshot, so a helper can report by ref.
 - **Shrink them.** `look` with `width: 300` is enough to judge a layout (about a quarter of

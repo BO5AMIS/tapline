@@ -1,6 +1,11 @@
 # Setup
 
-About fifteen minutes: your computer once, each app once, then a QR code per phone.
+About fifteen minutes: your computer once, each app once, then a QR code per phone. The
+computer side takes about two minutes (measured from a clean copy: install 40 s, build 10 s,
+checks a few seconds). The app side needs one new app build, and how long that takes is up to
+your build system, not Tapline.
+
+Short version: [quickstart.md](quickstart.md).
 
 Everyone who tests sets this up for themselves: their own computer, their own Tailscale
 network, their own phone and their own agents. Nobody needs anyone else's computer or
@@ -13,26 +18,33 @@ your own Tailscale network. Keep it on on the phone while you test.
 
 ## 2. The computer (host)
 
-Node.js 20 or later.
+Node.js 20 or later, and git.
 
 Tapline isn't on npm yet. From a clone:
 
 ```sh
 git clone https://github.com/<owner>/tapline
 cd tapline
-npm install
-npm run build
+npm install                        # about 40 s
+npm run build                      # about 10 s
 npm install -g ./packages/host     # puts `tapline` on your PATH
+tapline doctor                     # about 5 s: checks the computer side
 ```
 
+`npm install` ends with a few `deprecated` warnings and "6 low severity vulnerabilities".
+They come from the test tools (Jest), not from anything Tapline ships; ignore them.
+
 Or skip the global install and run `node /path/to/tapline/packages/host/dist/cli.js`
-wherever this guide says `tapline`.
+wherever this guide says `tapline`, for example
+`node /path/to/tapline/packages/host/dist/cli.js doctor`.
 
 **Give it to your agent.** The MCP server is the host: while the agent is running, your
 phone can connect.
 
 ```sh
 claude mcp add tapline -- tapline mcp           # Claude Code
+# without the global install:
+claude mcp add tapline -- node /path/to/tapline/packages/host/dist/cli.js mcp
 ```
 
 If your agent hands screenshots to smaller helper models, add `--screenshots file`: `look`
@@ -43,9 +55,10 @@ Other MCP clients: run `tapline mcp` as a stdio server. To only watch connection
 app logs, without an agent: `tapline host --scheme <your app's scheme>` (it also prints a
 pairing QR code).
 
-`tapline info` shows this computer's name and address and the code the app needs. A token
-is created on the first run and kept in `~/.tapline/token` (`%USERPROFILE%\.tapline\token`
-on Windows). You never copy it anywhere: pairing hands it to the app.
+`tapline info` shows this computer's name and address, and the few lines the app needs
+(step 3). A token is created on the first run and kept in `~/.tapline/token`
+(`%USERPROFILE%\.tapline\token` on Windows). `info` never prints it, and you never copy it
+anywhere: pairing hands it to the app.
 
 The host listens on your Tailscale address and 127.0.0.1 only, on port 7210. When 7210 is
 taken (another agent's host), it takes the next free port up to 7219, so several agents
@@ -66,21 +79,23 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 Your own React Native or Expo app, in a development build or a TestFlight build. Expo Go
 can't run it.
 
-**Install the package.** Until it's on npm, pack it from the clone and install the
-tarball in your app (Metro handles a tarball better than a linked folder):
+**Install the package.** Until it's on npm, pack it from the clone (after `npm run build`)
+and install the tarball in your app (Metro handles a tarball better than a linked folder):
 
 ```sh
-# in the tapline clone
-npm pack -w @tapline/react-native           # makes tapline-react-native-0.1.0.tgz
+# in the tapline clone, after npm run build
+npm pack -w @tapline/react-native           # makes tapline-react-native-0.1.0.tgz in the clone's folder
 # in your app
 npm install /path/to/tapline-react-native-0.1.0.tgz
 npx expo install expo-secure-store          # remembers the paired computer
 npx expo install react-native-view-shot     # optional: screenshots
+npx expo install expo-keep-awake            # optional: keeps the screen on while an agent is connected
 ```
 
-Both have native code: a new development build or TestFlight build includes them.
+All three have native code: a new development build or TestFlight build includes them.
 Without `expo-secure-store`, pairing works but lasts only until the app restarts (or pass
-your own `storage`, see below).
+your own `storage`, see below). Without `expo-keep-awake` the phone's screen can lock while
+an agent works; it matters most for a dedicated test device.
 
 **Load `register` first.** It has to run before React starts. The simplest way is Metro,
 in `metro.config.js` (it only does this when `EXPO_PUBLIC_TAPLINE_ENABLED=1`, so store
@@ -118,7 +133,7 @@ startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
 
 That's all the build carries: an on switch. No address, no token. With the switch off,
 `startTapline` does nothing at all. With it on, the app reconnects to the computer it was
-paired with whenever it's open (1, 2, 4 … 30 s between tries while the computer can't be
+paired with whenever it's open (a new try one second after each failed one while the computer can't be
 reached), and pairs when a pairing link opens it. It never throws into the app.
 `stopTapline()` shuts it down. Optional: `app: { name, id, version, build }` to name the
 app in `apps`, and `storage` (`getItem`, `setItem`, `removeItem`, all async) to keep the
@@ -226,15 +241,16 @@ stops it. Tapline's own connection doesn't need this: it works over the Tailscal
 **Pair.** Ask your agent to pair your phone (its `pair` tool needs your app's URL scheme,
 the `scheme` in app.json). It shows a QR code, also saved as `~/.tapline/pair-<port>.png`.
 Without an agent: `tapline pair --scheme <your scheme>` prints one in the terminal. With
-Tailscale on, scan the code with the phone's camera, open the app, and tap **Connect**.
-The code works once and expires after 10 minutes.
+Tailscale on, scan the code with the phone's camera and open the app. It asks **Connect for
+testing?** and names the computer: tap **Connect**. The code works once and expires after 10
+minutes.
 
 In the agent, `apps` lists the phone and `look` shows its screen. From now on the app
 reconnects by itself whenever it's open, as long as the agent (the host) is running on
 the same port. Keep the app open on screen while the agent works: iOS pauses an app soon
-after you switch away or lock the phone, which drops the connection until you open it again. With several agents, ports go to whichever starts first; if a phone stops
-connecting after a restart, pair it again, or give each agent a fixed port
-(`tapline mcp --port 7211`).
+after you switch away or lock the phone, which drops the connection until you open it again.
+With several agents, ports go to whichever starts first; if a phone stops connecting after a
+restart, pair it again, or give each agent a fixed port (`tapline mcp --port 7211`).
 
 **Unpair** a phone by opening `<your-scheme>://tapline/forget` on it (the agent's `pair`
 answer shows the exact link). Pairing with another computer replaces the old pairing.
@@ -253,6 +269,7 @@ and Metro over https, and says how to fix what's missing.
 |---|---|
 | the development build can't load the app ("App Transport Security") | serve Metro over `https` (step 4, away from your Wi-Fi) |
 | the app disconnects when you switch apps or lock the phone | expected: iOS pauses apps in the background; it reconnects when you open it again |
+| the agent gets `not_connected` or `in_background` | the app isn't open in front: open it on the phone (Tailscale on); `apps` should list it |
 | scanning the code doesn't open the app | the scheme passed to `pair` must be the app's `scheme`; the build must have Tapline turned on |
 | the app opens a "not found" screen | Expo Router: add `app/+native-intent.ts` (step 3) |
 | "pairing code has expired or was already used" | ask for a new code; each one works once, for 10 minutes |
