@@ -142,3 +142,17 @@ describe('adaptive quality (nextQuality)', () => {
     expect(nextQuality('balanced', 'balanced', link(100))).toBe('balanced');
   });
 });
+
+describe('adaptive quality on a still screen', () => {
+  const { nextQuality } = jest.requireActual<typeof import('../src/live')>('../src/live');
+  test('the latest quick answer steps up, though the smoothed time is still high', () => {
+    expect(nextQuality('light', 'balanced', { latencyMs: 180, lastMs: 30, sinceChangeMs: 5000, framesLastSecond: 1 })).toBe('balanced');
+    expect(nextQuality('light', 'balanced', { latencyMs: 180, lastMs: 120, sinceChangeMs: 5000, framesLastSecond: 1 })).toBe('light');
+  });
+});
+
+test('right after stepping up, a lagging smoothed time with a quick latest answer does not step down again', () => {
+  const { nextQuality } = jest.requireActual<typeof import('../src/live')>('../src/live');
+  expect(nextQuality('balanced', 'balanced', { latencyMs: 170, lastMs: 25, sinceChangeMs: 100, framesLastSecond: 1 })).toBe('balanced');
+  expect(nextQuality('balanced', 'balanced', { latencyMs: 170, lastMs: 220, sinceChangeMs: 100, framesLastSecond: 12 })).toBe('light');
+});

@@ -133,7 +133,7 @@ export function onFrameAck(): void {
   if (sent === undefined) return;
   const latency = now - sent;
   latencyMs = latencyMs === null ? latency : latencyMs * (1 - LATENCY_WEIGHT) + latency * LATENCY_WEIGHT;
-  adaptQuality(now);
+  adaptQuality(now, latency);
 }
 
 /**
@@ -143,14 +143,16 @@ export function onFrameAck(): void {
 export function nextQuality(
   applied: QualityPreset,
   chosen: QualityPreset,
-  link: { latencyMs: number; sinceChangeMs: number; framesLastSecond: number },
+  link: { latencyMs: number; sinceChangeMs: number; framesLastSecond: number; lastMs?: number },
 ): QualityPreset {
   const step = LADDER.indexOf(applied);
   const ceiling = LADDER.indexOf(chosen);
   if (step > ceiling) return chosen;
-  if (link.latencyMs > SLOW_LINK_MS && step > 0) return LADDER[step - 1] ?? applied;
+  // Down only while the link is slow now too: the smoothed time lags behind a link that recovered.
+  if (link.latencyMs > SLOW_LINK_MS && (link.lastMs ?? link.latencyMs) > SLOW_LINK_MS && step > 0) return LADDER[step - 1] ?? applied;
   if (
-    link.latencyMs < QUICK_LINK_MS &&
+    // A still screen sends a frame a second, so the smoothed time falls slowly: the latest one decides.
+    Math.min(link.latencyMs, link.lastMs ?? link.latencyMs) < QUICK_LINK_MS &&
     step < ceiling &&
     link.sinceChangeMs >= RECOVER_AFTER_MS &&
     link.framesLastSecond <= STILL_FRAMES_PER_S
@@ -160,17 +162,21 @@ export function nextQuality(
   return applied;
 }
 
-function adaptQuality(now: number): void {
+function adaptQuality(now: number, lastMs: number): void {
   if (feed === null || latencyMs === null) return;
   const next = nextQuality(appliedQuality, chosenQuality, {
     latencyMs,
+    lastMs,
     sinceChangeMs: now - lastQualityChangeAt,
     framesLastSecond: recentSends.filter((t) => now - t <= 1000).length,
   });
   if (next === appliedQuality) return;
+  const up = LADDER.indexOf(next) > LADDER.indexOf(appliedQuality);
   appliedQuality = next;
   lastQualityChangeAt = now;
   feed.setQuality(next);
+  // Back to the chosen quality on a still screen: show it at once, not at the next heartbeat.
+  if (up) feed.requestFrame();
 }
 
 function canSend(): boolean {
