@@ -162,8 +162,8 @@ version 1 is no longer listed.
 ## Later: other networks and weak links
 
 Not launch targets. A phone away from the computer, reached through Tailscale over 5G or another network:
-measured when it comes back, against the same targets as Wi-Fi. Weak links: When weak links come back, these were version 1's 3G targets (the iPhone's Network
-Link Conditioner "3G" profile: about 780 kbit/s to the phone, 330 kbit/s from it, 100 ms delay): every
+measured when it comes back, against the same targets as Wi-Fi. Weak links: these were version 1's 3G
+targets (the iPhone's Network Link Conditioner "3G" profile: about 780 kbit/s to the phone, 330 kbit/s from it, 100 ms delay): every
 action completes and nothing times out; S1 median ≤ 1.5 s, S2 ≤ 1.5 s, S3 ≤ 2.5 s, S4 ≤ 6 s, S5 ≤ 8 s;
 V1 median ≤ 1.0 s, V2 ≥ 2 fps, V3 ≤ 2 s, V7 ≤ 33 KB/s of frames. A JPEG stream can't meet V2 there
 (the smallest frame measured was 58 KB); it needs a video encoder on the phone.
