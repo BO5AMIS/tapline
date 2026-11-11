@@ -380,6 +380,48 @@ describe('TaplineAgent', () => {
     expect(notes.some((note) => note.includes('Old PC') && note.includes('pair'))).toBe(true);
   });
 
+  test('a launch link for the computer this phone is already paired with is not asked about, whatever its code', async () => {
+    // A pairing saved before codes were kept (or made by another bundle): Expo Go still hands the
+    // app the link it was opened by, with a code the phone can't recognise.
+    const storage = memoryStorage();
+    await storage.setItem('tapline.pairing', JSON.stringify({ url: 'ws://100.64.0.1:7211/', token: 'host-token', name: 'Dev PC' }));
+    const { agent, linking, prompts, notes } = track(makeAgent(storage));
+    linking.initial = LINK;
+    await agent.start();
+    await flush();
+    expect(prompts).toHaveLength(0);
+    expect(notes).toHaveLength(0);
+    last().open();
+    expect(last().hello).toMatchObject({ token: 'host-token' });
+  });
+
+  test('the same link opened while the app runs still asks (a person re-pairing on purpose)', async () => {
+    const storage = memoryStorage();
+    await storage.setItem('tapline.pairing', JSON.stringify({ url: 'ws://100.64.0.1:7211/', token: 'host-token', name: 'Dev PC' }));
+    const { agent, linking, prompts } = track(makeAgent(storage));
+    await agent.start();
+    linking.open(LINK);
+    await flush();
+    expect(prompts).toHaveLength(1);
+  });
+
+  test('a computer that refused the saved key is forgotten, so its next pairing link is asked about at launch', async () => {
+    const storage = memoryStorage();
+    await storage.setItem('tapline.pairing', JSON.stringify({ url: 'ws://100.64.0.1:7211/', token: 'old', name: 'Dev PC' }));
+    const first = track(makeAgent(storage));
+    await first.agent.start();
+    last().open();
+    last().drop(4001);
+    await flush();
+    expect(await storage.getItem('tapline.pairing')).toBeNull();
+    first.agent.stop();
+
+    const second = track(makeAgent(storage));
+    second.linking.initial = LINK;
+    await second.agent.start();
+    expect(second.prompts).toHaveLength(1);
+  });
+
   test('a broken saved pairing is ignored instead of crashing', async () => {
     const storage = memoryStorage();
     await storage.setItem('tapline.pairing', '{not json');

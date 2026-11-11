@@ -199,6 +199,13 @@ export class TaplineAgent {
       this.log(`this pairing link was used already: paired with ${this.pairing.name}`);
       return;
     }
+    // At launch, a link to the computer this phone is already paired with needs no question: Expo Go
+    // hands every reload the link it was opened by, and a pairing saved before codes were kept can't
+    // recognise its code. A link opened while the app runs still asks (re-pairing on purpose).
+    if (launch && this.pairing !== null && this.pairing.url === link.url) {
+      this.log(`already paired with ${this.pairing.name}`);
+      return;
+    }
     const address = addressOf(link.url);
     const warning = isNearbyAddress(address)
       ? ''
@@ -245,6 +252,11 @@ export class TaplineAgent {
   private onTokenRefused(code: number, name: string): void {
     if (this.stopped || code !== CLOSE_BAD_TOKEN) return;
     this.client = null;
+    if (!this.options.direct && this.pairing !== null) {
+      // The key is dead: forget it, so the computer's next pairing link is asked about, even at launch.
+      this.pairing = null;
+      void this.enqueue(() => this.deps.storage.removeItem(PAIRING_KEY).catch(() => undefined));
+    }
     this.deps.notify(
       'Tapline',
       `${name} no longer accepts this phone (its Tapline key changed). Scan or open a new pairing code from it to connect again.`,
