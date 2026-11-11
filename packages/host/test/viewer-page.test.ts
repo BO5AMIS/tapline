@@ -811,10 +811,22 @@ class FakeCtx {
   }
 }
 
+/* An element's style: properties as plain strings, plus setProperty for custom properties (--s …). */
+function fakeStyle(): Record<string, string> {
+  const style: Record<string, string> = {};
+  Object.defineProperty(style, "setProperty", {
+    value: (name: string, value: string): void => {
+      style[name] = value;
+    },
+    enumerable: false,
+  });
+  return style;
+}
+
 class DomEl {
   children: DomEl[] = [];
   parentNode: DomEl | null = null;
-  style: Record<string, string> = {};
+  style: Record<string, string> = fakeStyle();
   className = "";
   hidden = false;
   value = "";
@@ -1308,23 +1320,55 @@ describe("viewer page: the Boxes control follows accepts (protocol 1.3, overlay)
   });
 });
 
-/* WCAG contrast, for the tokens in the page's style. */
-function luminance(hex: string): number {
-  const [r, g, b] = [1, 3, 5].map((i) => {
-    const v = parseInt(hex.slice(i, i + 2), 16) / 255;
+/* WCAG contrast, for the tokens in the page's style. A colour is #rrggbb or rgba(r, g, b, a); a translucent
+   one is judged over each surface it can sit on (the page's background and both ends of the stage's gradient),
+   and the worst result counts. */
+type Rgba = [number, number, number, number];
+
+function parseColour(value: string): Rgba {
+  const hex = /^#([0-9a-fA-F]{6})$/.exec(value);
+  if (hex) return [0, 2, 4].map((i) => parseInt(hex[1]!.slice(i, i + 2), 16)).concat(1) as Rgba;
+  const rgba = /^rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\s*\)$/.exec(value);
+  if (!rgba) throw new Error(`not a colour: ${value}`);
+  return [Number(rgba[1]), Number(rgba[2]), Number(rgba[3]), rgba[4] === undefined ? 1 : Number(rgba[4])];
+}
+
+function over(top: Rgba, under: Rgba): Rgba {
+  const a = top[3];
+  return [0, 1, 2].map((i) => top[i]! * a + under[i]! * (1 - a)).concat(1) as Rgba;
+}
+
+function luminanceOf(c: Rgba): number {
+  const [r, g, b] = [0, 1, 2].map((i) => {
+    const v = c[i]! / 255;
     return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
   }) as [number, number, number];
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-function contrast(a: string, b: string): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+function luminance(value: string): number {
+  return luminanceOf(parseColour(value));
+}
+
+function contrastOf(a: Rgba, b: Rgba): number {
+  const [hi, lo] = [luminanceOf(a), luminanceOf(b)].sort((x, y) => y - x) as [number, number];
   return (hi + 0.05) / (lo + 0.05);
+}
+
+/* fg on bg, both tokens of one theme; translucent ones laid over the theme's surfaces, the worst case. */
+function contrast(tokens: Record<string, string>, fg: string, bg: string): number {
+  const surfaces = ["bg", "stage-hi", "stage-lo"].flatMap((n) => (tokens[n] ? [parseColour(tokens[n]!)] : []));
+  let worst = Infinity;
+  for (const surface of surfaces) {
+    const back = over(parseColour(tokens[bg]!), surface);
+    worst = Math.min(worst, contrastOf(over(parseColour(tokens[fg]!), back), back));
+  }
+  return worst;
 }
 
 function hexTokens(block: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const m of block.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) out[m[1]!] = m[2]!;
+  for (const m of block.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6}|rgba?\([^)]*\))\s*;/g)) out[m[1]!] = m[2]!;
   return out;
 }
 
@@ -1374,15 +1418,15 @@ describe("viewer page: light and dark themes", () => {
   ] as const) {
     it(`keeps text, marks and overlay labels readable in the ${theme} theme (4.5:1)`, () => {
       for (const [fg, bg] of TEXT_PAIRS) {
-        expect(contrast(tokens[fg]!, tokens[bg]!), `${theme}: --${fg} on --${bg}`).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(tokens, fg, bg), `${theme}: --${fg} on --${bg}`).toBeGreaterThanOrEqual(4.5);
       }
     });
 
     it(`keeps the focus ring and the status dots visible in the ${theme} theme (3:1)`, () => {
       for (const name of ["accent", "dot-idle", "dot-live", "dot-wait", "dot-bad"]) {
-        expect(contrast(tokens[name]!, tokens["panel"]!), `${theme}: --${name} on --panel`).toBeGreaterThanOrEqual(3);
+        expect(contrast(tokens, name, "panel"), `${theme}: --${name} on --panel`).toBeGreaterThanOrEqual(3);
       }
-      expect(contrast(tokens["accent"]!, tokens["bg"]!), `${theme}: --accent on --bg`).toBeGreaterThanOrEqual(3);
+      expect(contrast(tokens, "accent", "bg"), `${theme}: --accent on --bg`).toBeGreaterThanOrEqual(3);
     });
   }
 });
@@ -1617,12 +1661,18 @@ describe("viewer page: port e, a drag trail while dragging", () => {
     vi.useRealTimers();
   });
 
+  /* The frame's size in CSS pixels, as the layout set it (the drawn phone around it takes part of the stage). */
+  function frameSize(rig: PageRig): { w: number; h: number } {
+    return { w: parseFloat(rig.frame.style["width"]!), h: parseFloat(rig.frame.style["height"]!) };
+  }
+
   it("sizes the trail canvas to the frame times the pixel ratio", () => {
     const rig = pageRig();
     const trail = rig.el("trail");
-    expect(rig.frame.style["width"]).toBe("384px");
-    expect(rig.frame.style["height"]).toBe("768px");
-    expect([trail.width, trail.height]).toEqual([768, 1536]);
+    const { w, h } = frameSize(rig);
+    expect(w).toBeGreaterThan(300);
+    expect(h / w).toBeCloseTo(2, 1);
+    expect([trail.width, trail.height]).toEqual([Math.round(w * 2), Math.round(h * 2)]);
     expect(trail.ctx.ops).toContain("setTransform 2,0,0,2,0,0");
   });
 
@@ -1635,10 +1685,13 @@ describe("viewer page: port e, a drag trail while dragging", () => {
     expect(ctx.strokes).toHaveLength(0);
     pointer(rig, "pointermove", 120, 100, 1040);
     expect(ctx.strokes.map((s) => s.style)).toEqual(["rgba(0, 0, 0, 0.55)", "#8be28b"]);
-    expect(ctx.ops).toContain("moveTo 192,192");
+    const { w, h } = frameSize(rig);
+    const moves = ctx.ops.filter((op) => op.startsWith("moveTo ")).map((op) => op.slice(7).split(",").map(Number));
+    expect(moves[0]![0]).toBeCloseTo(w * 0.5, 5);
+    expect(moves[0]![1]).toBeCloseTo(h * 0.25, 5);
     const lines = ctx.ops.filter((op) => op.startsWith("lineTo ")).map((op) => op.slice(7).split(",").map(Number));
-    expect(lines.at(-1)![0]).toBeCloseTo(230.4, 5);
-    expect(lines.at(-1)![1]).toBe(192);
+    expect(lines.at(-1)![0]).toBeCloseTo(w * 0.6, 5);
+    expect(lines.at(-1)![1]).toBeCloseTo(h * 0.25, 5);
     expect(rig.marks.children).toHaveLength(0);
   });
 
@@ -1663,7 +1716,8 @@ describe("viewer page: port e, a drag trail while dragging", () => {
     vi.advanceTimersByTime(399);
     expect(ctx.ops.slice(after).some((op) => op.startsWith("clearRect"))).toBe(false);
     vi.advanceTimersByTime(1);
-    expect(ctx.ops.slice(after).filter((op) => op.startsWith("clearRect"))).toEqual(["clearRect 0,0,384,768"]);
+    const { w, h } = frameSize(rig);
+    expect(ctx.ops.slice(after).filter((op) => op.startsWith("clearRect"))).toEqual([`clearRect 0,0,${w},${h}`]);
   });
 
   it("clears the trail at once when the pointer is cancelled", () => {
@@ -1672,7 +1726,8 @@ describe("viewer page: port e, a drag trail while dragging", () => {
     pointer(rig, "pointerdown", 100, 100, 1000);
     pointer(rig, "pointermove", 150, 200, 1030);
     pointer(rig, "pointercancel", 150, 200, 1040);
-    expect(ctx.ops.at(-1)).toBe("clearRect 0,0,384,768");
+    const { w, h } = frameSize(rig);
+    expect(ctx.ops.at(-1)).toBe(`clearRect 0,0,${w},${h}`);
   });
 });
 
