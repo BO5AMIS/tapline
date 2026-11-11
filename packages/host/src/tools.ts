@@ -1058,7 +1058,9 @@ export class TaplineTools {
         : undefined;
       if (element !== undefined) {
         actual = typeof element.checked === "boolean" ? (element.checked ? "on" : "off") : typeof element.value === "string" ? element.value : undefined;
-        if (actual === e.value) return null;
+        // A switch takes "true" and "false" too (it reads checked=true in the list).
+        const wanted = typeof element.checked === "boolean" && (e.value === "true" || e.value === "false") ? (e.value === "true" ? "on" : "off") : e.value;
+        if (actual === wanted) return null;
       }
       if (Date.now() >= until) return expectFailure(e, seconds, actual);
       await sleep(100);

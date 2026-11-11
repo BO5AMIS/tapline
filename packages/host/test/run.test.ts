@@ -105,6 +105,9 @@ describe("run", () => {
     });
     const ok = await tools.run({ steps: [{ tool: "toggle", target: { id: "remind" }, expect: { id: "remind", value: "on" } }] });
     expect(ok.isError).toBeUndefined();
+    // the list says checked=true: "true" works for a switch too (AGENT-TOOLS 1.8 §9.2)
+    const asList = await tools.run({ steps: [{ tool: "wait_for", id: "remind", expect: { id: "remind", value: "true" } }] });
+    expect(asList.isError).toBeUndefined();
     const no = await tools.run({ steps: [{ tool: "tap", target: { id: "save" }, expect: { id: "email", value: "x@y.z", timeout: 0.5 } }] });
     expect(textOf(no)).toContain('id "email" didn\'t have the value "x@y.z" within 0.5 s (it has "")');
   });
