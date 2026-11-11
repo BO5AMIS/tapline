@@ -477,6 +477,14 @@ function stringProp(node: HostNode, key: string): string | null {
  * testID on to its TextInput would otherwise name two elements. A host that sets its testID itself
  * (a button) keeps it.
  */
+/** A host that takes a press, long press or toggle (its own or its component's handler), or is an input. */
+function actsItself(node: HostNode): boolean {
+  return (
+    isInputNode(node) ||
+    ['onPress', 'onLongPress', 'onValueChange'].some((key) => typeof findProp(node, key) === 'function')
+  );
+}
+
 function suppressedHandlers(nodes: HostNode[]): Set<string> {
   const suppressed = new Set<string>();
   for (const node of nodes) {
@@ -492,11 +500,12 @@ function suppressedHandlers(nodes: HostNode[]): Set<string> {
     }
     const own = propsOf(node.fiber).testID;
     if (typeof own === 'string' && own !== '') {
-      // a wrapper above that only inherits this host's testID
+      // a wrapper above that only inherits this host's testID and takes no action of its own (a
+      // field's label-and-input box); a wrapper that acts (a tab item) keeps it, as it's what lists
       for (let p = node.parent; p >= 0; ) {
         const ancestor = nodes[p];
         if (!ancestor) break;
-        if (propsOf(ancestor.fiber).testID === undefined && findProp(ancestor, 'testID') === own) {
+        if (propsOf(ancestor.fiber).testID === undefined && findProp(ancestor, 'testID') === own && !actsItself(ancestor)) {
           suppressed.add(`${ancestor.index}:testID`);
         }
         p = ancestor.parent;

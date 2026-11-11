@@ -168,6 +168,32 @@ describe('duplicates fold', () => {
     expect(named[0]?.actions).toContain('press');
   });
 
+  test("React Navigation's tab item: an outer view that inherits testID and onPress keeps the id over the pressable inside", async () => {
+    // BottomTabItem gets testID and onPress; the first view it renders inherits both, and the
+    // pressable inside sets the same testID itself with its own wrapped handler. Both act, so the
+    // outer one is what's listed: it must carry the id.
+    function TabItem({ testID, onPress, title }: { testID: string; onPress: () => void; title: string }) {
+      return (
+        <View>
+          <Pressable testID={testID} onPress={() => onPress()}>
+            <Text>{title}</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    await mount(
+      <View>
+        <TabItem testID="tab-explore" onPress={() => undefined} title="Explore" />
+      </View>,
+    );
+    useFrames({ 'tab-explore': frame(0, 700, 143, 49) });
+    const { elements } = await tree({});
+    // On the phone both share one rect and fold into the outer one; here they differ, so both list.
+    const buttons = elements.filter((element) => element.actions.includes('press'));
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.map((button) => button.testID)).toEqual(buttons.map(() => 'tab-explore'));
+  });
+
   test('a different rect (more than 1 pt) or different text lists both', async () => {
     await mount(
       <View>
