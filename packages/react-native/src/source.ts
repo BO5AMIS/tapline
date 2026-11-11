@@ -25,6 +25,11 @@ export interface ElementSource {
   components: string[];
   /** Where the app's code wrote this element (or its nearest ancestor the app wrote); null when unknown. */
   location: SourceLocation | null;
+  /**
+   * When `location` is inside one of the app's own components (a shared button): where the screen uses that
+   * component, so a developer goes straight to the use as well as to the inside. Absent otherwise.
+   */
+  usedAt?: SourceLocation;
   /** The props of the component the app wrote, in short: strings, numbers, booleans, handler names. */
   props: Record<string, string>;
 }
@@ -214,7 +219,27 @@ export async function sourcesOf(fibers: Fiber[]): Promise<ElementSource[]> {
     }
     const components = [...new Set(names)].slice(0, 6).reverse();
     const propsFrom = wrote && isCompositeTag(wrote.tag) ? wrote : compositesAbove(fiber, 1)[0] ?? null;
-    return { components, location, props: propsFrom ? shortProps(propsFrom) : {} };
+    // Inside an app component (LabButton): the first app line further up written by another component is
+    // where that component is used (<LabButton …> in LabScreen).
+    let usedAt: SourceLocation | undefined;
+    const chosen: SourceLocation | null = location;
+    if (chosen !== null && chosen.direct && chosen.component !== null) {
+      let past = false;
+      for (const span of spans[i]!) {
+        if (span.fiber === wrote) {
+          past = true;
+          continue;
+        }
+        if (!past) continue;
+        const frame = appFrame(span);
+        if (frame === null || frame.methodName === '' || INTERNAL.test(frame.methodName)) continue;
+        if (frame.methodName !== chosen.component) {
+          usedAt = { file: frame.file, line: frame.lineNumber, column: frame.column, component: frame.methodName, direct: true };
+        }
+        break;
+      }
+    }
+    return { components, location, ...(usedAt !== undefined ? { usedAt } : {}), props: propsFrom ? shortProps(propsFrom) : {} };
   });
 }
 

@@ -489,7 +489,23 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
   }
 
   if (types.has('overlap')) {
-    const overlapping = measured.filter((item) => overlapCandidate(item.entry));
+    // What shows of each element: its frame cut to the scroll view it sits in. A card scrolled under the
+    // tab bar is outside its list's visible area there, so it overlaps nothing; a button floating over
+    // the visible part of a list does.
+    const frameByNode = new Map(measured.map((item) => [item.entry.node.index, item.frame]));
+    const shown = (item: Measured): Frame | null => {
+      const container = scrollContainer(snapshot.nodes, snapshot.entries, item.entry.node);
+      const area = container >= 0 ? frameByNode.get(container) : undefined;
+      if (area === undefined) return item.frame;
+      const x = Math.max(item.frame.x, area.x);
+      const y = Math.max(item.frame.y, area.y);
+      const width = Math.min(item.frame.x + item.frame.width, area.x + area.width) - x;
+      const height = Math.min(item.frame.y + item.frame.height, area.y + area.height) - y;
+      return width > 0 && height > 0 ? { x, y, width, height } : null;
+    };
+    const overlapping = measured
+      .filter((item) => overlapCandidate(item.entry))
+      .map((item) => ({ ...item, visible: shown(item) }));
     for (let i = 0; i < overlapping.length; i++) {
       const first = overlapping[i];
       if (!first) continue;
@@ -502,10 +518,11 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
         // One control drawn as two views with the same id isn't two things on top of each other.
         const idA = first.entry.info.testID;
         if (idA !== null && idA !== '' && idA === second.entry.info.testID) continue;
-        // Content scrolling under a bar outside its scroll view is how lists work, not an overlap.
-        if (scrollContainer(snapshot.nodes, snapshot.entries, a) !== scrollContainer(snapshot.nodes, snapshot.entries, b)) continue;
-        const smaller = Math.min(first.frame.width * first.frame.height, second.frame.width * second.frame.height);
-        const shared = intersectionArea(first.frame, second.frame);
+        const va = first.visible;
+        const vb = second.visible;
+        if (va === null || vb === null) continue;
+        const smaller = Math.min(va.width * va.height, vb.width * vb.height);
+        const shared = intersectionArea(va, vb);
         if (smaller <= 0 || shared <= smaller * OVERLAP_LIMIT) continue;
         refFor(a.fiber);
         const otherRef = refFor(b.fiber);

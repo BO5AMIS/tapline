@@ -69,3 +69,21 @@ test("iOS's own switch at its system size is no small target; content scrolling 
   });
   expect(result?.issues).toEqual([]);
 });
+
+test('a button floating over the visible part of a list overlaps it', async () => {
+  const { ScrollView } = jest.requireActual<typeof import('react-native')>('react-native');
+  await mount(
+    <View>
+      <ScrollView testID="list2">
+        <Text testID="status">taps=0 pressed=-</Text>
+      </ScrollView>
+      <Pressable testID="corner" accessibilityRole="button" accessibilityLabel="TL" onPress={() => undefined} />
+    </View>,
+  );
+  useFrames({ list2: frame(0, 0, 400, 700), status: frame(16, 100, 398, 68), corner: frame(16, 100, 60, 60) }, null);
+  let result: Awaited<ReturnType<typeof audit>> | undefined;
+  await act(async () => {
+    result = await audit({ types: ['overlap'] });
+  });
+  expect(result?.issues.map((i) => i.type)).toEqual(['overlap']);
+});

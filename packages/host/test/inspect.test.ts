@@ -79,3 +79,30 @@ describe("inspect", () => {
     expect(text).toContain("Written at: unknown");
   });
 });
+
+describe("inspect inside a shared component", () => {
+  it("also names where the screen uses it, with that line", async () => {
+    const { formatInspect } = await import("../src/inspect.js");
+    const files = {
+      exists: (path: string) => path.endsWith(".tsx") || path.split("\\").join("/") === "/proj/package.json",
+      read: (path: string) =>
+        path.endsWith("ui.tsx")
+          ? Array.from({ length: 50 }, (_, i) => (i === 42 ? "<Pressable testID={`lab-${name}`} onPress={onPress}>" : "")).join("\n")
+          : Array.from({ length: 120 }, (_, i) => (i === 111 ? '<LabButton name="save" title="Save" />' : "")).join("\n"),
+    };
+    const text = formatInspect(
+      {
+        element: { ref: "e7", role: "button", text: "Save", testID: "lab-save", frame: { x: 16, y: 329, width: 193, height: 48 } },
+        source: {
+          components: ["LabScreen", "LabButton"],
+          location: { file: "/proj/app/ui.tsx", line: 43, column: 7, component: "LabButton", direct: true },
+          usedAt: { file: "/proj/app/lab.tsx", line: 112, column: 9, component: "LabScreen" },
+          props: {},
+        },
+      },
+      files,
+    );
+    expect(text).toContain("Written at: app/ui.tsx:43 (in LabButton)");
+    expect(text).toContain('Used at: app/lab.tsx:112 (in LabScreen)\n  112 | <LabButton name="save" title="Save" />');
+  });
+});

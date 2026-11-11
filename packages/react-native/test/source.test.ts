@@ -128,3 +128,15 @@ test("an app's own wrapper (a shared <Button testID>) maps to the call site that
   expect(source?.location).toMatchObject({ file: '/proj/src/screens/SignUpScreen.tsx', line: 112, direct: true });
   expect(source?.props).toMatchObject({ testID: '"save"', label: '"Save"' });
 });
+
+test("inside a shared component that makes its own id (LabButton), it also names where the screen uses it", async () => {
+  function LabButton(): null { return null; }
+  function Pressable(): null { return null; }
+  // SignUpScreen.tsx:112 writes <LabButton name="save" />; ui.tsx:43 (inside it) writes <Pressable testID={`lab-${name}`}>
+  const button = fiber(0, LabButton, { name: 'save', title: 'Save' }, stack(['jsxDEV', 100, 1], ['SignUpScreen', 400, 9]));
+  const pressable = fiber(11, Pressable, { testID: 'lab-save' }, stack(['jsxDEV', 100, 1], ['LabButton', 200, 7]), button);
+  const view = fiber(5, 'RCTView', { testID: 'lab-save' }, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), pressable);
+  const [source] = await sourcesOf([view]);
+  expect(source?.location).toMatchObject({ file: '/proj/src/ui.tsx', line: 43, direct: true });
+  expect(source?.usedAt).toMatchObject({ file: '/proj/src/screens/SignUpScreen.tsx', line: 112, component: 'SignUpScreen' });
+});

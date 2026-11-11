@@ -17,6 +17,7 @@ export const inspectResultSchema = z.object({
     location: z
       .object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish(), direct: z.boolean().optional() })
       .nullable(),
+    usedAt: z.object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish() }).optional(),
     props: z.record(z.string(), z.string()),
   }),
 });
@@ -88,6 +89,13 @@ export function formatInspect(result: InspectResult, files: FileAccess = realFil
     );
     const code = sourceLine(location.file, location.line, files);
     if (code !== null) lines.push(`  ${location.line} | ${code}`);
+    // Inside the app's own shared component: where the screen uses it.
+    const used = result.source.usedAt;
+    if (used !== undefined) {
+      lines.push(`Used at: ${shownPath(used.file, files)}:${used.line}${used.component ? ` (in ${used.component})` : ""}`);
+      const usedCode = sourceLine(used.file, used.line, files);
+      if (usedCode !== null) lines.push(`  ${used.line} | ${usedCode}`);
+    }
     // A library drew it: the app still wrote the element's id somewhere in that file (a tab's options).
     const id = result.element.testID;
     if (location.direct === false && typeof id === "string" && id !== "") {
