@@ -108,6 +108,8 @@ export const elementSchema = z.object({
   /** How many characters of the text the app left out (it sends at most 2000). */
   textMore: z.number().nullish(),
   value: z.unknown().nullish(),
+  /** An empty input's placeholder (AGENT-TOOLS v1.7). */
+  placeholder: z.string().nullish(),
   frame: frameSchema.nullish(),
   actions: z.array(z.string()).nullish(),
   disabled: z.boolean().nullish(),

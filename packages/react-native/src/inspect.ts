@@ -457,6 +457,8 @@ export interface NodeInfo {
   label: string | null;
   text: string;
   value: string | null;
+  /** An empty input's placeholder, else null. */
+  placeholder: string | null;
   actions: Action[];
   disabled: boolean;
   selected: boolean;
@@ -600,13 +602,15 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
       node.isText || input || toggleable || actions.includes('press') || actions.includes('longPress') || findProp(node, 'accessible') === true;
 
     const hasContent = node.isText && !node.insideText && node.text !== '';
+    const inputValue = input ? currentInputValue(node) : null;
     infos.push({
       type: typeName(node),
       role,
       testID,
       label,
       text: input || !accessible ? '' : node.text,
-      value: input ? currentInputValue(node) : null,
+      value: inputValue,
+      placeholder: inputValue === '' ? stringProp(node, 'placeholder') : null,
       actions,
       disabled,
       selected,
@@ -989,6 +993,7 @@ export function takeSnapshot(): Snapshot {
         label: null,
         text: tab.title,
         value: null,
+        placeholder: null,
         actions: ['press'],
         disabled: false,
         selected: tab.selected,
@@ -1252,6 +1257,7 @@ export function toElement(entry: Entry, frame: Frame | null, ref: string = refFo
     text: kept,
     ...(more > 0 ? { textMore: more } : {}),
     value: info.value === null ? null : displayText(info.value),
+    ...(info.placeholder !== null && displayText(info.placeholder) !== '' ? { placeholder: displayText(info.placeholder) } : {}),
     frame,
     actions: info.actions,
     disabled: info.disabled,
@@ -1309,6 +1315,7 @@ function changedFields(old: TaplineElement, now: TaplineElement): ChangedFields 
   // A label counts as changed only when the line shows it, before or after.
   if (old.label !== now.label && (showsLabel(old) || showsLabel(now))) was.label = old.label;
   if (old.value !== now.value) was.value = old.value;
+  if (old.placeholder !== now.placeholder && old.placeholder !== undefined) was.placeholder = old.placeholder;
   if (old.checked !== now.checked) was.checked = old.checked;
   if (old.selected !== now.selected) was.selected = old.selected;
   if (old.disabled !== now.disabled) was.disabled = old.disabled;

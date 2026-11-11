@@ -433,6 +433,7 @@ function backButtonEntry(snapshot: Snapshot): Entry {
       label: 'Back',
       text: 'Back',
       value: null,
+      placeholder: null,
       actions: ['press'],
       disabled: false,
       selected: false,

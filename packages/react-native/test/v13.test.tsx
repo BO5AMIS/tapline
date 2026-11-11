@@ -194,6 +194,29 @@ describe('duplicates fold', () => {
     expect(buttons.map((button) => button.testID)).toEqual(buttons.map(() => 'tab-explore'));
   });
 
+  test('an empty input reports its placeholder, never as its value; once typed into, the change says it was the placeholder (AGENT-TOOLS v1.7)', async () => {
+    await mount(
+      <View>
+        <TextInput testID="name" accessibilityLabel="Name" placeholder="Alex Morgan" />
+        <TextInput testID="city" accessibilityLabel="City" placeholder="Lisbon" defaultValue="Porto" />
+      </View>,
+    );
+    useFrames({ name: frame(24, 100, 300, 44), city: frame(24, 160, 300, 44) });
+    const first = await tree({});
+    const name = byTestID(first.elements, 'name');
+    expect(name?.value).toBe('');
+    expect(name?.placeholder).toBe('Alex Morgan');
+    // A field with text shows its value, not its placeholder.
+    expect(byTestID(first.elements, 'city')?.placeholder).toBeUndefined();
+    await run(() => typeText({ target: { testID: 'name' }, text: 'abc' }));
+    const second = await tree({ changes: true });
+    const typed = byTestID(second.elements, 'name');
+    expect(typed?.value).toBe('abc');
+    expect(typed?.placeholder).toBeUndefined();
+    const change = second.changes?.changed.find((c) => c.ref === typed?.ref);
+    expect(change?.was).toEqual({ value: '', placeholder: 'Alex Morgan' });
+  });
+
   test('a different rect (more than 1 pt) or different text lists both', async () => {
     await mount(
       <View>

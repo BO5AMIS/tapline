@@ -419,6 +419,20 @@ describe("formatChanges (AGENT-TOOLS §3.1)", () => {
     expect(formatChanges(t)).toBe('Same screen. Changes:\n~ e5 text "3 items" (was "2 items")');
   });
 
+  it("shows an empty input's placeholder instead of a value, and a typed value as once a placeholder (AGENT-TOOLS v1.7)", () => {
+    const empty = { ref: "e3", type: "TextInput", role: "textfield", label: "Name", text: "", value: "", placeholder: "Alex Morgan", testID: "name", actions: ["press", "type"], frame: null };
+    expect(formatElement(empty)).toBe('e3 input "Name" id=name placeholder="Alex Morgan" [tap, type]');
+    // a value and a placeholder are never both shown
+    expect(formatElement({ ...empty, value: "Sam", placeholder: "Alex Morgan" })).not.toContain("placeholder=");
+    const t = withChanges(3, { ...none, changed: [{ ref: "e3", was: { value: "", placeholder: "Alex Morgan" } }] });
+    t.elements[2] = { ...empty, value: "abc", placeholder: undefined };
+    expect(formatChanges(t)).toBe('Same screen. Changes:\n~ e3 input "Name" id=name value="abc" [tap, type] (was placeholder "Alex Morgan")');
+    // cleared again: the old value is what it was; the placeholder coming back isn't news
+    const cleared = withChanges(3, { ...none, changed: [{ ref: "e3", was: { value: "abc" } }] });
+    cleared.elements[2] = empty;
+    expect(formatChanges(cleared)).toContain('placeholder="Alex Morgan" [tap, type] (was "abc")');
+  });
+
   it("shows several changed fields as key=value pairs", () => {
     const t = withChanges(2, { ...none, changed: [{ ref: "e2", was: { text: "a", value: "b" } }] });
     expect(formatChanges(t)).toContain('(was text="a", value="b")');

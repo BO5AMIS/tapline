@@ -63,6 +63,8 @@ export interface TaplineElement {
   textMore?: number;
   /** TextInput content; null for everything else. */
   value: string | null;
+  /** An empty TextInput's placeholder (AGENT-TOOLS v1.7); absent when the input has text or none. */
+  placeholder?: string;
   /** Null only when the element could not be measured. */
   frame: Frame | null;
   actions: Action[];
@@ -87,7 +89,7 @@ export interface RouteInfo {
 
 /** What an element was before, for the fields that changed. */
 export type ChangedFields = Partial<
-  Pick<TaplineElement, 'text' | 'label' | 'value' | 'checked' | 'selected' | 'disabled' | 'actions'>
+  Pick<TaplineElement, 'text' | 'label' | 'value' | 'placeholder' | 'checked' | 'selected' | 'disabled' | 'actions'>
 >;
 
 /** The difference from the previous `tree` call (only with `changes: true`). Refs of unchanged elements are kept. */

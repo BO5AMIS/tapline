@@ -113,6 +113,9 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
   }
   if (element.value !== null && element.value !== undefined && element.value !== "") {
     parts.push(`value=${formatValue(element.value)}`);
+  } else if (typeof element.placeholder === "string" && element.placeholder !== "") {
+    // AGENT-TOOLS v1.7: an empty input shows its placeholder, never as a value
+    parts.push(`placeholder=${formatValue(element.placeholder)}`);
   }
   if (element.disabled === true) parts.push("disabled");
   if (element.selected === true) parts.push("selected");
@@ -204,7 +207,14 @@ function formatWas(key: string, value: unknown): string {
 
 /** The old values of a `~` line: one changed field reads `"old"`; several read `text="old", value="old"`. */
 function formatBefore(was: Record<string, unknown>): string {
-  const entries = Object.entries(was);
+  // AGENT-TOOLS v1.7: a field that was empty reads as its placeholder then: `was placeholder "…"`.
+  const placeholder = was["placeholder"];
+  if (typeof placeholder === "string" && placeholder !== "" && (was["value"] === "" || was["value"] === null || was["value"] === undefined)) {
+    const rest = Object.entries(was).filter(([key]) => key !== "value" && key !== "placeholder");
+    const own = `placeholder ${formatValue(placeholder)}`;
+    return rest.length === 0 ? own : [own, ...rest.map(([key, value]) => `${key}=${formatWas(key, value)}`)].join(", ");
+  }
+  const entries = Object.entries(was).filter(([key]) => key !== "placeholder");
   const [only] = entries;
   return entries.length === 1 && only !== undefined
     ? formatWas(only[0], only[1])
