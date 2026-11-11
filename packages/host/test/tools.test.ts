@@ -350,14 +350,16 @@ describe("the live viewer's side of the tools", () => {
     // When the drag is taken, nothing scrolls.
     app.handler = (req) => (req.method === "swipe" ? { ok: true, result: { element: TREE.elements[0], settledMs: 10 } } : viewerHandler(req));
     const outcome = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.6], [200, 0.5, 0.9]] });
-    expect(outcome).toMatchObject({ ok: true, action: { kind: "swipe" } });
+    expect(outcome).toMatchObject({ ok: true, action: { kind: "drag" } });
+    expect(outcome.action).not.toHaveProperty("caption");
     expect(app.requests.filter((r) => r.method === "scroll")).toHaveLength(1);
   });
 
   it("reports a person's action with where it happened, in 0..1", async () => {
     const { tools } = await viewerTools();
     const outcome = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [90, 0.5, 0.25]] });
-    expect(outcome.action).toMatchObject({ kind: "press", label: "Log in", point: { x: 0.5, y: 0.25 } });
+    expect(outcome.action).toMatchObject({ kind: "tap", label: "Log in", point: { x: 0.5, y: 0.25 } });
+    expect(outcome.action).not.toHaveProperty("caption"); // the page words a person's steps
     expect(outcome.action?.rect?.x).toBeCloseTo(24 / 400, 5);
   });
 
@@ -367,10 +369,10 @@ describe("the live viewer's side of the tools", () => {
     const refused = await tools.tap({ target: { id: "login-button" }, look: false });
     expect(refused.isError).toBe(true);
     expect(textOf(refused)).toContain("paused");
-    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", ok: false, code: "paused" });
+    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "tap", caption: "Tap", ok: false, code: "paused" });
     control.setPaused(false);
     await tools.tap({ target: { id: "login-button" }, look: false });
-    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "press", label: "Log in", ok: true });
+    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "tap", label: "Log in", caption: 'Tap "Log in"', ok: true });
   });
 
   it("after a person acts, ref targets are stale until the agent looks again; id targets still work", async () => {

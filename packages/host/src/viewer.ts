@@ -30,8 +30,11 @@ export type PersonInput =
 /** What was just done, for every viewer to see; `rect` / `point` in 0..1. */
 export interface ViewerAction {
   by: "agent" | "person";
+  /** VIEWER-PROTOCOL 1.4: the AGENT-TOOLS tool for the agent's steps, the viewer input name for a person's. */
   kind: string;
   label?: string;
+  /** The agent's step in plain words, for people watching (1.4); a person's steps have none. */
+  caption?: string;
   rect?: Rect;
   point?: { x: number; y: number };
   ok?: boolean;

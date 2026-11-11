@@ -6,6 +6,7 @@ import { z } from "zod";
 import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
+import { agentKind, captionFor, personKind } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
@@ -956,8 +957,8 @@ export class TaplineTools {
     return { x: frame.x / screen.w, y: frame.y / screen.h, w: frame.width / screen.w, h: frame.height / screen.h };
   }
 
-  /** The viewer's description of an action: its element's name and where it was. */
-  private describeAction(method: string, result: unknown, point?: { x: number; y: number }): Omit<ViewerAction, "by" | "ok" | "code"> {
+  /** The viewer's description of an action: its kind (protocol 1.4), its element's name and where it was. */
+  private describeAction(kind: string, result: unknown, point?: { x: number; y: number }): Omit<ViewerAction, "by" | "ok" | "code"> {
     const element =
       typeof result === "object" && result !== null && "element" in result
         ? elementSchema.safeParse((result as { element: unknown }).element)
@@ -966,7 +967,7 @@ export class TaplineTools {
     const label = data ? (data.text || data.label || data.testID || undefined) : undefined;
     const rect = this.normalized(data?.frame);
     return {
-      kind: method,
+      kind,
       ...(label ? { label: label.slice(0, 80) } : {}),
       ...(rect ? { rect } : {}),
       ...(point ? { point } : {}),
@@ -981,8 +982,16 @@ export class TaplineTools {
     const screen = this.lastScreen;
     const point =
       t && typeof t.x === "number" && typeof t.y === "number" && screen ? { x: t.x / screen.w, y: t.y / screen.h } : undefined;
+    const kind = by === "agent" ? agentKind(method) : method;
+    const described = this.describeAction(kind, result, point);
+    // A failed step has no element in its answer: name it from the target the agent gave, if it's words.
+    const named =
+      described.label ??
+      (t && typeof (t as { text?: unknown }).text === "string" ? (t as { text: string }).text : undefined) ??
+      (t && typeof (t as { label?: unknown }).label === "string" ? (t as { label: string }).label : undefined);
+    const caption = by === "agent" ? captionFor(kind, kind === "app_command" ? undefined : named, params) : undefined;
     try {
-      onAction({ by, ...this.describeAction(method, result, point), ok: code === undefined, ...(code ? { code } : {}) });
+      onAction({ by, ...described, ...(caption !== undefined ? { caption } : {}), ok: code === undefined, ...(code ? { code } : {}) });
     } catch {
       // a viewer's trouble must not fail the action
     }
@@ -1047,22 +1056,22 @@ export class TaplineTools {
       if (swipe !== undefined) {
         try {
           const swiped = await this.host.request("swipe", swipe, { sessionId: session.id });
-          return { ok: true, action: this.describeAction("swipe", swiped, point) };
+          return { ok: true, action: this.describeAction(personKind(input, "swipe"), swiped, point) };
         } catch (error) {
           if (!(error instanceof TaplineError && error.code === "not_actionable")) {
-            return { ok: false, code: error instanceof TaplineError ? error.code : "internal", message: error instanceof Error ? error.message : String(error), action: { kind: "swipe", ...(point ? { point } : {}) } };
+            return { ok: false, code: error instanceof TaplineError ? error.code : "internal", message: error instanceof Error ? error.message : String(error), action: { kind: personKind(input, "swipe"), ...(point ? { point } : {}) } };
           }
         }
       }
       try {
         const result = await this.host.request(method, params, { sessionId: session.id });
-        return { ok: true, action: this.describeAction(method, result, point) };
+        return { ok: true, action: this.describeAction(personKind(input, method), result, point) };
       } catch (error) {
         return {
           ok: false,
           code: error instanceof TaplineError ? error.code : "internal",
           message: error instanceof Error ? error.message : String(error),
-          action: { kind: method, ...(point ? { point } : {}) },
+          action: { kind: personKind(input, method), ...(point ? { point } : {}) },
         };
       }
     };
