@@ -117,6 +117,51 @@ describe('route', () => {
     expect((await tree({})).route).toEqual({ names: ['home'] });
   });
 
+  test("a JavaScript tab bar's buttons, which get each tab's route and the navigator's navigation, don't count as screens", async () => {
+    // React Navigation's bottom tabs: the tab bar renders one button per tab with that tab's `route`
+    // and the tab navigator's own `navigation`, whose isFocused() is true; the last one used to win.
+    const tabRoutes = [
+      { key: 'Explore-a', name: 'Explore' },
+      { key: 'Trips-b', name: 'Trips' },
+      { key: 'Settings-c', name: 'Settings' },
+    ];
+    const tabsNav = navigation({ state: { index: 0, routes: tabRoutes } });
+    function TabButton(props: { route: { key: string; name: string }; navigation: FakeNavigation }) {
+      void props;
+      return <Pressable onPress={() => undefined}><Text>tab</Text></Pressable>;
+    }
+    await mount(
+      <Screen route={{ key: 'Tabs-1', name: 'Tabs' }} navigation={navigation({ state: { index: 0, routes: [{ key: 'Tabs-1', name: 'Tabs' }] } })}>
+        <Screen route={tabRoutes[0]!} navigation={tabsNav}>
+          <Text>Explore</Text>
+        </Screen>
+        <View>
+          {tabRoutes.map((route) => (
+            <TabButton key={route.key} route={route} navigation={tabsNav} />
+          ))}
+        </View>
+      </Screen>,
+    );
+    useFrames({});
+    expect((await tree({})).route).toEqual({ names: ['Tabs', 'Explore'] });
+  });
+
+  test('a route its navigator says is not the current one is not focused, whatever isFocused says', async () => {
+    const state = { index: 1, routes: [{ key: 'a-1', name: 'first' }, { key: 'b-2', name: 'second' }] };
+    await mount(
+      <View>
+        <Screen route={{ key: 'b-2', name: 'second' }} navigation={navigation({ state })}>
+          <Text>Second</Text>
+        </Screen>
+        <Screen route={{ key: 'a-1', name: 'first' }} navigation={navigation({ state })}>
+          <Text>First</Text>
+        </Screen>
+      </View>,
+    );
+    useFrames({});
+    expect((await tree({})).route).toEqual({ names: ['second'] });
+  });
+
   test('no route without React Navigation', async () => {
     await mount(<Text>plain</Text>);
     useFrames({});

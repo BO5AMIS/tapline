@@ -163,7 +163,14 @@ function routeOf(fiber: Fiber, chain: RouteFound[]): RouteFound | null {
   const navigation = nav as NavigationLike;
   let focused = true;
   try {
-    if (typeof navigation.isFocused === 'function') focused = navigation.isFocused() !== false;
+    // The navigator's state decides when it lists this route: the route is focused when it is the
+    // current one. isFocused() alone isn't enough: a JavaScript tab bar passes every tab's route
+    // to its buttons with the navigator's own navigation, which is focused for all of them.
+    const state = typeof navigation.getState === 'function' ? navigation.getState() : undefined;
+    const routes = isRecord(state) && Array.isArray(state.routes) ? state.routes : [];
+    const at = routes.findIndex((r) => isRecord(r) && r.key === route.key);
+    if (at >= 0 && isRecord(state) && typeof state.index === 'number') focused = at === state.index;
+    else if (typeof navigation.isFocused === 'function') focused = navigation.isFocused() !== false;
   } catch {
     focused = true;
   }
