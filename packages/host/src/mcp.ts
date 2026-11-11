@@ -363,6 +363,7 @@ export async function runMcp(
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },
     pairImagePath: join(configDir(), `pair-${port}.png`),
+    offerDir: join(configDir(), "offers"),
     screenshots,
     screenshotDir: join(configDir(), "shots"),
     scriptsDir: join(configDir(), "scripts"),

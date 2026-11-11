@@ -33,13 +33,13 @@ interface Rig {
   answer: { value: boolean };
 }
 
-function rig(host: string | null, offers: Record<number, DevOffer>, active = true): Rig {
+function rig(host: string | null, offers: Record<number, DevOffer>, active = true, metroPort = 8081): Rig {
   const prompts: string[] = [];
   const fetched: Array<{ host: string; port: number }> = [];
   const answer = { value: true };
   let pending: (() => void) | null = null;
   const source: OfferSource = {
-    devServerHost: () => host,
+    devServer: () => (host === null ? null : { host, port: metroPort }),
     fetchOffer: (h, port) => {
       fetched.push({ host: h, port });
       return Promise.resolve(offers[port] ?? null);
@@ -83,7 +83,7 @@ test('finds the offer on the Metro computer, asks once, and pairs with its code 
   const { agent, prompts, fetched, tick } = rig('192.168.1.20', { 7211: { code: 'c-1', name: 'Dev PC' } });
   await agent.start();
   await tick();
-  expect(fetched.map((f) => f.port)).toEqual([7210, 7211, 7212, 7213, 7214, 7215, 7216, 7217, 7218, 7219]);
+  expect(fetched.map((f) => f.port)).toEqual([8081, 7210, 7211, 7212, 7213, 7214, 7215, 7216, 7217, 7218, 7219]);
   expect(fetched.every((f) => f.host === '192.168.1.20')).toBe(true);
   expect(prompts).toHaveLength(1);
   expect(prompts[0]).toContain('Dev PC (192.168.1.20), the computer this app’s code comes from'.replace('’', "'"));
@@ -121,6 +121,16 @@ test('never looks when the code comes from Tailscale, the internet or no server,
   await away.tick();
   expect(away.fetched).toHaveLength(0);
   away.agent.stop();
+});
+
+test('takes the offer Metro passes on, and connects to the port it names', async () => {
+  const { agent, prompts, fetched, tick } = rig('192.168.1.20', { 8081: { code: 'm-1', name: 'Dev PC', port: 19001 } });
+  await agent.start();
+  await tick();
+  expect(fetched.map((f) => f.port)).toEqual([8081]);
+  expect(prompts).toHaveLength(1);
+  expect(MockSocket.instances[0]?.url).toBe('ws://192.168.1.20:19001/');
+  agent.stop();
 });
 
 test('local network hosts', () => {

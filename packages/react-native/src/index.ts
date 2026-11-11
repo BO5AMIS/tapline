@@ -43,12 +43,15 @@ const OFFER_PATH = '/tapline/offer';
 function devOffers(): OfferSource | undefined {
   if (typeof __DEV__ === 'undefined' || !__DEV__) return undefined;
   return {
-    devServerHost() {
+    devServer() {
       try {
         const source = NativeModules.SourceCode as { getConstants?: () => { scriptURL?: unknown }; scriptURL?: unknown } | undefined;
         const url = source?.getConstants?.().scriptURL ?? source?.scriptURL;
         if (typeof url !== 'string') return null;
-        return /^https?:\/\/(\[[^\]]+\]|[^/:?#]+)/i.exec(url)?.[1] ?? null;
+        const m = /^(https?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::(\d+))?/i.exec(url);
+        if (!m || m[2] === undefined) return null;
+        const port = m[3] !== undefined ? Number(m[3]) : m[1]?.toLowerCase() === 'https' ? 443 : 80;
+        return { host: m[2], port };
       } catch {
         return null;
       }
@@ -61,8 +64,9 @@ function devOffers(): OfferSource | undefined {
         if (res.status !== 200) return null;
         const body: unknown = await res.json();
         if (typeof body !== 'object' || body === null) return null;
-        const { code, name } = body as { code?: unknown; name?: unknown };
-        return typeof code === 'string' && typeof name === 'string' ? { code, name } : null;
+        const { code, name, port: hostPort } = body as { code?: unknown; name?: unknown; port?: unknown };
+        if (typeof code !== 'string' || typeof name !== 'string') return null;
+        return typeof hostPort === 'number' ? { code, name, port: hostPort } : { code, name };
       } catch {
         return null;
       } finally {

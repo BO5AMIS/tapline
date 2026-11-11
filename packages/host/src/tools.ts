@@ -289,6 +289,11 @@ export interface ToolsOptions {
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
   canConfirm?: boolean;
+  /**
+   * Where `pair` writes the development offer for the Metro helper (`~/.tapline/offers`), so a phone that can
+   * only reach Metro (a firewall in the way of 7210-7219) still finds it. None: only the host's own endpoint.
+   */
+  offerDir?: string;
   /** Where `pair` also saves the QR code as a PNG (so the user can open it). */
   pairImagePath?: string;
   /** How long that PNG is kept. Default: the code's 10 minutes. */
@@ -730,7 +735,8 @@ export class TaplineTools {
     const { url, name } = this.options.connect;
     // Zero-QR pairing (Tapline 1.1): a development build whose JavaScript comes from this computer finds the
     // offer itself and asks its person to connect. Open for 10 minutes, one use, local network only.
-    this.host.openDevOffer(name);
+    const offer = this.host.openDevOffer(name);
+    this.writeOffer(offer);
     const devLine =
       "A development build that loads its JavaScript from this computer (Metro) on the same Wi-Fi asks by itself within a few seconds: the user only taps Connect, no QR code (open for 10 minutes, once).";
     if (args.scheme === undefined || args.scheme.trim() === "") {
@@ -785,6 +791,28 @@ export class TaplineTools {
         { type: "image", data: png.toString("base64"), mimeType: "image/png" },
       ],
     };
+  }
+
+  /** `<offerDir>/<port>.json` (0600): the open offer for the Metro helper. Never fails the pair call. */
+  private writeOffer(offer: { code: string; name: string; until: number }): void {
+    const dir = this.options.offerDir;
+    const port = this.host.boundPort();
+    if (dir === undefined || port === undefined) return;
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const file = join(dir, `${port}.json`);
+      writeFileSync(file, JSON.stringify({ code: offer.code, name: offer.name, port, until: offer.until }), { mode: 0o600 });
+      setTimeout(() => {
+        try {
+          // only our own offer: a newer pair call has written its own
+          if (existsSync(file) && readFileSync(file, "utf8").includes(offer.code)) rmSync(file, { force: true });
+        } catch {
+          // gone already
+        }
+      }, Math.max(0, offer.until - Date.now())).unref();
+    } catch {
+      // the host's own endpoint still has it
+    }
   }
 
   // -- apps

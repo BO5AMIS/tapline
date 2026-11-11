@@ -32,13 +32,15 @@ export interface AgentOptions {
 export interface DevOffer {
   code: string;
   name: string;
+  /** The host's port, when Metro passes the offer on (the host may listen where Metro is the only way in). */
+  port?: number;
 }
 
 /** Where development offers come from: the computer Metro serves this app's code from. */
 export interface OfferSource {
-  /** Metro's host (an IP or name), or null when the code isn't loaded from a development server. */
-  devServerHost(): string | null;
-  /** The offer at http://host:port/tapline/offer, or null (none open, nothing there, timeout). */
+  /** Metro's host (an IP or name) and port, or null when the code isn't loaded from a development server. */
+  devServer(): { host: string; port: number } | null;
+  /** The offer at http://host:port/tapline/offer (Metro's or a host's), or null (none open, nothing there, timeout). */
   fetchOffer(host: string, port: number, timeoutMs: number): Promise<DevOffer | null>;
   /** False while the app is in the background: no polling then. */
   active?(): boolean;
@@ -172,13 +174,13 @@ export class TaplineAgent {
   private watchOffers(): void {
     const offers = this.deps.offers;
     if (offers === undefined || this.options.direct || this.stopped) return;
-    const host = offers.devServerHost();
-    if (host === null || !isLocalNetworkHost(host)) return;
+    const server = offers.devServer();
+    if (server === null || !isLocalNetworkHost(server.host)) return;
     this.offerStarted = Date.now();
-    this.scheduleOffer(offers, host, 0);
+    this.scheduleOffer(offers, server, 0);
   }
 
-  private scheduleOffer(offers: OfferSource, host: string, ms: number): void {
+  private scheduleOffer(offers: OfferSource, host: { host: string; port: number }, ms: number): void {
     if (this.stopped) return;
     const set = offers.setTimeout ?? ((fn: () => void, wait: number) => setTimeout(fn, wait));
     this.offerTimer = set(() => {
@@ -187,22 +189,30 @@ export class TaplineAgent {
     }, ms);
   }
 
-  private async checkOffer(offers: OfferSource, host: string): Promise<void> {
+  private async checkOffer(offers: OfferSource, server: { host: string; port: number }): Promise<void> {
     if (this.stopped) return;
     const next = Date.now() - this.offerStarted < 60_000 ? 2000 : 5000;
     if (this.pairing !== null || this.asking || (offers.active !== undefined && !offers.active())) {
-      this.scheduleOffer(offers, host, next);
+      this.scheduleOffer(offers, server, next);
       return;
     }
-    const found = await Promise.all(
-      HOST_PORTS.map((port) => offers.fetchOffer(host, port, 1500).then((offer) => (offer ? { offer, port } : null), () => null)),
-    );
-    const hit = found.find((f): f is { offer: DevOffer; port: number } => f !== null && !this.seenCodes.has(f.offer.code));
-    if (hit && this.pairing === null && !this.stopped) {
-      this.seenCodes.add(hit.offer.code);
-      await this.enqueue(() => this.onOffer(host, hit.port, hit.offer));
+    const { host } = server;
+    // Metro first (the phone always reaches it), then the ports a host takes.
+    const viaMetro = await offers.fetchOffer(host, server.port, 1500).catch(() => null);
+    let hit: { offer: DevOffer; port: number } | null =
+      viaMetro !== null && typeof viaMetro.port === 'number' && !this.seenCodes.has(viaMetro.code) ? { offer: viaMetro, port: viaMetro.port } : null;
+    if (hit === null) {
+      const found = await Promise.all(
+        HOST_PORTS.map((port) => offers.fetchOffer(host, port, 1500).then((offer) => (offer ? { offer, port } : null), () => null)),
+      );
+      hit = found.find((f): f is { offer: DevOffer; port: number } => f !== null && !this.seenCodes.has(f.offer.code)) ?? null;
     }
-    this.scheduleOffer(offers, host, next);
+    if (hit !== null && this.pairing === null && !this.stopped) {
+      const chosen = hit;
+      this.seenCodes.add(chosen.offer.code);
+      await this.enqueue(() => this.onOffer(host, chosen.port, chosen.offer));
+    }
+    this.scheduleOffer(offers, server, next);
   }
 
   private async onOffer(host: string, port: number, offer: DevOffer): Promise<void> {

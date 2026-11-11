@@ -65,3 +65,23 @@ describe("the development offer", () => {
     expect((await offer(port)).status).toBe(200);
   });
 });
+
+describe("the offer file for the Metro helper", () => {
+  it("pair writes <port>.json (code, name, port, until) where Metro reads it", async () => {
+    const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "tapline-offerdir-"));
+    try {
+      const { host, port } = await startHost();
+      hosts.push(host);
+      const tools = new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, offerDir: dir });
+      await tools.pair({});
+      const written = JSON.parse(readFileSync(join(dir, `${port}.json`), "utf8")) as Record<string, unknown>;
+      expect(written).toMatchObject({ name: "Dev PC", port, code: host.currentDevOffer()?.code });
+      expect(Number(written["until"])).toBeGreaterThan(Date.now());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
