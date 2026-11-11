@@ -9,6 +9,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
 import {
   elementSchema,
@@ -99,6 +100,7 @@ export const toolShapes = {
       .describe("Draw each actionable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
   },
   check_layout: {},
+  inspect: { target: targetField },
   tap: { target: targetField, force: forceField, look: lookField, screenshot: screenshotField },
   long_press: {
     target: targetField,
@@ -714,6 +716,22 @@ export class TaplineTools {
       args.labels === true,
     );
     return { content: parts.content, ...(parts.isError ? { isError: true } : {}) };
+  }
+
+  // -- inspect (Tapline 1.1): from the screen to the code
+
+  async inspect(args: Shape<"inspect">): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    let raw: unknown;
+    try {
+      raw = await this.host.request("inspect", { target: args.target }, { sessionId: session.id });
+    } catch (error) {
+      return fail(describeError(error));
+    }
+    const parsed = inspectResultSchema.safeParse(raw);
+    if (!parsed.success) return fail("Error internal: the app returned an inspect answer the host could not read.");
+    return text(formatInspect(parsed.data));
   }
 
   // -- check_layout

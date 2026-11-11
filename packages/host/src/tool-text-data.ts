@@ -65,6 +65,7 @@ export const CORE_TOOL_TEXT = {
 /** Tapline extras (TOOL-TEXT section 3). */
 export const EXTRA_TOOL_TEXT = {
   "check_layout": "Checks the current screen from the element tree, with no screenshot: tap areas under 44x44 pt, elements cut off at the edges, overlaps, text contrast below WCAG, buttons with no label, and text likely cut off. Findings name elements by ref.",
+  "inspect": "Shows where an element comes from, in a development build: the components that draw it (screen first), the file and line of the app's code that wrote it, that line itself, and the component's props in short. Use it to say where to fix a bug you found. Release builds answer unsupported.",
   "compare_screen": "Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the reference; later calls compare it pixel by pixel and report how much changed, where, and an image with changes in red. Keep the same `width` for a name.",
   "filmstrip": "Several screenshots in one numbered image, for animations and loading states; cheaper than separate shots. `tap` first taps an element, then films what it sets off.",
   "record": "Record a run as a script to replay without an AI: `start` with a `name`, then every action becomes a step, then `stop` saves it. Also `status` and `discard`. Targets are saved by id, else label, else text; refs only last one run.",

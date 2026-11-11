@@ -78,6 +78,17 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "inspect",
+    {
+      title: "Find the code behind an element",
+      description: toolDescription("inspect"),
+      inputSchema: toolShapes.inspect,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => tools.inspect(args),
+  );
+
+  server.registerTool(
     "tap",
     {
       title: "Tap",
