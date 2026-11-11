@@ -28,6 +28,40 @@ export interface AgentOptions {
   direct?: { url: string; token: string };
 }
 
+/** A development offer (Tapline 1.1): what the computer serving this app's JavaScript lets it fetch after `pair`. */
+export interface DevOffer {
+  code: string;
+  name: string;
+}
+
+/** Where development offers come from: the computer Metro serves this app's code from. */
+export interface OfferSource {
+  /** Metro's host (an IP or name), or null when the code isn't loaded from a development server. */
+  devServerHost(): string | null;
+  /** The offer at http://host:port/tapline/offer, or null (none open, nothing there, timeout). */
+  fetchOffer(host: string, port: number, timeoutMs: number): Promise<DevOffer | null>;
+  /** False while the app is in the background: no polling then. */
+  active?(): boolean;
+  setTimeout?(fn: () => void, ms: number): unknown;
+  clearTimeout?(handle: unknown): void;
+}
+
+/** The ports a Tapline host takes (7210, else up to 7219). */
+export const HOST_PORTS = [7210, 7211, 7212, 7213, 7214, 7215, 7216, 7217, 7218, 7219];
+
+/** Loopback (a simulator) or a private LAN address; never Tailscale or the internet: offers stay on the Wi-Fi. */
+export function isLocalNetworkHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || h === '::1' || h.endsWith('.local')) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+  }
+  return /^f[cd][0-9a-f]{2}:/.test(h) || h.startsWith('fe80:');
+}
+
 export interface AgentDeps {
   storage: TaplineStorage;
   linking: LinkingLike;
@@ -37,6 +71,8 @@ export interface AgentDeps {
   notify(title: string, message: string): void;
   clientDeps?: ClientDeps;
   log?: (line: string) => void;
+  /** Zero-QR pairing in development builds; absent in other builds. */
+  offers?: OfferSource;
 }
 
 function randomId(): string {
@@ -98,6 +134,9 @@ export class TaplineAgent {
   private chain: Promise<void> = Promise.resolve();
   /** Pairing codes already handled: the launch link can arrive twice (initial URL and event). */
   private readonly seenCodes = new Set<string>();
+  private offerTimer: unknown = null;
+  private offerStarted = 0;
+  private asking = false;
 
   constructor(
     private readonly options: AgentOptions,
@@ -122,6 +161,74 @@ export class TaplineAgent {
       this.reconnectHome();
       const initial = await this.deps.linking.getInitialURL().catch(() => null);
       if (typeof initial === 'string' && initial !== '') await this.onLink(initial, true);
+      this.watchOffers();
+    });
+  }
+
+  /**
+   * Zero-QR pairing (Tapline 1.1): while this development build isn't paired, it looks for an offer from the
+   * computer its code comes from (every 2 s for a minute, then every 5 s). The person still taps Connect.
+   */
+  private watchOffers(): void {
+    const offers = this.deps.offers;
+    if (offers === undefined || this.options.direct || this.stopped) return;
+    const host = offers.devServerHost();
+    if (host === null || !isLocalNetworkHost(host)) return;
+    this.offerStarted = Date.now();
+    this.scheduleOffer(offers, host, 0);
+  }
+
+  private scheduleOffer(offers: OfferSource, host: string, ms: number): void {
+    if (this.stopped) return;
+    const set = offers.setTimeout ?? ((fn: () => void, wait: number) => setTimeout(fn, wait));
+    this.offerTimer = set(() => {
+      this.offerTimer = null;
+      void this.checkOffer(offers, host);
+    }, ms);
+  }
+
+  private async checkOffer(offers: OfferSource, host: string): Promise<void> {
+    if (this.stopped) return;
+    const next = Date.now() - this.offerStarted < 60_000 ? 2000 : 5000;
+    if (this.pairing !== null || this.asking || (offers.active !== undefined && !offers.active())) {
+      this.scheduleOffer(offers, host, next);
+      return;
+    }
+    const found = await Promise.all(
+      HOST_PORTS.map((port) => offers.fetchOffer(host, port, 1500).then((offer) => (offer ? { offer, port } : null), () => null)),
+    );
+    const hit = found.find((f): f is { offer: DevOffer; port: number } => f !== null && !this.seenCodes.has(f.offer.code));
+    if (hit && this.pairing === null && !this.stopped) {
+      this.seenCodes.add(hit.offer.code);
+      await this.enqueue(() => this.onOffer(host, hit.port, hit.offer));
+    }
+    this.scheduleOffer(offers, host, next);
+  }
+
+  private async onOffer(host: string, port: number, offer: DevOffer): Promise<void> {
+    if (this.stopped || this.pairing !== null) return;
+    // The address is Metro's own: the computer that already runs this app's code, never one the offer names.
+    const url = `ws://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}/`;
+    this.asking = true;
+    let agreed = false;
+    try {
+      agreed = await this.deps.confirm(
+        'Connect for testing?',
+        `${offer.name} (${host}), the computer this app's code comes from, will be able to see and use this app while it is open. Only connect to your own computer.`,
+        'Connect',
+      );
+    } finally {
+      this.asking = false;
+    }
+    if (!agreed || this.stopped) return;
+    const name = offer.name;
+    this.connect({
+      url,
+      pairCode: offer.code,
+      onPaired: (token) => {
+        void this.enqueue(() => this.remember({ url, token, name, code: offer.code }));
+      },
+      onRejected: () => this.onPairingRefused(name),
     });
   }
 
@@ -140,6 +247,11 @@ export class TaplineAgent {
 
   stop(): void {
     this.stopped = true;
+    if (this.offerTimer !== null) {
+      const clear = this.deps.offers?.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+      clear(this.offerTimer);
+      this.offerTimer = null;
+    }
     try {
       this.subscription?.remove();
     } catch {

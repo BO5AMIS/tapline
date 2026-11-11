@@ -1,5 +1,5 @@
-import { Linking } from 'react-native';
-import { TaplineAgent } from './agent';
+import { AppState, Linking, NativeModules } from 'react-native';
+import { TaplineAgent, type DevOffer, type OfferSource } from './agent';
 import { installAlertTracking, nativeAlert, uninstallAlertTracking } from './alerts';
 import { addLog, installLogs, originalLog, uninstallLogs } from './logs';
 import { inFlight, installNetworkTracking, onNetworkFailure, uninstallNetworkTracking } from './network';
@@ -36,8 +36,45 @@ let agent: TaplineAgent | null = null;
 let stopNetworkLog: (() => void) | null = null;
 
 /** Failed requests go into the app's logs, so `logs` explains a broken screen. */
+/** Zero-QR pairing's polls are Tapline's own: they never count as the app's requests. */
+const OFFER_PATH = '/tapline/offer';
+
+/** Development builds only: offers from the computer Metro serves this app's code from. */
+function devOffers(): OfferSource | undefined {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) return undefined;
+  return {
+    devServerHost() {
+      try {
+        const source = NativeModules.SourceCode as { getConstants?: () => { scriptURL?: unknown }; scriptURL?: unknown } | undefined;
+        const url = source?.getConstants?.().scriptURL ?? source?.scriptURL;
+        if (typeof url !== 'string') return null;
+        return /^https?:\/\/(\[[^\]]+\]|[^/:?#]+)/i.exec(url)?.[1] ?? null;
+      } catch {
+        return null;
+      }
+    },
+    async fetchOffer(host, port, timeoutMs): Promise<DevOffer | null> {
+      const controller = typeof AbortController === 'function' ? new AbortController() : undefined;
+      const timer = setTimeout(() => controller?.abort(), timeoutMs);
+      try {
+        const res = await fetch(`http://${host}:${port}${OFFER_PATH}`, controller ? { signal: controller.signal } : {});
+        if (res.status !== 200) return null;
+        const body: unknown = await res.json();
+        if (typeof body !== 'object' || body === null) return null;
+        const { code, name } = body as { code?: unknown; name?: unknown };
+        return typeof code === 'string' && typeof name === 'string' ? { code, name } : null;
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    active: () => AppState.currentState === 'active',
+  };
+}
+
 function watchNetwork(): void {
-  installNetworkTracking();
+  installNetworkTracking({ ignore: (url) => url.includes(OFFER_PATH) });
   setNetworkIdleProvider(() => inFlight() === 0);
   stopNetworkLog?.();
   stopNetworkLog = onNetworkFailure((failure) => {
@@ -99,7 +136,7 @@ export function startTapline(options: TaplineOptions): void {
     watchNetwork();
     const next = new TaplineAgent(
       { app: options.app, ...(url !== '' && token !== '' ? { direct: { url, token } } : {}) },
-      { storage, linking: Linking, confirm: confirmWithAlert, notify: notifyWithAlert },
+      { storage, linking: Linking, confirm: confirmWithAlert, notify: notifyWithAlert, offers: devOffers() },
     );
     agent = next;
     void next.start();

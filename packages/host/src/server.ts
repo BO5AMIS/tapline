@@ -112,6 +112,30 @@ export function isLoopback(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
+/**
+ * Whether a peer is on this computer's own local network (or is this computer): private IPv4, link-local, IPv6
+ * unique-local. Not Tailscale (100.64.0.0/10) and not the internet: the development offer stays on the Wi-Fi.
+ */
+export function isLocalNetwork(address: string | undefined): boolean {
+  if (address === undefined) return false;
+  const a = address.toLowerCase().replace(/^::ffff:/, "");
+  if (isLoopback(address) || a === "127.0.0.1") return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(a);
+  if (v4) {
+    const x = Number(v4[1]);
+    const y = Number(v4[2]);
+    return x === 10 || (x === 192 && y === 168) || (x === 172 && y >= 16 && y <= 31) || (x === 169 && y === 254);
+  }
+  return /^f[cd][0-9a-f]{2}:/.test(a) || a.startsWith("fe80:");
+}
+
+/** A development offer (Tapline 1.1, zero-QR pairing): a pairing code a development build may fetch for a while. */
+export interface DevOffer {
+  code: string;
+  name: string;
+  until: number;
+}
+
 export interface RequestOptions {
   sessionId?: string;
   timeoutMs?: number;
@@ -228,6 +252,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private selectedId: string | undefined;
   private lastDrop: LastDisconnect | undefined;
   private httpExtension: HttpExtension | undefined;
+  /** Open after `pair`: development builds on the local network may fetch this code (one use, 10 minutes). */
+  private devOffer: DevOffer | undefined;
   private sweeper: NodeJS.Timeout | undefined;
   private listenCalled = false;
   private closed = false;
@@ -349,6 +375,52 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return createPairCode(this.token);
   }
 
+  /**
+   * Opens the development offer: for `ms` (default 10 minutes), a development build whose JavaScript comes from
+   * this computer may fetch a one-use pairing code at `GET /tapline/offer` and ask its person to connect. Only
+   * peers on the local network get it; it closes when its code is used.
+   */
+  openDevOffer(name: string, ms: number = 10 * 60 * 1000): DevOffer {
+    const offer = { code: createPairCode(this.token), name, until: Date.now() + ms };
+    this.devOffer = offer;
+    return offer;
+  }
+
+  /** The open offer, if any (for tests and the pair tool). */
+  currentDevOffer(): DevOffer | undefined {
+    const offer = this.devOffer;
+    if (offer === undefined) return undefined;
+    if (offer.until <= Date.now() || this.usedCodes.has(offer.code)) {
+      this.devOffer = undefined;
+      return undefined;
+    }
+    return offer;
+  }
+
+  /** `GET /tapline/offer`: the open development offer, to the local network only. */
+  private handleDevOffer(req: IncomingMessage, res: ServerResponse): boolean {
+    if (new URL(req.url ?? "/", "http://host").pathname !== "/tapline/offer") return false;
+    const answer = (status: number, body: Record<string, unknown>): void => {
+      res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method !== "GET") {
+      answer(405, { error: "GET only" });
+      return true;
+    }
+    if (!isLocalNetwork(req.socket.remoteAddress)) {
+      answer(403, { error: "local network only" });
+      return true;
+    }
+    const offer = this.currentDevOffer();
+    if (offer === undefined) {
+      answer(404, { error: "no offer open: call pair on the computer" });
+      return true;
+    }
+    answer(200, { code: offer.code, name: offer.name });
+    return true;
+  }
+
   /** Runs an emit without letting a listener's exception escape into the socket handlers. */
   private safely(emit: () => void): void {
     try {
@@ -368,6 +440,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const http = createServer((req, res) => {
         try {
           if (this.handleAgentTouch(req, res)) return;
+          if (this.handleDevOffer(req, res)) return;
           if (this.httpExtension?.onRequest(req, res) === true) return;
         } catch {
           if (!res.headersSent) res.writeHead(500);

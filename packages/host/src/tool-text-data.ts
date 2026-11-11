@@ -88,5 +88,5 @@ export const EXTRA_TOOL_TEXT = {
   "logs": "Recent console output and JS errors from the app (last 500). `since` (epoch ms) returns only newer lines; each result ends with the latest timestamp to reuse.",
   "reload": "Reload the JavaScript bundle (development builds only), wait for the app to reconnect, and answer the screen. If it isn't back in time, it says so: `look` again shortly. Other builds answer `unsupported`.",
   "app_command": "Without `name`, lists the commands the app offers for testing (switch language, sign in as a test user, load sample data). With `name` and `args`, runs one and answers its result and what changed. Built in: `appearance` (`light`, `dark`, `system`).",
-  "pair": "Make a pairing link and QR code for the user's phone (valid 10 minutes, works once). The user scans it and taps Connect in the app. Needs the app's URL scheme. Show the user the QR code."
+  "pair": "Connect the user's phone. A development build that loads its JavaScript from this computer asks by itself within a few seconds: the user only taps Connect, and no `scheme` is needed. For TestFlight and release builds, pass the app's URL `scheme` to get a pairing link and QR code (valid 10 minutes, works once) and show the user the QR code."
 } as const satisfies Record<string, string>;

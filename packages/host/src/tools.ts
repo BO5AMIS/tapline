@@ -106,6 +106,7 @@ export const toolShapes = {
   pair: {
     scheme: z
       .string()
+      .optional()
       .describe(
         'The app\'s URL scheme ("scheme" in app.json or app.config), e.g. "myapp"; for an app running in Expo Go, the address Expo prints, e.g. "exp://192.168.1.20:8081"',
       ),
@@ -727,6 +728,21 @@ export class TaplineTools {
 
   async pair(args: Shape<"pair">): Promise<CallToolResult> {
     const { url, name } = this.options.connect;
+    // Zero-QR pairing (Tapline 1.1): a development build whose JavaScript comes from this computer finds the
+    // offer itself and asks its person to connect. Open for 10 minutes, one use, local network only.
+    this.host.openDevOffer(name);
+    const devLine =
+      "A development build that loads its JavaScript from this computer (Metro) on the same Wi-Fi asks by itself within a few seconds: the user only taps Connect, no QR code (open for 10 minutes, once).";
+    if (args.scheme === undefined || args.scheme.trim() === "") {
+      return text(
+        [
+          `Pairing is open for development builds for 10 minutes (${name}).`,
+          devLine,
+          "Ask the user to open the app on the phone and tap Connect, then call `apps`.",
+          "For a TestFlight or release build, call pair again with the app's URL scheme to get a QR code.",
+        ].join("\n"),
+      );
+    }
     let link: string;
     let forget: string;
     try {
@@ -759,6 +775,7 @@ export class TaplineTools {
       "",
       `Show the user the QR code (attached).${saved} They scan it with the phone's camera, open the app and tap Connect.`,
       "The phone needs to be on the same Wi-Fi as this computer, and the app must be a build with Tapline turned on.",
+      devLine,
       "Once paired, the app reconnects to this host (this address and port) by itself whenever it is open; call `apps` to check.",
       `To unpair the phone, open ${forget} on it.`,
     ];
