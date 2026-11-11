@@ -471,22 +471,49 @@ function stringProp(node: HostNode, key: string): string | null {
 }
 
 /**
- * Handlers, and a testID, shared with a descendant host belong to the descendant, not to this
- * wrapper. A component's props reach the first host it renders (`findProp` reads the owners), so
- * a field component that passes its testID on to its TextInput would otherwise name two elements.
+ * Handlers shared with a descendant host belong to the descendant, not to this wrapper. And a
+ * testID a wrapper only inherits (from the component that rendered it, through `findProp`'s owners)
+ * belongs to a descendant host that sets the same testID itself: a field component that passes its
+ * testID on to its TextInput would otherwise name two elements. A host that sets its testID itself
+ * (a button) keeps it.
  */
 function suppressedHandlers(nodes: HostNode[]): Set<string> {
   const suppressed = new Set<string>();
   for (const node of nodes) {
-    for (const key of ['onPress', 'onLongPress', 'onValueChange', 'testID']) {
+    for (const key of ['onPress', 'onLongPress', 'onValueChange']) {
       const handler = findProp(node, key);
-      if (key === 'testID' ? typeof handler !== 'string' || handler === '' : typeof handler !== 'function') continue;
+      if (typeof handler !== 'function') continue;
       for (let p = node.parent; p >= 0; ) {
         const ancestor = nodes[p];
         if (!ancestor) break;
         if (findProp(ancestor, key) === handler) suppressed.add(`${ancestor.index}:${key}`);
         p = ancestor.parent;
       }
+    }
+    const own = propsOf(node.fiber).testID;
+    if (typeof own === 'string' && own !== '') {
+      // a wrapper above that only inherits this host's testID
+      for (let p = node.parent; p >= 0; ) {
+        const ancestor = nodes[p];
+        if (!ancestor) break;
+        if (propsOf(ancestor.fiber).testID === undefined && findProp(ancestor, 'testID') === own) {
+          suppressed.add(`${ancestor.index}:testID`);
+        }
+        p = ancestor.parent;
+      }
+      continue;
+    }
+    // this host only inherits a testID that a host above sets itself (a button's label inside it)
+    const inherited = findProp(node, 'testID');
+    if (typeof inherited !== 'string' || inherited === '') continue;
+    for (let p = node.parent; p >= 0; ) {
+      const ancestor = nodes[p];
+      if (!ancestor) break;
+      if (propsOf(ancestor.fiber).testID === inherited) {
+        suppressed.add(`${node.index}:testID`);
+        break;
+      }
+      p = ancestor.parent;
     }
   }
   return suppressed;

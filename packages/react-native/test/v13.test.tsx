@@ -142,6 +142,32 @@ describe('duplicates fold', () => {
     expect(entry.info.actions).toContain('type');
   });
 
+  test('a button that passes its testID on inside keeps it (a tab bar button)', async () => {
+    // React Navigation's tab button: a pressable that takes the testID, with something inside it
+    // that gets the same props passed on. The button is what an agent targets by that id.
+    function Inner({ testID, title }: { testID: string; title: string }) {
+      void testID;
+      return <Text>{title}</Text>;
+    }
+    function TabButton({ testID, title }: { testID: string; title: string }) {
+      return (
+        <Pressable testID={testID} onPress={() => undefined}>
+          <Inner testID={testID} title={title} />
+        </Pressable>
+      );
+    }
+    await mount(
+      <View>
+        <TabButton testID="tab-explore" title="Explore" />
+      </View>,
+    );
+    useFrames({ 'tab-explore': frame(0, 700, 143, 49) });
+    const { elements } = await tree({});
+    const named = elements.filter((element) => element.testID === 'tab-explore');
+    expect(named).toHaveLength(1);
+    expect(named[0]?.actions).toContain('press');
+  });
+
   test('a different rect (more than 1 pt) or different text lists both', async () => {
     await mount(
       <View>
