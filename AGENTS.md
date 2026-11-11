@@ -36,6 +36,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 
 **App side** (the user's repository)
 
+`npx tapline-host init` in the app's folder does steps 1 to 5 in one go. Use `--dry-run` to see the
+changes first, or `--no-install` to skip the install. It edits only what it can edit safely, says
+exactly what to add by hand where a file is too custom, and warns when the production profile turns
+Tapline on. Read its output, then go on with step 6. By hand:
+
 1. Install `react-native-tapline`, `expo-secure-store` (remembers the pairing) and, for
    screenshots, `react-native-view-shot` (`npx expo install react-native-tapline
    expo-secure-store react-native-view-shot`).
@@ -44,7 +49,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    and `"main": "index.js"`. Getting this wrong is the most common failure: the tree comes
    back empty with "No React roots recorded".
 3. Add `startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' })` after
-   it. The build carries no address and no token.
+   it. The build carries no address and no token. Wrap the Metro config in `withTapline` from
+   `react-native-tapline/metro`: it lets a development build find the computer by itself (step 9).
 4. Expo Router apps: add `app/+native-intent.ts` that returns `null` for
    `isTaplineLink(path)` (docs/setup.md), or pairing links open a "not found" screen.
 5. Set `EXPO_PUBLIC_TAPLINE_ENABLED=1` only in the profiles used for testing (development,
@@ -60,7 +66,10 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    there, so serve Metro over `https` with Tailscale Serve (docs/setup.md, step 4). Check
    `tailscale serve status` first and pick a free port; don't replace what the user already
    serves.
-9. Prove the chain: call `pair` with the app's URL scheme (`scheme` in app.json) and show
+9. Prove the chain. **A development build** that loads its JavaScript from this computer: call
+   `pair` with no scheme and ask the user to open the app and tap Connect; it asks by itself within
+   a few seconds (the offer is open for 10 minutes, works once, and only on the local network).
+   **Any other build:** call `pair` with the app's URL scheme (`scheme` in app.json) and show
    the user the QR code (it is also saved as a PNG; the result gives the path). They scan
    it with the phone on the same Wi-Fi and tap Connect; when they're using the phone itself, give them
    the link to tap instead. Then `apps` should list the app and `look` should show its
@@ -82,13 +91,16 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`: ref, role, text,
    `id` (the `testID` prop), position in points, size, actions. Roles are `button`, `input`,
    `text`, `header`, `switch`, `slider`, `image`, `scroll`, `tab` and so on. The actions are
-   `tap`, `longPress`, `type`, `toggle` and `scroll`. A list holds up to 200 elements, then
+   `tap`, `longPress`, `type`, `toggle` and `scroll`. The ones a role implies aren't listed: a
+   button, tab or link can be tapped, an input typed into, a switch toggled and a scroll view
+   scrolled; other actions are listed in brackets. A list holds up to 200 elements, then
    `(+N more below; scroll)`. Text longer than 200 characters is cut and ends with what is
    missing, `…(+57)`; `wait_for` with a `text` checks all of it. A screenshot comes with it (the app needs
    `react-native-view-shot`); pass `screenshot: false` when the list is enough.
 3. Every action answers with the verb and the element (`Tapped e3 button "Log in"
-   id=login-button @24,610 354x48.`), then either `Same screen. Changes:` with lines for
-   what changed (`+` new, `-` gone, `~` changed with its old value, `↕` moved; unchanged
+   id=login-button.`), then either `Same screen. Changes:` with lines for
+   what changed (`+` new, `-` gone, `~` changed with its old value (a long one cut to what
+   changed), `↕` moved; unchanged
    elements keep their refs) or `No visible change.`, or the full list when the screen
    changed. Then `Settled in 0.31 s.`: the app answers once React hasn't committed for
    100 ms (2 s at most; when it's still changing then, a `Note:` says positions may be
@@ -135,7 +147,8 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    starts over from a fresh JavaScript state.
 9. Errors read `Error <code>: <message>`. The codes are `not_found`, `ambiguous`,
    `not_actionable`, `stale`, `busy`, `paused`, `in_background`, `reconnecting`,
-   `not_connected`, `not_answering`, `timeout`, `bad_params`, `unsupported` and `internal`.
+   `not_connected`, `not_answering`, `timeout`, `bad_params`, `unsupported`, `not_allowed`
+   (item 12), `expect_failed` (item 11) and `internal`.
    `not_answering` means the app is connected but stopped answering: try once more; if it
    repeats, ask the user to close the app and open it again (Tapline can't close apps). An
    action that a person couldn't do is `not_actionable`, and the message starts with the
@@ -151,11 +164,23 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    An OS alert can't be tapped from Tapline: ask the user to tap the button you need (say
    which), or use Tapwright, and actions are refused (`behind_alert`) until it's answered. When the app runs with Tapline's stand-in, the
    alert's buttons are ordinary elements: tap them.
-11. `app_command` without a name lists what the app offers for testing (for example
+11. **Several steps, accessibility, the code, a check before acting.** `run` does several steps in
+   one call and stops at the first that fails or whose `expect` doesn't hold (`expect_failed`).
+   `audit` checks the screen's accessibility (contrast, tap areas, labels, roles, cut-off text,
+   overlaps, shared ids), each issue with its fix and, in a development build, the file and line.
+   `inspect` an element (development builds) to say where to fix it: the components, the file and
+   line that wrote it, and that line. `dry_run: true` on a touch or on `run` runs every check and
+   touches nothing.
+12. **A person's OK.** A touch on a button whose label says Buy, Pay, Delete, Send, Post, Sign out
+   and the like answers `not_allowed: needs_confirmation`, and the live view asks the person; when
+   they allow it, make the same call again (once). A `blocked` word is refused outright. Never look
+   for another way to the same result, and never confirm for them. The user can change the words
+   with `tapline mcp --policy FILE`, or turn it off for a test phone with `--no-policy`.
+13. `app_command` without a name lists what the app offers for testing (for example
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
    `appearance` (light / dark) is always there. Use them to reach a state quickly and to
    check stress views: dark mode, right-to-left languages. Put things back when you're done.
-12. What you tap calls the element's handler; it isn't a real touch. `swipe` (`x0, y0, x1, y1`,
+14. What you tap calls the element's handler; it isn't a real touch. `swipe` (`x0, y0, x1, y1`,
    `seconds`) drags a finger through React Native's own touch system: a sheet's swipe to close,
    a pan view, a drawer. Gestures that react-native-gesture-handler or a native view handle
    (swipeable rows built on it, sliders, maps) answer `no_action`: say that you couldn't test
