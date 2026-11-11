@@ -214,3 +214,4 @@ took more than a few seconds (`Settled in` gives the time).
 | reporting "couldn't sign in" as a bug | list it under what you couldn't test |
 | reporting a swipe-only control as broken because `tap` did nothing | `swipe` it; if that answers `no_action`, say that Tapline can't make that gesture |
 | going on after the user left the app | stop: Tapline works only while its app is open in front |
+| trusting a password field because `type_text` answered | read the value it reports. iOS can raise its own sheets over a password field ("Use Strong Password?"), which Tapline can't see. Tapline types through the app, so no keys are lost, but the sheet may cover the form: if taps there are refused or nothing changes, ask the user to close it |
