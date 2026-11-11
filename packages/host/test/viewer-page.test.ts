@@ -961,6 +961,8 @@ class FakeTarget {
 class FakeDocument extends FakeTarget {
   title = "";
   activeElement: DomEl | null = null;
+  /* The page's modes live on body's classes ("details" for the developer view). */
+  readonly body = new DomEl();
   readonly els = new Map<string, DomEl>();
   getElementById = (id: string): DomEl => {
     let el = this.els.get(id);
@@ -1242,19 +1244,26 @@ describe("viewer page: wording of the states", () => {
     expect(rig.el("status").textContent).toBe("Phone locked");
   });
 
-  it("writes how the phone is reached as people do: USB, Wi-Fi, Tailscale", () => {
+  it("writes how the phone is reached as people do: USB, Wi-Fi, Tailscale (in the title, and on the line with Details on)", () => {
     const rig = pageRig(PAGE_ACCEPTS, { state: "live", via: "usb" });
-    expect(rig.el("status").textContent).toContain("via USB");
+    expect(rig.el("status").title).toContain("via USB");
     rig.status({ state: "live", via: "wifi" });
-    expect(rig.el("status").textContent).toContain("via Wi-Fi");
+    expect(rig.el("status").title).toContain("via Wi-Fi");
     rig.status({ state: "live", via: "tailscale" });
-    expect(rig.el("status").textContent).toContain("via Tailscale");
+    expect(rig.el("status").title).toContain("via Tailscale");
     rig.status({ state: "live", via: "cable" });
+    expect(rig.el("status").title).toContain("via cable");
+    // The presentation view (Details off) says only the state; the Details view says it all.
+    expect(rig.el("status").textContent).toBe("Live");
+    rig.el("details").dispatch("click", {});
     expect(rig.el("status").textContent).toContain("via cable");
   });
 
-  it("shows the server's frame rate while the JPEG stream shows", () => {
+  it("shows the server's frame rate while the JPEG stream shows (with Details on; always in the title)", () => {
     const rig = pageRig(PAGE_ACCEPTS, { state: "live", fps: 23.5 });
+    expect(rig.el("status").title).toContain("23.5 fps");
+    expect(rig.el("status").textContent).not.toContain("fps");
+    rig.el("details").dispatch("click", {});
     expect(rig.el("status").textContent).toContain("23.5 fps");
   });
 
