@@ -16,7 +16,7 @@ const SCREEN = p("dev", "trip-demo", "src", "screens", "SignUpScreen.tsx");
 const files = fakeFiles({
   [p("dev", "trip-demo", "package.json")]: "{}",
   [p("dev", "trip-demo", "node_modules", "react-native", "package.json")]: "{}",
-  [SCREEN]: ["line 1", ...Array.from({ length: 117 }, () => ""), '        <Button label="Create account" testID="signup-submit" onPress={submit} />'].join("\n"),
+  [SCREEN]: ["tabBarButtonTestID: 'tab-trips',", ...Array.from({ length: 117 }, () => ""), '        <Button label="Create account" testID="signup-submit" onPress={submit} />'].join("\n"),
 });
 
 describe("inspect", () => {
@@ -56,6 +56,19 @@ describe("inspect", () => {
         'Props: label="Create account", testID="signup-submit", onPress=submit()',
       ].join("\n"),
     );
+  });
+
+  it("says when a library drew the element and the line is the app code around it", () => {
+    const text = formatInspect(
+      {
+        element: { ref: "e24", text: "My trips", role: "button", testID: "tab-trips" },
+        source: { components: ["Tabs"], location: { file: SCREEN, line: 119, column: 1, component: "Tabs", direct: false }, props: {} },
+      },
+      files,
+    );
+    expect(text).toContain("Drawn by a library, inside: src/screens/SignUpScreen.tsx:119 (in Tabs)");
+    // the id literal the app wrote in that file (here only on line 1, as 'tab-trips')
+    expect(text).toContain("Its id is set at: src/screens/SignUpScreen.tsx:1");
   });
 
   it("says plainly when the location is unknown", () => {

@@ -1,4 +1,4 @@
-import { componentName, isCompositeTag, propsOf, type Fiber } from './fiber';
+import { isCompositeTag, propsOf, type Fiber } from './fiber';
 import { isRecord } from './types';
 
 /**
@@ -16,6 +16,8 @@ export interface SourceLocation {
   column: number;
   /** The component whose render wrote the element, e.g. "SignUpScreen". */
   component: string | null;
+  /** True when this is the element's own line; false when a library drew it and this is the app line around it. */
+  direct: boolean;
 }
 
 export interface ElementSource {
@@ -143,39 +145,73 @@ function shortProps(fiber: Fiber): Record<string, string> {
 }
 
 /**
+ * Whether the component the app wrote is the element itself, wrapped: it was given the element's own
+ * testID, accessibility label or text (a Pressable, a TextInput, a Text). A tab bar button gets its testID
+ * from the navigator's options instead, so the navigator's line is only the line around it.
+ */
+function sameIdentity(host: Fiber, wrote: Fiber): boolean {
+  const own = propsOf(host);
+  const given = propsOf(wrote);
+  for (const key of ['testID', 'nativeID', 'accessibilityLabel', 'aria-label']) {
+    const value = own[key];
+    if (typeof value === 'string' && value !== '' && given[key] === value) return true;
+  }
+  return typeof own.children === 'string' && own.children !== '' && given.children === own.children;
+}
+
+/**
  * Where the app wrote these elements. One request to Metro for all of them. `fibers` are the host fibers
  * of the elements; for one written inside a library component (a TextInput's native view), the nearest
  * ancestor the app's code wrote is used.
  */
 export async function sourcesOf(fibers: Fiber[]): Promise<ElementSource[]> {
-  // For each element: the fibers to try, nearest first (the host fiber, then the composites above it).
-  const chains = fibers.map((fiber) => [fiber, ...compositesAbove(fiber.return ?? fiber, 12)]);
+  // For each element: the fibers to try, nearest first (the host fiber, then the composites above it, up to
+  // the screen). An element a library drew (a tab bar button) maps to the app line that set the library up.
+  const chains = fibers.map((fiber) => [fiber, ...compositesAbove(fiber.return ?? fiber, 60)]);
   const allFrames: Frame[] = [];
   const spans = chains.map((chain) =>
     chain.map((f) => {
-      const frames = framesOf(f).slice(0, 6);
+      const frames = framesOf(f).slice(0, 4);
       const start = allFrames.length;
       allFrames.push(...frames);
       return { fiber: f, start, count: frames.length };
     }),
   );
   const mapped = await symbolicate(allFrames);
+  /** The first frame of the app's own code in a fiber's stack: the app line that created that fiber's element. */
+  const appFrame = (span: { start: number; count: number }): Frame | null => {
+    for (let k = span.start; k < span.start + span.count; k++) {
+      const frame = mapped[k];
+      if (frame && isAppFile(frame.file)) return frame;
+    }
+    return null;
+  };
   return fibers.map((fiber, i) => {
     let location: SourceLocation | null = null;
     let wrote: Fiber | null = null;
-    for (const span of spans[i]!) {
-      for (let k = span.start; k < span.start + span.count && location === null; k++) {
-        const frame = mapped[k];
-        if (frame && isAppFile(frame.file)) {
-          location = { file: frame.file, line: frame.lineNumber, column: frame.column, component: frame.methodName || null };
-          wrote = span.fiber;
-        }
+    // The app's own components, nearest first: the ones whose render wrote an element on this path.
+    const names: string[] = [];
+    for (const [n, span] of spans[i]!.entries()) {
+      const frame = appFrame(span);
+      if (frame === null) continue;
+      if (frame.methodName !== '' && !INTERNAL.test(frame.methodName)) names.push(frame.methodName);
+      if (location === null) {
+        location = {
+          file: frame.file,
+          line: frame.lineNumber,
+          column: frame.column,
+          component: frame.methodName || null,
+          // the element's own line, or (a library drew it) the app line around it
+          direct: n <= 1 || sameIdentity(fiber, span.fiber),
+        };
+        wrote = span.fiber;
+      } else if (location.direct && wrote !== null && sameIdentity(fiber, span.fiber)) {
+        // The app's own wrapper component got the same identity from further up (a shared <Button testID>
+        // used on a screen): the line that wrote the value is that call site, not the wrapper's inside.
+        location = { file: frame.file, line: frame.lineNumber, column: frame.column, component: frame.methodName || null, direct: true };
+        wrote = span.fiber;
       }
-      if (location) break;
     }
-    const names = compositesAbove(fiber, 24)
-      .map((f) => componentName(f.type))
-      .filter((name): name is string => name !== null && !INTERNAL.test(name));
     const components = [...new Set(names)].slice(0, 6).reverse();
     const propsFrom = wrote && isCompositeTag(wrote.tag) ? wrote : compositesAbove(fiber, 1)[0] ?? null;
     return { components, location, props: propsFrom ? shortProps(propsFrom) : {} };

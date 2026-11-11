@@ -59,7 +59,7 @@ test('an element the app wrote maps to its line, with the components above it an
   const field = fiber(0, Field, { label: 'Name', testID: 'signup-name', onChangeText: function setName() {} }, stack(['jsxDEV', 100, 1], ['SignUpScreen', 400, 9]), screen);
   const view = fiber(5, 'RCTView', {}, stack(['jsxDEV', 100, 1], ['Field', 200, 7]), field);
   const [source] = await sourcesOf([view]);
-  expect(source?.location).toEqual({ file: '/proj/src/ui.tsx', line: 43, column: 7, component: 'Field' });
+  expect(source?.location).toEqual({ file: '/proj/src/ui.tsx', line: 43, column: 7, component: 'Field', direct: true });
   expect(source?.components).toEqual(['SignUpScreen', 'Field']);
   expect(requests).toBe(1);
 });
@@ -71,11 +71,13 @@ test('an element a library drew (a TextInput’s native view) maps to the line t
   const input = fiber(11, TextInput, { placeholder: 'you@example.com', testID: 'signup-email' }, stack(['jsxDEV', 100, 1], ['Field', 200, 7]), field);
   const native = fiber(5, 'RCTSinglelineTextInputView', {}, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), input);
   const [source] = await sourcesOf([native]);
+  expect(source?.location?.direct).toBe(true);
   expect(source?.location?.file).toBe('/proj/src/ui.tsx');
   expect(source?.location?.line).toBe(43);
   // the props are those of the component the app wrote there
   expect(source?.props).toEqual({ placeholder: '"you@example.com"', testID: '"signup-email"' });
-  expect(source?.components).toEqual(['Field']);
+  // the app's own components on the path: SignUpScreen wrote the Field, Field wrote the TextInput
+  expect(source?.components).toEqual(['SignUpScreen', 'Field']);
 });
 
 test('several elements cost one request, and positions are cached', async () => {
@@ -93,4 +95,36 @@ test('without Metro (no stack, or Metro unreachable) the location is null, never
   });
   const [source] = await sourcesOf([fiber(5, 'RCTView', {}, stack(['Field', 200, 7]))]);
   expect(source?.location).toBeNull();
+});
+
+test('a wrapped element (a Pressable, several components deep) is the app line itself; a library-built one is the line around it', async () => {
+  function Pressable(): null { return null; }
+  function Inner(): null { return null; }
+  function TabItem(): null { return null; }
+  function Navigator(): null { return null; }
+  // the app wrote <Pressable testID="save">; React Native wraps its view in an inner component
+  const pressable = fiber(11, Pressable, { testID: 'save', onPress: () => undefined }, stack(['jsxDEV', 100, 1], ['SignUpScreen', 400, 9]));
+  const inner = fiber(0, Inner, { testID: 'save' }, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), pressable);
+  const view = fiber(5, 'RCTView', { testID: 'save' }, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), inner);
+  expect((await sourcesOf([view]))[0]?.location?.direct).toBe(true);
+  // the app wrote <Tab.Navigator>; the tab button's testID came from options, deep inside the library
+  const nav = fiber(0, Navigator, { initialRouteName: 'Explore' }, stack(['jsxDEV', 100, 1], ['SignUpScreen', 400, 9]));
+  const item = fiber(0, TabItem, { testID: 'tab-trips' }, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), nav);
+  const wrap = fiber(0, Inner, {}, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), item);
+  const button = fiber(5, 'RCTView', { testID: 'tab-trips' }, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), wrap);
+  const [tab] = await sourcesOf([button]);
+  expect(tab?.location?.direct).toBe(false);
+  expect(tab?.location?.line).toBe(112);
+});
+
+test("an app's own wrapper (a shared <Button testID>) maps to the call site that wrote the id, not the wrapper's inside", async () => {
+  function Button(): null { return null; }
+  function Pressable(): null { return null; }
+  // SignUpScreen.tsx:112 writes <Button testID="save" />; ui.tsx:43 (inside Button) writes <Pressable testID={testID}>
+  const button = fiber(0, Button, { testID: 'save', label: 'Save' }, stack(['jsxDEV', 100, 1], ['SignUpScreen', 400, 9]));
+  const pressable = fiber(11, Pressable, { testID: 'save' }, stack(['jsxDEV', 100, 1], ['Button', 200, 7]), button);
+  const view = fiber(5, 'RCTView', { testID: 'save' }, stack(['jsxDEV', 100, 1], ['InternalTextInput', 300, 5]), pressable);
+  const [source] = await sourcesOf([view]);
+  expect(source?.location).toMatchObject({ file: '/proj/src/screens/SignUpScreen.tsx', line: 112, direct: true });
+  expect(source?.props).toMatchObject({ testID: '"save"', label: '"Save"' });
 });

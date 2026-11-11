@@ -355,6 +355,24 @@ describe("the live viewer's side of the tools", () => {
     expect(app.requests.filter((r) => r.method === "scroll")).toHaveLength(1);
   });
 
+  it("inspect sends the target the way every tool does (an id becomes the app's testID)", async () => {
+    const { app, tools } = await viewerTools();
+    app.handler = (req) =>
+      req.method === "inspect"
+        ? {
+            ok: true,
+            result: {
+              element: TREE.elements[0],
+              source: { components: ["LoginScreen"], location: { file: "/nowhere/src/Login.tsx", line: 12, column: 3, component: "LoginScreen", direct: true }, props: {} },
+            },
+          }
+        : viewerHandler(req);
+    const answer = await tools.inspect({ target: { id: "login-button" } });
+    expect(answer.isError).toBeUndefined();
+    expect(app.requests.find((r) => r.method === "inspect")?.params).toEqual({ target: { testID: "login-button" } });
+    expect(textOf(answer)).toContain("Written at: ");
+  });
+
   it("reports a person's action with where it happened, in 0..1", async () => {
     const { tools } = await viewerTools();
     const outcome = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [90, 0.5, 0.25]] });

@@ -15,7 +15,7 @@ export const inspectResultSchema = z.object({
   source: z.object({
     components: z.array(z.string()),
     location: z
-      .object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish() })
+      .object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish(), direct: z.boolean().optional() })
       .nullable(),
     props: z.record(z.string(), z.string()),
   }),
@@ -61,15 +61,43 @@ export function sourceLine(file: string, line: number, files: FileAccess = realF
   }
 }
 
+/** The first line of a file that writes this id as a string literal ("id", 'id' or `id`); null when none. */
+export function literalLine(file: string, id: string, files: FileAccess = realFiles): number | null {
+  try {
+    if (!files.exists(file)) return null;
+    const lines = files.read(file).split(/\r?\n/);
+    const quoted = [`"${id}"`, `'${id}'`, `\`${id}\``];
+    const at = lines.findIndex((line) => quoted.some((q) => line.includes(q)));
+    return at >= 0 ? at + 1 : null;
+  } catch {
+    return null;
+  }
+}
+
 export function formatInspect(result: InspectResult, files: FileAccess = realFiles): string {
   const lines = [formatElement(result.element)];
   const { components, location, props } = result.source;
   if (components.length > 0) lines.push(`Components: ${components.join(" › ")}`);
   if (location !== null) {
     const where = `${shownPath(location.file, files)}:${location.line}`;
-    lines.push(`Written at: ${where}${location.component ? ` (in ${location.component})` : ""}`);
+    const inComponent = location.component ? ` (in ${location.component})` : "";
+    lines.push(
+      location.direct === false
+        ? `Drawn by a library, inside: ${where}${inComponent}`
+        : `Written at: ${where}${inComponent}`,
+    );
     const code = sourceLine(location.file, location.line, files);
     if (code !== null) lines.push(`  ${location.line} | ${code}`);
+    // A library drew it: the app still wrote the element's id somewhere in that file (a tab's options).
+    const id = result.element.testID;
+    if (location.direct === false && typeof id === "string" && id !== "") {
+      const at = literalLine(location.file, id, files);
+      if (at !== null) {
+        lines.push(`Its id is set at: ${shownPath(location.file, files)}:${at}`);
+        const set = sourceLine(location.file, at, files);
+        if (set !== null) lines.push(`  ${at} | ${set}`);
+      }
+    }
   } else {
     lines.push("Written at: unknown (Metro didn't map it; the app may be a release build or loaded without Metro).");
   }

@@ -725,7 +725,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     let raw: unknown;
     try {
-      raw = await this.host.request("inspect", { target: args.target }, { sessionId: session.id });
+      raw = await this.host.request("inspect", { target: toWireTarget(args.target) }, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
