@@ -33,7 +33,8 @@ Commands:
   host     Run the host in the foreground and log connections and app logs
   pair     Print a pairing link and QR code for a phone (needs --scheme)
   info     Show this computer's address and how to add Tapline to an app
-  doctor   Check the setup (Node, the Wi-Fi address, Tailscale if used, token, ports, firewall)
+  doctor   Check the setup (Node, the Wi-Fi address, Tailscale if used, token, ports, firewall);
+           --app also checks the app side in --project (or here), as tapline init would
   init     Set up Tapline in your app in one go: packages, entry file, Metro helper, .env.local
            (run it in the app's folder; --dry-run shows the plan, --no-install skips the install)
   dev      Serve Metro over https in your tailnet (iOS needs it); \`tapline dev -- <command>\`
@@ -243,6 +244,7 @@ async function main(argv: string[]): Promise<number> {
       "no-policy": { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
+      app: { type: "boolean" },
       "no-install": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -291,7 +293,17 @@ async function main(argv: string[]): Promise<number> {
     case "doctor": {
       const results = await runDoctor();
       process.stdout.write(`${formatDoctor(results)}\n`);
-      return results.some((r) => r.status === "fail") ? 1 : 0;
+      let failed = results.some((r) => r.status === "fail");
+      if (values.app === true) {
+        // The app side, as `tapline init` sees it; nothing is changed.
+        process.stdout.write("\nApp side (what tapline init would do):\n");
+        const app = runInit(
+          { ...(values.project !== undefined ? { project: values.project } : {}), dryRun: true, install: false },
+          { print: (line) => (line.startsWith("Dry run:") ? undefined : process.stdout.write(`${line}\n`)) },
+        );
+        if (app.exitCode !== 0 || app.changed) failed = true;
+      }
+      return failed ? 1 : 0;
     }
     case "dev":
       return runDev(values, positionals.slice(1));
