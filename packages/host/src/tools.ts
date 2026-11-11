@@ -802,7 +802,23 @@ export class TaplineTools {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const file = join(dir, `${port}.json`);
       writeFileSync(file, JSON.stringify({ code: offer.code, name: offer.name, port, until: offer.until }), { mode: 0o600 });
+      const remove = (): void => {
+        try {
+          // only our own offer: a newer pair call has written its own
+          if (existsSync(file) && readFileSync(file, "utf8").includes(offer.code)) rmSync(file, { force: true });
+        } catch {
+          // gone already
+        }
+      };
+      // Used: the code works once, so Metro stops handing it out at once.
+      const onConnect = (): void => {
+        if (this.host.currentDevOffer()?.code === offer.code) return;
+        this.host.off("connect", onConnect);
+        remove();
+      };
+      this.host.on("connect", onConnect);
       setTimeout(() => {
+        this.host.off("connect", onConnect);
         try {
           // only our own offer: a newer pair call has written its own
           if (existsSync(file) && readFileSync(file, "utf8").includes(offer.code)) rmSync(file, { force: true });

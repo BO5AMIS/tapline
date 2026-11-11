@@ -1,11 +1,11 @@
 ---
 name: tapline
-description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, scroll, wait_for, open_url, app_command, logs), when asked for QA, a UI check or a bug hunt on that app, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_answering or reconnecting.
+description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, audit, inspect, wait_for, open_url, app_command, logs), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
 license: MIT
 compatibility: Needs the Tapline MCP server (`tapline mcp`, Node.js 20 or later) on the user's computer, and a development or TestFlight build of the app with Tapline's SDK switched on. Works from Windows, macOS or Linux.
 metadata:
   tool: tapline
-  interface: AGENT-TOOLS v1.6
+  interface: AGENT-TOOLS v1.8
 ---
 
 # Tapline: test your own app on a real phone
@@ -20,8 +20,10 @@ well. The tools describe themselves; what follows is what they can't tell you.
 - **No Tapline tools in your tool list?** Set it up first:
   [references/setup.md](references/setup.md).
 - **Call `apps` once.** It lists the app that is connected. When none is: a phone that never
-  paired needs `pair` (show the user the QR code); a paired one only needs the user to open
-  the app with the phone on the same Wi-Fi as the computer.
+  paired needs `pair`. A development build that loads its JavaScript from this computer needs
+  no scheme and no QR code: call `pair` and ask the user to tap Connect in the app. Any other
+  build: pass the app's `scheme` and show the user the QR code. A paired phone only needs the
+  user to open the app with the phone on the same Wi-Fi as the computer.
 - **The app must stay open in front.** iOS pauses an app in the background, also when the
   user switches to another app to chat with you. `in_background` means a person must bring
   it back: ask, and wait.
@@ -41,14 +43,27 @@ well. The tools describe themselves; what follows is what they can't tell you.
 ```
 tap {"target": {"id": "login-button"}}
 
-Tapped e3 button "Log in" id=login-button @24,610 354x48.
+Tapped e3 button "Log in" id=login-button.
 Same screen. Changes:
 + e9 text "Wrong password" @24,560 354x20
-~ e2 input "Password" id=password @24,500 354x48 [tap, type] (was "hunter2")
+~ e2 input "Password" id=password (was "•••••••")
 Settled in 0.31 s.
 ```
 
-The answer already shows the error text, and that the field was emptied. No `look` is needed.
+The answer already shows the error text, and that the field was emptied (a password field shows
+one `•` per character, never its text). No `look` is needed.
+
+Several steps you are sure of go in one call, `run`, which answers once and stops at the first
+step that fails or whose `expect` doesn't hold:
+
+```
+run {"steps": [
+  {"tool": "type_text", "target": {"id": "email"}, "text": "test@example.com"},
+  {"tool": "type_text", "target": {"id": "password"}, "text": "test1234"},
+  {"tool": "tap", "target": {"id": "login-button"}, "expect": {"text": "Welcome"}}]}
+
+Ran 3 of 3 steps in 1.2 s.
+```
 
 Name the element with one of, in this order of preference: `id` (the app's own identifier,
 React Native's `testID`), `ref` (from your last list, like `e3`), `label`, `text`. Use `x`
@@ -56,7 +71,10 @@ and `y` only for things with no element.
 
 ## 3. Reading an answer
 
-- **The first line** says what was done and to which element.
+- **The first line** says what was done and to which element (its position is in the list).
+- **Actions a role implies aren't listed:** a button, tab or link can be tapped, an input typed
+  into, a switch toggled and a scroll view scrolled. Other actions are listed in brackets
+  (`[tap, longPress]`).
 - **`Same screen. Changes:`** then `+` new, `-` gone, `~` changed (with what it was),
   `↕` moved. When most of the screen changed, the full list comes instead.
 - **`No visible change.`** means nothing changed, on screen or off it.
@@ -72,7 +90,7 @@ and `y` only for things with no element.
 - **A change out of view has its own line, without a ref:**
   ```
   Same screen. Changes:
-  ~ text "taps=2" id=lab-state @16,-900 398x60 (off screen; was "taps=1")
+  ~ text "taps=2" id=lab-state (off screen; was "taps=1")
   ```
   The action worked. You don't need to scroll there to check.
 - **After answers you asked to be short (`look: false`), the next block covers them too:**
@@ -86,7 +104,7 @@ and `y` only for things with no element.
 - **Refs** stay with their elements from answer to answer. Only `look` starts again at `e1`,
   so after a `look` use the new list's refs.
 - **Long text is cut** and says by how much: `"…(+57)"`. `wait_for` with the text checks all
-  of it.
+  of it. A long old value in `(was "…")` is cut to the part that changed, with `…` where it was cut.
 - **The keyboard:** `Keyboard: shown` or `Keyboard: hidden` in an answer says it came or went.
   While it is up, a touch on anything but the field you are typing in closes it first, as a
   person would, and the answer ends with `Note: closed the keyboard first.` Typing into the
@@ -106,6 +124,10 @@ and `y` only for things with no element.
 | check that something appeared | read the action's answer; `look` only if it isn't there |
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
 | see pixels (layout, colours, images) | `check_layout` first: it finds small tap areas, cut-off or overlapping text and low contrast without a picture. Then `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
+| check a screen's accessibility | `audit`: contrast, tap areas, missing labels and roles, cut-off text, overlaps, shared ids, each with its fix and (in a development build) the file and line to change. Run it on each new screen; it costs no image |
+| say where to fix what you found | `inspect` the element (development builds): the components, the file and line that wrote it, and that line |
+| do several steps you are sure of | `run` with the steps; an `expect` on a step checks what must show after it |
+| see what a touch would do, without doing it | `dry_run: true` on the touch or on `run`: every check runs, nothing is touched, and the answer says whether it needs a person's OK |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
 | work with Tapwright and Tapline both connected | inside the app under test, Tapline's tools: its reads and actions are the fast ones. For what iOS draws (permission prompts, system alerts, the share sheet), other apps, real gestures, and the live view: Tapwright's. A ref belongs to the tool that gave it: never pass one tool's ref to the other; use the element's `id` with either |
 | jump straight to a screen | `open_url` with the app's deep link |
@@ -139,6 +161,8 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 | `timeout` | the action may have happened: `look` before you retry |
 | `unsupported` | Tapline can't do this: use what the message names |
 | `bad_params` | fix the call |
+| `not_allowed` | the first word is why. `needs_confirmation`: a person must allow this touch in the live view; tell the user, and when they have, make the same call again. `blocked`: the safety policy forbids it; don't try another way |
+| `expect_failed` | a `run` step's `expect` didn't hold: `look`, then fix the step or report the bug |
 | `internal` | a bug in the tool: report it with the call you made |
 
 ## 6. Testing well
@@ -192,6 +216,10 @@ took more than a few seconds (`Settled in` gives the time).
 - Don't read or repeat private content you see (messages, photos, notifications) beyond
   what the test needs.
 - Stay in the app under test.
+- Some touches need a person's OK first: a button whose label says Buy, Pay, Delete, Send,
+  Post, Sign out and the like answers `needs_confirmation`, and the live view asks the person.
+  You can never give that OK yourself, and you never look for another way to the same result
+  (another button, a deep link, `x` and `y`). `dry_run: true` tells you beforehand.
 - Give the live view's link to the user only. It carries a key. A pairing link lets a phone
   connect for ten minutes: show it to the user only. Never print the token in
   `~/.tapline/token`.
@@ -214,4 +242,6 @@ took more than a few seconds (`Settled in` gives the time).
 | reporting "couldn't sign in" as a bug | list it under what you couldn't test |
 | reporting a swipe-only control as broken because `tap` did nothing | `swipe` it; if that answers `no_action`, say that Tapline can't make that gesture |
 | going on after the user left the app | stop: Tapline works only while its app is open in front |
+| looking for another way after `needs_confirmation` or `blocked` | ask the user; the refusal is the policy working |
+| a `look` between every step of a flow you are sure of | one `run` with `expect` on the steps that matter |
 | trusting a password field because `type_text` answered | read the value it reports. iOS can raise its own sheets over a password field ("Use Strong Password?"), which Tapline can't see. Tapline types through the app, so no keys are lost, but the sheet may cover the form: if taps there are refused or nothing changes, ask the user to close it |

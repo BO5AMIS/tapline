@@ -80,6 +80,12 @@ describe("the offer file for the Metro helper", () => {
       const written = JSON.parse(readFileSync(join(dir, `${port}.json`), "utf8")) as Record<string, unknown>;
       expect(written).toMatchObject({ name: "Dev PC", port, code: host.currentDevOffer()?.code });
       expect(Number(written["until"])).toBeGreaterThan(Date.now());
+      // used once: Metro stops handing it out
+      const { existsSync } = await import("node:fs");
+      const { app } = await FakeApp.connect(port, { token: undefined, pairCode: String(written["code"]) });
+      apps.push(app);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(existsSync(join(dir, `${port}.json`))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
