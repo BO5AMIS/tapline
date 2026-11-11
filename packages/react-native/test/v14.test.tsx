@@ -180,14 +180,25 @@ describe('the keyboard closes first', () => {
     expect(result.value).toBe('hi');
   });
 
-  test('another input the keyboard covers, even in part, closes the keyboard first', async () => {
+  test('another input with less than 10 pt above the keyboard closes the keyboard first', async () => {
     const spies = makeSpies();
     await mountForm(spies);
-    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 170 });
+    // second: 150 to 190; the keyboard's top at 158 leaves 8 pt of it showing.
+    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 158 });
     setKeyboardControl(control);
     const result = await run(() => typeText({ target: { testID: 'second' }, text: 'hi' }));
     expect(calls).toEqual(['dismiss']);
     expect(result.closedKeyboard).toBe(true);
+  });
+
+  test('one with at least 10 pt above the keyboard, partly under it, takes the focus: a finger reaches the part that shows', async () => {
+    const spies = makeSpies();
+    await mountForm(spies);
+    const { calls, control } = fakeKeyboard(hostInstance('first'), { top: 167 });
+    setKeyboardControl(control);
+    const result = await run(() => typeText({ target: { testID: 'second' }, text: 'hi' }));
+    expect(calls).toEqual(['focus']);
+    expect(result).not.toHaveProperty('closedKeyboard');
   });
 
   test('when the focus does not move, the keyboard is closed the old way', async () => {

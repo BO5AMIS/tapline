@@ -1140,13 +1140,16 @@ function closeKeyboardFor(actor: Entry): boolean {
  * it isn't known where the keyboard is, or when the focus didn't move, and then the caller closes
  * the keyboard the old way.
  */
+/** How much of an input must show above the keyboard for a finger to reach it (AGENT-TOOLS v1.6 §4). */
+const SHOWS_ABOVE_KEYBOARD_PT = 10;
+
 async function moveFocusAboveKeyboard(entry: Entry): Promise<boolean> {
   const focused = keyboard.focusedInput();
   if (focused == null || !keyboard.visible() || ownsInstance(entry, focused)) return false;
   const top = keyboard.top?.() ?? null;
   if (top === null || keyboard.focus === undefined) return false;
   const frame = await measureFiber(entry.node.fiber);
-  if (frame === null || frame.y + frame.height > top) return false;
+  if (frame === null || frame.y < 0 || Math.min(frame.y + frame.height, top) - frame.y < SHOWS_ABOVE_KEYBOARD_PT) return false;
   keyboard.focus(inputInstances(entry));
   return ownsInstance(entry, keyboard.focusedInput());
 }
