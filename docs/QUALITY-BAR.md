@@ -5,7 +5,9 @@ Shared by Tapline and Tapwright. Version 1 was agreed by both projects and appro
 gives V6 (a) two readings, adds a target for a scroll made by a real touch, measures the video transport,
 and replaces the gap list with what the shared benchmark measured. The user handed these decisions to the
 two projects on 2026-11-10, and both agree on it. Version 2.1 (2026-11-10) adds group A: how an agent
-that has never seen the tool gets on with it. Each repo keeps an identical copy.
+that has never seen the tool gets on with it. Version 2.2 (2026-11-11, the owner's decision) narrows the
+launch links to USB and Wi-Fi on the same network, for a test phone that stays next to the computer;
+5G and Tailscale move to "Later". Each repo keeps an identical copy.
 
 The two tools should feel like one product made by one team. They differ only in setup: how an
 agent is wired to them, how the user gives access (an app pairs with Tapline; a whole phone
@@ -18,10 +20,11 @@ the end with a plan. There are no per-tool targets.
 
 ## Links
 
-- **Launch links:** USB, Wi-Fi on the same network, and 5G or another fast connection through Tailscale.
-  Every target below holds on each link a tool offers. Tapline uses the network (Wi-Fi, or Tailscale over
-  Wi-Fi or 5G); Tapwright uses USB, Wi-Fi, or Tailscale.
-- **Weak links (3G and the like)** are not a launch target. Their former targets are kept under "Later".
+- **Launch links (v1):** USB, and Wi-Fi on the same network as the computer. v1 is for testing on a test
+  phone that stays next to the computer while the agent runs it. Every target below holds on each link a
+  tool offers: Tapline uses the network (Wi-Fi); Tapwright uses USB or Wi-Fi.
+- **Later:** 5G or another network reached through Tailscale (a phone away from the computer), and weak
+  links (3G and the like). Not launch targets; 3G's former targets are kept under "Later".
 
 ## How it's measured
 
@@ -147,7 +150,7 @@ version 1 is no longer listed.
 | Tapwright | S1 in personal mode | 0.78 s for a tap (0.69 s on a dedicated device): before every touch the phone is asked which app is in front, 50 to 90 ms, so that the agent can't act in an app it wasn't given. A look pays nothing | accepted as the price of failing closed; a dedicated device is the measured setup |
 | Tapwright | S1, V1, R over Wi-Fi | measured 2026-11-11 on the home Wi-Fi. **Reliability:** 2 misses in 142 (three passes: R1 0/48, R2 0/48, R3 1/21, R4 1/21, R5 0/3, R6 0/1), down from 23 the evening before. One R4 miss came with notification banners; the R3 miss (a row pressed around "tap Bottom while off screen") is being replayed. **Speed:** a tap 0.91 to 0.95 s, type 0.86 to 1.23 s, toggle 0.81 to 0.94 s; a tap stays near 0.9 s with every change tried (a lighter stream, a kept connection): each request over this Wi-Fi costs more, and a tap is a touch call plus a read. **Viewer:** V1 0.35 s (slowest 0.53 to 0.65 s), V2 24 to 26 fps, V3 0.25 to 0.26 s, V3.look 0.57 to 0.90 s. Requests that get no answer for 5 to 30 s come in spells (the developer tunnel over Wi-Fi); a question is asked again, a touch that got no answer says `timeout` and the session stays | find the R3 cause; then the video settle (AirPlay pictures instead of the JPEG stream during actions). A tap at 0.7 s over Wi-Fi looks out of reach through WebDriverAgent on this network; three clean reliability runs before this row goes |
 | Tapwright | Notification banners, the passcode screen | two things of the phone's own that an owner's phone does and a test phone doesn't. While a notification banner slides over the app, WebDriverAgent answers with SpringBoard's tree, so a call in those seconds said "Home screen" or, in personal mode, was refused as `outside_apps` (twice in forty calls in a group A run); a read now waits for the banner to leave, not yet seen working on the phone. And iOS asks for the passcode again to allow UI automation about two and a half hours after the owner entered it, unless Settings > Developer > Enable UI Automation is on; until then every call answers `locked` and says why | see the banner wait work on the phone; refuse a touch that would land on a banner; setup and `doctor` say to turn Enable UI Automation on |
-| Tapwright | R4, V landscape | the phone can't afford to rotate frames, so landscape frames arrive sideways and viewer input maps wrong | rotate on the PC (about 28 ms a frame) and track the orientation |
+| Tapwright | R4, V landscape | built and checked on the phone 2026-11-11 (Calculator turned to each side by WebDriverAgent, no touches): the session follows the turn (the tree and window are 932x430, and WebDriverAgent says which side), and the live view's and `look`'s frames are turned upright on this computer (the phone can't afford to turn them; about 28 ms a frame). Both sides read upright. Not yet checked: a viewer's or an agent's touch in landscape, because the lab is portrait-only | a touch check needs a landscape screen in the lab, or the owner's word to tap in another app |
 | Tapline | V6 (a) under animation, a JPEG path | listed as the bar asks of a JPEG path; within 30. With the native module (2026-11-11) and the lab animation on, at 15 fps: the whole phone pays 11.9% of one core more with the viewer on (the app, backboardd and SpringBoard 9.9%), DVT, two windows of 65 s; at 12 fps, before adaptive quality, 15.5%. Smoothness (b): 1 slow animation frame in 4491. During motion over Wi-Fi the frames are the light preset (adaptive quality), the chosen preset once the screen is still. Every V row passes on the phone: V1 0.12 s, V2 15 fps, V3 0.072 s, V3.look 0.245 s | a video path only if a reason comes up |
 | Tapline | R3 OS-drawn UI | in an app built with Tapline's native module (2026-11-11), an alert UIKit shows (Alert.alert or native code) and the share sheet are seen: an `Alert:` line, and a tap behind them answers `behind_alert` (10 of 10 checks on the phone). Tapline still can't answer them, so the runner, which closes the cover with the tool, skips these two checks for Tapline. An app built without the native module doesn't see them | answering them stays Tapwright's (the shared skill row for both tools); the guide says to build with the module |
 | Tapline | R6 a frozen app | met for a frozen JavaScript thread: on the lab's 20 s freeze the tap in flight answers `not_answering` at 15 s, and the next look and tap work with no step from anyone (R6 0 misses on the phone). Not exercised: an app whose native side is frozen, as on 2026-11-10; that needs a native fixture | a native freeze fixture in the lab (a new build) |
@@ -155,11 +158,11 @@ version 1 is no longer listed.
 | Tapline | S4 reconnect | met, measured by hand on the phone (2026-11-11): the Tapwright side sent the app to the background and opened it again five times while a look ran every 100 ms. The first working look came 0.49 to 0.63 s after the app was back in front (open_app answered), 1.93 to 2.14 s after it was asked to open; every look in between answered that the app was in the background. The runner still doesn't measure it on its own | measure S4 in the runner when both tools are connected (the Tapwright side backgrounds the app) |
 | Both | C2 one page | done in code: `viewer.html` is one file, byte-identical in both repos (VIEWER-PROTOCOL v1.3). Checked in headless Chrome and Edge against both real servers, video included. Not judged: how typing, the wheel and dragging feel to a person | a person tries it |
 | Both | V8 browsers | Tapline's server measured in headless Chrome: first frame 35 ms, status under 1 ms, click mark 0.2 ms after release, no console errors (the browser ran on the host's own computer, so the first frame has no network in it). Tapwright's checked in headless Edge with video. Firefox and Safari not tried | try both; measure the first frame from another computer |
-| Both | Wi-Fi and 5G | Tapline's suites ran over the local network; Tapwright's over USB, and its speed and viewer suites over Wi-Fi (the row above). No run over 5G yet: it needs Wi-Fi switched off on the phone | run all three suites on each launch link before launch |
 
-## Later: weak links
+## Later: other networks and weak links
 
-Not a launch target. When weak links come back, these were version 1's 3G targets (the iPhone's Network
+Not launch targets. A phone away from the computer, reached through Tailscale over 5G or another network:
+measured when it comes back, against the same targets as Wi-Fi. Weak links: When weak links come back, these were version 1's 3G targets (the iPhone's Network
 Link Conditioner "3G" profile: about 780 kbit/s to the phone, 330 kbit/s from it, 100 ms delay): every
 action completes and nothing times out; S1 median ≤ 1.5 s, S2 ≤ 1.5 s, S3 ≤ 2.5 s, S4 ≤ 6 s, S5 ≤ 8 s;
 V1 median ≤ 1.0 s, V2 ≥ 2 fps, V3 ≤ 2 s, V7 ≤ 33 KB/s of frames. A JPEG stream can't meet V2 there
