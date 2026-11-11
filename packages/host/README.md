@@ -1,7 +1,7 @@
 # @tapline/host
 
 The computer side of [Tapline](../../README.md): the server your app's
-`@tapline/react-native` connects to over Tailscale, an MCP server for agents, and a CLI.
+`@tapline/react-native` connects to over the same Wi-Fi, an MCP server for agents, and a CLI.
 Node.js 20 or later. Full setup: [docs/setup.md](../../docs/setup.md).
 
 ## CLI
@@ -12,10 +12,11 @@ Node.js 20 or later. Full setup: [docs/setup.md](../../docs/setup.md).
 | `tapline host` | the host alone, logging connections and app logs (`--scheme` also prints a pairing QR code) |
 | `tapline pair --scheme <s>` | a pairing link and QR code in the terminal |
 | `tapline info` | this computer's name and address, and the code the app needs |
-| `tapline doctor` | check Node, Tailscale, the token, ports, the Windows firewall and Metro over https |
-| `tapline dev [-- <metro command>]` | serve Metro over https in your tailnet and run Metro with `EXPO_PACKAGER_PROXY_URL` set |
+| `tapline doctor` | check Node, this computer's Wi-Fi or LAN address, the token, ports and the Windows firewall (Tailscale and Metro over https are optional: warnings only) |
+| `tapline dev [-- <metro command>]` | optional, for a phone away from this Wi-Fi: serve Metro over https in your tailnet and run Metro with `EXPO_PACKAGER_PROXY_URL` set |
 | `tapline replay <name>` | replay a recorded script without an agent (exit code 1 when a step fails) |
 | `tapline token` | print the token (only to connect without pairing, e.g. a simulator) |
+| `tapline skill install` / `skill path` | install the agent skill for Claude Code, Codex and other agents / print where it is |
 
 Options: `--port <n>` for a fixed port (or `TAPLINE_PORT`; otherwise 7210, moving up to
 7219 when taken, so each agent's host gets its own); `--host <addr>[,<addr>…]` to listen
@@ -32,7 +33,7 @@ as a stdio server; it logs to stderr only.
 ## MCP tools
 
 `pair`, `apps`, `open_app`, `look`, `check_layout`, `tap`, `long_press`, `type_text`,
-`scroll`, `toggle`, `open_url`, `back`, `app_command`, `wait_for`, `record`, `replay`,
+`scroll`, `swipe`, `toggle`, `open_url`, `back`, `app_command`, `wait_for`, `record`, `replay`,
 `compare_screen`, `filmstrip`, `viewer`, `logs`, `reload`, `wait`. Targets: `{ref}`, `{id}`
 (the `testID` prop), `{label}`, `{text}` or `{x, y}`; `index` goes with `id`, `label` and
 `text`. Every action answers with the verb and the element, then `Same screen. Changes:`
@@ -69,11 +70,11 @@ Tapline ignores.
   Delete the file to make a new one: every phone then has to pair again.
 - Pairing codes are signed with the token, expire after 10 minutes, and each host accepts
   a code once.
-- The host listens on your Tailscale address and 127.0.0.1 only. If one of them can't be
-  used it keeps the other; without Tailscale, 127.0.0.1 only. `--host 0.0.0.0` opens it to
-  your whole network: only on networks you trust.
+- The host listens on this computer's Wi-Fi or LAN address (private addresses on real
+  adapters only), on its Tailscale address when there is one, and on 127.0.0.1. Phones pair
+  with the Wi-Fi or LAN address. `--host <addr>` chooses other addresses.
 - Connections without the right token are closed (4001), and bad pairing codes too
-  (4004). Traffic is plain WebSocket inside Tailscale's encrypted tunnel.
+  (4004). Traffic is plain WebSocket: use a Wi-Fi you trust (Tailscale, when used, encrypts it).
 - The live viewer has its own random key, new on each start, in the link the `viewer` tool
   gives. Only that first page load takes the key in the address: it sets an HttpOnly,
   SameSite=Strict cookie and the page removes the key from the address bar. The stream and

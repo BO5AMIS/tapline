@@ -81,7 +81,7 @@ tapline mcp
 - `--screenshots file` saves pictures in `~/.tapline/shots` and answers with their path, for
   hosts and agents that shouldn't receive images (a lead agent that hands pictures to a
   small model).
-- `--viewer remote` also opens the live view to other devices that can reach the host;
+- `--viewer remote` also opens the live view to your own devices on Tailscale;
   `--viewer off` turns it off.
 
 **Claude Code**

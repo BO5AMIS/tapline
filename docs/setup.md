@@ -75,7 +75,7 @@ its own older copy and nothing else.
 If your agent hands screenshots to smaller helper models, add `--screenshots file`: `look`
 then returns a file path instead of the image ([AGENTS.md](../AGENTS.md#screenshots-and-tokens)).
 The live viewer (the agent's `viewer` tool gives its link) opens on this computer only; add
-`--viewer remote` to also open it from other devices that can reach the host, or
+`--viewer remote` to also open it from your own devices on Tailscale, or
 `--viewer off`.
 Other MCP clients: run `tapline mcp` as a stdio server. To only watch connections and
 app logs, without an agent: `tapline host --scheme <your app's scheme>` (it also prints a
@@ -128,6 +128,11 @@ All three have native code: a new development build or TestFlight build includes
 Without `expo-secure-store`, pairing works but lasts only until the app restarts (or pass
 your own `storage`, see below). Without `expo-keep-awake` the phone's screen can lock while
 an agent works; it matters most for a dedicated test device.
+
+The package also carries a small Expo native module, which any new build of an Expo app picks
+up by itself (no config plugin). With it, the live viewer runs at about 15 frames a second
+instead of 6, and the agent sees an alert from native code or the share sheet over the app
+(an `Alert:` line, with taps behind it refused). A build without it works as before.
 
 **Load `register` first.** It has to run before React starts. The simplest way is Metro,
 in `metro.config.js` (it only does this when `EXPO_PUBLIC_TAPLINE_ENABLED=1`, so store
@@ -321,8 +326,8 @@ your Wi-Fi.
 | `No React roots recorded` | `register` isn't the first import of the entry file (Expo Router: use your own `index.js`, step 3) |
 | `screenshot … unsupported` | install `react-native-view-shot`, then rebuild the app (it has native code) |
 | an element isn't in `look` | it has no text, label, `testID` or handler (give it a `testID`), or it's hidden: tabs that aren't selected and screens covered by another are left out |
-| the tab bar isn't in `look` | native tab bars (Expo Router's `NativeTabs`) are drawn by iOS, not React; switch tabs with `open_url` and the tab's route (`myapp://settings`) |
-| `type` didn't change an input | inputs without `onChangeText` keep their native text; target the input by `id` (its `testID`) |
+| a tab isn't in `look` | native tab bars (Expo Router's `NativeTabs`) are drawn by iOS: their tabs show as `tab` elements without a position, and tapping one switches tabs; screens of tabs that aren't selected are left out. `open_url` with the tab's route (`myapp://settings`) also works |
+| `type_text` didn't change an input | inputs without `onChangeText` keep their native text; target the input by `id` (its `testID`) |
 | the agent gets `not_answering` | the app is connected but stopped answering (a frozen screen, or its JavaScript is stuck): try once more, then close the app and open it again |
 | the app shows a red "Metro has encountered an error: EMFILE" screen (Windows, development builds) | Metro ran out of open files while rebuilding after a file change, which happens in large projects on Windows; it isn't Tapline. Stop Metro, start it again, then close the app and open it (a cold start); avoid saving files Metro watches while a test runs |
 

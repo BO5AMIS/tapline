@@ -129,7 +129,7 @@ runs anyway and the answer says it was forced. A target hidden by an open
 sheet or modal answers `covered: … is behind …; close that first.`; close the sheet and try
 again. When the on-screen keyboard is up and an action targets something outside the focused
 field, Tapline closes the keyboard first and says so (`Note: closed the keyboard first.`).
-Typing into the next field of a form leaves the keyboard up, and answers say `Keyboard: shown`
+Typing into the next field of a form (one that shows above the keyboard) leaves the keyboard up, and answers say `Keyboard: shown`
 or `Keyboard: hidden` when it comes or goes.
 A look reads like this:
 
@@ -171,10 +171,11 @@ has the recipe.
 
 **Watch live.** Ask your agent for the viewer link and open it in a browser on your
 computer. It shows the app's screen as it changes, marks each tap and scroll the agent makes,
-and can draw a box around every element. You can tap, scroll and type in it as well: your
+and can draw a box around every element. You can tap, drag, scroll and type in it as well (a drag goes to what takes a finger's drag,
+such as a sheet's swipe to close, and scrolls otherwise): your
 input goes first, the agent waits until you've been idle for 3 seconds, and **Pause agent**
 stops it until you resume. The link carries a key and works on this computer only;
-`tapline mcp --viewer remote` also opens it to other devices that can reach the host, and
+`tapline mcp --viewer remote` also opens it to your own devices on Tailscale, and
 `--viewer off` turns it off. It runs only while someone watches. The page can show video
 when a server offers it; Tapline's own doesn't yet.
 
@@ -219,7 +220,9 @@ order, pair again (or give each agent a fixed `--port`).
 - Actions call your components' handlers; they aren't real touches. `swipe` drags through React
   Native's own touch system (a sheet's swipe to close, pan views, drawers); gestures built on
   react-native-gesture-handler, pinch, and native views React doesn't render (sliders, maps, web
-  view contents) are out of reach.
+  view contents) are out of reach, and so is a touch that a sheet in its own window (`Modal`)
+  keeps for itself; `swipe` answers `no_action` for these, and for a drag along a list (use
+  `scroll`).
 - Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS; Tapline lists their tabs
   (without a position) and switches them through navigation. Tabs that aren't selected and
   screens covered by another are left out of `look`, like they are for the user.
@@ -245,8 +248,8 @@ order, pair again (or give each agent a fixed `--port`).
   the module (an older build), about 6 frames a second while the screen changes, since each
   frame then makes iOS draw the screen once more. Filmstrips show a few frames a second.
 - The live viewer shows only the app's window: not the keyboard, the status bar or system
-  alerts. Open it on another device than the phone: switching apps on the phone pauses the
-  app.
+  alerts. Open it in a browser on the computer, not on the phone: switching apps on the phone pauses
+  the app.
 - iOS alerts can't be pressed from inside the app. Tapline shows them to the agent and stops
   it from tapping behind them (an `Alert.alert` always; one from native code, and the share
   sheet, with the native module); with `alerts: 'stand-in'` (test builds) it shows its own
