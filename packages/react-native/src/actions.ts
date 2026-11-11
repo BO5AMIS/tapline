@@ -1816,3 +1816,206 @@ export async function screenshot(
   }
   return { mime: format === 'png' ? 'image/png' : 'image/jpeg', data, width, height };
 }
+
+/* -------------------------------------------------------------------------- */
+/* swipe                                                                        */
+/* -------------------------------------------------------------------------- */
+
+/** One finger's record in React Native's touch history (what PanResponder computes gestures from). */
+interface TouchRecord {
+  touchActive: boolean;
+  startPageX: number;
+  startPageY: number;
+  startTimeStamp: number;
+  currentPageX: number;
+  currentPageY: number;
+  currentTimeStamp: number;
+  previousPageX: number;
+  previousPageY: number;
+  previousTimeStamp: number;
+}
+
+interface TouchHistory {
+  touchBank: TouchRecord[];
+  numberActiveTouches: number;
+  indexOfSingleActiveTouch: number;
+  mostRecentTimeStamp: number;
+}
+
+/** A swipe's moves come about this often, as a finger's do on a 60 Hz screen. */
+const SWIPE_STEP_MS = 16;
+const SWIPE_DEFAULT_SECONDS = 0.35;
+const HOST_COMPONENT_TAG = 5;
+
+/** The host components from `fiber` up to the root, deepest first: where responder handlers live. */
+function hostChain(fiber: Fiber): Fiber[] {
+  const chain: Fiber[] = [];
+  for (let current: Fiber | null = fiber; current; current = current.return) {
+    if (current.tag === HOST_COMPONENT_TAG) chain.push(current);
+  }
+  return chain;
+}
+
+function callResponder(fiber: Fiber, name: string, event: unknown): unknown {
+  const props = isRecord(fiber.memoizedProps) ? fiber.memoizedProps : {};
+  const handler = props[name];
+  if (typeof handler !== 'function') return undefined;
+  return (handler as (event: unknown) => unknown)(event);
+}
+
+/**
+ * React Native's negotiation for who handles a touch: the capture phase from the root down, then
+ * the bubble phase from the deepest view up; the first view whose handler answers true wins.
+ */
+function negotiate(chain: Fiber[], capture: string, bubble: string, event: unknown, skip?: Fiber): Fiber | undefined {
+  for (const fiber of [...chain].reverse()) {
+    if (fiber !== skip && callResponder(fiber, capture, event) === true) return fiber;
+  }
+  for (const fiber of chain) {
+    if (fiber !== skip && callResponder(fiber, bubble, event) === true) return fiber;
+  }
+  return undefined;
+}
+
+function touchEvent(history: TouchHistory, x: number, y: number, at: number, target: Fiber, active: boolean): Record<string, unknown> {
+  const tag = nativeTagOf(target);
+  const touch = { identifier: 0, pageX: x, pageY: y, locationX: x, locationY: y, timestamp: at, target: tag };
+  return {
+    nativeEvent: { ...touch, touches: active ? [touch] : [], changedTouches: [touch] },
+    touchHistory: history,
+    target: tag,
+    currentTarget: tag,
+    timeStamp: at,
+    persist: () => undefined,
+    isPersistent: () => true,
+    preventDefault: () => undefined,
+    stopPropagation: () => undefined,
+    isDefaultPrevented: () => false,
+    isPropagationStopped: () => false,
+  };
+}
+
+function callProp(fiber: Fiber, name: string): unknown {
+  return isRecord(fiber.memoizedProps) ? fiber.memoizedProps[name] : undefined;
+}
+
+function isScrollHost(fiber: Fiber): boolean {
+  return typeof fiber.type === 'string' && /ScrollView|RCTScroll/.test(fiber.type);
+}
+
+/**
+ * `swipe`: a finger dragged from (x0, y0) to (x1, y1) over `seconds`, through React Native's own
+ * touch system: the views under the start point negotiate for it as they would for a finger
+ * (PanResponder, a sheet's swipe to close, a Pressable that gives way once the finger moves), and
+ * the winner gets the moves and the release with a real touch history. Gestures that
+ * react-native-gesture-handler or a native view handle (sliders, maps) don't go through it: they
+ * answer `no_action`, as does a start on a scroll view (`scroll` moves those).
+ */
+export async function swipe(
+  rawParams: unknown,
+): Promise<{ element: TaplineElement | null; from: { x: number; y: number }; to: { x: number; y: number } } & SettleOutcome> {
+  const params = paramsOf(rawParams);
+  const numbers = [params.x0, params.y0, params.x1, params.y1];
+  if (!numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+    throw badParams('swipe needs x0, y0, x1 and y1 in points');
+  }
+  const [x0, y0, x1, y1] = numbers as [number, number, number, number];
+  const seconds = typeof params.seconds === 'number' && params.seconds > 0 ? Math.min(params.seconds, 5) : SWIPE_DEFAULT_SECONDS;
+  const snapshot = takeSnapshot();
+  const screen = snapshot.screen;
+  if ([x0, x1].some((x) => x < 0 || x > screen.width) || [y0, y1].some((y) => y < 0 || y > screen.height)) {
+    throw badParams(`swipe points must be on the screen (0 to ${screen.width} across, 0 to ${screen.height} down)`);
+  }
+  assertNoBlockingAlert();
+
+  // What lies under the start point: the hit test, else the frontmost element whose frame holds it.
+  let start: Fiber | null | undefined = await hitTest(x0, y0);
+  if (!start) {
+    const frames = await Promise.all(snapshot.entries.map((entry) => measureFiber(entry.node.fiber)));
+    snapshot.entries.forEach((entry, i) => {
+      const frame = frames[i];
+      if (frame && frameContains(frame, x0, y0)) start = entry.node.fiber;
+    });
+  }
+  if (!start) throw notActionable('no_action', `Nothing at (${x0}, ${y0}) to swipe on.`);
+  const origin: Fiber = start;
+  const chain = hostChain(origin);
+
+  const begin = Date.now();
+  const record: TouchRecord = {
+    touchActive: true,
+    startPageX: x0,
+    startPageY: y0,
+    startTimeStamp: begin,
+    currentPageX: x0,
+    currentPageY: y0,
+    currentTimeStamp: begin,
+    previousPageX: x0,
+    previousPageY: y0,
+    previousTimeStamp: begin,
+  };
+  const history: TouchHistory = { touchBank: [record], numberActiveTouches: 1, indexOfSingleActiveTouch: 0, mostRecentTimeStamp: begin };
+  const advance = (x: number, y: number, at: number): void => {
+    record.previousPageX = record.currentPageX;
+    record.previousPageY = record.currentPageY;
+    record.previousTimeStamp = record.currentTimeStamp;
+    record.currentPageX = x;
+    record.currentPageY = y;
+    record.currentTimeStamp = at;
+    history.mostRecentTimeStamp = at;
+  };
+
+  // A native scroll view takes a drag along its axis on the native side, unless a view inside it claims
+  // the moves first (a swipeable row): then the swipe is the scroll view's, and `scroll` moves it.
+  const scrollHost = chain.find(isScrollHost);
+  const alongScroll = scrollHost !== undefined && (callProp(scrollHost, 'horizontal') === true ? Math.abs(x1 - x0) > Math.abs(y1 - y0) : Math.abs(y1 - y0) >= Math.abs(x1 - x0));
+  let claimedOnMove: Fiber | undefined;
+  let responder = negotiate(chain, 'onStartShouldSetResponderCapture', 'onStartShouldSetResponder', touchEvent(history, x0, y0, begin, origin, true));
+  if (responder) callResponder(responder, 'onResponderGrant', touchEvent(history, x0, y0, begin, origin, true));
+
+  const steps = Math.max(3, Math.min(120, Math.round((seconds * 1000) / SWIPE_STEP_MS)));
+  for (let i = 1; i <= steps; i += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, SWIPE_STEP_MS));
+    const x = x0 + ((x1 - x0) * i) / steps;
+    const y = y0 + ((y1 - y0) * i) / steps;
+    const at = Math.max(Date.now(), history.mostRecentTimeStamp + 1);
+    advance(x, y, at);
+    const event = touchEvent(history, x, y, at, origin, true);
+    // A view may take the touch over once the finger moves (a sheet's pan over a button inside it).
+    const taker = negotiate(responder ? hostChain(responder) : chain, 'onMoveShouldSetResponderCapture', 'onMoveShouldSetResponder', event, responder);
+    if (taker) {
+      const yields = responder === undefined || callResponder(responder, 'onResponderTerminationRequest', event) !== false;
+      if (yields) {
+        if (responder) callResponder(responder, 'onResponderTerminate', event);
+        responder = taker;
+        claimedOnMove = taker;
+        callResponder(responder, 'onResponderGrant', event);
+      } else {
+        callResponder(taker, 'onResponderReject', event);
+      }
+    }
+    if (responder) callResponder(responder, 'onResponderMove', event);
+  }
+  const end = Math.max(Date.now(), history.mostRecentTimeStamp + 1);
+  advance(x1, y1, end);
+  record.touchActive = false;
+  history.numberActiveTouches = 0;
+  const finalEvent = touchEvent(history, x1, y1, end, origin, false);
+  const scrollTakesIt =
+    alongScroll && scrollHost !== undefined && !(claimedOnMove !== undefined && claimedOnMove !== scrollHost && isWithin(claimedOnMove, scrollHost));
+  if (!responder || isScrollHost(responder) || scrollTakesIt) {
+    if (responder) callResponder(responder, 'onResponderTerminate', finalEvent);
+    const why = responder || scrollTakesIt
+      ? 'it starts on a scroll view, which moves natively: use scroll'
+      : "nothing there takes a swipe through React Native's touch system";
+    throw notActionable(
+      'no_action',
+      `Nothing took the swipe from (${x0}, ${y0}): ${why}. Gestures that react-native-gesture-handler or a native view handle (sliders, maps) can't be made from inside the app; Tapwright's swipe makes real ones.`,
+    );
+  }
+  callResponder(responder, 'onResponderRelease', finalEvent);
+
+  const owner = [...snapshot.entries].reverse().find((entry) => entry.info.interesting && isWithin(responder as Fiber, entry.node.fiber));
+  const element = owner ? (await elementFor(owner)).element : null;
+  return { element, from: { x: x0, y: y0 }, to: { x: x1, y: y1 }, ...(await settleOutcome()) };
+}

@@ -142,6 +142,15 @@ export const toolShapes = {
     screenshot: screenshotField,
   },
   back: { look: lookField, screenshot: screenshotField },
+  swipe: {
+    x0: z.number().describe("Where the finger starts, in points from the left"),
+    y0: z.number().describe("Where the finger starts, in points from the top"),
+    x1: z.number().describe("Where it lifts, in points from the left"),
+    y1: z.number().describe("Where it lifts, in points from the top"),
+    seconds: z.number().min(0.05).max(5).optional().describe("How long the drag takes (default 0.35)"),
+    look: lookField,
+    screenshot: screenshotField,
+  },
   app_command: {
     name: z.string().optional().describe("The command to run; omit to list the app's commands and what they take"),
     args: z.record(z.string(), z.unknown()).optional().describe("Arguments, as the command's description says"),
@@ -1575,6 +1584,22 @@ export class TaplineTools {
       (r) => {
         const ms = typeof r === "object" && r !== null && "waitedMs" in r ? (r as { waitedMs: unknown }).waitedMs : undefined;
         return typeof ms === "number" ? `Done after ${(Math.round(ms / 100) / 10).toFixed(1)} s.` : "Done.";
+      },
+      args.look,
+      args.screenshot,
+    );
+  }
+
+  /** A drag through React Native's touch system (AGENT-TOOLS 5.2): what a pan view or a swipe-to-close sheet handles. */
+  swipe(args: Shape<"swipe">): Promise<CallToolResult> {
+    const params: Record<string, unknown> = { x0: args.x0, y0: args.y0, x1: args.x1, y1: args.y1 };
+    if (args.seconds !== undefined) params["seconds"] = args.seconds;
+    return this.act(
+      "swipe",
+      params,
+      (r) => {
+        const on = this.elementName(r);
+        return `Swiped from (${args.x0}, ${args.y0}) to (${args.x1}, ${args.y1})${on === "element" ? "" : ` on ${on}`}.`;
       },
       args.look,
       args.screenshot,

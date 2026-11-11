@@ -72,5 +72,6 @@ export const EXTRA_TOOL_TEXT = {
   "logs": "Recent console output and JS errors from the app (last 500). `since` (epoch ms) returns only newer lines; each result ends with the latest timestamp to reuse.",
   "reload": "Reload the JavaScript bundle (development builds only), wait for the app to reconnect, and answer the screen. If it isn't back in time, it says so: `look` again shortly. Other builds answer `unsupported`.",
   "app_command": "Without `name`, lists the commands the app offers for testing (switch language, sign in as a test user, load sample data). With `name` and `args`, runs one and answers its result and what changed. Built in: `appearance` (`light`, `dark`, `system`).",
+  "swipe": "Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35). For sliders, carousels, swipe actions and edge gestures; for lists, use `scroll`.\nTapline: drives what React Native's touch system handles (a pan view, a sheet's swipe to close); a gesture that react-native-gesture-handler or a native view handles (sliders, maps) answers `no_action`, and its message says what can make it.",
   "pair": "Make a pairing link and QR code for the user's phone (valid 10 minutes, works once). The user scans it and taps Connect in the app. Needs the app's URL scheme. Show the user the QR code."
 } as const satisfies Record<string, string>;

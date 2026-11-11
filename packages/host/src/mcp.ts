@@ -88,6 +88,16 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "swipe",
+    {
+      title: "Swipe",
+      description: toolDescription("swipe"),
+      inputSchema: toolShapes.swipe,
+    },
+    (args) => tools.swipe(args),
+  );
+
+  server.registerTool(
     "long_press",
     {
       title: "Long press",
