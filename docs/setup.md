@@ -114,6 +114,29 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 Your own React Native or Expo app, in a development build or a TestFlight build, or an Expo
 app in Expo Go (see "In Expo Go" below).
 
+**The quick way: `init`.** In the app's folder:
+
+```sh
+npx tapline-host init
+```
+
+It does the steps below for you:
+
+- installs `react-native-tapline`, `expo-secure-store` and `react-native-view-shot`;
+- sets up the entry file with `register` and `startTapline` (for Expo Router, its own `index.js`);
+- adds `withTapline` to `metro.config.js`;
+- adds `app/+native-intent.ts` for Expo Router;
+- puts `EXPO_PUBLIC_TAPLINE_ENABLED=1` in `.env.local`.
+
+`--dry-run` shows what it would change and changes nothing. `--no-install` skips the package
+install. `--project <dir>` runs it for another folder. Where a file is too custom to edit,
+it tells you exactly what to add by hand. It warns you if a production build profile turns
+Tapline on. Run it a second time and it changes nothing. You still need a new build if a
+native package was added, and you still decide which profiles turn Tapline on (see "Turn it
+on only where you test" below).
+
+**By hand:** the rest of this step does the same work, one piece at a time.
+
 **Install the package:**
 
 ```sh
@@ -147,6 +170,11 @@ const { withTapline } = require('react-native-tapline/metro');
 
 module.exports = withTapline(getDefaultConfig(__dirname));
 ```
+
+`withTapline` does two things. It loads `register` before your app's code. It also lets Metro
+answer a development build that asks for a pairing offer (see "Pairing a development build
+without a QR code" below); that answer goes to the local network only. Without it, pairing a
+development build without a QR code does not work.
 
 Then call `startTapline` (below) anywhere that loads at startup, such as the top of
 `app/_layout.tsx`. Or, without the Metro helper, import it on the first line of the app's
@@ -289,12 +317,34 @@ the `scheme` in app.json). It shows a QR code, also saved as `~/.tapline/pair-<p
 Without an agent: `tapline pair --scheme <your scheme>` prints one in the terminal. With
 the phone on the same Wi-Fi, scan the code with the phone's camera and open the app. It asks **Connect for
 testing?** and names the computer: tap **Connect**. The code works once and expires after 10
-minutes.
+minutes. TestFlight and release builds always pair this way. A development build can also
+pair without a QR code, as the next section shows.
+
+### Pairing a development build without a QR code
+
+Call `pair` with no scheme (or run `tapline pair`). Tapline opens an offer for 10 minutes. It
+works once, and it is available on the local network only: never through Tailscale or the
+internet.
+
+A development build finds the offer by itself, when its JavaScript comes from this computer's
+Metro. It asks Metro first, then the host's own port (7210 to 7219). Then it asks **Connect
+for testing?** and names the computer: tap **Connect**.
+
+What it needs:
+
+- `withTapline` in `metro.config.js` (`init` adds it), and Metro running on this computer;
+- the phone and the computer on the same Wi-Fi;
+- the app open on the phone, within the 10 minutes.
+
+The Connect prompt is the person's consent. On a test phone that another agent also drives
+(for example Tapwright), that agent can accept the prompt. Use this only on test phones that
+you control, on your own Wi-Fi. If you want a person to scan, pair with the scheme and the QR
+code instead.
 
 **In Expo Go.** An Expo app also runs Tapline in Expo Go, with no build: install the package
 and the three Expo modules above (Expo Go carries them), set `EXPO_PUBLIC_TAPLINE_ENABLED=1` in
 `.env.local`, and start Metro (`npx expo start --go`). To pair, give `pair` the address Expo
-prints instead of a scheme: `tapline pair --scheme exp://192.168.1.20:8081`, or ask your agent
+prints instead of a scheme: `tapline pair --scheme exp://<computer's address>:8081`, or ask your agent
 to pair with that address. Scanning the code opens the app in Expo Go and pairs in one step.
 Expo Go has no room for Tapline's native module, so the live view runs at about 6 frames a
 second instead of 15, and iOS's own alerts and the share sheet aren't seen from inside the app.
@@ -332,6 +382,8 @@ your Wi-Fi.
 | the app disconnects when you switch apps or lock the phone | expected: iOS pauses apps in the background; it reconnects when you open it again |
 | the agent gets `not_connected` or `in_background` | the app isn't open in front: open it on the phone (on the same Wi-Fi); `apps` should list it |
 | scanning the code doesn't open the app | the scheme passed to `pair` must be the app's `scheme`; the build must have Tapline turned on |
+| the app doesn't ask to connect (pairing without a QR code) | the offer from `pair` lasts only 10 minutes and works once: call `pair` again. Check that `metro.config.js` uses `withTapline`, that the phone and the computer are on the same Wi-Fi, and that the app loads its code from Metro on this computer, not through a tunnel. TestFlight and release builds need the QR code (`pair` with the scheme) |
+| `not_allowed: needs_confirmation` | the touch is on an element with a policy word (Buy, Delete, Send …). Open the live view and choose Allow once, then repeat the same call within 120 seconds. On a test phone with test data, run the MCP server with `--no-policy` |
 | the app opens a "not found" screen | Expo Router: add `app/+native-intent.ts` (step 3) |
 | "pairing code has expired or was already used" | ask for a new code; each one works once, for 10 minutes |
 | the app never connects | the phone and the computer are on the same Wi-Fi (some guest or office networks block devices from each other); the host (or the agent) is running; Windows: the firewall rule above |
@@ -350,6 +402,6 @@ your Wi-Fi.
 ## Undo
 
 Open the forget link on each phone, remove the `register` and `startTapline` lines (and
-your custom `index.js` and `+native-intent.ts`), uninstall `react-native-tapline`, remove
+your custom `index.js` and `+native-intent.ts`, and `withTapline` in `metro.config.js`), uninstall `react-native-tapline`, remove
 `EXPO_PUBLIC_TAPLINE_ENABLED`, delete `~/.tapline` on the computer, the firewall rule if
 you added one, and the Tailscale Serve entry for Metro (`tailscale serve --https=8443 off`).

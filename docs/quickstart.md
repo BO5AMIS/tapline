@@ -37,8 +37,11 @@ tapline skill install              # the skill that teaches agents to test with 
 
 ## On the phone
 
-Everything here is in your app's code, except the QR code at the end. See
+Everything here is in your app's code, except one tap on the phone at the end. See
 [setup.md](setup.md#3-the-app) for each step in full.
+
+**In one command:** run `npx tapline-host init` in your app's folder. It does steps 1 to 5 below
+(`--dry-run` shows the changes first), then go on with step 6. By hand:
 
 1. Install the SDK in your app: `npx expo install react-native-tapline expo-secure-store`
    (the second remembers the pairing), and optionally `react-native-view-shot` (screenshots)
@@ -61,10 +64,12 @@ Everything here is in your app's code, except the QR code at the end. See
    Tapline does nothing at all.
 6. **Make one new build.** The new native modules need it, and so does the switch. Its
    time is your build system's (EAS, Xcode), not Tapline's. Install it on the phone.
-7. Ask your agent to pair your phone. It shows a QR code. With the phone on the same Wi-Fi, scan it with
-   the phone's camera and open the app. It asks **Connect for testing?** and names your
-   computer: tap **Connect**. The code works once and expires after 10 minutes. From then
-   on the app reconnects by itself whenever it's open.
+7. Ask your agent to pair your phone. **A development build** that loads its code from this computer
+   (Metro, with `withTapline` in metro.config.js, which `init` adds) asks by itself within a few
+   seconds: open the app and tap **Connect**. **Other builds:** the agent shows a QR code. With the phone
+   on the same Wi-Fi, scan it with the phone's camera and open the app. It asks **Connect for testing?**
+   and names your computer: tap **Connect**. Either way the offer works once and expires after 10
+   minutes. From then on the app reconnects by itself whenever it's open.
 
 ## First test
 

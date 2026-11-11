@@ -3,11 +3,13 @@
 **Let AI agents see and drive your own React Native app on a test phone.**
 
 Tapline puts a small agent inside the development and TestFlight builds of your
-React Native / Expo app. You pair your phone with your computer by scanning a QR code;
-from then on the app connects to your computer over the same Wi-Fi,
-and an agent (Claude, Codex, anything that speaks MCP) uses it to read the screen as
-named elements, tap, type, scroll, toggle, open deep links, read the app's logs and
-take screenshots. The phone stays next to the computer, on the same Wi-Fi (or the
+React Native / Expo app. You pair your phone with your computer (a QR code, or in a
+development build a single tap on Connect); from then on the app connects to your computer
+over the same Wi-Fi, and an agent (Claude, Codex, anything that speaks MCP) uses it to read
+the screen as named elements, tap, type, scroll, toggle, open deep links, read the app's
+logs and take screenshots. It can also tell you which file and line of your code drew any
+element on the screen (`inspect`), check the screen for accessibility problems (`audit`),
+and ask a person before it touches anything like Buy or Delete. The phone stays next to the computer, on the same Wi-Fi (or the
 computer is on a cable to the same router). Nothing is plugged in, and no Mac is needed.
 A phone away from your Wi-Fi can connect over [Tailscale](https://tailscale.com); that
 is optional and not part of the tested v1 setup.
@@ -52,10 +54,9 @@ outside** (any app, system alerts) through Apple's UI automation (`pip install t
 
 ## Quick start
 
-`npm install -g tapline-host` on the computer (the `tapline` command), and
-`npx expo install react-native-tapline` in your app. Start with the
-[quickstart](docs/quickstart.md); [docs/setup.md](docs/setup.md) has the detail, including
-building from a clone.
+`npm install -g tapline-host` on the computer (the `tapline` command), then `npx tapline-host init`
+in your app's folder. Start with the [quickstart](docs/quickstart.md);
+[docs/setup.md](docs/setup.md) has the detail, including building from a clone.
 
 **The computer:**
 
@@ -76,22 +77,25 @@ for one project instead. It tells an agent how to set Tapline up, how to read it
 how to test well and report, and the mistakes agents new to it make. Ask for it by name:
 `/tapline` in Claude Code, `$tapline` in Codex.
 
-**The app**, first lines of its entry file:
+**The app**, in its folder:
 
-```js
-import 'react-native-tapline/register';      // before anything imports React
-import { startTapline } from 'react-native-tapline';
-
-startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
+```sh
+npx tapline-host init
 ```
 
-Set `EXPO_PUBLIC_TAPLINE_ENABLED=1` only in the build profiles you test with, never in your
-App Store build. Expo Router apps also add a three-line `app/+native-intent.ts`
-([setup](docs/setup.md#3-the-app)).
+It installs the packages and sets up the entry file (`register` and `startTapline`; for Expo
+Router its own `index.js`), `metro.config.js` with `withTapline`, Expo Router's
+`app/+native-intent.ts` and `.env.local`. `--dry-run` shows what it would change. It warns if
+your production profile turns Tapline on; run it again and nothing changes. To do it by hand,
+see [setup](docs/setup.md#3-the-app). Set `EXPO_PUBLIC_TAPLINE_ENABLED=1` only in the build
+profiles you test with, never in your App Store build.
 
-**Pair:** ask your agent to pair your phone. It shows a QR code; scan it with the phone's
-camera, tap **Connect** in the app, and you're done. The app remembers your computer and
-reconnects whenever it's open (within about 2 seconds after your agent's server starts).
+**Pair:** ask your agent to pair your phone. In a development build whose code comes from
+this computer's Metro, no scan is needed: open the app and tap **Connect** when it asks
+"Connect for testing?" (the offer lasts 10 minutes and works once, on the local network
+only). In a TestFlight or release build, the agent shows a QR code: scan it with the phone's
+camera and tap **Connect**. The app remembers your computer and reconnects whenever it's
+open (within about 2 seconds after your agent's server starts).
 Then ask, for example: *"Sign up in MyApp with a test email
 and tell me if anything looks broken."* [AGENTS.md](AGENTS.md) is the agent's guide; point
 your agent at it.
@@ -100,7 +104,10 @@ your agent at it.
 
 | Tool | What it does |
 |---|---|
-| `pair` | a QR code and link that pair a phone with this computer |
+| `pair` | pairs a phone with this computer: a QR code and link (with the app's scheme), or with no scheme an offer a development build finds by itself |
+| `inspect` | for an element on screen: the components that draw it, and the file and line of your code that wrote it (development builds) |
+| `audit` | accessibility check of the screen: contrast, tap areas, labels, cut-off text, roles, overlaps, shared ids; each issue with its fix and, in development builds, `at <file>:<line>` |
+| `run` | several steps in one call, each with an optional `expect`; stops at the first step that fails; `trace: true` lists each step |
 | `apps`, `open_app` | connected apps; `open_app` picks one by session id, app id or name when several are connected |
 | `look` | the screen as elements (role, text, id, position, actions), the app and the current route, with a screenshot (`screenshot: false` skips it; with `--screenshots file` a file path instead; `labels` draws each element's box and ref on it) |
 | `check_layout` | automatic visual checks without a screenshot: small tap areas, cut-off edges, overlaps, low contrast, unnamed buttons, truncated text |
@@ -110,7 +117,7 @@ your agent at it.
 | `wait_for` | wait until something appears or is gone, or the network is quiet |
 | `compare_screen` | compare the screen with a saved reference picture: what changed, where, marked in red |
 | `filmstrip` | several frames in one image, for animations and loading states |
-| `record`, `replay` | save a test run as a script and replay it later, without an AI (also `tapline replay`) |
+| `record`, `replay` | save a test run as a script (shared format, version 1) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml]` (exit 0 all held, 1 a step stopped, 2 couldn't start) |
 | `viewer` | a link to watch the app live in a browser, with what the agent does marked on it; you can tap, scroll and type there too |
 | `tap`, `long_press` | by `id` (the `testID` prop), label, visible text, ref from the last look, or x/y (`long_press` takes `seconds`, which Tapline ignores) |
 | `type_text` | into an input; replace or append; optionally submit; refused where a person couldn't type |
@@ -120,6 +127,10 @@ your agent at it.
 | `logs` | the app's console output and JavaScript errors |
 | `reload` | reload the JavaScript bundle (development builds) |
 | `wait` | let something load, then look |
+
+Every touch tool also takes `dry_run: true`: every check runs and nothing is touched, and the
+answer says what it would do and whether a person's OK is needed. Password fields never show their
+value, only one • per character.
 
 Every action returns what changed on screen (or the whole list when the screen changed),
 as text, so each step is one call. A change to something scrolled out of view is shown too,
@@ -205,6 +216,18 @@ order, pair again (or give each agent a fixed `--port`).
   Tapline does nothing at all, not even listen for pairing links.
 - The agent inside your app can do whatever your app's UI can do. Turn it on only in
   builds you test with.
+- **A person's OK for risky touches.** A touch on an element whose label or text has Buy,
+  Purchase, Subscribe, Pay, Delete, Remove, Send, Post, Publish, Sign out, Log out or Erase
+  answers `not_allowed: needs_confirmation`. The live view asks you (Allow once / Don't allow);
+  one allow lets the same call on the same element through once, within 120 seconds.
+  `tapline mcp --policy FILE` sets your own words to confirm or to block; `--no-policy` turns
+  it off, for a test phone with test data.
+- **Action log.** Every action, by the agent or a person, is one JSON line in
+  `~/.tapline/log/`. Typed text is logged only as its length. Files are kept for 14 days;
+  `--no-log` turns it off.
+- **Pairing without a QR code** is for your own test phone on your own Wi-Fi. The Connect
+  prompt is your consent. A tool that makes real touches on the same phone (Tapwright) could
+  accept it, so keep this to phones that only you drive.
 - To unpair one phone, open `<your-scheme>://tapline/forget` on it (deleting the app doesn't: iOS
   keeps the pairing in the keychain). To unpair every phone,
   delete `~/.tapline/token`; phones then need a new pairing code.
@@ -280,6 +303,7 @@ order, pair again (or give each agent a fixed `--port`).
 ```
 packages/host           tapline-host: WebSocket server, MCP server, CLI (Node 20+)
 packages/react-native   react-native-tapline: the in-app agent (TypeScript, no native code)
+CHANGELOG.md            what changed in each release
 docs/quickstart.md      the short way to start
 docs/setup.md           step-by-step setup
 docs/PROTOCOL.md        the wire protocol

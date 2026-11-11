@@ -34,6 +34,14 @@ commit or a file.
 
 ## Steps in the user's app
 
+**Start with `init`.** In the app's folder run `npx tapline-host init`. It installs the three
+packages and sets up the entry file (`register` and `startTapline`; for Expo Router its own
+`index.js`), `metro.config.js` with `withTapline`, `app/+native-intent.ts` for Expo Router and
+`.env.local`. `--dry-run` shows the changes without making them, `--no-install` skips the
+install, `--project <dir>` picks the folder. Where a file is too custom, it gives exact advice:
+follow it. It warns if the production profile turns Tapline on: fix that. A second run changes
+nothing. Do the numbered steps below by hand only for what `init` could not do.
+
 1. Install the SDK: `npx expo install react-native-tapline expo-secure-store
    react-native-view-shot` (the second remembers the pairing; the third takes screenshots).
 2. Make `import 'react-native-tapline/register';` the first line of the app's entry file.
@@ -58,11 +66,20 @@ commit or a file.
 
 ## Pair the phone, and prove the chain
 
-1. Call `pair` with the app's URL scheme (`scheme` in app.json). Show the user the QR code
+1. A development build whose JavaScript comes from this computer's Metro: call `pair` with no
+   scheme. It opens an offer for 10 minutes (one use, local network only). The app finds it by
+   itself through Metro (needs `withTapline` in `metro.config.js`) or the host's port, and asks
+   "Connect for testing?". The user taps Connect. No QR code is needed.
+2. A TestFlight or release build, or when step 1 does not work: call `pair` with the app's URL
+   scheme (`scheme` in app.json). Show the user the QR code
    (it is also saved as a picture; the answer gives the path). They scan it with the phone
    on the same Wi-Fi and tap Connect in the app. When they are using the phone itself, give them the link
    to tap.
-2. `apps` should now list the app, and `look` should show its screen.
+3. `apps` should now list the app, and `look` should show its screen.
+
+The Connect prompt is the person's consent. On a test phone that another agent (Tapwright)
+also drives, that agent can accept it, so use pairing without a QR code only on the user's own
+test phones and Wi-Fi.
 
 A paired phone connects by itself when the app is opened. `<scheme>://tapline/forget` on the
 phone unpairs it; deleting and reinstalling the app (or Expo Go) doesn't, because iOS keeps the
@@ -90,6 +107,9 @@ tapline mcp
   small model).
 - `--viewer remote` also opens the live view to your own devices on Tailscale;
   `--viewer off` turns it off.
+- `--policy FILE` sets the words that need a person's OK or are blocked (JSON, per app);
+  `--no-policy` turns the policy off, only for a test phone with test data. `--no-log` turns
+  off the action log in `~/.tapline/log/`.
 
 **Claude Code**
 
@@ -134,6 +154,8 @@ Run `tapline doctor` first.
 | `apps` lists nothing, phone was paired | the user opens the app with the phone on the same Wi-Fi; it connects within a few seconds |
 | the phone can't connect, on Windows | the firewall: `tapline doctor` names the rule for ports 7210 to 7219 (it allows the local subnet and Tailscale) |
 | the phone can't connect, on any computer | the phone and the computer are on different networks, or the Wi-Fi blocks devices from each other (guest networks do) |
+| the app doesn't ask to connect after `pair` with no scheme | the offer lasts 10 minutes: call `pair` again. `metro.config.js` needs `withTapline`; same Wi-Fi; the code must load from this computer's Metro, not a tunnel. TestFlight and release builds need the QR code |
+| `not_allowed: needs_confirmation` | a policy word (Buy, Delete, Send …) is on the element: the user allows it in the live view (`viewer`), then repeat the call within 120 s. Use `--no-policy` only on a test phone, with the user's OK |
 | the list is empty, "No React roots recorded" | the `register` import isn't the first line of the entry file |
 | a pairing link opens a "not found" screen | Expo Router: `app/+native-intent.ts` is missing |
 | every call answers `in_background` | the app isn't in front: the user opens it again |
