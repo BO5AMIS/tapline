@@ -141,7 +141,7 @@ describe("press", () => {
     const { tools: tools2 } = await setup((req) =>
       req.method === "press" ? { ok: true, result: { element: TREE.elements[0], settledMs: 120 } } : defaultHandler(req),
     )();
-    expect(textOf(await tools2.tap({ target: { id: "login-button" }, look: false }))).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+    expect(textOf(await tools2.tap({ target: { id: "login-button" }, look: false }))).toBe('Tapped e3 button "Log in" id=login-button.');
   });
 
   it("an action answer reads like AGENT-TOOLS §3.1", async () => {
@@ -161,7 +161,7 @@ describe("press", () => {
     expect(lines.at(-1)).toBe("Settled in 0.31 s.");
     expect(text).not.toContain("\n\n");
     expect(textOf(await tools.tap({ target: { id: "login-button" }, look: false })).split("\n")).toHaveLength(1);
-    expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+    expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button.');
     expect(lines[1]).toBe("Same screen. Changes:");
     expect(text).not.toContain("Unchanged elements keep their refs");
   });
@@ -171,7 +171,7 @@ describe("press", () => {
     const result = await tools.tap({ target: { id: "login-button" } });
     expect(result.isError).toBeUndefined();
     const text = textOf(result);
-    expect(text).toContain('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+    expect(text).toContain('Tapped e3 button "Log in" id=login-button.');
     expect(text).toContain('e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]');
     expect(result.content.every((block) => block.type === "text")).toBe(true);
     expect(app.requests.map((r) => r.method)).toEqual(["press", "tree"]);
@@ -205,7 +205,7 @@ describe("press", () => {
   it("skips the look when look is false", async () => {
     const { app, tools } = await setup(defaultHandler)();
     const result = await tools.tap({ target: { ref: "e3" }, look: false });
-    expect(textOf(result)).toBe('Tapped e3 button "Log in" id=login-button @24,610 354x48.');
+    expect(textOf(result)).toBe('Tapped e3 button "Log in" id=login-button.');
     expect(app.requests.map((r) => r.method)).toEqual(["press"]);
   });
 
@@ -240,8 +240,8 @@ describe("press", () => {
     expect(result.isError).toBe(true);
     const text = textOf(result);
     expect(text).toContain("Error ambiguous");
-    expect(text).toContain('e5 button "Delete" @0,100 80x40 [tap]');
-    expect(text).toContain('e9 button "Delete" @0,300 80x40 [tap]');
+    expect(text).toContain('e5 button "Delete" @0,100 80x40');
+    expect(text).toContain('e9 button "Delete" @0,300 80x40');
     expect(text).toContain("index");
   });
 
@@ -262,7 +262,7 @@ describe("press", () => {
     const lines = text.split("\n");
     const at = lines.indexOf("Candidates:");
     expect(at).toBeGreaterThan(0);
-    expect(lines.slice(at + 1, at + 3)).toEqual(['  e32 text "Nutrition" @76,733 273x23', '  e57 tab "Nutrition" [tap]']);
+    expect(lines.slice(at + 1, at + 3)).toEqual(['  e32 text "Nutrition" @76,733 273x23', '  e57 tab "Nutrition"']);
     expect(lines[at + 3]).toBe('Retry with one of the refs, or add "index" (0-based).');
   });
 
@@ -885,7 +885,7 @@ describe("changes after actions", () => {
     expect(text).toContain("Same screen. Changes:");
     expect(text).toContain('+ e5 text "Free delivery"');
     expect(text).toContain('- button "Use coupon"');
-    expect(text).toContain('~ e2 text "$8" @0,40 200x30 (was "$10")');
+    expect(text).toContain('~ e2 text "$8" (was "$10")');
     expect(text).toContain('↕ e4 button "Pay" @0,650 200x48');
     expect(text).not.toContain('e1 text "Basket"');
     expect(text).not.toContain("call look for the full list");

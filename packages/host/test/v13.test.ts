@@ -61,7 +61,7 @@ describe("ambiguous wording (AGENT-TOOLS §4)", () => {
         'Error ambiguous: 2 elements match text "Nutrition".',
         "Candidates:",
         '  e32 text "Nutrition" @76,730 263x23',
-        '  e46 tab "Nutrition" [tap]',
+        '  e46 tab "Nutrition"',
         'Retry with one of the refs, or add "index" (0-based).',
       ].join("\n"),
     );

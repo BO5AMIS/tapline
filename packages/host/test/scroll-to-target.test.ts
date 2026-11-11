@@ -47,7 +47,7 @@ describe('scroll with to: "target"', () => {
     const { app, tools } = await setup({ element: LIST, target: RESET, offset: { x: 0, y: 1070 }, moved: true, reached: true });
     const lines = textOf(await tools.scroll({ to: "target", target: { id: "lab-reset" } })).split("\n");
     expect(lines[0]).toBe(
-      'Scrolled e1 scroll id=lab-scroll @0,0 430x932 to e20 button "Reset" id=lab-reset @16,103 398x48. Offset now {"x":0,"y":1070}.',
+      'Scrolled e1 scroll id=lab-scroll to e20 button "Reset" id=lab-reset. Offset now {"x":0,"y":1070}.',
     );
     expect(lines.some((line) => line.startsWith("Note: the scroll view"))).toBe(false);
     const sent = app.requests.find((r) => r.method === "scroll");
@@ -57,7 +57,7 @@ describe('scroll with to: "target"', () => {
   it("an element that is clear already: the first line says so, and the list follows as after any action", async () => {
     const { tools } = await setup({ element: RESET, target: RESET, offset: { x: 0, y: 0 }, moved: false, reached: true, unchanged: true });
     const lines = textOf(await tools.scroll({ to: "target", target: { id: "lab-reset" } })).split("\n");
-    expect(lines[0]).toBe('e20 button "Reset" id=lab-reset @16,103 398x48 is already on screen.');
+    expect(lines[0]).toBe('e20 button "Reset" id=lab-reset is already on screen.');
     expect(lines[1]).toBe("Screen 430x932 pt @3x · 2 elements");
     expect(lines.some((line) => line.startsWith("Note:"))).toBe(false);
   });
@@ -65,7 +65,7 @@ describe('scroll with to: "target"', () => {
   it("says when the scroll view can't bring it clear", async () => {
     const { tools } = await setup({ element: LIST, target: RESET, offset: { x: 0, y: 0 }, moved: false, reached: false });
     const lines = textOf(await tools.scroll({ to: "target", target: { id: "lab-reset" } })).split("\n");
-    expect(lines[0]).toBe('Scrolled e1 scroll id=lab-scroll @0,0 430x932 toward e20 button "Reset" id=lab-reset @16,103 398x48. Offset now {"x":0,"y":0}.');
+    expect(lines[0]).toBe('Scrolled e1 scroll id=lab-scroll toward e20 button "Reset" id=lab-reset. Offset now {"x":0,"y":0}.');
     expect(lines.at(-1)).toBe("Note: it doesn't scroll further: the target is as far into view as it gets.");
     expect(lines.some((line) => line.includes("already at the"))).toBe(false);
   });
@@ -80,7 +80,7 @@ describe('scroll with to: "target"', () => {
   it("start and end read as before", async () => {
     const { tools } = await setup({ element: LIST, offset: { x: 0, y: 0 }, moved: true });
     expect(textOf(await tools.scroll({ to: "start" })).split("\n")[0]).toBe(
-      'Scrolled e1 scroll id=lab-scroll @0,0 430x932 to start. Offset now {"x":0,"y":0}.',
+      'Scrolled e1 scroll id=lab-scroll to start. Offset now {"x":0,"y":0}.',
     );
   });
 });

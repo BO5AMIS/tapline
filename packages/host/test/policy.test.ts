@@ -160,7 +160,7 @@ describe("guarded touches (§11.2)", () => {
     confirmations.answer(asked.id, true);
     const allowed = await tools.tap({ target: { id: "delete-trip" }, look: false });
     expect(allowed.isError).not.toBe(true);
-    expect(textOf(allowed)).toBe(`Tapped e12 button "Delete trip" id=delete-trip @115,620 200x40.\nNote: a person allowed this.`);
+    expect(textOf(allowed)).toBe(`Tapped e12 button "Delete trip" id=delete-trip.\nNote: a person allowed this.`);
     expect(app.requests.filter((r) => r.method === "press")).toHaveLength(1);
     // one use
     const third = await tools.tap({ target: { id: "delete-trip" }, look: false });
@@ -189,7 +189,7 @@ describe("guarded touches (§11.2)", () => {
   it("lets ordinary buttons straight through, after one dry run", async () => {
     const { app, tools } = await setup();
     const saved = await tools.tap({ target: { id: "save" }, look: false });
-    expect(textOf(saved)).toBe(`Tapped e3 button "Save" id=save @24,610 354x48.`);
+    expect(textOf(saved)).toBe(`Tapped e3 button "Save" id=save.`);
     expect(app.dryRuns).toHaveLength(1);
     expect(app.requests.filter((r) => r.method === "press")).toHaveLength(1);
   });

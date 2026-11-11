@@ -34,7 +34,7 @@ describe("swipe", () => {
   it("sends the points and seconds, and names what took the drag", async () => {
     const { tools, app } = await setup(() => ({ ok: true, result: { element: SHEET, from: { x: 215, y: 720 }, to: { x: 215, y: 900 }, settledMs: 120 } }));
     const answer = textOf(await tools.swipe({ x0: 215, y0: 720, x1: 215, y1: 900, seconds: 0.3, look: false }));
-    expect(answer.split("\n")[0]).toBe('Swiped from (215, 720) to (215, 900) on e5 other "Backdrop sheet" id=lab-sheet2 @0,690 430x242.');
+    expect(answer.split("\n")[0]).toBe('Swiped from (215, 720) to (215, 900) on e5 other "Backdrop sheet" id=lab-sheet2.');
     expect(app.requests.find((r) => r.method === "swipe")?.params).toEqual({ x0: 215, y0: 720, x1: 215, y1: 900, seconds: 0.3 });
   });
 

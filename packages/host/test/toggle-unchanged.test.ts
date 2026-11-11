@@ -49,7 +49,7 @@ describe("toggle to the value the switch already has", () => {
         : { ok: true, result: TREE },
     );
     const answer = textOf(await tools.toggle({ target: { id: "lab-switch" }, value: true }));
-    expect(answer).toBe('e16 switch "Switch" id=lab-switch checked=true @351,629 63x28 is already true.');
+    expect(answer).toBe('e16 switch "Switch" id=lab-switch checked=true is already true.');
     expect(app.requests.filter((r) => r.method === "tree")).toHaveLength(0);
   });
 
@@ -61,7 +61,7 @@ describe("toggle to the value the switch already has", () => {
         : { ok: true, result: TREE },
     );
     const answer = textOf(await tools.toggle({ target: { id: "lab-switch" }, value: false }));
-    expect(answer).toBe('e16 switch "Switch" id=lab-switch checked=false @351,629 63x28 is already false.');
+    expect(answer).toBe('e16 switch "Switch" id=lab-switch checked=false is already false.');
   });
 
   it("a real toggle still answers `Toggled … to …` with what changed", async () => {
@@ -69,7 +69,7 @@ describe("toggle to the value the switch already has", () => {
       req.method === "toggle" ? { ok: true, result: { element: SWITCH, value: true, settledMs: 120 } } : { ok: true, result: TREE },
     );
     const lines = textOf(await tools.toggle({ target: { id: "lab-switch" }, value: true })).split("\n");
-    expect(lines[0]).toBe('Toggled e16 switch "Switch" id=lab-switch checked=true @351,629 63x28 to true.');
+    expect(lines[0]).toBe('Toggled e16 switch "Switch" id=lab-switch checked=true to true.');
     expect(lines).toContain("Settled in 0.12 s.");
   });
 });

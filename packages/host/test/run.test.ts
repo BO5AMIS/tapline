@@ -129,7 +129,7 @@ describe("run", () => {
   it("trace lists each step that ran", async () => {
     const { tools } = await setup(handler);
     const answer = await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }], trace: true });
-    expect(textOf(answer)).toMatch(/\n {2}1\. Tapped e3 button "Save" id=save @24,610 354x48\. \(\d+\.\d s\)/);
+    expect(textOf(answer)).toMatch(/\n {2}1\. Tapped e3 button "Save" id=save\. \(\d+\.\d s\)/);
   });
 });
 

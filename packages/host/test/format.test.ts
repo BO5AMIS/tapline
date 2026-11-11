@@ -58,7 +58,7 @@ describe("formatElement", () => {
     expect(formatElement(tree.elements[1]!)).toBe(
       'e2 input "Email" id=email value="me@example.com" @24,200 354x44 [type]',
     );
-    expect(formatElement(tree.elements[3]!)).toBe('e4 switch "Remember me" disabled checked=true @330,301 51x31 [toggle]');
+    expect(formatElement(tree.elements[3]!)).toBe('e4 switch "Remember me" disabled checked=true @330,301 51x31');
   });
 
   it("flattens whitespace and shows up to 200 characters whole", () => {
@@ -90,7 +90,7 @@ describe("changes off screen (AGENT-TOOLS v1.6)", () => {
   it("lists them without a ref, marked off screen, with the old value", () => {
     const block = formatChanges({ ...tree, changes: { ...base, offScreen: [{ element: STATE, was: { text: "taps=1 row=-" } }] } });
     expect(block).toBe(
-      ['Same screen. Changes:', '~ text "taps=1 row=30" id=lab-state @16,-900 398x68 (off screen; was "taps=1 row=-")'].join("\n"),
+      ['Same screen. Changes:', '~ text "taps=1 row=30" id=lab-state (off screen; was "taps=1 row=-")'].join("\n"),
     );
   });
 
@@ -105,7 +105,7 @@ describe("changes off screen (AGENT-TOOLS v1.6)", () => {
   it("several fields are named, as on screen", () => {
     const sw = { ref: "", type: "Switch", role: "switch", label: "Notify", checked: true, disabled: false, frame: { x: 16, y: 1200, width: 60, height: 32 } };
     const block = formatChanges({ ...tree, changes: { ...base, offScreen: [{ element: sw, was: { checked: false, disabled: true } }] } });
-    expect(block?.split("\n")[1]).toBe('~ switch "Notify" checked=true @16,1200 60x32 (off screen; was checked=false, disabled=true)');
+    expect(block?.split("\n")[1]).toBe('~ switch "Notify" checked=true (off screen; was checked=false, disabled=true)');
   });
 
   it("with nothing on screen or off it: No visible change.", () => {
@@ -128,7 +128,7 @@ describe("off-screen changes after a full list", () => {
   it("gives the same lines when most of the same screen changed", () => {
     expect(formatOffScreenAfterList({ ...tree, changes })).toEqual([
       "Changes off screen:",
-      '~ text "row=5" id=lab-state @16,-900 398x68 (off screen; was "row=-")',
+      '~ text "row=5" id=lab-state (off screen; was "row=-")',
       "~ 1 more changed off screen",
     ]);
   });
@@ -223,8 +223,8 @@ describe("element lines (AGENT-TOOLS §3.3)", () => {
 
   it("lists type without submit, and scroll and toggle as they are", () => {
     expect(formatElement({ ...base, role: "textfield", actions: ["type", "submit"] })).toMatch(/\[type\]$/);
-    expect(formatElement({ ...base, role: "switch", actions: ["toggle"] })).toMatch(/\[toggle\]$/);
-    expect(formatElement({ ...base, role: "scrollview", actions: ["scroll"] })).toMatch(/\[scroll\]$/);
+    expect(formatElement({ ...base, role: "button", actions: ["toggle"] })).toMatch(/\[toggle\]$/);
+    expect(formatElement({ ...base, role: "button", actions: ["scroll"] })).toMatch(/\[scroll\]$/);
   });
 
   it("leaves the action list out when only submit is offered", () => {
@@ -378,7 +378,7 @@ describe("formatTree", () => {
   it("shows a native tab without a position", () => {
     expect(
       formatElement({ ref: "e9", type: "Tab", role: "tab", text: "Nutrition", frame: null, actions: ["press"], selected: false }),
-    ).toBe('e9 tab "Nutrition" [tap]');
+    ).toBe('e9 tab "Nutrition"');
   });
 });
 
@@ -421,16 +421,16 @@ describe("formatChanges (AGENT-TOOLS §3.1)", () => {
 
   it("shows an empty input's placeholder instead of a value, and a typed value as once a placeholder (AGENT-TOOLS v1.7)", () => {
     const empty = { ref: "e3", type: "TextInput", role: "textfield", label: "Name", text: "", value: "", placeholder: "Alex Morgan", testID: "name", actions: ["press", "type"], frame: null };
-    expect(formatElement(empty)).toBe('e3 input "Name" id=name placeholder="Alex Morgan" [tap, type]');
+    expect(formatElement(empty)).toBe('e3 input "Name" id=name placeholder="Alex Morgan"');
     // a value and a placeholder are never both shown
     expect(formatElement({ ...empty, value: "Sam", placeholder: "Alex Morgan" })).not.toContain("placeholder=");
     const t = withChanges(3, { ...none, changed: [{ ref: "e3", was: { value: "", placeholder: "Alex Morgan" } }] });
     t.elements[2] = { ...empty, value: "abc", placeholder: undefined };
-    expect(formatChanges(t)).toBe('Same screen. Changes:\n~ e3 input "Name" id=name value="abc" [tap, type] (was placeholder "Alex Morgan")');
+    expect(formatChanges(t)).toBe('Same screen. Changes:\n~ e3 input "Name" id=name value="abc" (was placeholder "Alex Morgan")');
     // cleared again: the old value is what it was; the placeholder coming back isn't news
     const cleared = withChanges(3, { ...none, changed: [{ ref: "e3", was: { value: "abc" } }] });
     cleared.elements[2] = empty;
-    expect(formatChanges(cleared)).toContain('placeholder="Alex Morgan" [tap, type] (was "abc")');
+    expect(formatChanges(cleared)).toContain('placeholder="Alex Morgan" (was "abc")');
   });
 
   it("shows several changed fields as key=value pairs", () => {
@@ -484,5 +484,25 @@ describe("formatLogs", () => {
   });
   it("handles an empty list", () => {
     expect(formatLogs([])).toBe("(no log lines)");
+  });
+});
+
+describe("shorter answers (AGENT-TOOLS 1.8 §13)", () => {
+  it("leaves out the actions a role implies and keeps any other set", async () => {
+    const { formatElement } = await import("../src/format.js");
+    expect(formatElement({ ref: "e4", role: "button", text: "Save", actions: ["press"] })).toBe('e4 button "Save"');
+    expect(formatElement({ ref: "e5", role: "textfield", label: "Email", actions: ["press", "type"] })).toBe('e5 input "Email"');
+    expect(formatElement({ ref: "e6", type: "Switch", label: "Wi-Fi", checked: false, actions: ["toggle"] })).toBe('e6 switch "Wi-Fi" checked=false');
+    expect(formatElement({ ref: "e7", role: "button", text: "Save", actions: ["press", "longPress"] })).toBe('e7 button "Save" [tap, longPress]');
+    expect(formatElement({ ref: "e9", role: "text", text: "Help", actions: ["press"] })).toBe('e9 text "Help" [tap]');
+  });
+
+  it("cuts a long old value to what changed, with 12 characters each side; 40 or less stays whole", async () => {
+    const { shortWas } = await import("../src/format.js");
+    const old = "pressed=- typed= typed2= switch=off taps=2 long=0 slow=0 anim=off sheet=closed alert=none";
+    expect(shortWas(old, old.replace("typed= ", "typed=hello "))).toBe("…sed=- typed= typed2= swi…");
+    expect(shortWas("Total: 12 items in your basket, delivery on Thursday 14 May", "Total: 12 items in your basket, delivery on Friday 15 May")).toBe("…delivery on Thursday 14 May");
+    expect(shortWas("3 trips planned for the spring, 2 of them shared with friends", "4 trips planned for the spring, 2 of them shared with friends")).toBe("3 trips plann…");
+    expect(shortWas("Tap me 17", "Tap me 20")).toBe("Tap me 17");
   });
 });

@@ -70,7 +70,7 @@ describe("off-screen changes follow a full list", () => {
     await tools.look({ screenshot: false });
     const lines = textOf(await tools.tap({ target: { id: "open-sheet" } })).split("\n");
     expect(lines[1]).toBe("Screen 402x874 pt @3x · 1 element");
-    const at = lines.indexOf('~ text "row=5" id=lab-state @16,-900 398x68 (off screen; was "row=-")');
+    const at = lines.indexOf('~ text "row=5" id=lab-state (off screen; was "row=-")');
     expect(at).toBeGreaterThan(2);
     expect(lines[at - 1]).toBe("Changes off screen:");
     expect(lines[at + 1]).toBe("Settled in 0.10 s.");

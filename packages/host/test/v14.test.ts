@@ -72,7 +72,7 @@ describe("Note: closed the keyboard first. (v1.4)", () => {
   it("with look: false it is the line right after the first line", async () => {
     const { tools } = await setup(answering({ closedKeyboard: true }));
     expect(textOf(await tools.tap({ target: { id: "login-button" }, look: false }))).toBe(
-      `Tapped e3 button "Log in" id=login-button @24,610 354x48.\n${NOTE}`,
+      `Tapped e3 button "Log in" id=login-button.\n${NOTE}`,
     );
   });
 

@@ -1830,11 +1830,18 @@ export class TaplineTools {
     return { content: [{ type: "text", text: `${line}\n${head}` }, ...rest] };
   }
 
-  /** The line (without its actions) of the element a result carries under `key`. */
-  private elementName(result: unknown, key: "element" | "target" = "element"): string {
+  /**
+   * The element a result carries under `key`, for an answer's first line: without its actions, position or
+   * size (AGENT-TOOLS 1.8 §13 rule 1; the change block or list has them). `withoutValue` for type_text,
+   * whose sentence says the value (rule 5).
+   */
+  private elementName(result: unknown, key: "element" | "target" = "element", withoutValue = false): string {
     if (typeof result === "object" && result !== null && key in result) {
       const element = elementSchema.safeParse((result as Record<string, unknown>)[key]);
-      if (element.success) return formatElement(element.data, { actions: false });
+      if (element.success) {
+        const shown = withoutValue ? { ...element.data, value: null, placeholder: null } : element.data;
+        return formatElement(shown, { actions: false, frame: false });
+      }
     }
     return "element";
   }
@@ -2063,7 +2070,7 @@ export class TaplineTools {
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
-        return `Typed into ${this.elementName(r)}${args.submit ? " and submitted" : ""}.${shown}`;
+        return `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`;
       },
       args.look,
       args.screenshot,

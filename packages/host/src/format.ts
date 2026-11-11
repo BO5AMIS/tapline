@@ -94,8 +94,27 @@ export function actionsOf(element: Pick<TreeElement, "actions">): string[] {
   return shown;
 }
 
-/** One compact line for an element, e.g. `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`. */
-export function formatElement(element: TreeElement, options: { actions?: boolean } = {}): string {
+/** AGENT-TOOLS 1.8 §13 rule 4: the actions a role implies, left out of the line. */
+const IMPLIED_ACTIONS: ReadonlyMap<string, readonly string[]> = new Map([
+  ["button", ["tap"]],
+  ["tab", ["tap"]],
+  ["link", ["tap"]],
+  ["input", ["tap", "type"]],
+  ["switch", ["toggle"]],
+  ["scroll", ["scroll"]],
+]);
+
+function impliedBy(role: string | null, actions: string[]): boolean {
+  const implied = role !== null ? IMPLIED_ACTIONS.get(role) : undefined;
+  return implied !== undefined && implied.length === actions.length && implied.every((a) => actions.includes(a));
+}
+
+/**
+ * One compact line for an element, e.g. `e3 button "Log in" id=login-button @24,610 354x48` (a button's
+ * `[tap]` goes without saying; other actions are listed, `[tap, longPress]`). `frame: false` leaves the
+ * position and size out; `actions: false` the actions.
+ */
+export function formatElement(element: TreeElement, options: { actions?: boolean; frame?: boolean } = {}): string {
   // An element that isn't on the list (one that changed off screen) has no ref.
   const parts: string[] = element.ref !== "" ? [element.ref] : [];
   const kind = roleOf(element);
@@ -120,13 +139,33 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
   if (element.disabled === true) parts.push("disabled");
   if (element.selected === true) parts.push("selected");
   if (element.checked !== null && element.checked !== undefined) parts.push(`checked=${String(element.checked)}`);
-  if (element.frame !== null && element.frame !== undefined) {
+  if (options.frame !== false && element.frame !== null && element.frame !== undefined) {
     const f = element.frame;
     parts.push(`@${Math.round(f.x)},${Math.round(f.y)}`, `${Math.round(f.width)}x${Math.round(f.height)}`);
   }
   const actions = options.actions === false ? [] : actionsOf(element);
-  if (actions.length > 0) parts.push(`[${actions.join(", ")}]`);
+  if (actions.length > 0 && !impliedBy(kind, actions)) parts.push(`[${actions.join(", ")}]`);
   return parts.join(" ");
+}
+
+/** A `~` line's element (§13 rule 2): its position and actions only when they are among what changed. */
+function changedLine(element: TreeElement, was: Record<string, unknown>): string {
+  return formatElement(element, { frame: "frame" in was, actions: "actions" in was });
+}
+
+/** Rule 3: an old value over 40 characters, cut to what changed plus 12 characters each side. */
+export function shortWas(old: string, now: string, keep = 40, context = 12): string {
+  const o = [...old];
+  const n = [...now];
+  if (o.length <= keep) return old;
+  let p = 0;
+  while (p < o.length && p < n.length && o[p] === n[p]) p++;
+  let s = 0;
+  while (s < o.length - p && s < n.length - p && o[o.length - 1 - s] === n[n.length - 1 - s]) s++;
+  const start = Math.max(0, p - context);
+  const end = o.length - Math.max(0, s - context);
+  if (start === 0 && end === o.length) return old;
+  return `${start > 0 ? "…" : ""}${o.slice(start, end).join("")}${end < o.length ? "…" : ""}`;
 }
 
 /** Very short element description for action results, e.g. `e3 button "Log in"`. */
@@ -189,8 +228,8 @@ function describeGone(element: TreeElement): string {
   return line !== "" ? line : "element";
 }
 
-/** An old value as it would have been shown: positions as `@x,y WxH`, other values as in an element line. */
-function formatWas(key: string, value: unknown): string {
+/** An old value as it would have been shown: positions as `@x,y WxH`, other values as in an element line, a long text cut to what changed. */
+function formatWas(key: string, value: unknown, now?: TreeElement): string {
   if (key === "frame" && typeof value === "object" && value !== null) {
     const { x, y, width, height } = value as Record<string, unknown>;
     if ([x, y, width, height].every((n) => typeof n === "number")) {
@@ -202,23 +241,25 @@ function formatWas(key: string, value: unknown): string {
     const names = actionsOf({ actions: value.filter((item): item is string => typeof item === "string") });
     return `[${names.join(", ")}]`;
   }
+  const current = now !== undefined ? (now as Record<string, unknown>)[key] : undefined;
+  if (typeof value === "string" && typeof current === "string") return quote(shortWas(value, current));
   return formatValue(value);
 }
 
 /** The old values of a `~` line: one changed field reads `"old"`; several read `text="old", value="old"`. */
-function formatBefore(was: Record<string, unknown>): string {
+function formatBefore(was: Record<string, unknown>, now?: TreeElement): string {
   // AGENT-TOOLS v1.7: a field that was empty reads as its placeholder then: `was placeholder "…"`.
   const placeholder = was["placeholder"];
   if (typeof placeholder === "string" && placeholder !== "" && (was["value"] === "" || was["value"] === null || was["value"] === undefined)) {
     const rest = Object.entries(was).filter(([key]) => key !== "value" && key !== "placeholder");
     const own = `placeholder ${formatValue(placeholder)}`;
-    return rest.length === 0 ? own : [own, ...rest.map(([key, value]) => `${key}=${formatWas(key, value)}`)].join(", ");
+    return rest.length === 0 ? own : [own, ...rest.map(([key, value]) => `${key}=${formatWas(key, value, now)}`)].join(", ");
   }
   const entries = Object.entries(was).filter(([key]) => key !== "placeholder");
   const [only] = entries;
   return entries.length === 1 && only !== undefined
-    ? formatWas(only[0], only[1])
-    : entries.map(([key, value]) => `${key}=${formatWas(key, value)}`).join(", ");
+    ? formatWas(only[0], only[1], now)
+    : entries.map(([key, value]) => `${key}=${formatWas(key, value, now)}`).join(", ");
 }
 
 /**
@@ -227,7 +268,7 @@ function formatBefore(was: Record<string, unknown>): string {
  */
 function formatOffScreenChanges(changes: NonNullable<TreeResult["changes"]>): string[] {
   const lines = (changes.offScreen ?? []).map(
-    ({ element, was }) => `~ ${formatElement({ ...element, ref: "" })} (off screen; was ${formatBefore(was)})`,
+    ({ element, was }) => `~ ${changedLine({ ...element, ref: "" }, was)} (off screen; was ${formatBefore(was, element)})`,
   );
   const more = changes.offScreenMore ?? 0;
   if (more > 0) lines.push(`~ ${more} more changed off screen`);
@@ -279,7 +320,7 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean }
   for (const { ref, was } of changes.changed) {
     const element = byRef.get(ref);
     if (element === undefined) continue;
-    lines.push(`~ ${formatElement(element)} (was ${formatBefore(was)})`);
+    lines.push(`~ ${changedLine(element, was)} (was ${formatBefore(was, element)})`);
   }
   lines.push(...formatOffScreenChanges(changes));
   if (changes.moved.length > MAX_MOVED_LINES) {

@@ -15,8 +15,8 @@ describe("ambiguous: several inputs, no target (AGENT-TOOLS §4)", () => {
       [
         "Error ambiguous: 2 inputs on screen; pass a target to pick one:",
         "Candidates:",
-        "  e4 input @20,100 300x40 [tap, type]",
-        "  e7 input @20,200 300x40 [tap, type]",
+        "  e4 input @20,100 300x40",
+        "  e7 input @20,200 300x40",
         "Retry with one of the refs as the target.",
       ].join("\n"),
     );

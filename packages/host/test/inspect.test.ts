@@ -49,7 +49,7 @@ describe("inspect", () => {
     );
     expect(text).toBe(
       [
-        'e12 button "Create account" id=signup-submit @24,610 382x54 [tap]',
+        'e12 button "Create account" id=signup-submit @24,610 382x54',
         "Components: SignUpScreen \u203a Button",
         "Written at: src/screens/SignUpScreen.tsx:119 (in SignUpScreen)",
         '  119 | <Button label="Create account" testID="signup-submit" onPress={submit} />',
