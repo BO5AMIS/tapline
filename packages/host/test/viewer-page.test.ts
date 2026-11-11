@@ -973,6 +973,8 @@ class FakeDocument extends FakeTarget {
     return el;
   };
   createElement = (): DomEl => new DomEl();
+  /* The page looks up a few containers by class (".more"); one stand-in element per selector. */
+  querySelector = (selector: string): DomEl => this.getElementById(`query:${selector}`);
 }
 
 class FakeWindow extends FakeTarget {
@@ -999,6 +1001,8 @@ const PAGE_ACCEPTS = ["tap", "longPress", "drag", "scroll"];
 function pageRig(accepts: string[] = PAGE_ACCEPTS, extra: Record<string, unknown> = {}): PageRig {
   FakeSocket.all = [];
   const doc = new FakeDocument();
+  // As in the markup: the More menu, the Steps drawer and the confirm dialog start hidden.
+  for (const id of ["more-menu", "steps", "confirm"]) doc.getElementById(id).hidden = true;
   const win = new FakeWindow();
   const loc = { search: "", pathname: "/viewer", protocol: "http:", href: "http://host/viewer" };
   const hist = { replaceState: (): void => undefined };
@@ -1555,7 +1559,7 @@ describe("viewer page: port b, toolbar controls let go of the focus after a clic
     vi.useFakeTimers();
     try {
       const rig = pageRig(TEXT_ACCEPTS);
-      const inBar = { closest: (sel: string): object | null => (sel === "#bar" ? {} : null) };
+      const inBar = { closest: (sel: string): object | null => (sel.split(",").map((s) => s.trim()).includes("#bar") ? {} : null) };
       rig.doc.activeElement = rig.el("home");
       expect(key(rig, { key: "a", target: inBar }).prevented).toBe(false);
       expect(key(rig, { key: "Enter", target: inBar }).prevented).toBe(false);
