@@ -1406,6 +1406,30 @@ describe('openURL / logs / reload / screenshot', () => {
     }
   });
 
+  test("in an Expo app reload goes through Expo's own reload (DevSettings.reload breaks in Expo Go)", async () => {
+    jest.useFakeTimers();
+    const holder = globalThis as { expo?: unknown };
+    const previous = holder.expo;
+    const reasons: string[] = [];
+    holder.expo = {
+      reloadAppAsync: (reason: string) => {
+        reasons.push(reason);
+        return Promise.resolve();
+      },
+    };
+    try {
+      jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const spy = jest.spyOn(DevSettings, 'reload').mockImplementation(() => {});
+      await expect(reload()).resolves.toEqual({});
+      jest.advanceTimersByTime(150);
+      expect(reasons).toEqual(['Tapline: the agent asked for a reload']);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      holder.expo = previous;
+      jest.useRealTimers();
+    }
+  });
+
   test('reload is unsupported outside __DEV__', async () => {
     const holder = globalThis as { __DEV__?: boolean };
     const previous = holder.__DEV__;

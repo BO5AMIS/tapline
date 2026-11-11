@@ -1746,6 +1746,14 @@ export async function reload(): Promise<Record<string, never>> {
   // Reply first: the reload tears the socket down.
   setTimeout(() => {
     try {
+      // An Expo app reloads through Expo (what `reloadAppAsync` from 'expo' calls): in Expo Go,
+      // DevSettings.reload() starts the bundle without Expo's native modules and it fails to load.
+      const expo = (globalThis as { expo?: unknown }).expo;
+      const expoReload = isRecord(expo) ? expo.reloadAppAsync : undefined;
+      if (typeof expoReload === 'function') {
+        void Promise.resolve(expoReload.call(expo, 'Tapline: the agent asked for a reload')).catch(() => DevSettings.reload());
+        return;
+      }
       DevSettings.reload();
     } catch {
       // nothing to do
