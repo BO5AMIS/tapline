@@ -60,9 +60,9 @@ describe("the skill in the repository (Agent Skills format)", () => {
     // A skill that teaches a call the server refuses is worse than none.
     const quoted = new Set([...text.matchAll(/`([a-z_]+)`/g)].map((match) => match[1] ?? ""));
     const mine = new Set(Object.keys(toolShapes));
-    const tapwrightOnly = ["alert", "close_app", "swipe", "press_button"];
+    const tapwrightOnly = ["alert", "close_app", "press_button"];
     for (const tool of tapwrightOnly) expect(quoted.has(tool), `${tool} is Tapwright's`).toBe(false);
-    for (const tool of ["look", "tap", "type_text", "scroll", "toggle", "back", "wait_for", "open_url", "apps", "pair", "logs", "app_command", "check_layout", "viewer"]) {
+    for (const tool of ["look", "tap", "type_text", "scroll", "toggle", "back", "wait_for", "open_url", "apps", "pair", "logs", "app_command", "check_layout", "viewer", "swipe"]) {
       expect(mine.has(tool), `${tool} is a tool`).toBe(true);
       expect(quoted.has(tool), `the skill names ${tool}`).toBe(true);
     }

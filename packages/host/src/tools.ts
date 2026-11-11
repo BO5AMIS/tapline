@@ -325,6 +325,8 @@ function describeStep(step: ScriptStep): string {
       return `open ${String(p["url"])}`;
     case "command":
       return `command ${String(p["name"])}`;
+    case "swipe":
+      return `swipe ${String(p["x0"])},${String(p["y0"])} → ${String(p["x1"])},${String(p["y1"])}`;
     case "waitFor": {
       const what = ["text", "testID", "label"].find((key) => typeof p[key] === "string");
       const thing = what ? `${what === "testID" ? "id" : what}=${JSON.stringify(p[what])}${p["gone"] === true ? " gone" : ""}` : "";
