@@ -1147,13 +1147,51 @@ export class TaplineTools {
       }
     }
     if (this.recording !== null && !this.replaying) {
-      const { params: stable, fragile } = stableParams(params, result);
+      const { params: chosen, fragile } = stableParams(params, result);
+      // A ref saved as a label or text that several elements share needs its index (AGENT-TOOLS 1.8 §9.4).
+      const stable = await this.withIndexIfShared(params, chosen, result, session.id);
       const step: ScriptStep = { method, params: stable };
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
     }
     return response;
+  }
+
+  /**
+   * When the agent's ref was saved as a testID, label or text that more than one element on screen has, add
+   * the element's `index` among them (reading order), so the replay picks the same one instead of
+   * answering `ambiguous`. One extra read, only while recording and only for ref targets.
+   */
+  private async withIndexIfShared(
+    original: unknown,
+    chosen: Record<string, unknown>,
+    result: unknown,
+    sessionId: string,
+  ): Promise<Record<string, unknown>> {
+    const before = typeof original === "object" && original !== null ? (original as { target?: unknown }).target : undefined;
+    const target = chosen["target"];
+    if (typeof before !== "object" || before === null || !("ref" in before)) return chosen;
+    if (typeof target !== "object" || target === null || "ref" in target || "index" in target) return chosen;
+    const element = typeof result === "object" && result !== null && "element" in result
+      ? elementSchema.safeParse((result as { element: unknown }).element)
+      : null;
+    if (!element?.success) return chosen;
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId }).catch(() => null));
+    if (!tree.success) return chosen;
+    const t = target as { testID?: unknown; label?: unknown; text?: unknown };
+    const same = tree.data.elements.filter((el) =>
+      typeof t.testID === "string"
+        ? el.testID === t.testID
+        : typeof t.label === "string"
+          ? (el.label ?? "").toLowerCase() === t.label.toLowerCase()
+          : typeof t.text === "string"
+            ? el.text === t.text
+            : false,
+    );
+    if (same.length < 2) return chosen;
+    const at = same.findIndex((el) => el.ref === element.data.ref);
+    return at < 0 ? chosen : { ...chosen, target: { ...(target as Record<string, unknown>), index: at } };
   }
 
   // -- the live viewer
@@ -1602,6 +1640,12 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const notes: string[] = [];
+    script.steps.forEach((step, i) => {
+      const target = (step as Record<string, unknown>)["target"];
+      if (typeof target === "object" && target !== null && "x" in target) {
+        notes.push(`Note (step ${i + 1}): a point target; it breaks when the layout changes.`);
+      }
+    });
     if (script.fresh !== false) {
       // Tapline can't close and open the app: it starts its JavaScript again (a development build).
       const fresh = await this.reload({});
