@@ -37,6 +37,7 @@ import {
   type Snapshot,
   type TabFound,
 } from './inspect';
+import { sourcesOf, type ElementSource } from './source';
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
@@ -1751,6 +1752,21 @@ export async function openURL(rawParams: unknown): Promise<SettleOutcome> {
     if (timer !== undefined) clearTimeout(timer);
   }
   return settleOutcome();
+}
+
+/**
+ * `inspect {target}` (Tapline 1.1, development builds): the element, the components that draw it, the line
+ * of the app's code that wrote it, and that component's props in short. From the screen to the code.
+ */
+export async function inspect(rawParams: unknown): Promise<{ element: TaplineElement; source: ElementSource }> {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) {
+    throw new TaplineError('unsupported', 'inspect needs a development build: release builds keep no source locations');
+  }
+  const params = paramsOf(rawParams);
+  const { entry } = await resolveTarget(params.target);
+  const [source] = await sourcesOf([entry.node.fiber]);
+  const { element } = await elementFor(entry);
+  return { element, source: source ?? { components: [], location: null, props: {} } };
 }
 
 export async function getLogs(rawParams: unknown): Promise<{ entries: LogEntry[] }> {

@@ -1,0 +1,188 @@
+import { componentName, isCompositeTag, propsOf, type Fiber } from './fiber';
+import { isRecord } from './types';
+
+/**
+ * Source locations (Tapline 1.1, development builds): which component draws an element and which line of
+ * the app's code wrote it. React 19 keeps, on every fiber, the stack captured where its JSX element was
+ * created (`_debugStack`). The frames point into the bundle Metro serves; Metro's own `/symbolicate`
+ * turns them back into the app's files and lines. The first frame outside node_modules is the line that
+ * wrote the element. Nothing here runs unless the agent asks.
+ */
+
+export interface SourceLocation {
+  /** The file as Metro reports it (absolute on the computer that serves the bundle). */
+  file: string;
+  line: number;
+  column: number;
+  /** The component whose render wrote the element, e.g. "SignUpScreen". */
+  component: string | null;
+}
+
+export interface ElementSource {
+  /** Components from the screen down to the element, app components first (at most 6). */
+  components: string[];
+  /** Where the app's code wrote this element (or its nearest ancestor the app wrote); null when unknown. */
+  location: SourceLocation | null;
+  /** The props of the component the app wrote, in short: strings, numbers, booleans, handler names. */
+  props: Record<string, string>;
+}
+
+interface Frame {
+  file: string;
+  lineNumber: number;
+  column: number;
+  methodName: string;
+}
+
+type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{
+  ok: boolean;
+  json(): Promise<unknown>;
+}>;
+
+let fetcher: FetchLike | null = null;
+
+/** Replace the HTTP client (tests); null restores the global fetch. */
+export function setSourceFetch(next: FetchLike | null): void {
+  fetcher = next;
+}
+
+function http(): FetchLike | null {
+  if (fetcher) return fetcher;
+  const global = (globalThis as { fetch?: unknown }).fetch;
+  return typeof global === 'function' ? (global as FetchLike) : null;
+}
+
+/** The stack React captured where this fiber's element was created, as frames; empty when there is none. */
+export function framesOf(fiber: Fiber): Frame[] {
+  const stack = (fiber as Fiber & { _debugStack?: unknown })._debugStack;
+  const text = isRecord(stack) && typeof stack.stack === 'string' ? stack.stack : typeof stack === 'string' ? stack : '';
+  const frames: Frame[] = [];
+  for (const line of text.split('\n')) {
+    // Hermes and V8: "at name (url:line:col)" or "at url:line:col"
+    const m = /^\s*at\s+(?:(.*?)\s+\()?(.+?):(\d+):(\d+)\)?\s*$/.exec(line);
+    if (!m) continue;
+    const file = m[2]!.replace(/^address at\s+/, '');
+    frames.push({ methodName: m[1] ?? '', file, lineNumber: Number(m[3]), column: Number(m[4]) });
+  }
+  return frames;
+}
+
+/** Metro's address, from a bundle URL in a frame: "http://192.168.1.20:8081". */
+function metroOrigin(frames: Frame[]): string | null {
+  for (const frame of frames) {
+    const m = /^(https?:\/\/[^/]+)\//.exec(frame.file);
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
+const cache = new Map<string, Frame | null>();
+const keyOf = (f: Frame): string => `${f.file}:${f.lineNumber}:${f.column}`;
+
+/** Asks Metro for the original positions of these frames; frames it can't map come back null. */
+async function symbolicate(frames: Frame[]): Promise<Array<Frame | null>> {
+  const missing = frames.filter((f) => !cache.has(keyOf(f)));
+  const origin = metroOrigin(missing);
+  const client = http();
+  if (missing.length > 0 && origin && client) {
+    try {
+      const res = await client(`${origin}/symbolicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stack: missing }),
+      });
+      const body: unknown = res.ok ? await res.json() : null;
+      const out = isRecord(body) && Array.isArray(body.stack) ? body.stack : [];
+      missing.forEach((frame, i) => {
+        const mapped: unknown = out[i];
+        cache.set(
+          keyOf(frame),
+          isRecord(mapped) && typeof mapped.file === 'string' && typeof mapped.lineNumber === 'number'
+            ? {
+                file: mapped.file,
+                lineNumber: mapped.lineNumber,
+                column: typeof mapped.column === 'number' ? mapped.column : 0,
+                methodName: typeof mapped.methodName === 'string' ? mapped.methodName : '',
+              }
+            : null,
+        );
+      });
+    } catch {
+      // Metro unreachable: no locations this time; try again next call.
+      return frames.map(() => null);
+    }
+  }
+  return frames.map((f) => cache.get(keyOf(f)) ?? null);
+}
+
+/** A file of the app's own code (not a library, not React's internals). */
+export function isAppFile(file: string): boolean {
+  return !/[\\/]node_modules[\\/]/.test(file) && !/^https?:/.test(file) && !/^\[native code\]$/.test(file);
+}
+
+const INTERNAL = /^(View|Text|RCT|Animated|Virtualized|ScrollView|Pressable|TouchableOpacity|TouchableHighlight|TouchableWithoutFeedback|TextInput|Image|Context|Provider|Consumer|Fragment)/;
+
+/** The composite components above a fiber, nearest first. */
+function compositesAbove(fiber: Fiber, limit: number): Fiber[] {
+  const out: Fiber[] = [];
+  for (let f: Fiber | null = fiber; f && out.length < limit; f = f.return) {
+    if (isCompositeTag(f.tag)) out.push(f);
+  }
+  return out;
+}
+
+function shortProps(fiber: Fiber): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(propsOf(fiber))) {
+    if (key === 'children' || key === 'style' || Object.keys(out).length >= 8) continue;
+    if (typeof value === 'string') out[key] = JSON.stringify(value.length > 40 ? `${value.slice(0, 40)}…` : value);
+    else if (typeof value === 'number' || typeof value === 'boolean') out[key] = String(value);
+    else if (typeof value === 'function') out[key] = `${(value as { name?: string }).name || 'function'}()`;
+  }
+  return out;
+}
+
+/**
+ * Where the app wrote these elements. One request to Metro for all of them. `fibers` are the host fibers
+ * of the elements; for one written inside a library component (a TextInput's native view), the nearest
+ * ancestor the app's code wrote is used.
+ */
+export async function sourcesOf(fibers: Fiber[]): Promise<ElementSource[]> {
+  // For each element: the fibers to try, nearest first (the host fiber, then the composites above it).
+  const chains = fibers.map((fiber) => [fiber, ...compositesAbove(fiber.return ?? fiber, 12)]);
+  const allFrames: Frame[] = [];
+  const spans = chains.map((chain) =>
+    chain.map((f) => {
+      const frames = framesOf(f).slice(0, 6);
+      const start = allFrames.length;
+      allFrames.push(...frames);
+      return { fiber: f, start, count: frames.length };
+    }),
+  );
+  const mapped = await symbolicate(allFrames);
+  return fibers.map((fiber, i) => {
+    let location: SourceLocation | null = null;
+    let wrote: Fiber | null = null;
+    for (const span of spans[i]!) {
+      for (let k = span.start; k < span.start + span.count && location === null; k++) {
+        const frame = mapped[k];
+        if (frame && isAppFile(frame.file)) {
+          location = { file: frame.file, line: frame.lineNumber, column: frame.column, component: frame.methodName || null };
+          wrote = span.fiber;
+        }
+      }
+      if (location) break;
+    }
+    const names = compositesAbove(fiber, 24)
+      .map((f) => componentName(f.type))
+      .filter((name): name is string => name !== null && !INTERNAL.test(name));
+    const components = [...new Set(names)].slice(0, 6).reverse();
+    const propsFrom = wrote && isCompositeTag(wrote.tag) ? wrote : compositesAbove(fiber, 1)[0] ?? null;
+    return { components, location, props: propsFrom ? shortProps(propsFrom) : {} };
+  });
+}
+
+/** Forget mapped positions (after a reload the bundle's lines change; tests). */
+export function clearSourceCache(): void {
+  cache.clear();
+}
