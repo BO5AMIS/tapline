@@ -8,6 +8,8 @@ export interface CallResult {
   text: string;
   /** Number of image content items. */
   images: number;
+  /** The images' token cost (width × height / 750 each), when their headers could be read (J6). */
+  imageTokens?: number;
   isError: boolean;
   /** Wall time of the call in milliseconds (one clock: performance.now()). */
   ms: number;
@@ -36,7 +38,7 @@ export interface SpawnConfig {
 
 const contentSchema = z.object({
   content: z
-    .array(z.object({ type: z.string(), text: z.string().optional() }))
+    .array(z.object({ type: z.string(), text: z.string().optional(), data: z.string().optional() }))
     .default([]),
   isError: z.boolean().optional(),
 });
@@ -52,8 +54,31 @@ export function parseToolResult(raw: unknown): Omit<CallResult, "ms"> {
     .filter((c) => c.type === "text" && typeof c.text === "string")
     .map((c) => c.text ?? "")
     .join("\n");
-  const images = items.filter((c) => c.type === "image").length;
-  return { text, images, isError: parsed.data.isError === true };
+  const shots = items.filter((c) => c.type === "image");
+  const imageTokens = shots.reduce((sum, c) => {
+    const size = imageSize(c.data ?? "");
+    return sum + (size !== null ? Math.round((size.w * size.h) / 750) : 0);
+  }, 0);
+  return { text, images: shots.length, ...(imageTokens > 0 ? { imageTokens } : {}), isError: parsed.data.isError === true };
+}
+
+/** Width and height from a base64 PNG or JPEG header; null when it is neither. */
+export function imageSize(base64: string): { w: number; h: number } | null {
+  const buf = Buffer.from(base64.slice(0, 8000), "base64");
+  if (buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50) return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const marker = buf[i + 1] ?? 0;
+      if (marker >= 0xc0 && marker <= 0xc3) return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  }
+  return null;
 }
 
 /** Spawns the tool's MCP server over stdio, exactly as an agent would. */

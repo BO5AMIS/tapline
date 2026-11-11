@@ -3,6 +3,7 @@ import { parseArgs } from "node:util";
 import { loadConfig } from "./config.js";
 import { guardApp, learnLabApp } from "./guard.js";
 import { openLab, resetLab } from "./lab.js";
+import { sizeAnswers } from "./answers.js";
 import { startTool } from "./mcp.js";
 import {
   allPass,
@@ -67,9 +68,12 @@ async function main(): Promise<number> {
       await openLab(tool, labUrl);
       // From here on every touch goes through the guard: the run stops if the phone leaves the lab's app.
       const guarded = guardApp(tool, await learnLabApp(tool));
+      // J6: every answer the suites get is measured too (report only).
+      const sized = sizeAnswers(guarded);
       for (const suite of selected) {
-        results.push(...(await suite.run({ tool: guarded, config, samples, runs, labUrl })));
+        results.push(...(await suite.run({ tool: sized.session, config, samples, runs, labUrl })));
       }
+      results.push(...sized.rows());
       // Leave the lab as the next tester expects it: counters at zero, scrolled to the top. It goes
       // through the guard too, and a reset that fails only gets a line: the results are kept.
       try {
