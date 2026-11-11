@@ -904,6 +904,18 @@ class DomEl {
   closest(): null {
     return null;
   }
+  /* The page's static markup isn't parsed here: only appended children exist, and none match. */
+  querySelectorAll(): DomEl[] {
+    return [];
+  }
+  getAttribute(name: string): string | null {
+    return this.attrs[name] ?? null;
+  }
+  contains(other: DomEl | null): boolean {
+    for (let el: DomEl | null = other; el !== null; el = el.parentNode) if (el === this) return true;
+    return false;
+  }
+  focus(): void {}
   getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
     return { left: 0, top: 0, width: 200, height: 400 };
   }
