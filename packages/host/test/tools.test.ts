@@ -11,6 +11,7 @@ import type { TaplineHost } from "../src/server.js";
 import { ControlQueue } from "../src/control.js";
 import { z } from "zod";
 import { TaplineTools, targetSchema, toolShapes } from "../src/tools.js";
+import { NO_POLICY } from "../src/policy.js";
 import type { ViewerAction } from "../src/viewer.js";
 import { FakeApp, TOKEN, startHost, type IncomingRequest, type Reply } from "./helpers.js";
 
@@ -590,6 +591,7 @@ describe("record and replay", () => {
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
       scriptsDir: dir,
+      policy: NO_POLICY, // a checkout taps "Pay": recording, not the policy, is under test
       reloadWaitMs: 50,
     });
     return { app, tools, dir };
@@ -679,7 +681,7 @@ describe("record and replay", () => {
     hosts.push(host);
     const { app } = await FakeApp.connect(port, {}, shop(["basket"], "press"));
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir, reloadWaitMs: 50 });
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir, reloadWaitMs: 50, policy: NO_POLICY });
     try {
       const result = await tools.replay({ name: "broken" });
       expect(result.isError).toBe(true);
@@ -698,7 +700,7 @@ describe("record and replay", () => {
     hosts.push(host);
     const { app } = await FakeApp.connect(port, {}, shop(["home"]));
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir, reloadWaitMs: 50 });
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir, reloadWaitMs: 50, policy: NO_POLICY });
     try {
       const result = await tools.replay({ name: "nav" });
       expect(result.isError).toBe(true);

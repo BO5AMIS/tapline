@@ -14,6 +14,8 @@ import {
 } from "./config.js";
 import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
+import { Confirmations } from "./confirm.js";
+import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
 import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
 import { VIEWER_HTML } from "./viewer-page.js";
 import { TaplineHost } from "./server.js";
@@ -291,12 +293,17 @@ function log(message: string): void {
 }
 
 /** Runs the host and serves MCP over stdio. stdout is reserved for the protocol; everything else goes to stderr. */
-export async function runMcp(options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean } = {}): Promise<boolean> {
+export async function runMcp(
+  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean } = {},
+): Promise<boolean> {
   let screenshots: ScreenshotMode;
   let viewer: ViewerMode;
+  let policy: PolicyFile;
   try {
     screenshots = screenshotMode(options.screenshots, options.env);
     viewer = viewerMode(options.viewer, options.env);
+    // The safety policy (AGENT-TOOLS 1.8 §11): built in, from --policy FILE, or none with --no-policy.
+    policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
   } catch (error) {
     log(error instanceof Error ? error.message : String(error));
     return false;
@@ -337,8 +344,12 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string; v
     ...(remoteViewer ? [`http://${config.tailscaleIp}:${port}/viewer?token=${viewerToken} (from your own devices on Tailscale)`] : []),
   ];
   const control = new ControlQueue();
+  const confirmations = new Confirmations();
   let hub: ViewerHub | undefined;
   const tools = new TaplineTools(host, {
+    policy,
+    confirmations,
+    canConfirm: viewer !== "off",
     connect: { url, name: config.name },
     pairImagePath: join(configDir(), `pair-${port}.png`),
     screenshots,
@@ -374,6 +385,7 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string; v
       },
       readOverlay: () => tools.readOverlay(),
       runInput: (input) => tools.personInput(input),
+      confirmations,
     });
     hub = live;
     host.setHttpExtension(live);

@@ -10,7 +10,9 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
-import { ActionLog, loggedTarget } from "./actionlog.js";
+import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
+import { Confirmations } from "./confirm.js";
+import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -33,6 +35,7 @@ import {
   screenshotResultSchema,
   treeResultSchema,
   type LogEntry,
+  type TreeElement,
   type TreeResult,
   type WireTarget,
 } from "./protocol.js";
@@ -84,6 +87,11 @@ const lookField = z
 
 const screenshotField = z.boolean().optional().describe("Add a screenshot to the answer (default false)");
 
+const dryRunField = z
+  .boolean()
+  .optional()
+  .describe("Resolve the target and run every check (and the safety policy), then touch nothing: the answer says what would happen");
+
 const forceField = z
   .boolean()
   .optional()
@@ -117,7 +125,7 @@ export const toolShapes = {
   },
   check_layout: {},
   inspect: { target: targetField },
-  tap: { target: targetField, force: forceField, look: lookField, screenshot: screenshotField },
+  tap: { target: targetField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField },
   long_press: {
     target: targetField,
     seconds: z
@@ -127,6 +135,7 @@ export const toolShapes = {
       .optional()
       .describe("How long to hold (default 1.0). Tapline calls the handler, so it doesn't wait"),
     force: forceField,
+    dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
   },
@@ -136,6 +145,7 @@ export const toolShapes = {
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
     force: forceField,
+    dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
   },
@@ -156,6 +166,7 @@ export const toolShapes = {
     target: targetField,
     value: z.boolean().optional().describe("Desired state; omit to flip"),
     force: forceField,
+    dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
   },
@@ -238,6 +249,10 @@ export const toolShapes = {
         'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2).',
       ),
     trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
+    dry_run: z
+      .boolean()
+      .optional()
+      .describe("Check every step's parameters and resolve step 1 (later steps depend on what it does), then touch nothing"),
     look: lookField,
     screenshot: screenshotField,
   },
@@ -258,6 +273,12 @@ export interface ToolsOptions {
   connect: ConnectInfo;
   /** Where the action log goes (AGENT-TOOLS 1.8 §12); none: no log. */
   logDir?: string;
+  /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
+  policy?: PolicyFile;
+  /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
+  confirmations?: Confirmations;
+  /** False when nobody can answer a request (--viewer off). Default true. */
+  canConfirm?: boolean;
   /** Where `pair` also saves the QR code as a PNG (so the user can open it). */
   pairImagePath?: string;
   /** How long that PNG is kept. Default: the code's 10 minutes. */
@@ -552,6 +573,46 @@ export function describeError(error: unknown): string {
   return `Error internal: ${error instanceof Error ? error.message : String(error)}`;
 }
 
+/** Adds a note line to the end of an answer's first text block. */
+function appendNote(answer: CallToolResult, note: string): CallToolResult {
+  const [top, ...rest] = answer.content;
+  if (top === undefined || top.type !== "text") return answer;
+  return { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), note].join("\n") }, ...rest] };
+}
+
+/** An app's dry-run answer (AGENT-TOOLS 1.8 §11.4). */
+const dryRunResultSchema = z.object({
+  element: elementSchema,
+  dryRun: z.literal(true),
+  point: z.object({ x: z.number(), y: z.number() }).optional(),
+  value: z.unknown().optional(),
+});
+
+/** For an app without dry runs: every element on its list the target could mean. */
+function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] {
+  if (typeof target !== "object" || target === null) return [];
+  const t = target as Record<string, unknown>;
+  const lower = (value: unknown): string => (typeof value === "string" ? value.toLowerCase() : "");
+  const x = t["x"];
+  const y = t["y"];
+  let found: TreeElement[];
+  if (typeof t["ref"] === "string") found = elements.filter((e) => e.ref === t["ref"]);
+  else if (typeof t["testID"] === "string") found = elements.filter((e) => e.testID === t["testID"]);
+  else if (typeof t["label"] === "string") found = elements.filter((e) => lower(e.label) === lower(t["label"]));
+  else if (typeof t["text"] === "string") {
+    const want = lower(t["text"]);
+    found = elements.filter((e) => lower(e.text).includes(want) || lower(e.label).includes(want));
+  } else if (typeof x === "number" && typeof y === "number") {
+    found = elements.filter((e) => {
+      const f = e.frame;
+      return f !== null && f !== undefined && x >= f.x && x <= f.x + f.width && y >= f.y && y <= f.y + f.height;
+    });
+  } else found = [];
+  const index = t["index"];
+  const picked = typeof index === "number" ? found[index] : undefined;
+  return picked !== undefined ? [picked] : found;
+}
+
 // ---- tool handlers ----------------------------------------------------------
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
@@ -563,6 +624,10 @@ export class TaplineTools {
   private actionStartedAt: number | undefined;
   /** Set while `run` runs a step: the log ties the action to its batch. */
   private batch: { id: string; step: number } | undefined;
+  /** Extra fields for the next log line (a dry run, a confirmed touch). */
+  private logExtra: Partial<ActionLogEntry> | undefined;
+  readonly confirmations: Confirmations;
+  private readonly policy: PolicyFile;
   private readonly reloadSettleMs: number;
   private readonly noScreenshot = new Set<string>();
   private readonly shotFiles: string[] = [];
@@ -590,6 +655,8 @@ export class TaplineTools {
     private readonly options: ToolsOptions,
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
+    this.confirmations = options.confirmations ?? new Confirmations();
+    this.policy = options.policy ?? DEFAULT_POLICY;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
@@ -780,6 +847,7 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
       }
     }
+    if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
     const started = Date.now();
     const batchId = `b${started.toString(36)}`;
@@ -842,6 +910,25 @@ export class TaplineTools {
       }
     }
     return failed ? { ...response, isError: true } : response;
+  }
+
+  /** `run` with dry_run (§11.4): the steps are checked already; step 1 is resolved, nothing is touched. */
+  private async dryRunBatch(steps: Step[]): Promise<CallToolResult> {
+    const total = steps.length;
+    const first = steps[0] as Step;
+    const head = `Would run ${total} step${total === 1 ? "" : "s"}`;
+    if (first.tool === "tap" || first.tool === "long_press" || first.tool === "toggle" || first.tool === "type_text") {
+      const answer = await this.runStep({ ...first, dry_run: true } as Step);
+      const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
+      const [line, ...rest] = said.split("\n");
+      if (answer.isError === true) {
+        const { code, message } = parseError(said);
+        return fail(`Error ${code}: ${head}; step 1 (${describeRunStep(first)}) would fail: ${message}`);
+      }
+      const would = (line ?? "").replace(/^Would /, "would ");
+      return text([`${head}; step 1 ${would}`, ...rest].join("\n"));
+    }
+    return text(`${head}; step 1 would ${describeRunStep(first)}.`);
   }
 
   /** One step of `run`, as its own tool call without a list. */
@@ -1087,16 +1174,8 @@ export class TaplineTools {
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
-    if (this.personActed) {
-      const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
-      if (typeof target === "object" && target !== null && "ref" in target) {
-        // The error says it already, so the note isn't repeated.
-        this.personNotePending = false;
-        return fail(
-          "Error stale: a person used the app since your last look, so refs from that list may point elsewhere. Look again, or target by id, label or text.",
-        );
-      }
-    }
+    const stale = this.staleRef(params);
+    if (stale !== null) return stale;
     let result: unknown;
     this.actionStartedAt = Date.now();
     try {
@@ -1255,7 +1334,9 @@ export class TaplineTools {
       ...(by === "agent" && this.actionStartedAt !== undefined ? { ms: Date.now() - this.actionStartedAt } : {}),
       ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
       ...(by === "agent" && this.batch !== undefined ? { batch: this.batch } : {}),
+      ...(by === "agent" ? (this.logExtra ?? {}) : {}),
     });
+    if (by === "agent") this.logExtra = undefined;
   }
 
   private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string, reason?: string): void {
@@ -1731,24 +1812,209 @@ export class TaplineTools {
     return "element";
   }
 
+  // -- the safety policy (AGENT-TOOLS 1.8 §11)
+
+  /**
+   * A guarded touch: the app resolves the target in a dry run, the policy's words are matched against the
+   * element's own label and text, and a confirm word waits for a person's OK in the live view.
+   */
+  private async guarded(
+    tool: "tap" | "long_press" | "toggle",
+    method: string,
+    params: Record<string, unknown>,
+    dryRun: boolean,
+    perform: () => Promise<CallToolResult>,
+  ): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const lists = listsFor(this.policy, session.app);
+    if (!dryRun && lists.confirm.length === 0 && lists.block.length === 0) return perform();
+    const stale = this.staleRef(params);
+    if (stale !== null) return stale;
+    const resolved = await this.resolveForPolicy(session, method, params);
+    if (resolved.kind === "error") {
+      // The touch itself would fail the same way: let it answer (and log) as usual.
+      if (!dryRun) return perform();
+      this.logExtra = { dry_run: true };
+      this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
+      return fail(resolved.text);
+    }
+    const elements = resolved.elements;
+    const shown = elements[0];
+    for (const element of elements) {
+      const word = matchWord(lists.block, element);
+      if (word === null) continue;
+      const line = `Error not_allowed: blocked: ${this.shortName(element, false)} is blocked by the policy (${JSON.stringify(word)}); don't try another way.`;
+      if (dryRun) this.logExtra = { dry_run: true };
+      this.showAction("agent", method, { element }, params, "not_allowed", "blocked");
+      return fail(line);
+    }
+    let confirm: { element: TreeElement; word: string } | null = null;
+    for (const element of elements) {
+      const word = matchWord(lists.confirm, element);
+      if (word !== null) {
+        confirm = { element, word };
+        break;
+      }
+    }
+    if (dryRun) {
+      const would = this.wouldLine(tool, shown, resolved.point, resolved.value);
+      const needs = confirm !== null ? ` It needs a person's OK (policy word ${JSON.stringify(confirm.word)}).` : "";
+      this.logExtra = { dry_run: true };
+      this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
+      return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
+    }
+    if (confirm === null) return perform();
+    const name = this.shortName(confirm.element, false);
+    const label = confirm.element.label ?? confirm.element.text ?? undefined;
+    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
+    const check = this.confirmations.check(`${tool}|${elementKey(confirm.element)}`, { kind: tool, caption, word: confirm.word });
+    if (check.granted) {
+      this.logExtra = { confirmed: true };
+      const answer = await perform();
+      return appendNote(answer, "Note: a person allowed this.");
+    }
+    const where =
+      this.options.canConfirm === false
+        ? "The live view is off, so nobody can allow it here; ask your user."
+        : "The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.";
+    this.showAction("agent", method, { element: confirm.element }, params, "not_allowed", "needs_confirmation");
+    return fail(
+      `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(confirm.word)}). ${where}${check.suffix}`,
+    );
+  }
+
+  /** A dry run of a tool the policy doesn't guard (type_text): the app's checks, nothing touched. */
+  private async dryRun(tool: string, method: string, params: Record<string, unknown>): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const stale = this.staleRef(params);
+    if (stale !== null) return stale;
+    const resolved = await this.resolveForPolicy(session, method, params);
+    this.logExtra = { dry_run: true };
+    if (resolved.kind === "error") {
+      this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
+      return fail(resolved.text);
+    }
+    this.showAction("agent", method, resolved.elements[0] !== undefined ? { element: resolved.elements[0] } : undefined, params);
+    return text([this.wouldLine(tool, resolved.elements[0], resolved.point, resolved.value), ...this.takePersonNote()].join("\n"));
+  }
+
+  /**
+   * What a touch would act on. Apps that know dry runs resolve it themselves, with every check; older
+   * apps only give their element list, and every element the target could mean is checked.
+   */
+  private async resolveForPolicy(
+    session: SessionInfo,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<
+    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown }
+    | { kind: "error"; text: string; code: string; reason?: string }
+  > {
+    if (session.capabilities.includes("dryRun")) {
+      let raw: unknown;
+      try {
+        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id });
+      } catch (error) {
+        const reason = error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined;
+        return {
+          kind: "error",
+          text: describeError(error),
+          code: error instanceof TaplineError ? error.code : "internal",
+          ...(reason !== undefined ? { reason } : {}),
+        };
+      }
+      const parsed = dryRunResultSchema.safeParse(raw);
+      if (!parsed.success) return { kind: "error", text: "Error internal: the app didn't answer the dry run.", code: "internal" };
+      return {
+        kind: "ok",
+        elements: [parsed.data.element],
+        ...(parsed.data.point !== undefined ? { point: parsed.data.point } : {}),
+        ...(parsed.data.value !== undefined ? { value: parsed.data.value } : {}),
+      };
+    }
+    if (method === "type" || params["target"] === undefined) {
+      return { kind: "error", text: "Error unsupported: this app's Tapline is too old for dry runs; update react-native-tapline.", code: "unsupported" };
+    }
+    let raw: unknown;
+    try {
+      raw = await this.host.request("tree", {}, { sessionId: session.id });
+    } catch (error) {
+      return { kind: "error", text: describeError(error), code: error instanceof TaplineError ? error.code : "internal" };
+    }
+    const tree = treeResultSchema.safeParse(raw);
+    if (!tree.success) return { kind: "error", text: "Error internal: the app returned an element list the host could not read.", code: "internal" };
+    const elements = candidatesFor(params["target"], tree.data.elements);
+    if (elements.length === 0) {
+      return { kind: "error", text: "Error not_found: nothing on screen matches that target.", code: "not_found" };
+    }
+    const first = elements[0];
+    const frame = elements.length === 1 && first !== undefined ? first.frame : null;
+    return {
+      kind: "ok",
+      elements,
+      ...(frame ? { point: { x: Math.round(frame.x + frame.width / 2), y: Math.round(frame.y + frame.height / 2) } } : {}),
+    };
+  }
+
+  /** `Would tap e12 button "Delete trip" at 215,640.` */
+  private wouldLine(tool: string, element: TreeElement | undefined, point: { x: number; y: number } | undefined, value: unknown): string {
+    const name = element !== undefined ? this.shortName(element, true) : "the element";
+    const at = point !== undefined ? ` at ${point.x},${point.y}` : "";
+    switch (tool) {
+      case "long_press":
+        return `Would long-press ${name}${at}.`;
+      case "toggle":
+        return `Would toggle ${name}${typeof value === "boolean" ? ` to ${String(value)}` : ""}${at}.`;
+      case "type_text":
+        return `Would type into ${name}.`;
+      default:
+        return `Would tap ${name}${at}.`;
+    }
+  }
+
+  /** `e12 button "Delete trip"`: ref (when asked), role and name, nothing else. */
+  private shortName(element: TreeElement, withRef: boolean): string {
+    return formatElement(
+      {
+        ref: withRef ? element.ref : "",
+        role: element.role ?? null,
+        type: element.type ?? null,
+        label: element.label ?? null,
+        text: element.text ?? null,
+        textMore: element.textMore ?? null,
+      },
+      { actions: false },
+    );
+  }
+
+  /** A `{ref}` target after a person used the app: refs may point elsewhere. */
+  private staleRef(params: unknown): CallToolResult | null {
+    if (!this.personActed) return null;
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (typeof target === "object" && target !== null && "ref" in target) {
+      // The error says it already, so the note isn't repeated.
+      this.personNotePending = false;
+      return fail(
+        "Error stale: a person used the app since your last look, so refs from that list may point elsewhere. Look again, or target by id, label or text.",
+      );
+    }
+    return null;
+  }
+
   tap(args: Shape<"tap">): Promise<CallToolResult> {
-    return this.act(
-      "press",
-      { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) },
-      (r) => `Tapped ${this.elementName(r)}.`,
-      args.look,
-      args.screenshot,
+    const params = { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) };
+    return this.guarded("tap", "press", params, args.dry_run === true, () =>
+      this.act("press", params, (r) => `Tapped ${this.elementName(r)}.`, args.look, args.screenshot),
     );
   }
 
   /** `seconds` is accepted for the shared interface; Tapline calls the handler, so it doesn't hold. */
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
-    return this.act(
-      "longPress",
-      { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) },
-      (r) => `Long-pressed ${this.elementName(r)}.`,
-      args.look,
-      args.screenshot,
+    const params = { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) };
+    return this.guarded("long_press", "longPress", params, args.dry_run === true, () =>
+      this.act("longPress", params, (r) => `Long-pressed ${this.elementName(r)}.`, args.look, args.screenshot),
     );
   }
 
@@ -1760,6 +2026,8 @@ export class TaplineTools {
     };
     if (args.target !== undefined) params["target"] = toWireTarget(args.target);
     if (args.force === true) params["force"] = true;
+    // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
+    if (args.dry_run === true) return this.dryRun("type_text", "type", params);
     return this.act(
       "type",
       params,
@@ -1833,18 +2101,20 @@ export class TaplineTools {
     if (args.force === true) params["force"] = true;
     // The switch already had the asked value: the app touched nothing, and that line is the whole answer.
     const unchanged = (r: unknown): boolean => typeof r === "object" && r !== null && "unchanged" in r && r.unchanged === true;
-    return this.act(
-      "toggle",
-      params,
-      (r) => {
-        const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
-        if (unchanged(r)) return `${this.elementName(r)} is already ${JSON.stringify(value)}.`;
-        return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
-      },
-      args.look,
-      args.screenshot,
-      undefined,
-      unchanged,
+    return this.guarded("toggle", "toggle", params, args.dry_run === true, () =>
+      this.act(
+        "toggle",
+        params,
+        (r) => {
+          const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
+          if (unchanged(r)) return `${this.elementName(r)} is already ${JSON.stringify(value)}.`;
+          return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
+        },
+        args.look,
+        args.screenshot,
+        undefined,
+        unchanged,
+      ),
     );
   }
 

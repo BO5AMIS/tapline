@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
+import type { Confirmations } from "./confirm.js";
 import type { ControlQueue } from "./control.js";
 import { isLoopback, type AppFrame, type HttpExtension, type TaplineHost } from "./server.js";
 
@@ -76,6 +77,8 @@ export interface ViewerHubOptions {
   idleStopMs?: number;
   /** How often to resend the status when the measured frame rate changed. Default 2000 ms. */
   statusEveryMs?: number;
+  /** A person's OK for guarded touches (VIEWER-PROTOCOL 1.5): shown to every viewer, answered from any. */
+  confirmations?: Confirmations;
 }
 
 interface StatusFields {
@@ -214,7 +217,12 @@ export class ViewerHub implements HttpExtension {
   private fpsTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: ViewerHubOptions) {
-    this.unsubscribe = options.control.onChange(() => this.broadcastStatus());
+    const offControl = options.control.onChange(() => this.broadcastStatus());
+    const offConfirm = options.confirmations?.onEvent((event) => this.broadcast({ ...event }));
+    this.unsubscribe = () => {
+      offControl();
+      offConfirm?.();
+    };
   }
 
   /** While anyone is connected, resend the status when the measured frame rate changes. */
@@ -408,6 +416,8 @@ export class ViewerHub implements HttpExtension {
     });
     this.viewersChanged();
     this.send(client, this.statusMessage());
+    // A request still waiting for an answer shows on a viewer that joins now, too.
+    for (const request of this.options.confirmations?.open() ?? []) this.send(client, { ...request });
   }
 
   private async onMessage(client: WsClient, message: Record<string, unknown>): Promise<void> {
@@ -424,6 +434,12 @@ export class ViewerHub implements HttpExtension {
           }
         }
         return;
+      case "confirm_answer": {
+        const id = message["id"];
+        const allow = message["allow"];
+        if (typeof id === "string" && typeof allow === "boolean") this.options.confirmations?.answer(id, allow);
+        return;
+      }
       case "quality": {
         const preset = message["preset"];
         if (preset === "sharp" || preset === "balanced" || preset === "light") {

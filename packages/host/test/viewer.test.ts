@@ -446,3 +446,25 @@ describe("the WebSocket", () => {
     expect(messages.find((m) => m["type"] === "action")).toMatchObject({ by: "agent", kind: "press", ok: false, code: "busy" });
   });
 });
+
+describe("a person's OK in the live view (VIEWER-PROTOCOL 1.5)", () => {
+  it("shows a request to every viewer, to one that joins later too, and takes the first answer", async () => {
+    const { Confirmations } = await import("../src/confirm.js");
+    const confirmations = new Confirmations();
+    const { port } = await startHub({ confirmations });
+    const first = await openWs(port);
+    const check = confirmations.check("tap|id:d", { kind: "tap", caption: 'Tap "Delete trip"', word: "Delete" });
+    if (check.granted) throw new Error("granted without asking");
+    await until(() => first.messages.some((m) => m["type"] === "confirm"));
+    expect(first.messages.find((m) => m["type"] === "confirm")).toMatchObject({ id: check.request.id, by: "agent", kind: "tap", caption: 'Tap "Delete trip"', word: "Delete" });
+    const late = await openWs(port);
+    await until(() => late.messages.some((m) => m["type"] === "confirm"));
+    late.ws.send(JSON.stringify({ type: "confirm_answer", id: check.request.id, allow: true }));
+    await until(() => first.messages.some((m) => m["type"] === "confirm_closed"));
+    expect(first.messages.find((m) => m["type"] === "confirm_closed")).toEqual({ type: "confirm_closed", id: check.request.id, allow: true });
+    first.ws.send(JSON.stringify({ type: "confirm_answer", id: check.request.id, allow: false }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(confirmations.check("tap|id:d", { kind: "tap", caption: "", word: "Delete" }).granted).toBe(true);
+    confirmations.close();
+  });
+});

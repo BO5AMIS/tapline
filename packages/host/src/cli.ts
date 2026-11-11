@@ -51,6 +51,8 @@ Options:
                  For mcp: put screenshots in the tool result (default), or save them in
                  ~/.tapline/shots and return the path (or TAPLINE_SCREENSHOTS)
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
+  --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
+  --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
   --viewer <local|remote|off>
                  For mcp: the live viewer on this computer only (default), also on your
                  own Tailscale devices, or off (or TAPLINE_VIEWER)
@@ -231,6 +233,8 @@ async function main(argv: string[]): Promise<number> {
       wait: { type: "string" },
       junit: { type: "string" },
       "no-log": { type: "boolean" },
+      policy: { type: "string" },
+      "no-policy": { type: "boolean" },
       project: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
@@ -253,6 +257,8 @@ async function main(argv: string[]): Promise<number> {
         ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}),
         ...(values.viewer !== undefined ? { viewer: values.viewer } : {}),
         ...(values["no-log"] === true ? { noLog: true } : {}),
+        ...(values.policy !== undefined ? { policy: values.policy } : {}),
+        ...(values["no-policy"] === true ? { noPolicy: true } : {}),
       }))
         ? -1 // keep running
         : 1;

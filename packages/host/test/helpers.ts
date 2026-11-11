@@ -36,6 +36,8 @@ export class FakeApp {
   readonly ws: WebSocket;
   readonly received: unknown[] = [];
   readonly requests: IncomingRequest[] = [];
+  /** Dry runs (AGENT-TOOLS 1.8 §11.4) the host sent before a touch; kept apart so request lists stay as they were. */
+  readonly dryRuns: IncomingRequest[] = [];
   readonly closed: Promise<Closed>;
   handler: (request: IncomingRequest) => Reply = () => ({ ok: true, result: {} });
   private waiters: Array<(message: unknown) => void> = [];
@@ -53,6 +55,15 @@ export class FakeApp {
           method: String(parsed["method"]),
           params: parsed["params"],
         };
+        // A dry run: the handler's answer for the same call, marked dry (nothing is "touched" in a fake).
+        if (isRecord(request.params) && request.params["dryRun"] === true) {
+          this.dryRuns.push(request);
+          const reply = this.handler(request);
+          if (reply === "ignore") return;
+          const result = reply.ok && isRecord(reply.result) ? { ...reply.result, dryRun: true } : undefined;
+          this.send({ type: "response", id: request.id, ...(reply.ok ? { ok: true, result } : reply) });
+          return;
+        }
         this.requests.push(request);
         const reply = this.handler(request);
         if (reply !== "ignore") this.send({ type: "response", id: request.id, ...reply });
@@ -97,7 +108,7 @@ export class FakeApp {
       token: TOKEN,
       app: { name: "Demo", id: "com.example.demo", version: "1.0.0", build: "1" },
       device: { platform: "ios", osVersion: "26.1", model: "iPhone18,2", name: "Test iPhone" },
-      capabilities: ["tree", "press", "screenshot", "logs"],
+      capabilities: ["tree", "press", "screenshot", "logs", "dryRun"],
       ...overrides,
     };
   }

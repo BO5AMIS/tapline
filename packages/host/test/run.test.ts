@@ -165,7 +165,7 @@ describe("record keeps the index of a shared label or text (AGENT-TOOLS 1.8 §9.
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
     const dir = mkdtempSync(join(tmpdir(), "tapline-index-"));
-    const first = { ref: "e1", type: "Pressable", role: "button", text: "Delete", frame: { x: 0, y: 100, width: 100, height: 40 }, actions: ["press"] };
+    const first = { ref: "e1", type: "Pressable", role: "button", text: "Edit", frame: { x: 0, y: 100, width: 100, height: 40 }, actions: ["press"] };
     const second = { ...first, ref: "e2", frame: { x: 0, y: 200, width: 100, height: 40 } };
     const { host, port } = await startHost();
     hosts.push(host);
@@ -181,7 +181,7 @@ describe("record keeps the index of a shared label or text (AGENT-TOOLS 1.8 §9.
       await tools.tap({ target: { ref: "e2" }, look: false });
       await tools.record({ stop: true });
       const script = JSON.parse(readFileSync(join(dir, "second.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
-      expect(script.steps[0]).toMatchObject({ tool: "tap", target: { text: "Delete", index: 1 } });
+      expect(script.steps[0]).toMatchObject({ tool: "tap", target: { text: "Edit", index: 1 } });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
