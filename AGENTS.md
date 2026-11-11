@@ -150,9 +150,11 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
    `appearance` (light / dark) is always there. Use them to reach a state quickly and to
    check stress views: dark mode, right-to-left languages. Put things back when you're done.
-12. What you tap calls the element's handler; it isn't a real touch. If a control only
-   reacts to gestures (swipe-to-delete, drag), say that you couldn't test it rather than
-   guessing.
+12. What you tap calls the element's handler; it isn't a real touch. `swipe` (`x0, y0, x1, y1`,
+   `seconds`) drags a finger through React Native's own touch system: a sheet's swipe to close,
+   a pan view, a drawer. Gestures that react-native-gesture-handler or a native view handle
+   (swipeable rows built on it, sliders, maps) answer `no_action`: say that you couldn't test
+   them (or use Tapwright) rather than guessing. Lists move with `scroll`, not `swipe`.
 
 ## Repeatable runs
 

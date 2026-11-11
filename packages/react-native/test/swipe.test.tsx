@@ -115,3 +115,42 @@ test('a drag along a scroll view is the scroll view\'s (it moves natively): no_a
   expect(error.message).toMatch(/^no_action: Nothing took the swipe from \(200, 330\): it starts on a scroll view, which moves natively: use scroll/);
   expect(onRow).not.toHaveBeenCalled();
 });
+
+describe('inside a Modal, as on a phone', () => {
+  function ModalSheet({ claimOnStart, onRelease }: { claimOnStart: boolean; onRelease: () => void }) {
+    const pan = useMemo(
+      () =>
+        PanResponder.create({
+          ...(claimOnStart ? { onStartShouldSetPanResponder: () => true } : {}),
+          onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 8,
+          onPanResponderRelease: () => onRelease(),
+        }),
+      [claimOnStart, onRelease],
+    );
+    // The Modal's own window takes any touch nobody inside it takes.
+    return React.createElement(
+      'RCTModalHostView',
+      { visible: true, onStartShouldSetResponder: () => true },
+      <View testID="panel" {...pan.panHandlers}>
+        <Text>Panel</Text>
+      </View>,
+    );
+  }
+
+  test('a panel that only claims on a move never gets it: the Modal holds the touch, and the answer says so', async () => {
+    const onRelease = jest.fn();
+    await mount(<ModalSheet claimOnStart={false} onRelease={onRelease} />);
+    useFrames({ panel: frame(0, 500, 400, 300), Panel: frame(20, 520, 300, 22) });
+    const error = await failure(run(() => swipe({ x0: 200, y0: 530, x1: 200, y1: 730, seconds: 0.1 })));
+    expect(error.message).toMatch(/only the open sheet's own window took it/);
+    expect(onRelease).not.toHaveBeenCalled();
+  });
+
+  test('a panel that claims on start gets the drag', async () => {
+    const onRelease = jest.fn();
+    await mount(<ModalSheet claimOnStart onRelease={onRelease} />);
+    useFrames({ panel: frame(0, 500, 400, 300), Panel: frame(20, 520, 300, 22) });
+    await run(() => swipe({ x0: 200, y0: 530, x1: 200, y1: 730, seconds: 0.1 }));
+    expect(onRelease).toHaveBeenCalledTimes(1);
+  });
+});

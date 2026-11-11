@@ -103,6 +103,7 @@ your agent at it.
 | `look` | the screen as elements (role, text, id, position, actions), the app and the current route, with a screenshot (`screenshot: false` skips it; with `--screenshots file` a file path instead; `labels` draws each element's box and ref on it) |
 | `check_layout` | automatic visual checks without a screenshot: small tap areas, cut-off edges, overlaps, low contrast, unnamed buttons, truncated text |
 | `back` | go back, like the back button or swipe; it closes an open sheet or modal first (`Closed the sheet.`) |
+| `swipe` | a finger dragged from `x0, y0` to `x1, y1` over `seconds`, through React Native's touch system (a sheet's swipe to close, a pan view) |
 | `app_command` | the app's own test commands (switch language, sign in as a test user, sample data …) and the built-in light/dark switch |
 | `wait_for` | wait until something appears or is gone, or the network is quiet |
 | `compare_screen` | compare the screen with a saved reference picture: what changed, where, marked in red |
@@ -210,9 +211,10 @@ order, pair again (or give each agent a fixed `--port`).
   Tapwright covers those. Built with Tapline's native module (any new build of an Expo app
   with the SDK installed), an alert UIKit shows and the share sheet are seen: the agent gets an
   `Alert:` line and taps behind them are refused.
-- Actions call your components' handlers; they aren't real touches. Gesture-only controls
-  (swipe-to-delete, drag, pinch) and native views React doesn't render (maps, web view
-  contents) are out of reach.
+- Actions call your components' handlers; they aren't real touches. `swipe` drags through React
+  Native's own touch system (a sheet's swipe to close, pan views, drawers); gestures built on
+  react-native-gesture-handler, pinch, and native views React doesn't render (sliders, maps, web
+  view contents) are out of reach.
 - Native tab bars (Expo Router's `NativeTabs`) are drawn by iOS; Tapline lists their tabs
   (without a position) and switches them through navigation. Tabs that aren't selected and
   screens covered by another are left out of `look`, like they are for the user.

@@ -1902,6 +1902,11 @@ function callProp(fiber: Fiber, name: string): unknown {
   return isRecord(fiber.memoizedProps) ? fiber.memoizedProps[name] : undefined;
 }
 
+/** A Modal's own window, which takes any touch nobody inside it takes (so it doesn't fall through). */
+function isModalHost(fiber: Fiber): boolean {
+  return typeof fiber.type === 'string' && /ModalHostView/.test(fiber.type);
+}
+
 function isScrollHost(fiber: Fiber): boolean {
   return typeof fiber.type === 'string' && /ScrollView|RCTScroll/.test(fiber.type);
 }
@@ -2006,11 +2011,14 @@ export async function swipe(
   const finalEvent = touchEvent(history, x1, y1, end, origin, false);
   const scrollTakesIt =
     alongScroll && scrollHost !== undefined && !(claimedOnMove !== undefined && claimedOnMove !== scrollHost && isWithin(claimedOnMove, scrollHost));
-  if (!responder || isScrollHost(responder) || scrollTakesIt) {
+  if (!responder || isScrollHost(responder) || isModalHost(responder) || scrollTakesIt) {
     if (responder) callResponder(responder, 'onResponderTerminate', finalEvent);
-    const why = responder || scrollTakesIt
-      ? 'it starts on a scroll view, which moves natively: use scroll'
-      : "nothing there takes a swipe through React Native's touch system";
+    const why =
+      responder && isModalHost(responder) && !scrollTakesIt
+        ? "only the open sheet's own window took it, so nothing in the sheet handles a swipe (a sheet that closes by a swipe claims the touch when it starts)"
+        : responder || scrollTakesIt
+          ? 'it starts on a scroll view, which moves natively: use scroll'
+          : "nothing there takes a swipe through React Native's touch system";
     throw notActionable(
       'no_action',
       `Nothing took the swipe from (${x0}, ${y0}): ${why}. Gestures that react-native-gesture-handler or a native view handle (sliders, maps) can't be made from inside the app; Tapwright's swipe makes real ones.`,

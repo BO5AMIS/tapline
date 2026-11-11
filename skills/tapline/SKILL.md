@@ -115,6 +115,7 @@ and `y` only for things with no element.
 | answer an alert | the app's alert shows as an `Alert:` line in the header (in a build with Tapline's native module, also an alert iOS draws, and the share sheet as `Alert: "Share sheet"`). With Tapline's stand-in its buttons are also in the list: tap them. When the note says it is an OS alert, Tapline can't tap it: ask the user to tap the button you name |
 | keep a flow to run again after a change | `record` with `start`, act, `record` with `stop`; later `replay` |
 | compare a screen with how it looked before | `compare_screen` with a name |
+| close a sheet by swiping it down, or drag a pan view | `swipe` from a point on it to where the finger lifts. A gesture built on react-native-gesture-handler, a slider or a map answers `no_action`: say you couldn't test it. Lists move with `scroll` |
 | see an animation or a loading state | `filmstrip`: several frames in one picture |
 | let the user watch, or do a step themselves (their own password) | `viewer`, and give them the link |
 
@@ -161,8 +162,9 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 An element you can only reach by `x` and `y`, with no id and no label, is a finding too: a
 person using VoiceOver can't reach it either.
 
-Tapline calls the app's handlers; it doesn't make real touches. A control that only reacts
-to a gesture (swipe to delete, drag, pinch) can't be tested this way: say so, don't guess.
+Tapline calls the app's handlers; it doesn't make real touches. `swipe` drags through React
+Native's own touch system; a gesture built on react-native-gesture-handler, a pinch, a slider or a
+map can't be made this way: say so, don't guess.
 A refusal (`covered`, `off_screen`, `disabled`) on something a user is meant to reach is
 often the bug itself. Read `logs` after anything that misbehaves, and once at the end.
 
@@ -210,5 +212,5 @@ took more than a few seconds (`Settled in` gives the time).
 | calling `back` again when it answered `no_action` | the message names what is open: tap its close control |
 | using `x` and `y` because a ref went stale | `look`, then use the id or the new ref |
 | reporting "couldn't sign in" as a bug | list it under what you couldn't test |
-| reporting a swipe-only control as broken because `tap` did nothing | say that Tapline can't make that gesture |
+| reporting a swipe-only control as broken because `tap` did nothing | `swipe` it; if that answers `no_action`, say that Tapline can't make that gesture |
 | going on after the user left the app | stop: Tapline works only while its app is open in front |
