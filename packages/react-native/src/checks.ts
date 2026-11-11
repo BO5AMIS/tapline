@@ -406,9 +406,31 @@ function explicitRole(node: HostNode): string | null {
 }
 
 /** A pressable without a role, or a switch-like element without a state: VoiceOver can't say what it is. */
-function traitProblem(item: Measured): { problem: string; fix: string } | null {
+/** The role set on the element, or on a host up to three levels above it (a library's pressable around its view). */
+function roleAround(nodes: HostNode[], node: HostNode): string | null {
+  let current: HostNode | undefined = node;
+  for (let level = 0; current && level < 4; level++) {
+    const role = explicitRole(current);
+    if (role !== null) return role;
+    current = current.parent >= 0 ? nodes[current.parent] : undefined;
+  }
+  return null;
+}
+
+/** The nearest scroll view around a node (its index), or -1: content scrolls under bars outside it. */
+function scrollContainer(nodes: HostNode[], entries: Entry[], node: HostNode): number {
+  for (let p = node.parent; p >= 0; ) {
+    if (entries.some((e) => e.node.index === p && e.info.actions.includes('scroll'))) return p;
+    const next = nodes[p];
+    if (!next) return -1;
+    p = next.parent;
+  }
+  return -1;
+}
+
+function traitProblem(item: Measured, nodes: HostNode[]): { problem: string; fix: string } | null {
   const { node, info } = item.entry;
-  const role = explicitRole(node);
+  const role = roleAround(nodes, node);
   if (role !== null && STATEFUL_ROLES.has(role) && info.checked === null) {
     return {
       problem: `it's a ${role} without a state, so VoiceOver can't say whether it's on`,
@@ -441,7 +463,9 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
   };
 
   for (const item of measured) {
-    if (smallTarget(item) !== null) {
+    // iOS's own switch (51x31 pt) takes touches around it: at its system size it isn't a small target.
+    const systemSwitch = item.entry.info.type === 'Switch' && item.frame.width >= 44 && item.frame.height >= 24;
+    if (smallTarget(item) !== null && !systemSwitch) {
       add(item, 'hit_region', `too small to tap reliably (${num(item.frame.width)}x${num(item.frame.height)} pt)`, `make it at least ${MIN_TARGET}x${MIN_TARGET} pt`);
     }
     const contrast = contrastOf(item, snapshot.nodes);
@@ -460,7 +484,7 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
     if (truncated !== null) add(item, 'clipped_text', truncated, 'let it wrap, or give it more room');
     const cut = cutOff(item, snapshot.screen.width);
     if (cut !== null) add(item, 'clipped_text', `it ${cut}`, 'keep it inside the screen');
-    const trait = traitProblem(item);
+    const trait = traitProblem(item, snapshot.nodes);
     if (trait !== null) add(item, 'trait', trait.problem, trait.fix);
   }
 
@@ -475,6 +499,11 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
         const a = first.entry.node;
         const b = second.entry.node;
         if (isAncestor(snapshot.nodes, a, b) || isAncestor(snapshot.nodes, b, a)) continue;
+        // One control drawn as two views with the same id isn't two things on top of each other.
+        const idA = first.entry.info.testID;
+        if (idA !== null && idA !== '' && idA === second.entry.info.testID) continue;
+        // Content scrolling under a bar outside its scroll view is how lists work, not an overlap.
+        if (scrollContainer(snapshot.nodes, snapshot.entries, a) !== scrollContainer(snapshot.nodes, snapshot.entries, b)) continue;
         const smaller = Math.min(first.frame.width * first.frame.height, second.frame.width * second.frame.height);
         const shared = intersectionArea(first.frame, second.frame);
         if (smaller <= 0 || shared <= smaller * OVERLAP_LIMIT) continue;
@@ -491,6 +520,10 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
       const id = item.entry.info.testID;
       if (id === null || id === '') continue;
       byId.set(id, [...(byId.get(id) ?? []), item]);
+    }
+    // A view inside another with the same id is one control drawn twice (a library's pressable and its view): count it once.
+    for (const [id, items] of byId) {
+      byId.set(id, items.filter((item) => !items.some((other) => other !== item && isAncestor(snapshot.nodes, other.entry.node, item.entry.node))));
     }
     for (const [id, items] of byId) {
       const first = items[0];

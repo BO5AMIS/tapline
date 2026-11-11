@@ -1863,6 +1863,7 @@ export class TaplineTools {
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    this.actionStartedAt = Date.now();
     const lists = listsFor(this.policy, session.app);
     if (!dryRun && lists.confirm.length === 0 && lists.block.length === 0) return perform();
     const stale = this.staleRef(params);
