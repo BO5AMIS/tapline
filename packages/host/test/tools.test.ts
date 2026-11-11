@@ -287,6 +287,8 @@ describe("the live viewer's side of the tools", () => {
     if (req.method === "scroll") return { ok: true, result: { element: TREE.elements[0], offset: { x: 0, y: 300 } } };
     if (req.method === "type") return { ok: true, result: { element: { ...TREE.elements[0], role: "textfield" }, value: "x" } };
     if (req.method === "longPress") return { ok: true, result: { element: TREE.elements[0] } };
+    // A list: nothing in React Native's touch system takes the drag, so it scrolls.
+    if (req.method === "swipe") return { ok: false, error: { code: "not_actionable", message: "no_action: Nothing took the swipe" } };
     return defaultHandler(req);
   };
 
@@ -337,6 +339,19 @@ describe("the live viewer's side of the tools", () => {
     await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [60, 0.5275, 0.25]] });
     expect(params("press")).toHaveLength(1);
     expect(params("scroll")).toHaveLength(1);
+  });
+
+  it("a person's drag goes to what takes a finger's drag first (a sheet's swipe to close), and scrolls only when nothing does", async () => {
+    const { app, tools } = await viewerTools();
+    await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.75], [150, 0.5, 0.5], [300, 0.5, 0.25]] });
+    const swipes = app.requests.filter((r) => r.method === "swipe").map((r) => r.params);
+    expect(swipes).toEqual([{ x0: 200, y0: 600, x1: 200, y1: 200, seconds: 0.3 }]);
+    expect(app.requests.filter((r) => r.method === "scroll")).toHaveLength(1);
+    // When the drag is taken, nothing scrolls.
+    app.handler = (req) => (req.method === "swipe" ? { ok: true, result: { element: TREE.elements[0], settledMs: 10 } } : viewerHandler(req));
+    const outcome = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.6], [200, 0.5, 0.9]] });
+    expect(outcome).toMatchObject({ ok: true, action: { kind: "swipe" } });
+    expect(app.requests.filter((r) => r.method === "scroll")).toHaveLength(1);
   });
 
   it("reports a person's action with where it happened, in 0..1", async () => {

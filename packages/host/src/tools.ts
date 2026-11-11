@@ -1035,9 +1035,21 @@ export class TaplineTools {
     const run = async (): Promise<InputOutcome> => {
       const size = await this.screenSize(session.id);
       if (size === undefined) return { ok: false, code: "unsupported", message: "Couldn't read the screen size yet." };
-      const { method, params, point } = this.mapInput(input, size);
+      const { method, params, point, swipe } = this.mapInput(input, size);
       // The request reaches the app from here on, whether it succeeds or is refused.
       this.markPersonUsedApp();
+      // A drag goes to what takes a finger's drag (a sheet's swipe to close, a pan view) first; when
+      // nothing does (a list moves natively), it scrolls, as before.
+      if (swipe !== undefined) {
+        try {
+          const swiped = await this.host.request("swipe", swipe, { sessionId: session.id });
+          return { ok: true, action: this.describeAction("swipe", swiped, point) };
+        } catch (error) {
+          if (!(error instanceof TaplineError && error.code === "not_actionable")) {
+            return { ok: false, code: error instanceof TaplineError ? error.code : "internal", message: error instanceof Error ? error.message : String(error), action: { kind: "swipe", ...(point ? { point } : {}) } };
+          }
+        }
+      }
       try {
         const result = await this.host.request(method, params, { sessionId: session.id });
         return { ok: true, action: this.describeAction(method, result, point) };
@@ -1060,7 +1072,7 @@ export class TaplineTools {
   private mapInput(
     input: PersonInput,
     size: { w: number; h: number },
-  ): { method: string; params: Record<string, unknown>; point?: { x: number; y: number } } {
+  ): { method: string; params: Record<string, unknown>; point?: { x: number; y: number }; swipe?: Record<string, unknown> } {
     switch (input.type) {
       case "gesture": {
         const first = input.points[0] ?? [0, 0, 0];
@@ -1078,7 +1090,9 @@ export class TaplineTools {
         // A finger moving up shows what is further down.
         const vertical = Math.abs(dy) >= Math.abs(dx);
         const direction = vertical ? (dy < 0 ? "down" : "up") : dx < 0 ? "right" : "left";
-        return { method: "scroll", params: { target, direction, amount: Math.round(Math.abs(vertical ? dy : dx)) }, point };
+        const seconds = Math.min(5, Math.max(0.05, (last[0] - first[0]) / 1000));
+        const swipe = { x0: target.x, y0: target.y, x1: Math.round(last[1] * size.w), y1: Math.round(last[2] * size.h), seconds };
+        return { method: "scroll", params: { target, direction, amount: Math.round(Math.abs(vertical ? dy : dx)) }, point, swipe };
       }
       case "scroll": {
         const target = { x: Math.round(input.x * size.w), y: Math.round(input.y * size.h) };
