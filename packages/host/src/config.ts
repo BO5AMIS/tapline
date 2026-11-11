@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 
 export const DEFAULT_PORT = 7210;
@@ -20,7 +20,9 @@ export interface HostConfig {
   hosts: string[];
   /** This machine's Tailscale IPv4, if found. */
   tailscaleIp: string | null;
-  /** The address the app should connect to (Tailscale IP if known, else loopback). */
+  /** This machine's addresses on its Wi-Fi or wired network (private IPv4), Wi-Fi first. */
+  lanIps: string[];
+  /** The address the app should connect to (the Wi-Fi/LAN address if there is one, else Tailscale, else loopback). */
   advertisedHost: string;
   /** This computer's name, shown on the phone before it connects. */
   name: string;
@@ -51,6 +53,37 @@ export interface ResolveOptions {
   /** Comma-separated bind addresses; overrides the defaults. */
   host?: string;
   env?: NodeJS.ProcessEnv;
+  /** The network interfaces (tests); defaults to this machine's. */
+  interfaces?: NetworkInterfaces;
+}
+
+export type NetworkInterfaces = ReturnType<typeof networkInterfaces>;
+
+/** Adapters that aren't the network the phone is on: virtual machines, containers, VPNs. */
+const VIRTUAL_ADAPTER = /vethernet|wsl|hyper-v|virtualbox|vbox|vmware|docker|loopback|tailscale|utun|zerotier|npcap|bluetooth|^br-|^tap|^tun/i;
+
+function isPrivateV4(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return false;
+  const [a = 0, b = 0] = parts;
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/**
+ * This machine's addresses on the network a phone next to it shares (Wi-Fi or a cable to the same
+ * router): private IPv4 on a physical adapter, Wi-Fi first, then Ethernet.
+ */
+export function lanAddresses(interfaces: NetworkInterfaces = networkInterfaces()): string[] {
+  const found: Array<{ name: string; address: string }> = [];
+  for (const [name, list] of Object.entries(interfaces)) {
+    if (list === undefined || VIRTUAL_ADAPTER.test(name)) continue;
+    for (const entry of list) {
+      const v4 = entry.family === "IPv4" || (entry.family as unknown) === 4;
+      if (v4 && !entry.internal && isPrivateV4(entry.address)) found.push({ name, address: entry.address });
+    }
+  }
+  const rank = (name: string): number => (/wi-?fi|wlan|wireless|^en0$/i.test(name) ? 0 : /ethernet|^eth|^en\d/i.test(name) ? 1 : 2);
+  return found.sort((x, y) => rank(x.name) - rank(y.name)).map((entry) => entry.address);
 }
 
 export type ScreenshotMode = "inline" | "file";
@@ -144,8 +177,13 @@ function parsePort(value: number | string | undefined, source: string): number |
   return port;
 }
 
-/** The address to give apps: one the host listens on, preferring Tailscale. */
-function advertise(hosts: string[], tailscaleIp: string | null): string {
+/**
+ * The address to give apps: one the host listens on. The Wi-Fi/LAN address comes first (v1: a test
+ * phone on the same network as this computer), then Tailscale.
+ */
+function advertise(hosts: string[], tailscaleIp: string | null, lanIps: string[]): string {
+  const lan = lanIps.find((ip) => hosts.includes(ip));
+  if (lan !== undefined) return lan;
   if (tailscaleIp !== null && hosts.includes(tailscaleIp)) return tailscaleIp;
   const specific = hosts.find((h) => h !== "0.0.0.0" && h !== "::");
   if (specific !== undefined) return specific;
@@ -159,6 +197,7 @@ export async function resolveConfig(options: ResolveOptions = {}): Promise<HostC
   const token = loadOrCreateToken(env);
   const notes: string[] = [];
   const tailscaleIp = await detectTailscaleIp();
+  const lanIps = lanAddresses(options.interfaces);
 
   let hosts: string[];
   if (options.host !== undefined && options.host.trim().length > 0) {
@@ -166,14 +205,15 @@ export async function resolveConfig(options: ResolveOptions = {}): Promise<HostC
       .split(",")
       .map((h) => h.trim())
       .filter((h) => h.length > 0);
-  } else if (tailscaleIp !== null) {
-    hosts = [tailscaleIp, "127.0.0.1"];
   } else {
-    hosts = ["127.0.0.1"];
-    notes.push(
-      "Tailscale was not found (tried `tailscale ip -4`), so the host listens on 127.0.0.1 only. " +
-        "Install Tailscale on this computer and your phone to reach it from anywhere, or pass --host.",
-    );
+    // The phone's Wi-Fi (or the same router by cable), Tailscale when it runs, and this computer.
+    hosts = [...lanIps, ...(tailscaleIp !== null ? [tailscaleIp] : []), "127.0.0.1"];
+    if (lanIps.length === 0 && tailscaleIp === null) {
+      notes.push(
+        "This computer has no Wi-Fi or local network address and Tailscale wasn't found, so the host listens on 127.0.0.1 only. " +
+          "Connect it to the same Wi-Fi as the phone (or a cable to the same router), or pass --host.",
+      );
+    }
   }
 
   return {
@@ -183,7 +223,8 @@ export async function resolveConfig(options: ResolveOptions = {}): Promise<HostC
     portFallback: explicitPort === undefined ? DEFAULT_PORT_FALLBACK : 0,
     hosts,
     tailscaleIp,
-    advertisedHost: advertise(hosts, tailscaleIp),
+    lanIps,
+    advertisedHost: advertise(hosts, tailscaleIp, lanIps),
     name: hostname(),
     notes,
   };

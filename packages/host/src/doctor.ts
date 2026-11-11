@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
-import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, tokenFilePath } from "./config.js";
+import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, tokenFilePath } from "./config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -20,6 +20,8 @@ export interface DoctorDeps {
   fileExists: (path: string) => boolean;
   portFree: (host: string, port: number) => Promise<boolean>;
   env: NodeJS.ProcessEnv;
+  /** This computer's Wi-Fi/LAN addresses (private IPv4 on real adapters). */
+  lanIps: () => string[];
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -28,7 +30,7 @@ const METRO_PORT = "8081";
 const WINDOWS_TAILSCALE = "C:\\Program Files\\Tailscale\\tailscale.exe";
 const MAC_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 const FIREWALL_COMMAND =
-  'New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress 100.64.0.0/10 -Action Allow';
+  'New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress LocalSubnet,100.64.0.0/10 -Action Allow';
 const SERVE_COMMAND = `tailscale serve --bg --https=8443 http://127.0.0.1:${METRO_PORT}`;
 
 function defaultRun(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -67,6 +69,7 @@ function defaultDeps(): DoctorDeps {
     fileExists: existsSync,
     portFree: defaultPortFree,
     env: process.env,
+    lanIps: () => lanAddresses(),
   };
 }
 
@@ -132,6 +135,20 @@ function checkNode(deps: DoctorDeps): CheckResult {
   };
 }
 
+/** v1 runs on a test phone on the same network as this computer: it needs an address on that network. */
+function checkLan(deps: DoctorDeps): CheckResult {
+  const ips = deps.lanIps();
+  if (ips.length > 0) {
+    return { name: "Wi-Fi or LAN address", status: "pass", detail: `this computer is ${ips.join(", ")} on its local network; a phone on the same Wi-Fi reaches it there` };
+  }
+  return {
+    name: "Wi-Fi or LAN address",
+    status: "fail",
+    detail: "this computer has no address on a Wi-Fi or local network",
+    fix: "Connect it to the same Wi-Fi as the phone, or by cable to the same router.",
+  };
+}
+
 function checkCli(lookup: TailscaleLookup): CheckResult {
   if (lookup.binary !== null) {
     return {
@@ -142,9 +159,9 @@ function checkCli(lookup: TailscaleLookup): CheckResult {
   }
   return {
     name: "Tailscale CLI",
-    status: "fail",
-    detail: lookup.error.length > 0 ? `the tailscale command didn't run: ${lookup.error}` : "the tailscale command wasn't found",
-    fix: "Install Tailscale from https://tailscale.com/download on this computer, then open a new terminal.",
+    status: "warn",
+    detail: lookup.error.length > 0 ? `the tailscale command didn't run: ${lookup.error}` : "not installed; optional (a phone on the same Wi-Fi doesn't need it)",
+    fix: "Only to reach a phone away from this Wi-Fi: install Tailscale from https://tailscale.com/download, then open a new terminal.",
   };
 }
 
@@ -154,9 +171,9 @@ async function checkRunning(deps: DoctorDeps, binary: string | null): Promise<{ 
     return {
       result: {
         name,
-        status: "fail",
-        detail: "can't check, the Tailscale CLI isn't available",
-        fix: "Install Tailscale first (see the check above), then open it and sign in.",
+        status: "warn",
+        detail: "can't check, the Tailscale CLI isn't available (optional)",
+        fix: "Only to reach a phone away from this Wi-Fi: install Tailscale (see the check above), then open it and sign in.",
       },
     };
   }
@@ -172,8 +189,8 @@ async function checkRunning(deps: DoctorDeps, binary: string | null): Promise<{ 
   return {
     result: {
       name,
-      status: "fail",
-      detail: `no Tailscale address (100.x.y.z)${why.length > 0 ? `: ${why}` : ""}`,
+      status: "warn",
+      detail: `optional: no Tailscale address (100.x.y.z)${why.length > 0 ? `: ${why}` : ""}`,
       fix: "Open Tailscale on this computer and sign in, and check that it is connected.",
     },
   };
@@ -318,8 +335,9 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
   } catch (error) {
     lookup = { binary: null, version: "", error: errorText(error) };
   }
-  results.push(await guard("Tailscale CLI", "fail", () => checkCli(lookup)));
-  results.push(await guard("Tailscale running", "fail", async () => (await checkRunning(deps, lookup.binary)).result));
+  results.push(await guard("Wi-Fi or LAN address", "fail", () => checkLan(deps)));
+  results.push(await guard("Tailscale CLI", "warn", () => checkCli(lookup)));
+  results.push(await guard("Tailscale running", "warn", async () => (await checkRunning(deps, lookup.binary)).result));
   results.push(await guard("MagicDNS name", "warn", async () => (await checkMagicDns(deps, lookup.binary)).result));
   results.push(await guard("Token", "warn", () => checkToken(deps)));
   results.push(await guard(`Ports ${DEFAULT_PORT}-${DEFAULT_PORT + DEFAULT_PORT_FALLBACK}`, "warn", () => checkPorts(deps)));

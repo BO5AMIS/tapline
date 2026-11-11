@@ -8,6 +8,7 @@ import {
   loadOrCreateToken,
   nativeIntentSnippet,
   reachableHost,
+  lanAddresses,
   resolveConfig,
   screenshotMode,
   viewerMode,
@@ -47,7 +48,7 @@ describe("resolveConfig", () => {
     const config = await resolveConfig({ env: tempEnv() });
     expect(config.port).toBe(7210);
     expect(config.portFallback).toBe(9);
-    expect(config.hosts).toContain(config.tailscaleIp === null ? "127.0.0.1" : config.tailscaleIp);
+    expect(config.hosts).toContain("127.0.0.1");
     expect(hostUrl(config, 7212)).toBe(`ws://${config.advertisedHost}:7212/`);
   });
 
@@ -73,6 +74,36 @@ describe("resolveConfig", () => {
     const config = await resolveConfig({ host: "0.0.0.0", env: tempEnv() });
     expect(config.hosts).toEqual(["0.0.0.0"]);
     expect(config.advertisedHost).toBe(config.tailscaleIp ?? "127.0.0.1");
+  });
+
+  it("listens on the Wi-Fi/LAN address and gives it to the app (v1: a test phone on the same network)", async () => {
+    const interfaces = {
+      "vEthernet (WSL)": [{ address: "172.20.0.1", netmask: "255.255.240.0", family: "IPv4" as const, mac: "00:00:00:00:00:00", internal: false, cidr: null }],
+      "Wi-Fi": [{ address: "192.168.1.20", netmask: "255.255.255.0", family: "IPv4" as const, mac: "00:00:00:00:00:01", internal: false, cidr: null }],
+      Ethernet: [{ address: "10.0.0.5", netmask: "255.255.255.0", family: "IPv4" as const, mac: "00:00:00:00:00:02", internal: false, cidr: null }],
+      Tailscale: [{ address: "100.101.102.103", netmask: "255.192.0.0", family: "IPv4" as const, mac: "00:00:00:00:00:03", internal: false, cidr: null }],
+    };
+    const config = await resolveConfig({ env: tempEnv(), interfaces });
+    expect(config.lanIps).toEqual(["192.168.1.20", "10.0.0.5"]);
+    expect(config.hosts.slice(0, 2)).toEqual(["192.168.1.20", "10.0.0.5"]);
+    expect(config.hosts).toContain("127.0.0.1");
+    expect(config.hosts).not.toContain("172.20.0.1");
+    expect(config.advertisedHost).toBe("192.168.1.20");
+  });
+
+  it("with no network address at all, listens on 127.0.0.1 and says why", async () => {
+    const config = await resolveConfig({ env: tempEnv(), interfaces: {} });
+    if (config.tailscaleIp === null) {
+      expect(config.hosts).toEqual(["127.0.0.1"]);
+      expect(config.notes.join(" ")).toMatch(/same Wi-Fi as the phone/);
+    }
+  });
+});
+
+describe("lanAddresses", () => {
+  it("keeps private IPv4 on real adapters, Wi-Fi first", () => {
+    const entry = (address: string, internal = false) => ({ address, netmask: "255.255.255.0", family: "IPv4" as const, mac: "00:00:00:00:00:00", internal, cidr: null });
+    expect(lanAddresses({ Ethernet: [entry("10.1.2.3")], "Wi-Fi": [entry("192.168.0.9")], lo: [entry("127.0.0.1", true)], docker0: [entry("172.17.0.1")], public: [entry("8.8.8.8")] })).toEqual(["192.168.0.9", "10.1.2.3"]);
   });
 
   it("puts IPv6 addresses in brackets", () => {

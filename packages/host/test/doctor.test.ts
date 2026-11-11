@@ -48,6 +48,7 @@ function deps(overrides: Partial<DoctorDeps> = {}, replies: Record<string, Reply
     env: ENV,
     fileExists: (path) => path === tokenFilePath(ENV),
     portFree: async () => true,
+    lanIps: () => ["192.168.1.20"],
     ...overrides,
   };
 }
@@ -61,9 +62,10 @@ function byName(results: CheckResult[], name: string): CheckResult {
 describe("runDoctor", () => {
   it("passes everything on a healthy Windows setup, firewall included", async () => {
     const results = await runDoctor(deps());
-    expect(results.map((r) => r.status)).toEqual(Array(8).fill("pass"));
+    expect(results.map((r) => r.status)).toEqual(Array(9).fill("pass"));
     expect(results.map((r) => r.name)).toEqual([
       "Node.js",
+      "Wi-Fi or LAN address",
       "Tailscale CLI",
       "Tailscale running",
       "MagicDNS name",
@@ -80,7 +82,7 @@ describe("runDoctor", () => {
 
   it("leaves out the firewall check on darwin", async () => {
     const results = await runDoctor(deps({ platform: "darwin" }));
-    expect(results).toHaveLength(7);
+    expect(results).toHaveLength(8);
     expect(results.some((r) => r.name === "Windows firewall")).toBe(false);
     expect(results.every((r) => r.status === "pass")).toBe(true);
   });
@@ -103,27 +105,34 @@ describe("runDoctor", () => {
     expect(results.every((r) => r.status === "pass")).toBe(true);
   });
 
-  it("fails the CLI when Tailscale is missing, without crashing the dependent checks", async () => {
+  it("fails without a Wi-Fi or LAN address, and says to join the phone's Wi-Fi", async () => {
+    const lan = byName(await runDoctor(deps({ lanIps: () => [] })), "Wi-Fi or LAN address");
+    expect(lan.status).toBe("fail");
+    expect(lan.fix).toMatch(/same Wi-Fi as the phone/);
+    expect(byName(await runDoctor(deps()), "Wi-Fi or LAN address").detail).toContain("192.168.1.20");
+  });
+
+  it("only warns when Tailscale is missing (optional for a phone on the same Wi-Fi), without crashing the dependent checks", async () => {
     const results = await runDoctor(deps({}, { powershell: { code: 0 } }));
     const cli = byName(results, "Tailscale CLI");
-    expect(cli.status).toBe("fail");
+    expect(cli.status).toBe("warn");
     expect(cli.fix).toMatch(/tailscale/i);
-    expect(byName(results, "Tailscale running").status).toBe("fail");
+    expect(byName(results, "Tailscale running").status).toBe("warn");
     expect(byName(results, "MagicDNS name").status).toBe("warn");
     expect(byName(results, "Metro over https").status).toBe("warn");
     expect(byName(results, "Token").status).toBe("pass");
   });
 
-  it("fails when Tailscale gives no 100.x address", async () => {
+  it("warns when Tailscale gives no 100.x address", async () => {
     const results = await runDoctor(
       deps({}, { ...HEALTHY, "tailscale ip -4": { code: 1, stderr: "Tailscale is stopped." } }),
     );
     const running = byName(results, "Tailscale running");
-    expect(running.status).toBe("fail");
+    expect(running.status).toBe("warn");
     expect(running.fix).toMatch(/sign in/i);
 
     const odd = await runDoctor(deps({}, { ...HEALTHY, "tailscale ip -4": { code: 0, stdout: "192.168.1.5\n" } }));
-    expect(byName(odd, "Tailscale running").status).toBe("fail");
+    expect(byName(odd, "Tailscale running").status).toBe("warn");
   });
 
   it("warns when MagicDNS has no name", async () => {
@@ -175,7 +184,7 @@ describe("runDoctor", () => {
     const firewall = byName(results, "Windows firewall");
     expect(firewall.status).toBe("warn");
     expect(firewall.fix).toContain(
-      'New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress 100.64.0.0/10 -Action Allow',
+      'New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress LocalSubnet,100.64.0.0/10 -Action Allow',
     );
     const ps = calls.find((c) => c.startsWith("powershell"));
     expect(ps).toContain("-NoProfile -Command");
@@ -234,9 +243,9 @@ describe("runDoctor", () => {
         },
       }),
     );
-    expect(results.length).toBe(8);
+    expect(results.length).toBe(9);
     expect(results.some((r) => r.status === "pass")).toBe(true); // Node.js
-    for (const r of results.filter((x) => x.name !== "Node.js")) {
+    for (const r of results.filter((x) => x.name !== "Node.js" && x.name !== "Wi-Fi or LAN address")) {
       expect(r.status).not.toBe("pass");
     }
     expect(byName(results, "Tailscale CLI").detail).toContain("boom");
