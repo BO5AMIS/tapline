@@ -10,6 +10,7 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
+import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
@@ -124,6 +125,12 @@ export const toolShapes = {
       .describe("Draw each actionable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
   },
   check_layout: {},
+  audit: {
+    types: z
+      .array(z.enum(AUDIT_TYPES))
+      .optional()
+      .describe("Which checks to run (default all): contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, overlap, duplicate_id"),
+  },
   inspect: { target: targetField },
   tap: { target: targetField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField },
   long_press: {
@@ -1009,6 +1016,26 @@ export class TaplineTools {
     const parsed = inspectResultSchema.safeParse(raw);
     if (!parsed.success) return fail("Error internal: the app returned an inspect answer the host could not read.");
     return text(formatInspect(parsed.data));
+  }
+
+  // -- audit (AGENT-TOOLS 1.8 §10)
+
+  async audit(args: Shape<"audit"> = {}): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    if (!session.capabilities.includes("audit")) {
+      return fail("Error unsupported: this app's Tapline is too old for audit; update react-native-tapline (check_layout works meanwhile).");
+    }
+    let raw: unknown;
+    try {
+      raw = await this.host.request("audit", args.types !== undefined ? { types: args.types } : {}, { sessionId: session.id });
+    } catch (error) {
+      return fail(describeError(error));
+    }
+    const parsed = auditResultSchema.safeParse(raw);
+    if (!parsed.success) return fail("Error internal: the app returned an audit the host could not read.");
+    const title = auditTitle(await this.currentRoute(), session.app.name);
+    return text([formatAudit(title, parsed.data, args.types), ...this.takePersonNote()].join("\n"));
   }
 
   // -- check_layout

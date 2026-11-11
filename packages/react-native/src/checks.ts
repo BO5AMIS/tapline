@@ -266,7 +266,15 @@ function noName(item: Measured): string | null {
   return 'button has no text or accessibility label; VoiceOver would read nothing';
 }
 
-function lowContrast(item: Measured, nodes: HostNode[]): string | null {
+interface Contrast {
+  /** Rounded down to one decimal. */
+  ratio: number;
+  required: number;
+  foreground: string;
+  background: string;
+}
+
+function contrastOf(item: Measured, nodes: HostNode[]): Contrast | null {
   const { node } = item.entry;
   if (!node.isText) return null;
   const foreground = parseColor(inheritedTextStyle(nodes, node, 'color'));
@@ -280,8 +288,12 @@ function lowContrast(item: Measured, nodes: HostNode[]): string | null {
 
   const ratio = contrastRatio(over(foreground, behind.color), behind.color);
   if (ratio >= required) return null;
-  const shown = Math.floor(ratio * 10) / 10;
-  return `contrast ${num(shown)}:1 is below ${num(required)}:1 (${toHex(foreground)} on ${toHex(behind.color)})`;
+  return { ratio: Math.floor(ratio * 10) / 10, required, foreground: toHex(foreground), background: toHex(behind.color) };
+}
+
+function lowContrast(item: Measured, nodes: HostNode[]): string | null {
+  const c = contrastOf(item, nodes);
+  return c === null ? null : `contrast ${num(c.ratio)}:1 is below ${num(c.required)}:1 (${c.foreground} on ${c.background})`;
 }
 
 function maybeTruncated(item: Measured, nodes: HostNode[]): string | null {
@@ -363,4 +375,131 @@ export async function checkLayout(_params?: unknown): Promise<{ findings: Findin
 
   tagged.sort((x, y) => x.position - y.position);
   return { findings: tagged.map((item) => item.finding) };
+}
+
+/* -------------------------------------------------------------------------- */
+/* audit (AGENT-TOOLS 1.8 §10)                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** The shared audit types Tapline checks; dynamic_type and element_detection are XCTest's own. */
+export const AUDIT_TYPES = ['contrast', 'hit_region', 'description', 'clipped_text', 'trait', 'overlap', 'duplicate_id'] as const;
+export type AuditType = (typeof AUDIT_TYPES)[number];
+
+export interface AuditFinding {
+  type: AuditType;
+  /** The element, or null for the screen as a whole. */
+  entry: Entry | null;
+  frame: Frame | null;
+  /** What is wrong, in plain words, without the element (the host puts the element line first). */
+  problem: string;
+  fix: string;
+}
+
+const STATEFUL_ROLES = new Set(['switch', 'checkbox', 'radio', 'togglebutton']);
+
+function explicitRole(node: HostNode): string | null {
+  for (const key of ['role', 'accessibilityRole']) {
+    const value = findProp(node, key);
+    if (typeof value === 'string' && value !== '' && value !== 'none') return value.toLowerCase();
+  }
+  return null;
+}
+
+/** A pressable without a role, or a switch-like element without a state: VoiceOver can't say what it is. */
+function traitProblem(item: Measured): { problem: string; fix: string } | null {
+  const { node, info } = item.entry;
+  const role = explicitRole(node);
+  if (role !== null && STATEFUL_ROLES.has(role) && info.checked === null) {
+    return {
+      problem: `it's a ${role} without a state, so VoiceOver can't say whether it's on`,
+      fix: 'set accessibilityState={{ checked }}',
+    };
+  }
+  if (role !== null) return null;
+  const presses = info.actions.includes('press') || info.actions.includes('longPress');
+  if (!presses || info.actions.includes('type') || info.actions.includes('toggle')) return null;
+  // React Native's own Button and the text of a link set nothing either; a Text with onPress reads as text.
+  if (node.isText) {
+    return { problem: "it acts like a link but has no role, so VoiceOver reads it as plain text", fix: 'set accessibilityRole="link" (or "button")' };
+  }
+  return { problem: "it acts like a button but has no role, so VoiceOver doesn't say it's a button", fix: 'set accessibilityRole="button"' };
+}
+
+/** `audit`: the screen's accessibility problems, in the shared types (AGENT-TOOLS 1.8 §10). */
+export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditFinding[]> {
+  const snapshot = takeSnapshot();
+  const candidates = snapshot.entries.filter((entry) => entry.info.interesting && !entry.tab);
+  const frames = await Promise.all(candidates.map((entry) => measureFiber(entry.node.fiber)));
+  const measured: Measured[] = [];
+  candidates.forEach((entry, i) => {
+    const frame = frames[i] ?? null;
+    if (frame !== null && isOnScreen(frame, snapshot.screen)) measured.push({ entry, frame });
+  });
+  const out: Array<AuditFinding & { position: number }> = [];
+  const add = (item: Measured, type: AuditType, problem: string, fix: string): void => {
+    if (types.has(type)) out.push({ type, entry: item.entry, frame: item.frame, problem, fix, position: item.entry.node.index });
+  };
+
+  for (const item of measured) {
+    if (smallTarget(item) !== null) {
+      add(item, 'hit_region', `too small to tap reliably (${num(item.frame.width)}x${num(item.frame.height)} pt)`, `make it at least ${MIN_TARGET}x${MIN_TARGET} pt`);
+    }
+    const contrast = contrastOf(item, snapshot.nodes);
+    if (contrast !== null) {
+      add(
+        item,
+        'contrast',
+        `the text is hard to read against its background (${num(contrast.ratio)}:1, ${contrast.foreground} on ${contrast.background})`,
+        `raise the contrast to at least ${num(contrast.required)}:1`,
+      );
+    }
+    if (noName(item) !== null) {
+      add(item, 'description', 'no label, so VoiceOver says only "button"', 'give it an accessibility label');
+    }
+    const truncated = maybeTruncated(item, snapshot.nodes);
+    if (truncated !== null) add(item, 'clipped_text', truncated, 'let it wrap, or give it more room');
+    const cut = cutOff(item, snapshot.screen.width);
+    if (cut !== null) add(item, 'clipped_text', `it ${cut}`, 'keep it inside the screen');
+    const trait = traitProblem(item);
+    if (trait !== null) add(item, 'trait', trait.problem, trait.fix);
+  }
+
+  if (types.has('overlap')) {
+    const overlapping = measured.filter((item) => overlapCandidate(item.entry));
+    for (let i = 0; i < overlapping.length; i++) {
+      const first = overlapping[i];
+      if (!first) continue;
+      for (let j = i + 1; j < overlapping.length; j++) {
+        const second = overlapping[j];
+        if (!second) continue;
+        const a = first.entry.node;
+        const b = second.entry.node;
+        if (isAncestor(snapshot.nodes, a, b) || isAncestor(snapshot.nodes, b, a)) continue;
+        const smaller = Math.min(first.frame.width * first.frame.height, second.frame.width * second.frame.height);
+        const shared = intersectionArea(first.frame, second.frame);
+        if (smaller <= 0 || shared <= smaller * OVERLAP_LIMIT) continue;
+        refFor(a.fiber);
+        const otherRef = refFor(b.fiber);
+        add(first, 'overlap', `it covers ${Math.round((shared / smaller) * 100)}% of ${otherRef}`, 'move them apart, or make one of them not take touches');
+      }
+    }
+  }
+
+  if (types.has('duplicate_id')) {
+    const byId = new Map<string, Measured[]>();
+    for (const item of measured) {
+      const id = item.entry.info.testID;
+      if (id === null || id === '') continue;
+      byId.set(id, [...(byId.get(id) ?? []), item]);
+    }
+    for (const [id, items] of byId) {
+      const first = items[0];
+      if (items.length < 2 || first === undefined) continue;
+      const refs = items.map((item) => refFor(item.entry.node.fiber));
+      add(first, 'duplicate_id', `the id "${id}" is on ${items.length} elements (${refs.join(', ')})`, 'give each its own testID');
+    }
+  }
+
+  out.sort((x, y) => x.position - y.position);
+  return out.map(({ position: _position, ...finding }) => finding);
 }

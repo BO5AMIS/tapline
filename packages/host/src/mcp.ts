@@ -90,6 +90,17 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "audit",
+    {
+      title: "Audit the screen's accessibility",
+      description: toolDescription("audit"),
+      inputSchema: toolShapes.audit,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => tools.audit(args),
+  );
+
+  server.registerTool(
     "inspect",
     {
       title: "Find the code behind an element",

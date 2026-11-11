@@ -1,4 +1,4 @@
-import { back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
+import { audit, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
@@ -41,6 +41,7 @@ export const methods: Record<string, MethodFn> = {
   waitFor: (params) => waitFor(params),
   logs: (params) => getLogs(params),
   inspect: (params) => inspect(params),
+  audit: (params) => audit(params),
   reload: () => reload(),
   screenshot: (params) => screenshot(params),
   feed: (params) => feedMethod(params),

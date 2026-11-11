@@ -38,6 +38,7 @@ import {
   type TabFound,
 } from './inspect';
 import { sourcesOf, type ElementSource } from './source';
+import { AUDIT_TYPES, auditScreen, type AuditType } from './checks';
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
@@ -1786,6 +1787,53 @@ export async function inspect(rawParams: unknown): Promise<{ element: TaplineEle
   const [source] = await sourcesOf([entry.node.fiber]);
   const { element } = await elementFor(entry);
   return { element, source: source ?? { components: [], location: null, props: {} } };
+}
+
+export interface AuditIssue {
+  type: AuditType;
+  element: TaplineElement | null;
+  problem: string;
+  fix: string;
+  /** Where the app's code wrote the element (development builds), as Metro names the file. */
+  at?: { file: string; line: number; direct: boolean };
+}
+
+/** `audit {types?}` (AGENT-TOOLS 1.8 §10): the screen's accessibility problems, each with its source line in development. */
+export async function audit(rawParams: unknown): Promise<{ issues: AuditIssue[]; checked: AuditType[] }> {
+  const params = paramsOf(rawParams);
+  const asked = params.types;
+  if (asked !== undefined && (!Array.isArray(asked) || asked.some((t) => typeof t !== 'string'))) {
+    throw badParams('types must be a list of audit types');
+  }
+  const known = new Set<string>(AUDIT_TYPES);
+  const types = new Set<AuditType>(
+    asked === undefined ? AUDIT_TYPES : AUDIT_TYPES.filter((t) => (asked as string[]).includes(t) && known.has(t)),
+  );
+  const findings = await auditScreen(types);
+  let sources: ElementSource[] = [];
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    const fibers = findings.flatMap((f) => (f.entry !== null ? [f.entry.node.fiber] : []));
+    try {
+      sources = fibers.length > 0 ? await sourcesOf(fibers) : [];
+    } catch {
+      sources = []; // Metro unreachable: the report still stands, without lines
+    }
+  }
+  let next = 0;
+  const issues: AuditIssue[] = [];
+  for (const finding of findings) {
+    const source = finding.entry !== null ? sources[next++] : undefined;
+    const element = finding.entry !== null ? (await elementFor(finding.entry, finding.frame)).element : null;
+    const location = source?.location ?? null;
+    issues.push({
+      type: finding.type,
+      element,
+      problem: finding.problem,
+      fix: finding.fix,
+      ...(location !== null ? { at: { file: location.file, line: location.line, direct: location.direct } } : {}),
+    });
+  }
+  return { issues, checked: [...types] };
 }
 
 export async function getLogs(rawParams: unknown): Promise<{ entries: LogEntry[] }> {
