@@ -147,3 +147,14 @@ describe("run's wording", () => {
     expect(expectFailure({ id: "spinner", gone: true }, 2)).toBe('id "spinner" didn\'t go away within 2 s');
   });
 });
+
+describe("secure fields (AGENT-TOOLS 1.8 §3.3)", () => {
+  it("typing into one answers that the value is hidden, without even the bullets", async () => {
+    const { tools } = await setup((req) =>
+      req.method === "type" ? { ok: true, result: { element: { ...EMAIL, label: "Password", value: "•••" }, value: "•••", secure: true } } : handler(req),
+    );
+    const said = textOf(await tools.typeText({ target: { id: "email" }, text: "abc", look: false }));
+    expect(said).toContain("The value is hidden (secure field).");
+    expect(said).not.toContain("Value is now");
+  });
+});

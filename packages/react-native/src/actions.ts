@@ -1209,7 +1209,7 @@ function setNativeText(entry: Entry, text: string): void {
 
 export async function typeText(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: string; closedKeyboard?: true; forced?: string } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: string; secure?: true; closedKeyboard?: true; forced?: string } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
@@ -1270,12 +1270,14 @@ export async function typeText(
   const outcome = await settleOutcome();
   const { element } = await elementFor(entry);
   // A password field's text never leaves the app: one bullet per character, as iOS draws it.
-  const shown = isSecureInput(entry.node) ? maskSecret(next) : displayText(next);
+  const secure = isSecureInput(entry.node);
+  const shown = secure ? maskSecret(next) : displayText(next);
   // An input that now holds text shows no placeholder (AGENT-TOOLS v1.7).
   const { placeholder, ...rest } = element;
   return {
     element: { ...rest, ...(next === '' && placeholder !== undefined ? { placeholder } : {}), value: shown },
     value: shown,
+    ...(secure ? { secure: true as const } : {}),
     ...keyboardNote(closedKeyboard),
     ...forced,
     ...outcome,

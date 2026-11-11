@@ -1676,7 +1676,9 @@ export class TaplineTools {
       params,
       (r) => {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
-        const shown = typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
+        // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
+        const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
+        const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
         return `Typed into ${this.elementName(r)}${args.submit ? " and submitted" : ""}.${shown}`;
       },
       args.look,
