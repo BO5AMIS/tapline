@@ -77,7 +77,11 @@ export const toolShapes = {
   apps: {},
   open_app: { app: z.string().describe("The app's session id, app id or name, as apps lists them") },
   pair: {
-    scheme: z.string().describe('The app\'s URL scheme ("scheme" in app.json or app.config), e.g. "myapp"'),
+    scheme: z
+      .string()
+      .describe(
+        'The app\'s URL scheme ("scheme" in app.json or app.config), e.g. "myapp"; for an app running in Expo Go, the address Expo prints, e.g. "exp://192.168.1.20:8081"',
+      ),
   },
   look: {
     screenshot: z.boolean().optional().describe("Include a screenshot (default true); false skips it"),

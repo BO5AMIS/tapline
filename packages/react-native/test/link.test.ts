@@ -47,6 +47,29 @@ describe('parseTaplineLink', () => {
   });
 });
 
+describe('links for an app in Expo Go', () => {
+  const GO = 'exp://192.168.1.20:8081/--/tapline/pair?url=ws%3A%2F%2F192.168.1.20%3A7210%2F&code=abc-123&name=Dev%20PC';
+
+  test('reads a pairing link and the forget link in the exp://<host>:<port>/--/ form', () => {
+    expect(parseTaplineLink(GO)).toEqual({ kind: 'pair', url: 'ws://192.168.1.20:7210/', code: 'abc-123', name: 'Dev PC' });
+    expect(parseTaplineLink('exp://192.168.1.20:8081/--/tapline/forget')).toEqual({ kind: 'forget' });
+    expect(parseTaplineLink('exps://u.expo.dev/--/tapline/forget')).toEqual({ kind: 'forget' });
+  });
+
+  test('the /--/ form belongs to Expo Go only: an app scheme with a path before tapline is not a Tapline link', () => {
+    expect(parseTaplineLink('myapp://somewhere/--/tapline/forget')).toBeNull();
+    expect(parseTaplineLink('exp://192.168.1.20:8081/tapline/forget')).toBeNull();
+    expect(parseTaplineLink('exp://192.168.1.20:8081/--/other/tapline/forget')).toBeNull();
+  });
+
+  test('the router leaves them alone too', () => {
+    expect(isTaplineLink(GO)).toBe(true);
+    expect(isTaplineLink('/--/tapline/pair?url=x&code=y')).toBe(true);
+    expect(isTaplineLink('--/tapline/forget')).toBe(true);
+    expect(isTaplineLink('exp://192.168.1.20:8081/--/trips')).toBe(false);
+  });
+});
+
 describe('isTaplineLink', () => {
   test('matches pairing and forget links, with or without the scheme', () => {
     expect(isTaplineLink(PAIR)).toBe(true);

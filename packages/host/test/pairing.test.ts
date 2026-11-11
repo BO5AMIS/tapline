@@ -53,4 +53,18 @@ describe("links", () => {
       expect(() => pairingLink({ scheme: bad, url: "ws://h:1/", code: "c", name: "n" })).toThrow(/scheme/);
     }
   });
+
+  it("builds Expo Go's form from the address Expo prints (exp://<host>:<port>), with or without /--", () => {
+    const parts = { url: "ws://192.168.1.20:7210/", code: "c", name: "n" };
+    for (const scheme of ["exp://192.168.1.20:8081", "exp://192.168.1.20:8081/", "exp://192.168.1.20:8081/--", "exp://192.168.1.20:8081/--/"]) {
+      expect(pairingLink({ scheme, ...parts })).toBe("exp://192.168.1.20:8081/--/tapline/pair?url=ws%3A%2F%2F192.168.1.20%3A7210%2F&code=c&name=n");
+      expect(forgetLink(scheme)).toBe("exp://192.168.1.20:8081/--/tapline/forget");
+    }
+  });
+
+  it("rejects an Expo Go address with user info, a path or a query, which the app couldn't read back", () => {
+    for (const bad of ["exp://me@192.168.1.20:8081", "exp://192.168.1.20:8081/trips", "exp://192.168.1.20:8081?x=1", "exp://", "myapp://host"]) {
+      expect(() => pairingLink({ scheme: bad, url: "ws://h:1/", code: "c", name: "n" })).toThrow(/scheme/);
+    }
+  });
 });

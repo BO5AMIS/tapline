@@ -38,16 +38,31 @@ export function pairCodeExpiry(code: string): number | null {
   return Number.isFinite(expiresAt) ? expiresAt : null;
 }
 
-function normalizeScheme(scheme: string): string {
-  const bare = scheme.trim().replace(/:(\/\/)?$/, "");
-  if (!/^[a-z][a-z0-9+.-]*$/i.test(bare) || /^https?$/i.test(bare)) {
-    throw new Error(`"${scheme}" is not the app's URL scheme (like "myapp", from "scheme" in app.json).`);
+/** Expo Go's address for a project, as Expo prints it: exp://<host>:<port>, optionally with /-- after it. */
+const EXPO_GO = /^(exps?:\/\/[^\s/?#@]+)\/?(?:--\/?)?$/i;
+
+/**
+ * What a Tapline link starts with: `<scheme>://` for an app with its own scheme, or Expo Go's
+ * `exp://<host>:<port>/--/` for an app running in Expo Go (`scheme` is then the address Expo prints).
+ */
+function linkBase(scheme: string): string {
+  const trimmed = scheme.trim();
+  const go = EXPO_GO.exec(trimmed);
+  if (go !== null) return `${go[1]}/--/`;
+  const bare = trimmed.replace(/:(\/\/)?$/, "");
+  if (/^exps?$/i.test(bare)) {
+    throw new Error(`"${scheme}": for an app in Expo Go, give the scheme as the address Expo prints, exp://<host>:<port>.`);
   }
-  return bare;
+  if (!/^[a-z][a-z0-9+.-]*$/i.test(bare) || /^https?$/i.test(bare)) {
+    throw new Error(
+      `"${scheme}" is not the app's URL scheme (like "myapp", from "scheme" in app.json, or Expo Go's exp://<host>:<port>).`,
+    );
+  }
+  return `${bare}://`;
 }
 
 export interface PairingLinkParts {
-  /** The app's URL scheme, e.g. "myapp". */
+  /** The app's URL scheme, e.g. "myapp", or for an app in Expo Go the address Expo prints (exp://<host>:<port>). */
   scheme: string;
   /** Where the app should connect, e.g. ws://100.64.0.1:7210/ */
   url: string;
@@ -58,16 +73,16 @@ export interface PairingLinkParts {
 
 /** `<scheme>://tapline/pair?url=…&code=…&name=…`, opened on the phone by scanning its QR code. */
 export function pairingLink(parts: PairingLinkParts): string {
-  const scheme = normalizeScheme(parts.scheme);
+  const base = linkBase(parts.scheme);
   const query = [
     `url=${encodeURIComponent(parts.url)}`,
     `code=${encodeURIComponent(parts.code)}`,
     `name=${encodeURIComponent(parts.name)}`,
   ].join("&");
-  return `${scheme}://tapline/pair?${query}`;
+  return `${base}tapline/pair?${query}`;
 }
 
 /** `<scheme>://tapline/forget`: the app forgets the computer it was paired with. */
 export function forgetLink(scheme: string): string {
-  return `${normalizeScheme(scheme)}://tapline/forget`;
+  return `${linkBase(scheme)}tapline/forget`;
 }

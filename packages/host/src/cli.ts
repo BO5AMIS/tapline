@@ -40,7 +40,8 @@ Commands:
            \`tapline skill path\` prints where the skill ships
 
 Options:
-  --scheme <s>   The app's URL scheme, e.g. myapp (for pair; host also prints the QR code)
+  --scheme <s>   The app's URL scheme, e.g. myapp, or in Expo Go the address Expo prints,
+                 e.g. exp://192.168.1.20:8081 (for pair; host also prints the QR code)
   --port <n>     Port (default 7210, or TAPLINE_PORT; without either, a taken port moves up to 7219)
   --host <addr>  Bind address(es), comma separated (default: Wi-Fi/LAN IP, Tailscale IP if any, 127.0.0.1)
   --screenshots <inline|file>

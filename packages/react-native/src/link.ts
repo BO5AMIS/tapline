@@ -2,17 +2,19 @@
  * Pairing links, made by the computer (`pair` tool or `tapline pair`):
  *   <scheme>://tapline/pair?url=<ws://…>&code=<one-time code>&name=<computer name>
  *   <scheme>://tapline/forget
+ * For an app running in Expo Go the same links come in Expo Go's form:
+ *   exp://<host>:<port>/--/tapline/pair?…   exp://<host>:<port>/--/tapline/forget
  */
 export type TaplineLink = { kind: 'pair'; url: string; code: string; name: string } | { kind: 'forget' };
 
-const LINK = /^([a-z][a-z0-9+.-]*):\/\/tapline\/(pair|forget)\/?(?:\?([^#]*))?(?:#.*)?$/i;
+const LINK = /^(?:([a-z][a-z0-9+.-]*):\/\/|(exps?):\/\/[^\s/?#]+\/--\/)tapline\/(pair|forget)\/?(?:\?([^#]*))?(?:#.*)?$/i;
 
 /**
- * True for a Tapline pairing or forget link, with or without the scheme. For Expo Router's
- * `redirectSystemPath`, so the router leaves these links to Tapline.
+ * True for a Tapline pairing or forget link, with or without the scheme (and in Expo Go's
+ * `/--/` form). For Expo Router's `redirectSystemPath`, so the router leaves these links to Tapline.
  */
 export function isTaplineLink(url: string): boolean {
-  return /^(?:[a-z][a-z0-9+.-]*:\/\/|\/)?tapline\/(?:pair|forget)(?:[/?#]|$)/i.test(url.trim());
+  return /^(?:[a-z][a-z0-9+.-]*:\/\/|exps?:\/\/[^\s/?#]+\/--\/|\/?--\/|\/)?tapline\/(?:pair|forget)(?:[/?#]|$)/i.test(url.trim());
 }
 
 function decode(value: string): string | null {
@@ -48,7 +50,8 @@ function cleanName(raw: string): string {
 export function parseTaplineLink(raw: string): TaplineLink | null {
   const match = LINK.exec(raw.trim());
   if (match === null) return null;
-  const [, scheme = '', kind = '', query = ''] = match;
+  const [, appScheme, goScheme, kind = '', query = ''] = match;
+  const scheme = appScheme ?? goScheme ?? '';
   if (/^https?$/i.test(scheme)) return null;
   if (kind.toLowerCase() === 'forget') return { kind: 'forget' };
   const params = parseQuery(query);
