@@ -9,8 +9,9 @@ every option: [setup.md](setup.md).
 - A computer with Node.js 20 or later and git (Windows, macOS or Linux).
 - An iPhone, and your own Expo or React Native app that you can build as a development
   build or a TestFlight build. Expo Go can't run it.
-- [Tailscale](https://tailscale.com), signed in on the computer and on the phone. Keep it
-  on on the phone while you test.
+- The phone on the same Wi-Fi as the computer (or the computer on a cable to the same
+  router). [Tailscale](https://tailscale.com) is optional, only for a phone away from
+  your Wi-Fi.
 - An AI agent client that speaks MCP, such as Claude Code.
 
 ## On the computer
@@ -30,8 +31,8 @@ tapline skill install              # the skill that teaches agents to test with 
 
 - `npm install` ends with a few `deprecated` warnings and "6 low severity
   vulnerabilities". They come from the test tools; ignore them.
-- `tapline doctor` checks Node, Tailscale, the token, the ports and, on Windows, the
-  firewall. It says how to fix anything that's missing. Fix that before you go on.
+- `tapline doctor` checks Node, the Wi-Fi or LAN address, the token, the ports and, on Windows, the
+  firewall. (Tailscale checks are optional warnings.) It says how to fix anything that's missing. Fix that before you go on.
 - Without the global install, run `node /path/to/tapline/packages/host/dist/cli.js` where
   this page says `tapline`.
 - `claude mcp add` gives Tapline to Claude Code. Codex: `[mcp_servers.tapline]` with
@@ -67,7 +68,7 @@ Everything here is in your app's code, except the QR code at the end. See
    Tapline does nothing at all.
 6. **Make one new build.** The new native modules need it, and so does the switch. Its
    time is your build system's (EAS, Xcode), not Tapline's. Install it on the phone.
-7. Ask your agent to pair your phone. It shows a QR code. With Tailscale on, scan it with
+7. Ask your agent to pair your phone. It shows a QR code. With the phone on the same Wi-Fi, scan it with
    the phone's camera and open the app. It asks **Connect for testing?** and names your
    computer: tap **Connect**. The code works once and expires after 10 minutes. From then
    on the app reconnects by itself whenever it's open.
@@ -135,10 +136,10 @@ Run `tapline doctor` first. Then the three most common failures:
 
 - **The tree comes back empty, with "No React roots recorded".** `register` isn't the
   first import of the entry file. For Expo Router, use your own `index.js` as in step 2.
-- **The phone can't connect.** Check that Tailscale is on, on both, and that the agent is
-  running. On Windows the usual cause is the firewall. As admin:
+- **The phone can't connect.** Check that the phone and the computer are on the same
+  Wi-Fi, and that the agent is running. On Windows the usual cause is the firewall. As admin:
   ```powershell
-  New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress 100.64.0.0/10 -Action Allow
+  New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress LocalSubnet,100.64.0.0/10 -Action Allow
   ```
 - **The agent gets `not_connected` (or `in_background`).** The app isn't open in front.
   Open it on the phone and call `apps` again.

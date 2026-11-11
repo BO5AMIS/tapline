@@ -21,7 +21,7 @@ well. The tools describe themselves; what follows is what they can't tell you.
   [references/setup.md](references/setup.md).
 - **Call `apps` once.** It lists the app that is connected. When none is: a phone that never
   paired needs `pair` (show the user the QR code); a paired one only needs the user to open
-  the app with Tailscale on.
+  the app with the phone on the same Wi-Fi as the computer.
 - **The app must stay open in front.** iOS pauses an app in the background, also when the
   user switches to another app to chat with you. `in_background` means a person must bring
   it back: ask, and wait.

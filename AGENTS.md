@@ -1,13 +1,13 @@
 # Tapline: guide for agents
 
 Through Tapline's MCP tools you can see and operate the user's own React Native app on
-their real phone, from wherever the phone is, to test it. Tapline works inside that one
+their real test phone, on the same Wi-Fi as the computer, to test it. Tapline works inside that one
 app; it can't reach other apps, system dialogs or the home screen. This guide covers
 setting Tapline up for a developer, then testing well and safely.
 
-Each person uses their own setup: their own computer, Tailscale network, phone and
+Each person uses their own setup: their own computer, Wi-Fi, phone and
 agents. The phone pairs with the computer you run on, by a QR code. Never set up a phone
-to use someone else's computer or Tailscale network.
+to use someone else's computer or network.
 
 ## Setting it up for a developer
 
@@ -19,8 +19,10 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 1. Clone and build Tapline (`npm install`, `npm run build`), then `npm install -g
    ./packages/host` (or use `node <clone>/packages/host/dist/cli.js`). `tapline doctor`
    checks the whole computer side and says what to fix.
-2. Check that Tailscale is running (`tailscale ip -4` prints a `100.x.y.z` address). If it
-   isn't installed or signed in, ask the user; it needs their account.
+2. The computer and the phone must be on the same Wi-Fi (or the computer on a cable to the
+   same router). `tapline doctor` fails when the computer has no Wi-Fi or LAN address; ask
+   the user to join the phone's Wi-Fi. Tailscale is optional, only for a phone away from
+   that Wi-Fi (not part of v1); its warnings can be ignored.
 3. `tapline info` prints this computer's address and the code the app needs. The token in
    `~/.tapline/token` is a secret: never print it or put it in chat, commits or files.
 4. Add the MCP server to your client (Claude Code: `claude mcp add tapline -- tapline mcp`;
@@ -51,13 +53,15 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 7. A new native dependency (`expo-secure-store`, `react-native-view-shot`) means a new
    build; ask the user before starting EAS builds or TestFlight submissions (they cost
    build minutes and reach testers).
-8. A development build away from the computer's Wi-Fi loads its JavaScript over Tailscale,
-   and iOS refuses plain `http` there: serve Metro over `https` with Tailscale Serve
-   (docs/setup.md, step 4). Check `tailscale serve status` first and pick a free port; don't
-   replace what the user already serves.
+8. A development build on the same Wi-Fi loads its JavaScript from Metro over plain `http`;
+   nothing more is needed. Optional, later (not part of v1): a development build away from
+   the computer's Wi-Fi loads its JavaScript over Tailscale, and iOS refuses plain `http`
+   there, so serve Metro over `https` with Tailscale Serve (docs/setup.md, step 4). Check
+   `tailscale serve status` first and pick a free port; don't replace what the user already
+   serves.
 9. Prove the chain: call `pair` with the app's URL scheme (`scheme` in app.json) and show
    the user the QR code (it is also saved as a PNG; the result gives the path). They scan
-   it with Tailscale on and tap Connect; when they're using the phone itself, give them
+   it with the phone on the same Wi-Fi and tap Connect; when they're using the phone itself, give them
    the link to tap instead. Then `apps` should list the app and `look` should show its
    screen.
 
@@ -66,7 +70,7 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 1. `apps` shows the connected app (`open_app {app}` when there are several; `app` is a
    session id, app id or name, and several matches give `ambiguous`). If none is
    connected: a phone that never paired needs `pair`; a paired one only needs the user to
-   open the app with Tailscale on; after your server starts, an app that is open finds it
+   open the app with the phone on the same Wi-Fi; after your server starts, an app that is open finds it
    by itself within about 2 seconds. The app must stay on screen while you work: iOS pauses
    it in the background (also when the user switches to chat with you on the same phone).
    Tapline only works while its app is open in front, so when the user leaves or closes the

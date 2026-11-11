@@ -7,14 +7,19 @@ your build system, not Tapline.
 
 Short version: [quickstart.md](quickstart.md).
 
-Everyone who tests sets this up for themselves: their own computer, their own Tailscale
-network, their own phone and their own agents. Nobody needs anyone else's computer or
-Tailscale network, and the app build is the same for everyone.
+Everyone who tests sets this up for themselves: their own computer, their own Wi-Fi,
+their own phone and their own agents. Nobody needs anyone else's computer, and the app
+build is the same for everyone.
 
-## 1. Tailscale
+## 1. The network
 
-Install [Tailscale](https://tailscale.com) on your computer and on your phone, signed in to
-your own Tailscale network. Keep it on on the phone while you test.
+The test phone stays next to the computer, on the same Wi-Fi (or the computer is on a cable
+to the same router). That is all the network setup v1 needs.
+
+**Optional, to reach a phone away from this Wi-Fi (not part of v1):** install
+[Tailscale](https://tailscale.com) on your computer and on your phone, signed in to your own
+Tailscale network, and keep it on on the phone. The host then also listens on the Tailscale
+address.
 
 ## 2. The computer (host)
 
@@ -70,7 +75,8 @@ its own older copy and nothing else.
 If your agent hands screenshots to smaller helper models, add `--screenshots file`: `look`
 then returns a file path instead of the image ([AGENTS.md](../AGENTS.md#screenshots-and-tokens)).
 The live viewer (the agent's `viewer` tool gives its link) opens on this computer only; add
-`--viewer remote` to also open it from your own devices on Tailscale, or `--viewer off`.
+`--viewer remote` to also open it from other devices that can reach the host, or
+`--viewer off`.
 Other MCP clients: run `tapline mcp` as a stdio server. To only watch connections and
 app logs, without an agent: `tapline host --scheme <your app's scheme>` (it also prints a
 pairing QR code).
@@ -80,19 +86,25 @@ pairing QR code).
 (`%USERPROFILE%\.tapline\token` on Windows). `info` never prints it, and you never copy it
 anywhere: pairing hands it to the app.
 
-The host listens on your Tailscale address and 127.0.0.1 only, on port 7210. When 7210 is
-taken (another agent's host), it takes the next free port up to 7219, so several agents
-can run at once, each with its own phone. Options: `--port` (or `TAPLINE_PORT`) for a fixed
-port, `--host` (comma-separated addresses to listen on instead). If Tailscale isn't
-running, it listens on 127.0.0.1 only and says so.
+The host listens on this computer's Wi-Fi/LAN address(es) (private IPv4 addresses on real
+adapters, Wi-Fi first), on the Tailscale address if Tailscale runs, and on 127.0.0.1, on
+port 7210. It gives the app the Wi-Fi address in the pairing link. When 7210 is taken
+(another agent's host), it takes the next free port up to 7219, so several agents can run
+at once, each with its own phone. Options: `--port` (or `TAPLINE_PORT`) for a fixed port,
+`--host` (comma-separated addresses to listen on instead). If the computer has no Wi-Fi or
+LAN address and no Tailscale, it listens on 127.0.0.1 only and says so: join the same
+Wi-Fi as the phone. Traffic on the local network is plain WebSocket, so use a Wi-Fi you
+trust.
 
 **Windows:** the first time, Windows Firewall may ask whether Node.js may accept
-connections. Allow it on **private** networks (Tailscale counts as private). Without that
-prompt, as admin:
+connections. Allow it on **private** networks, and make sure your Wi-Fi is set to
+private. Without that prompt, as admin:
 
 ```powershell
-New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress 100.64.0.0/10 -Action Allow
+New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -LocalPort 7210-7219 -RemoteAddress LocalSubnet,100.64.0.0/10 -Action Allow
 ```
+
+`LocalSubnet` is your Wi-Fi; `100.64.0.0/10` is Tailscale.
 
 ## 3. The app
 
@@ -233,8 +245,14 @@ positions, but `testID`s keep tests stable (the agent targets them as `id`):
 - TestFlight: `eas build --profile testflight --platform ios --auto-submit`, then install
   from TestFlight. Every tester uses the same build and pairs it with their own computer.
 
-**A development build away from your Wi-Fi.** The build loads its JavaScript from Metro on
-your computer. iOS refuses plain `http` to a Tailscale address ("App Transport Security
+**A development build on the same Wi-Fi.** The build loads its JavaScript from Metro on
+your computer over plain `http` on the local network: start Metro as usual
+(`npx expo start --dev-client --port 8081`) and open the project from the development
+build. Nothing more is needed.
+
+**Optional, later: a development build away from your Wi-Fi (not part of v1).** The build
+loads its JavaScript from Metro on your computer. iOS refuses plain `http` to a Tailscale
+address ("App Transport Security
 policy requires the use of a secure connection"), so serve Metro over `https` with
 [Tailscale Serve](https://tailscale.com/kb/1312/serve) (MagicDNS and HTTPS certificates on in
 your Tailscale admin console). `tapline dev` does it in one go, without touching anything
@@ -261,7 +279,7 @@ stops it. Tapline's own connection doesn't need this: it works over the Tailscal
 **Pair.** Ask your agent to pair your phone (its `pair` tool needs your app's URL scheme,
 the `scheme` in app.json). It shows a QR code, also saved as `~/.tapline/pair-<port>.png`.
 Without an agent: `tapline pair --scheme <your scheme>` prints one in the terminal. With
-Tailscale on, scan the code with the phone's camera and open the app. It asks **Connect for
+the phone on the same Wi-Fi, scan the code with the phone's camera and open the app. It asks **Connect for
 testing?** and names the computer: tap **Connect**. The code works once and expires after 10
 minutes.
 
@@ -282,22 +300,24 @@ answer shows the exact link). Pairing with another computer replaces the old pai
 
 ## Troubleshooting
 
-`tapline doctor` checks Node, Tailscale, the token, the ports, the Windows firewall rule
-and Metro over https, and says how to fix what's missing.
+`tapline doctor` checks Node, the Wi-Fi or LAN address, the token, the ports and the
+Windows firewall rule, and says how to fix what's missing. It also checks Tailscale and
+Metro over https, but those are optional warnings: you only need them for a phone away from
+your Wi-Fi.
 
 | Symptom | Fix |
 |---|---|
-| the development build can't load the app ("App Transport Security") | serve Metro over `https` (step 4, away from your Wi-Fi) |
+| the development build can't load the app ("App Transport Security") | you are away from your Wi-Fi: serve Metro over `https` (step 4, optional, later). On the same Wi-Fi, check that the phone and the computer are on the same network |
 | the app disconnects when you switch apps or lock the phone | expected: iOS pauses apps in the background; it reconnects when you open it again |
-| the agent gets `not_connected` or `in_background` | the app isn't open in front: open it on the phone (Tailscale on); `apps` should list it |
+| the agent gets `not_connected` or `in_background` | the app isn't open in front: open it on the phone (on the same Wi-Fi); `apps` should list it |
 | scanning the code doesn't open the app | the scheme passed to `pair` must be the app's `scheme`; the build must have Tapline turned on |
 | the app opens a "not found" screen | Expo Router: add `app/+native-intent.ts` (step 3) |
 | "pairing code has expired or was already used" | ask for a new code; each one works once, for 10 minutes |
-| the app never connects | Tailscale on, on both; the host (or the agent) is running; Windows: the firewall rule above |
+| the app never connects | the phone and the computer are on the same Wi-Fi (some guest or office networks block devices from each other); the host (or the agent) is running; Windows: the firewall rule above |
 | it forgets the computer after a restart | install `expo-secure-store` and rebuild, or pass `storage` |
 | "no longer accepts this phone" | the computer's token changed (`~/.tapline/token` deleted); pair again |
 | a paired phone stopped connecting after agents restarted | its host came back on another port; pair again |
-| the prompt warns the address is outside Tailscale | the link points somewhere other than your Tailscale or local network: cancel unless you know why |
+| the prompt warns the address is outside your network | the link points somewhere other than your local network or Tailscale: cancel unless you know why |
 | `No React roots recorded` | `register` isn't the first import of the entry file (Expo Router: use your own `index.js`, step 3) |
 | `screenshot … unsupported` | install `react-native-view-shot`, then rebuild the app (it has native code) |
 | an element isn't in `look` | it has no text, label, `testID` or handler (give it a `testID`), or it's hidden: tabs that aren't selected and screens covered by another are left out |

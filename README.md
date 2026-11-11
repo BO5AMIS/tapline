@@ -1,26 +1,27 @@
 # Tapline
 
-**Let AI agents see and drive your own React Native app on your phone, from anywhere.**
+**Let AI agents see and drive your own React Native app on a test phone.**
 
 Tapline puts a small agent inside the development and TestFlight builds of your
 React Native / Expo app. You pair your phone with your computer by scanning a QR code;
-from then on the app connects to your computer over [Tailscale](https://tailscale.com),
+from then on the app connects to your computer over the same Wi-Fi,
 and an agent (Claude, Codex, anything that speaks MCP) uses it to read the screen as
 named elements, tap, type, scroll, toggle, open deep links, read the app's logs and
-take screenshots. The phone can be anywhere: on cellular, on another Wi-Fi, across the
-world. Nothing is plugged in, and no Mac is needed.
+take screenshots. The phone stays next to the computer, on the same Wi-Fi (or the
+computer is on a cable to the same router). Nothing is plugged in, and no Mac is needed.
+A phone away from your Wi-Fi can connect over [Tailscale](https://tailscale.com); that
+is optional and not part of the tested v1 setup.
 
 > [!NOTE]
-> Early. It has driven a real app on a physical iPhone over cellular through Tailscale, in a
-> development build. TestFlight builds and Android haven't been tried yet; see
-> [Status](#status).
+> Early. It has driven a real app on a physical iPhone, in a development build. TestFlight
+> builds and Android haven't been tried yet; see [Status](#status).
 
 ## How it works
 
 ```
- your phone (anywhere)                                your computer
+ your phone (same Wi-Fi)                              your computer
  ┌─────────────────────────┐    WebSocket over        ┌────────────────────────────┐
- │ your app (dev build or  │    Tailscale             │ tapline host  :7210        │
+ │ your app (dev build or  │    the local network     │ tapline host  :7210        │
  │ TestFlight)             │ ───────────────────────▶ │   MCP server (stdio) ◀──── agent
  │   @tapline/react-native │ ◀──── requests ───────── │   CLI                      │
  └─────────────────────────┘ ───── responses, logs ─▶ └────────────────────────────┘
@@ -33,11 +34,11 @@ app, finds elements in its React tree, and calls their own handlers (`onPress`,
 no open ports.
 
 **Everyone uses their own setup.** Each developer or tester has their own computer, their
-own Tailscale network, their own phone and their own agents. The app build carries no
+own Wi-Fi, their own phone and their own agents. The app build carries no
 address and no secret, only an on switch, so one TestFlight build serves every tester:
 each pairs the app with their own computer.
 
-Tapline drives **your own app from the inside**, from anywhere. Its sibling project
+Tapline drives **your own app from the inside**. Its sibling project
 [Tapwright](https://github.com/<owner>/tapwright) drives **the whole phone from the
 outside** (any app, system alerts) through Apple's UI automation.
 
@@ -45,8 +46,8 @@ outside** (any app, system alerts) through Apple's UI automation.
 
 - A React Native or Expo app you build yourself (development builds or TestFlight;
   Expo Go can't load it).
-- A computer with Node.js 20 or later and Tailscale, and Tailscale on your phone, in your
-  own Tailscale network.
+- A computer with Node.js 20 or later, on the same Wi-Fi as your phone (or on a cable to
+  the same router). Tailscale is optional.
 - An MCP client for the agent, such as Claude Code.
 
 ## Quick start
@@ -173,7 +174,7 @@ computer. It shows the app's screen as it changes, marks each tap and scroll the
 and can draw a box around every element. You can tap, scroll and type in it as well: your
 input goes first, the agent waits until you've been idle for 3 seconds, and **Pause agent**
 stops it until you resume. The link carries a key and works on this computer only;
-`tapline mcp --viewer remote` also opens it to your own devices on Tailscale, and
+`tapline mcp --viewer remote` also opens it to other devices that can reach the host, and
 `--viewer off` turns it off. It runs only while someone watches. The page can show video
 when a server offers it; Tapline's own doesn't yet.
 
@@ -185,12 +186,16 @@ order, pair again (or give each agent a fixed `--port`).
 
 ## Security
 
-- The host listens only on your Tailscale address and 127.0.0.1, so only devices in your
-  own Tailscale network can reach it.
+- The host listens on this computer's Wi-Fi/LAN address(es), on Tailscale if it runs, and
+  on 127.0.0.1. Other devices on the same network can reach the port, but nothing connects
+  without the one-time pairing code, and the person holding the phone approves it.
 - A pairing code works once and expires after 10 minutes. Before connecting, the app asks
   "Connect for testing?" and names the computer. The host then hands the app its token
   (a random secret in `~/.tapline/token`), which the app keeps in the phone's keychain;
-  other connections are closed. Tailscale encrypts the traffic.
+  other connections are closed.
+- Traffic on the local network is plain WebSocket, not encrypted. Tailscale encrypts it
+  when you use it. Use a Wi-Fi you trust.
+- The live viewer stays on this computer unless you start the host with `--viewer remote`.
 - The build carries no address and no token. With the switch off (your App Store build),
   Tapline does nothing at all, not even listen for pairing links.
 - The agent inside your app can do whatever your app's UI can do. Turn it on only in
@@ -258,7 +263,7 @@ order, pair again (or give each agent a fixed `--port`).
 | Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.6 answers, the shared tool text and the agent skill with its installer: 470 tests); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.6 behaviour, the viewer feed's pace, a person's touches: 624 tests); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (123 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
 | On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured); `long_press` and `toggle`; the keyboard closing before a tap outside the focused field; `covered` for what an open sheet hides, and `back` closing the sheet; an app frozen for 20 seconds (`not_answering`, then working again by itself); the off-screen counts, the longer text cut and the in-app alert in front; scrolling to an element in one call, changes off screen, and the notes after a forced action and after actions without a list. Measured there by the shared benchmark over the local network: a tap, typing, a scroll and a toggle each answer in about 0.2 s, a look in 0.02 s, and the reliability checks (the right element, no false refusals, refusing what a person couldn't do) had no misses in three passes |
 | Also on that iPhone (2026-11-10 and 11) | the note after a person's real touch on the phone; the native module in a new development build: an alert from native code and the share sheet seen as `Alert:` lines with taps behind them refused, and the live viewer at 15 frames a second under the lab animation over Wi-Fi with every viewer row of the benchmark passing (the longest gap 0.07 s, the phone paying about 12% of one core); typing into the next field with the keyboard up, `Keyboard:` lines, and `back` closing a sheet by its backdrop |
-| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), 5G through Tailscale with the current build, a second phone, scanning the QR code with the camera, Android |
+| Not yet | TestFlight and release builds, network tracking and keeping the screen on (on a device), a second phone, scanning the QR code with the camera, Android |
 
 ## Repository
 

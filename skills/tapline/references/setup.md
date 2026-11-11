@@ -4,15 +4,16 @@ Do the work on the computer and in the app's code yourself. Ask the user only fo
 their hands, their accounts or their decisions. The full guide is `docs/setup.md` in the
 Tapline repository, and `docs/quickstart.md` is the short one; this is the order.
 
-Each person uses their own computer, their own Tailscale network and their own phone. Never
-set a phone up to use someone else's computer or network.
+Each person uses their own computer, their own Wi-Fi and their own phone. Never set a phone
+up to use someone else's computer or network.
 
 ## What is needed
 
 - A computer with Node.js 20 or later and git (Windows, macOS or Linux).
 - An iPhone, and the user's own Expo or React Native app, which they can build as a
   development build or a TestFlight build. Expo Go can't run it.
-- Tailscale, signed in on the computer and on the phone, and on on the phone while testing.
+- The phone on the same Wi-Fi as the computer (or the computer on a cable to the same
+  router). Tailscale is optional, only for a phone away from that Wi-Fi (not part of v1).
 
 The token in `~/.tapline/token` is a secret. Never print it, and never put it in chat, a
 commit or a file.
@@ -28,9 +29,9 @@ commit or a file.
    npm install -g ./packages/host
    tapline doctor
    ```
-   Fix what `doctor` reports. If Tailscale isn't installed or signed in, ask the user: it
-   needs their account. On Windows the firewall rule it names needs an administrator prompt
-   that the user approves.
+   Fix what `doctor` reports. If it finds no Wi-Fi or LAN address, ask the user to join
+   the same Wi-Fi as the phone. Tailscale warnings can be ignored on the same Wi-Fi. On
+   Windows the firewall rule it names needs an administrator prompt that the user approves.
 2. Add the MCP server to the agent host (below).
 
 ## Steps in the user's app
@@ -61,8 +62,8 @@ commit or a file.
 ## Pair the phone, and prove the chain
 
 1. Call `pair` with the app's URL scheme (`scheme` in app.json). Show the user the QR code
-   (it is also saved as a picture; the answer gives the path). They scan it with Tailscale
-   on and tap Connect in the app. When they are using the phone itself, give them the link
+   (it is also saved as a picture; the answer gives the path). They scan it with the phone
+   on the same Wi-Fi and tap Connect in the app. When they are using the phone itself, give them the link
    to tap.
 2. `apps` should now list the app, and `look` should show its screen.
 
@@ -80,7 +81,7 @@ tapline mcp
 - `--screenshots file` saves pictures in `~/.tapline/shots` and answers with their path, for
   hosts and agents that shouldn't receive images (a lead agent that hands pictures to a
   small model).
-- `--viewer remote` also opens the live view to the user's own devices on Tailscale;
+- `--viewer remote` also opens the live view to other devices that can reach the host;
   `--viewer off` turns it off.
 
 **Claude Code**
@@ -122,12 +123,14 @@ Run `tapline doctor` first.
 
 | Symptom | Fix |
 |---|---|
-| `apps` lists nothing, phone never paired | `pair` with the app's scheme; the user scans the code with Tailscale on |
-| `apps` lists nothing, phone was paired | the user opens the app with Tailscale on; it connects within a few seconds |
-| the phone can't connect, on Windows | the firewall: `tapline doctor` names the rule for ports 7210 to 7219 |
+| `apps` lists nothing, phone never paired | `pair` with the app's scheme; the user scans the code with the phone on the same Wi-Fi |
+| `apps` lists nothing, phone was paired | the user opens the app with the phone on the same Wi-Fi; it connects within a few seconds |
+| the phone can't connect, on Windows | the firewall: `tapline doctor` names the rule for ports 7210 to 7219 (it allows the local subnet and Tailscale) |
+| the phone can't connect, on any computer | the phone and the computer are on different networks, or the Wi-Fi blocks devices from each other (guest networks do) |
 | the list is empty, "No React roots recorded" | the `register` import isn't the first line of the entry file |
 | a pairing link opens a "not found" screen | Expo Router: `app/+native-intent.ts` is missing |
 | every call answers `in_background` | the app isn't in front: the user opens it again |
 | `not_answering` | the app froze: try once more, then the user closes and opens the app |
 | no screenshots | the app needs `react-native-view-shot`, and a new build after adding it |
-| a development build doesn't load away from the computer's Wi-Fi | serve Metro over https in the tailnet: `tapline dev` |
+| a development build doesn't load on the same Wi-Fi | start Metro on the computer (plain http works on the local network) and check both are on the same network |
+| a development build doesn't load away from the computer's Wi-Fi (optional, not part of v1) | serve Metro over https in the tailnet: `tapline dev` |
