@@ -284,9 +284,31 @@ describe('stand-in (standIn true)', () => {
     });
     installAlertTracking({ standIn: true });
     nativeAlert('Connect for testing?', 'Only the person holding the phone answers this', [{ text: 'Connect' }]);
-    expect(openAlerts()).toHaveLength(0);
+    // Listed as a real alert (the agent sees it and taps behind it are refused), never as a stand-in.
+    expect(openAlerts()).toEqual([expect.objectContaining({ title: 'Connect for testing?', standIn: false })]);
     expect(promptSpy).toHaveBeenCalledTimes(1);
     expect(at(promptSpy.mock.calls, 0)[0]).toBe('Connect for testing?');
+  });
+
+  it('nativeAlert is listed until the person answers it, and the stand-in never draws it', async () => {
+    installAlertTracking({ standIn: true });
+    const renderer = await mount(<TaplineAlertHost />);
+    const pressed: string[] = [];
+    await act(async () => {
+      nativeAlert('Connect for testing?', 'Dev PC will be able to use this app', [
+        { text: 'Cancel', style: 'cancel', onPress: () => pressed.push('cancel') },
+        { text: 'Connect', onPress: () => pressed.push('connect') },
+      ]);
+    });
+    expect(openAlerts().map((alert) => [alert.title, alert.standIn])).toEqual([['Connect for testing?', false]]);
+    expect(byTestID(renderer.root, 'tapline-alert')).toHaveLength(0);
+    // The person taps Connect on the real alert.
+    const shown = at(alertSpy.mock.calls, 0)[2] ?? [];
+    await act(async () => {
+      shown[1]?.onPress?.();
+    });
+    expect(pressed).toEqual(['connect']);
+    expect(openAlerts()).toHaveLength(0);
   });
 
   it("an original Alert.alert kept from before Tapline reaches the stand-in as an alert, with no text field", async () => {

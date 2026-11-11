@@ -297,14 +297,32 @@ export function uninstallAlertTracking(): void {
 }
 
 /**
- * A real (native) alert, never recorded or replaced by the stand-in: for Tapline's own prompts,
- * such as "Connect for testing?", which only the person holding the phone should answer.
+ * A real (native) alert, never replaced by the stand-in: for Tapline's own prompts, such as
+ * "Connect for testing?", which only the person holding the phone should answer. It is listed as
+ * a real alert (not a stand-in) while open, so the agent sees it and its taps behind it are
+ * refused, but it has no way to press its buttons.
  */
 export function nativeAlert(...args: Parameters<AlertFn>): void {
   const show = originalAlert ?? Alert.alert;
+  const [title, message, buttons, options] = args;
+  let entry: Entry | null = null;
+  let forwarded: Parameters<AlertFn> = args;
+  try {
+    entry = record('alert', title, message, buttons, false);
+    forwarded = [title, message, wrapButtons(entry.info.id, buttons), wrapOptions(entry.info.id, options)];
+  } catch {
+    if (entry) closeAlert(entry.info.id);
+    entry = null;
+    forwarded = args;
+  }
   // iOS's Alert.alert calls Alert.prompt, which is ours while tracking: pass it through untouched,
   // or the stand-in would draw this alert and an agent could answer it.
-  runOriginal((...forwarded: Parameters<AlertFn>) => show.apply(Alert, forwarded), args);
+  try {
+    runOriginal((...shown: Parameters<AlertFn>) => show.apply(Alert, shown), forwarded);
+  } catch (error) {
+    if (entry) closeAlert(entry.info.id);
+    throw error;
+  }
 }
 
 /** The id of an alert that only the native module saw (an alert or the share sheet UIKit shows). */

@@ -117,12 +117,20 @@ test('a press is refused while an iOS alert is open, unless forced', async () =>
   expect(onSave).toHaveBeenCalledTimes(1);
 });
 
-test("Tapline's own prompts stay native and untracked", async () => {
+test("Tapline's own prompts stay native: listed as a real alert, never a stand-in, and taps behind them are refused", async () => {
   const spy = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
   installAlertTracking({ standIn: true });
+  const onSave = jest.fn();
+  await mount(
+    <Pressable testID="save" onPress={onSave}>
+      <Text>Save</Text>
+    </Pressable>,
+  );
+  useFrames({ save: frame(20, 100, 100, 40) });
   nativeAlert('Connect for testing?', 'My PC (100.64.0.7:7210)', [{ text: 'Connect' }]);
-  expect(spy).toHaveBeenCalledWith('Connect for testing?', 'My PC (100.64.0.7:7210)', [{ text: 'Connect' }]);
-  await mount(<Text>App</Text>);
-  useFrames({});
-  expect((await tree({})).alerts).toBeUndefined();
+  expect(spy).toHaveBeenCalledWith('Connect for testing?', 'My PC (100.64.0.7:7210)', [expect.objectContaining({ text: 'Connect' })], expect.anything());
+  expect((await tree({})).alerts).toEqual([expect.objectContaining({ title: 'Connect for testing?', standIn: false })]);
+  const error = await failure(run(() => press({ target: { testID: 'save' } })));
+  expect(error.message).toMatch(/^behind_alert: /);
+  expect(onSave).not.toHaveBeenCalled();
 });
