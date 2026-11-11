@@ -12,7 +12,7 @@ repository, which drives a tool through MCP exactly as an agent does.
 | App | a production Expo app (Expo 57, React Native 0.86, new architecture) in a development build that includes the lab screen and Tapline's native module |
 | Computer | Windows 11, wired to the router; the phone on the same Wi-Fi |
 | Tapline | branch `agent-tools-v1`, 2026-11-11 |
-| Lab | one screen built for measuring: a state line the runner reads, buttons, inputs, a switch, a list of 40 rows, a sheet, an alert, a covered button, an animation |
+| Lab | one screen built for measuring: a state line the runner reads, buttons, inputs, a switch, a list of 40 rows, two sheets, an alert, a covered button, an animation |
 
 The runner writes one scorecard (JSON) per run. Times are taken on the computer with one clock.
 
@@ -55,7 +55,9 @@ preset back at once.
 
 ## Reliability (R), 2026-11-11
 
-Three full passes; one miss in any pass fails the row.
+Three full passes; one miss in any pass fails the row. Run twice on 2026-11-11, with the same result:
+once at night, and once in the morning with the phone's notifications on (a banner can't take
+Tapline's touches: they go through the app's own touch system).
 
 | | Checks | Misses |
 |---|---|---|
@@ -87,9 +89,10 @@ nothing outside the charter.
 
 ## Not measured
 
-- Android, a second iPhone, a TestFlight build.
-- Safari (no Mac here).
+- Android, a second iPhone, an iPad, a TestFlight build.
+- A computer other than this one: only Windows 11 was used. Safari (no Mac here).
 - A phone away from the computer (Tailscale over another network): outside v1.
+- A person judging the viewer, and a measured comparison with another tool.
 
 ## Run it yourself
 
