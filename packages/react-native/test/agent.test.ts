@@ -212,6 +212,49 @@ describe('TaplineAgent', () => {
     expect(JSON.parse((await storage.getItem('tapline.pairing')) ?? '{}')).toEqual(SAVED);
   });
 
+  test('Expo Go reloads with the pairing link it was opened by: a code this phone already used is not asked about again', async () => {
+    const storage = memoryStorage();
+    const first = track(makeAgent(storage));
+    first.linking.initial = LINK;
+    await first.agent.start();
+    last().open();
+    last().receive({ type: 'welcome', protocol: 1, session: 's-1', token: 'host-token' });
+    await flush();
+    first.agent.stop();
+
+    // The reload: a new JavaScript start, the same launch link.
+    const second = track(makeAgent(storage));
+    second.linking.initial = LINK;
+    await second.agent.start();
+    await flush();
+    expect(second.prompts).toHaveLength(0);
+    expect(second.notes).toHaveLength(0);
+    expect(last().url).toBe('ws://100.64.0.1:7211/');
+    last().open();
+    expect(last().hello).toMatchObject({ token: 'host-token' });
+  });
+
+  test('a launch forget link when nothing is paired stays quiet (a reload after forgetting)', async () => {
+    const { agent, linking, notes } = track(makeAgent());
+    linking.initial = 'demo://tapline/forget';
+    await agent.start();
+    expect(notes).toHaveLength(0);
+    linking.open('demo://tapline/forget');
+    await flush();
+    expect(notes).toEqual(['This app was not paired with a computer.']);
+  });
+
+  test("an expired code's note says to open a new link, not only to scan", async () => {
+    const { agent, linking, notes } = track(makeAgent());
+    await agent.start();
+    linking.open(LINK);
+    await flush();
+    last().open();
+    last().drop(4004);
+    await flush();
+    expect(notes.at(-1)).toMatch(/Make a new one on the computer and scan or open it again\.$/);
+  });
+
   test('the forget link disconnects and forgets the computer', async () => {
     const storage = memoryStorage();
     await storage.setItem('tapline.pairing', JSON.stringify(SAVED));

@@ -12,6 +12,8 @@ export interface Pairing {
   url: string;
   token: string;
   name: string;
+  /** The one-time code this pairing was made with: a launch link carrying it again is already handled. */
+  code?: string;
 }
 
 /** The slice of React Native's Linking that Tapline uses. */
@@ -73,7 +75,9 @@ function readPairing(raw: string | null): Pairing | null {
   try {
     const value: unknown = JSON.parse(raw);
     if (isRecord(value) && typeof value.url === 'string' && typeof value.token === 'string') {
-      return { url: value.url, token: value.token, name: typeof value.name === 'string' ? value.name : 'a computer' };
+      const pairing: Pairing = { url: value.url, token: value.token, name: typeof value.name === 'string' ? value.name : 'a computer' };
+      if (typeof value.code === 'string' && value.code !== '') pairing.code = value.code;
+      return pairing;
     }
   } catch {
     // a broken entry: treat as not paired
@@ -117,7 +121,7 @@ export class TaplineAgent {
       }
       this.reconnectHome();
       const initial = await this.deps.linking.getInitialURL().catch(() => null);
-      if (typeof initial === 'string' && initial !== '') await this.onLink(initial);
+      if (typeof initial === 'string' && initial !== '') await this.onLink(initial, true);
     });
   }
 
@@ -176,16 +180,25 @@ export class TaplineAgent {
     client.start();
   }
 
-  private async onLink(url: string): Promise<void> {
+  /**
+   * `launch`: the link the app was opened by. Expo Go hands that same link to every reload of the
+   * project, so a launch link this phone has already acted on is not acted on again.
+   */
+  private async onLink(url: string, launch = false): Promise<void> {
     if (this.stopped) return;
     const link = parseTaplineLink(url);
     if (link === null) return;
     if (link.kind === 'forget') {
+      if (launch && this.pairing === null && !this.options.direct) return; // forgotten already
       await this.forget();
       return;
     }
     if (this.seenCodes.has(link.code)) return;
     this.seenCodes.add(link.code);
+    if (this.pairing?.code === link.code) {
+      this.log(`this pairing link was used already: paired with ${this.pairing.name}`);
+      return;
+    }
     const address = addressOf(link.url);
     const warning = isNearbyAddress(address)
       ? ''
@@ -203,7 +216,7 @@ export class TaplineAgent {
       pairCode: link.code,
       onPaired: (token) => {
         // In the queue, so a forget link that follows can't be undone by a late save.
-        void this.enqueue(() => this.remember({ url: hostUrl, token, name }));
+        void this.enqueue(() => this.remember({ url: hostUrl, token, name, code: link.code }));
       },
       onRejected: () => this.onPairingRefused(name),
     });
@@ -224,7 +237,7 @@ export class TaplineAgent {
     if (this.stopped) return;
     this.deps.notify(
       'Tapline',
-      `The pairing code from ${name} has expired or was already used. Make a new one on the computer and scan it again.`,
+      `The pairing code from ${name} has expired or was already used. Make a new one on the computer and scan or open it again.`,
     );
     this.reconnectHome();
   }
@@ -234,7 +247,7 @@ export class TaplineAgent {
     this.client = null;
     this.deps.notify(
       'Tapline',
-      `${name} no longer accepts this phone (its Tapline key changed). Scan a new pairing code from it to connect again.`,
+      `${name} no longer accepts this phone (its Tapline key changed). Scan or open a new pairing code from it to connect again.`,
     );
   }
 
@@ -248,7 +261,7 @@ export class TaplineAgent {
     this.deps.notify(
       'Tapline',
       name !== undefined
-        ? `Disconnected from ${name}. Scan a new pairing code to connect again.`
+        ? `Disconnected from ${name}. Scan or open a new pairing code to connect again.`
         : 'This app was not paired with a computer.',
     );
   }
