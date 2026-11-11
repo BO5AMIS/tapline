@@ -397,6 +397,16 @@ export function rememberTyped(node: HostNode, text: string): void {
   if (typeof key === 'object' && key !== null) typedValues.set(key, text);
 }
 
+/** A password field (`secureTextEntry`): its text is never reported, only its length. */
+export function isSecureInput(node: HostNode): boolean {
+  return findProp(node, 'secureTextEntry') === true;
+}
+
+/** What a password field shows instead of its text: one bullet per character, as iOS draws it. */
+export function maskSecret(text: string): string {
+  return '•'.repeat([...text].length);
+}
+
 export function currentInputValue(node: HostNode): string {
   const controlled = findProp(node, 'value');
   if (typeof controlled === 'string') return controlled;
@@ -602,7 +612,8 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
       node.isText || input || toggleable || actions.includes('press') || actions.includes('longPress') || findProp(node, 'accessible') === true;
 
     const hasContent = node.isText && !node.insideText && node.text !== '';
-    const inputValue = input ? currentInputValue(node) : null;
+    const rawValue = input ? currentInputValue(node) : null;
+    const inputValue = rawValue !== null && isSecureInput(node) ? maskSecret(rawValue) : rawValue;
     infos.push({
       type: typeName(node),
       role,

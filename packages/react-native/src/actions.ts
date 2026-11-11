@@ -4,6 +4,8 @@ import { nativeModule } from './native';
 import {
   closingModalHosts,
   currentInputValue,
+  isSecureInput,
+  maskSecret,
   cutText,
   MAX_TEXT,
   displayText,
@@ -1266,7 +1268,17 @@ export async function typeText(
 
   const outcome = await settleOutcome();
   const { element } = await elementFor(entry);
-  return { element: { ...element, value: displayText(next) }, value: displayText(next), ...keyboardNote(closedKeyboard), ...forced, ...outcome };
+  // A password field's text never leaves the app: one bullet per character, as iOS draws it.
+  const shown = isSecureInput(entry.node) ? maskSecret(next) : displayText(next);
+  // An input that now holds text shows no placeholder (AGENT-TOOLS v1.7).
+  const { placeholder, ...rest } = element;
+  return {
+    element: { ...rest, ...(next === '' && placeholder !== undefined ? { placeholder } : {}), value: shown },
+    value: shown,
+    ...keyboardNote(closedKeyboard),
+    ...forced,
+    ...outcome,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

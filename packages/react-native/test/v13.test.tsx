@@ -217,6 +217,21 @@ describe('duplicates fold', () => {
     expect(change?.was).toEqual({ value: '', placeholder: 'Alex Morgan' });
   });
 
+  test("a password field's value never leaves the app: it reads as one bullet per character, as iOS shows it", async () => {
+    await mount(
+      <View>
+        <TextInput testID="password" accessibilityLabel="Password" secureTextEntry placeholder="At least 6 characters" />
+      </View>,
+    );
+    useFrames({ password: frame(24, 100, 300, 44) });
+    const answer = await run(() => typeText({ target: { testID: 'password' }, text: 'hunter2' }));
+    expect(JSON.stringify(answer)).not.toContain('hunter2');
+    const { elements, changes } = await tree({ changes: true });
+    const field = byTestID(elements, 'password');
+    expect(field?.value).toBe('•'.repeat(7));
+    expect(JSON.stringify({ elements, changes })).not.toContain('hunter2');
+  });
+
   test('a different rect (more than 1 pt) or different text lists both', async () => {
     await mount(
       <View>
