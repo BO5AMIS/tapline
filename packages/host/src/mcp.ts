@@ -291,7 +291,7 @@ function log(message: string): void {
 }
 
 /** Runs the host and serves MCP over stdio. stdout is reserved for the protocol; everything else goes to stderr. */
-export async function runMcp(options: ResolveOptions & { screenshots?: string; viewer?: string } = {}): Promise<boolean> {
+export async function runMcp(options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean } = {}): Promise<boolean> {
   let screenshots: ScreenshotMode;
   let viewer: ViewerMode;
   try {
@@ -345,6 +345,8 @@ export async function runMcp(options: ResolveOptions & { screenshots?: string; v
     screenshotDir: join(configDir(), "shots"),
     scriptsDir: join(configDir(), "scripts"),
     baselinesDir: join(configDir(), "baselines"),
+    // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
+    ...(options.noLog === true ? {} : { logDir: join(configDir(), "log") }),
     ...(viewer === "off"
       ? {}
       : {

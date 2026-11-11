@@ -10,6 +10,7 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
+import { ActionLog, loggedTarget } from "./actionlog.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -255,6 +256,8 @@ export interface ConnectInfo {
 
 export interface ToolsOptions {
   connect: ConnectInfo;
+  /** Where the action log goes (AGENT-TOOLS 1.8 §12); none: no log. */
+  logDir?: string;
   /** Where `pair` also saves the QR code as a PNG (so the user can open it). */
   pairImagePath?: string;
   /** How long that PNG is kept. Default: the code's 10 minutes. */
@@ -554,6 +557,12 @@ export function describeError(error: unknown): string {
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
   private readonly reloadWaitMs: number;
+  /** The action log (§12), when one is configured. */
+  private readonly actionLog: ActionLog | null;
+  /** When the action in flight started, for the log's `ms`. */
+  private actionStartedAt: number | undefined;
+  /** Set while `run` runs a step: the log ties the action to its batch. */
+  private batch: { id: string; step: number } | undefined;
   private readonly reloadSettleMs: number;
   private readonly noScreenshot = new Set<string>();
   private readonly shotFiles: string[] = [];
@@ -581,6 +590,8 @@ export class TaplineTools {
     private readonly options: ToolsOptions,
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
+    this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
+    this.actionLog?.open();
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
     // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
@@ -771,6 +782,7 @@ export class TaplineTools {
     }
     const before = this.unlistedActions.get(session.id) ?? 0;
     const started = Date.now();
+    const batchId = `b${started.toString(36)}`;
     const notes: string[] = [];
     const trace: string[] = [];
     let ran = 0;
@@ -781,7 +793,10 @@ export class TaplineTools {
         break;
       }
       const at = Date.now();
-      const answer = await this.runStep(step);
+      this.batch = { id: batchId, step: i + 1 };
+      const answer = await this.runStep(step).finally(() => {
+        this.batch = undefined;
+      });
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       if (answer.isError === true) {
         stop = { index: i, ...parseError(said) };
@@ -1083,6 +1098,7 @@ export class TaplineTools {
       }
     }
     let result: unknown;
+    this.actionStartedAt = Date.now();
     try {
       const timeoutMs = answerTimeoutMs(method, params);
       const run = (): Promise<unknown> =>
@@ -1220,15 +1236,41 @@ export class TaplineTools {
     };
   }
 
+  /** One line in the action log (§12). Never fails the action. */
+  private logAction(by: "agent" | "person", tool: string, params: unknown, result: unknown, code?: string, reason?: string): void {
+    if (this.actionLog === null) return;
+    const element =
+      typeof result === "object" && result !== null && "element" in result
+        ? elementSchema.safeParse((result as { element: unknown }).element)
+        : null;
+    const session = this.host.current();
+    this.actionLog.write({
+      by,
+      tool,
+      ...loggedTarget(params),
+      ...(element?.success ? { element: formatElement({ ...element.data, ref: "" }, { actions: false }) } : {}),
+      ok: code === undefined,
+      ...(code !== undefined ? { code } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(by === "agent" && this.actionStartedAt !== undefined ? { ms: Date.now() - this.actionStartedAt } : {}),
+      ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
+      ...(by === "agent" && this.batch !== undefined ? { batch: this.batch } : {}),
+    });
+  }
+
   private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string, reason?: string): void {
     const onAction = this.options.onAction;
-    if (onAction === undefined) return;
+    if (onAction === undefined) {
+      this.logAction(by, by === "agent" ? agentKind(method) : method, params, result, code, reason);
+      return;
+    }
     const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
     const t = typeof target === "object" && target !== null ? (target as { x?: unknown; y?: unknown }) : undefined;
     const screen = this.lastScreen;
     const point =
       t && typeof t.x === "number" && typeof t.y === "number" && screen ? { x: t.x / screen.w, y: t.y / screen.h } : undefined;
     const kind = by === "agent" ? agentKind(method) : method;
+    this.logAction(by, kind, params, result, code, reason);
     const described = this.describeAction(kind, result, point);
     // A failed step has no element in its answer: name it from the target the agent gave, if it's words.
     const named =
@@ -1324,7 +1366,10 @@ export class TaplineTools {
       }
     };
     try {
-      return this.options.control ? await this.options.control.runPerson(run) : await run();
+      const outcome = this.options.control ? await this.options.control.runPerson(run) : await run();
+      // The log (§12): a person's input too, its typed text only as a length.
+      this.logAction("person", outcome.action?.kind ?? input.type, input.type === "text" ? { text: input.text } : {}, undefined, outcome.ok ? undefined : outcome.code, outcome.reason);
+      return outcome;
     } catch (error) {
       return { ok: false, code: "internal", message: error instanceof Error ? error.message : String(error) };
     }
