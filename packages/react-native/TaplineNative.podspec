@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name = 'TaplineNative'
-  s.version = '0.1.0'
+  s.version = '1.0.0'
   s.summary = 'Tapline: frames without a forced render, and what iOS draws over the app'
   s.license = { :type => 'MIT' }
   s.author = 'Tapline'

@@ -22,7 +22,7 @@ import { TaplineTools, toolShapes } from "./tools.js";
 
 /** Registers every Tapline tool on an MCP server. */
 export function createMcpServer(tools: TaplineTools): McpServer {
-  const server = new McpServer({ name: "tapline", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: "1.0.0" }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     "apps",

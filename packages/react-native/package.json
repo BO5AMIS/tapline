@@ -1,6 +1,6 @@
 {
   "name": "react-native-tapline",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Tapline in-app agent: lets AI agents see and drive your own React Native / Expo app on a test phone on the same Wi-Fi.",
   "license": "MIT",
   "repository": {

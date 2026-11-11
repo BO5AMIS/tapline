@@ -129,7 +129,7 @@ your own `storage`, see below). Without `expo-keep-awake` the phone's screen can
 an agent works; it matters most for a dedicated test device.
 
 From a clone of Tapline instead, `npm pack -w react-native-tapline` (after `npm run build`)
-makes `react-native-tapline-0.1.0.tgz`; install that file in your app (Metro handles a tarball
+makes `react-native-tapline-1.0.0.tgz`; install that file in your app (Metro handles a tarball
 better than a linked folder).
 
 The package also carries a small Expo native module, which any new build of an Expo app picks
