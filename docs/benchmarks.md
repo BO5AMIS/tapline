@@ -11,12 +11,47 @@ repository, which drives a tool through MCP exactly as an agent does.
 | Phone | iPhone 14 Pro Max, iOS 26.5, a test phone next to the computer |
 | App | a production Expo app (Expo 57, React Native 0.86, new architecture) in a development build that includes the lab screen and Tapline's native module |
 | Computer | Windows 11, wired to the router; the phone on the same Wi-Fi |
-| Tapline | branch `agent-tools-v1`, 2026-11-11 |
+| Tapline | 1.1.0 before release (main, 2026-11-12); the 1.0.0 rows below are from 2026-11-11 |
 | Lab | one screen built for measuring: a state line the runner reads, buttons, inputs, a switch, a list of 40 rows, two sheets, an alert, a covered button, an animation |
 
 The runner writes one scorecard (JSON) per run. Times are taken on the computer with one clock.
 
-## Speed (S), 2026-11-11
+## 1.1.0, 2026-11-12
+
+The whole bench on the same lab, Wi-Fi, after the 1.1 changes and the review fixes. Every row passes.
+
+| | 1.1.0 | 1.0.0 (same day, same lab) | Target |
+|---|---|---|---|
+| Tap (S1), median / p95 | 0.23 / 0.24 s | 0.22 / 0.24 s | 0.7 / 1.2 s |
+| Type, scroll, toggle (S1), median | 0.20 to 0.23 s | 0.20 to 0.22 s | 0.7 s |
+| Look, text only (S2) | 0.018 s | 0.017 s | 0.5 s |
+| Look with a screenshot (S3) | 0.074 s | 0.073 s | 0.8 s |
+| Start to ready (S5) | 1.07 s | 1.68 s | 5 s |
+| A person's tap to the picture (V1), median / p95 | 0.12 / 0.35 s | 0.12 / 0.13 s | 0.3 / 0.5 s |
+| Frames a second while the screen changes (V2) | 15 | 13.6 | 15 |
+| Reliability R1 to R6 | 0 misses (48, 48, 15, 21, 3, 1 checks) | 0 misses | 0 |
+
+A tap costs about 15 ms more than in 1.0.0: before a touch, the app checks the target for the safety
+policy (a dry run), inside the same turn as the touch.
+
+**Answer size (J6).** Tokens per answer (characters ÷ 3.6; a screenshot counted by its size), over
+every answer the suites above get:
+
+| | 1.0.0 | 1.1.0 | Change |
+|---|---|---|---|
+| `look`, median | 453 | 419 | −7% |
+| An action's answer, median | 23 | 19 | −17% |
+| An action's answer, p95 | 451 | 412 | −9% |
+
+The lab's actions mostly answer with a line or two, so the gain is smaller there than in real agent
+work. Applied to 321 answers from first-time agents' runs (screens with long status lines), the same
+rules bring the median action answer from 114 to 77 tokens (−32%).
+
+**Agent use.** A first-time agent (Claude Sonnet, the tool text and the skill only) tested the lab
+with the 11-point charter plus `run`, `audit` and `inspect`: 11 of 11, 51 calls, 3 state-only
+reads, nothing outside the charter.
+
+## Speed (S), 1.0.0, 2026-11-11
 
 Twenty samples each; the median and the 95th percentile, in seconds. The full round trip: the MCP
 request goes out, and the whole answer (with the change block) comes back.
@@ -32,7 +67,7 @@ request goes out, and the whole answer (with the change block) comes back.
 | Start to ready (S5) | 0.83 | | 5 |
 | Back in front to the first look (S4) | 0.49 to 0.63 (five times, by hand) | | 3 |
 
-## The live view (V), 2026-11-11
+## The live view (V), 1.0.0, 2026-11-11
 
 The viewer page in a browser, over the same Wi-Fi, with the lab's animation running where it says so.
 
@@ -53,7 +88,7 @@ making iOS render a new frame, the app keeps at most two frames on their way, an
 moves on a link that can't carry more, frames are the light preset; a still screen gets the chosen
 preset back at once.
 
-## Reliability (R), 2026-11-11
+## Reliability (R), 1.0.0, 2026-11-11
 
 Three full passes; one miss in any pass fails the row. Run twice on 2026-11-11, with the same result:
 once at night, and once in the morning with the phone's notifications on (a banner can't take
@@ -83,6 +118,7 @@ skill) tests the lab against an 11-point charter. Every call is written down who
 | v1.6 | 52 | 2 | 11 of 11 | nothing |
 | v1.6 with the skill | 53, then 49 | 1, then 2 | 11 of 11 | nothing |
 | With Tapwright connected too | 40 (18 Tapline, 22 Tapwright) | 0 | 11 of 11 | nothing |
+| 1.1 (with run, audit, inspect) | 51 | 3 | 11 of 11 | nothing |
 
 Target: the whole charter, at most 60 calls, at most 3 state-only reads, no misread answer,
 nothing outside the charter.
