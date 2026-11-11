@@ -989,10 +989,12 @@ async function pressLike(
   const { snapshot, entry } = await resolveTarget(params.target, kind);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
+    if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
     selectTab(snapshot, entry.tab);
     return { element: toElement(entry, null), ...keyboardNote(closeKeyboardFor(entry)), ...(await settleOutcome()) };
   }
   if (entry.navBack) {
+    if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
     const { route: _route, ...outcome } = await back({});
     return { element: toElement(entry, null), ...outcome };
   }
@@ -1014,6 +1016,8 @@ async function pressLike(
   }
   const { element, frame } = await elementFor(actor);
   const forced = await checkedOrForced(params.force === true, () => assertReachable(snapshot, actor, frame));
+  // A dry run (AGENT-TOOLS 1.8 §11.4): every check ran; nothing is touched.
+  if (params.dryRun === true) return { element, dryRun: true, ...pointOf(frame), ...forced, settledMs: 0 };
   const closedKeyboard = closeKeyboardFor(actor);
   if (handler) callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
   else {
@@ -1030,7 +1034,12 @@ async function pressLike(
  * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
  * closed first, and `forced` (the reason word) when `force` let through what the checks refuse.
  */
-export type PressResult = { element: TaplineElement; closedKeyboard?: true; forced?: string } & SettleOutcome;
+export type PressResult = { element: TaplineElement; closedKeyboard?: true; forced?: string; dryRun?: true; point?: { x: number; y: number } } & SettleOutcome;
+
+/** Where a finger would land: the middle of the element (points, rounded). */
+function pointOf(frame: Frame | null): { point?: { x: number; y: number } } {
+  return frame ? { point: { x: Math.round(frame.x + frame.width / 2), y: Math.round(frame.y + frame.height / 2) } } : {};
+}
 
 export function press(params: unknown): Promise<PressResult> {
   return pressLike('press', params);
@@ -1209,7 +1218,7 @@ function setNativeText(entry: Entry, text: string): void {
 
 export async function typeText(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: string; secure?: true; closedKeyboard?: true; forced?: string } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: string; secure?: true; closedKeyboard?: true; forced?: string; dryRun?: true } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
@@ -1235,6 +1244,10 @@ export async function typeText(
       await assertReachable(snapshot, entry, await measureFiber(entry.node.fiber));
     }
   });
+  if (params.dryRun === true) {
+    const { element } = await elementFor(entry);
+    return { element, value: displayText(currentInputValue(entry.node)), dryRun: true, ...forced, settledMs: 0 };
+  }
   // Typing into the input that has focus leaves the keyboard alone. Another input above the keyboard
   // takes the focus with the keyboard up; one the keyboard covers closes it first.
   const closedKeyboard = !(await moveFocusAboveKeyboard(entry)) && closeKeyboardFor(entry);
@@ -1705,7 +1718,7 @@ async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
 
 export async function toggle(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
   const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
@@ -1719,6 +1732,10 @@ export async function toggle(
   const forced = await checkedOrForced(params.force === true, async () =>
     assertReachable(snapshot, control, await measureFiber(control.node.fiber)),
   );
+  if (params.dryRun === true) {
+    const { element, frame } = await elementFor(control);
+    return { element, value: next, dryRun: true, ...pointOf(frame), ...forced, settledMs: 0 };
+  }
   if (typeof params.value === 'boolean' && control.info.checked === params.value) {
     // Already there: a person wouldn't touch it, so the handler isn't called and the keyboard stays.
     const { element } = await elementFor(control);
