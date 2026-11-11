@@ -1485,11 +1485,14 @@ export class TaplineTools {
       typeof r === "object" && r !== null && key in r ? (r as Record<string, unknown>)[key] : undefined;
     // The element was on screen and clear already: nothing was scrolled, and the first line says so.
     const alreadyThere = (r: unknown): boolean => toTarget && flag(r, "unchanged") === true;
+    const atEndAlready = (r: unknown): boolean => (args.to === "start" || args.to === "end") && flag(r, "moved") === false;
     return this.act(
       "scroll",
       params,
       (r) => {
         if (alreadyThere(r)) return `${this.elementName(r, "target")} is already on screen.`;
+        // to: "start" or "end" with the list already there (AGENT-TOOLS v1.6 §5, shared with Tapwright).
+        if (atEndAlready(r)) return `${this.elementName(r)} is already at its ${String(args.to)}.`;
         const offset = flag(r, "offset");
         const at = offset !== undefined ? ` Offset now ${JSON.stringify(offset)}.` : "";
         // "toward" when it stopped before the element was clear: the first line mustn't read like success.
@@ -1506,7 +1509,7 @@ export class TaplineTools {
             : [];
         }
         const moved = flag(r, "moved");
-        if (moved !== false) return [];
+        if (moved !== false || atEndAlready(r)) return [];
         const direction = args.to !== undefined ? (args.to === "start" ? "up" : "down") : (args.direction ?? "down");
         if (direction === "up") {
           return [

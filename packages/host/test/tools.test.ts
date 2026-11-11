@@ -1271,9 +1271,12 @@ describe("other tools", () => {
     expect(up.at(-1)).toBe(
       "Note: the scroll view is already at the top (as far as Tapline can scroll it; a person's swipe can reach a little further when the system adds an inset).",
     );
-    expect(textOf(await tools.scroll({ to: "start" })).split("\n").at(-1)).toMatch(/already at the top/);
+    // to: "start" / "end" with the list already there: the first line says so, and no note (AGENT-TOOLS v1.6 §5).
+    const start = textOf(await tools.scroll({ to: "start" })).split("\n");
+    expect(start[0]).toMatch(/ is already at its start\.$/);
+    expect(start.join("\n")).not.toContain("Note: the scroll view");
     expect(textOf(await tools.scroll({ direction: "down" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
-    expect(textOf(await tools.scroll({ to: "end" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
+    expect(textOf(await tools.scroll({ to: "end" })).split("\n")[0]).toMatch(/ is already at its end\.$/);
     expect(textOf(await tools.scroll({ direction: "left" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the start.");
     expect(textOf(await tools.scroll({ direction: "right" })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
     expect(textOf(await tools.scroll({ direction: "down", look: false })).split("\n").at(-1)).toBe("Note: the scroll view is already at the end.");
