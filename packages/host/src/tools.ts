@@ -10,6 +10,20 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
+import {
+  EXPECT_TIMEOUT_S,
+  MAX_STEPS,
+  RUN_TIMEOUT_MS,
+  RUN_TOOLS,
+  describeRunStep,
+  expectFailure,
+  parseError,
+  stepNotes,
+  stepSchema,
+  type Expect,
+  type RunTool,
+  type Step,
+} from "./run.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
 import {
   elementSchema,
@@ -206,6 +220,18 @@ export const toolShapes = {
   },
   reload: { look: lookField },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
+  run: {
+    steps: z
+      .array(stepSchema)
+      .min(1)
+      .max(MAX_STEPS)
+      .describe(
+        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2).',
+      ),
+    trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
+    look: lookField,
+    screenshot: screenshotField,
+  },
 } as const;
 
 type Shape<K extends keyof typeof toolShapes> = z.infer<z.ZodObject<(typeof toolShapes)[K]>>;
@@ -716,6 +742,131 @@ export class TaplineTools {
       args.labels === true,
     );
     return { content: parts.content, ...(parts.isError ? { isError: true } : {}) };
+  }
+
+  // -- run (AGENT-TOOLS 1.8 §9): a batch of steps, answered once
+
+  async run(args: Shape<"run">): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const steps = args.steps as Step[];
+    for (const [i, step] of steps.entries()) {
+      if (!(RUN_TOOLS as readonly string[]).includes(step.tool)) {
+        return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
+      }
+      const shape = toolShapes[step.tool as RunTool];
+      const { tool: _tool, expect: _expect, ...params } = step;
+      const parsed = z.object(shape).strict().safeParse(params);
+      if (!parsed.success) {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
+      }
+    }
+    const before = this.unlistedActions.get(session.id) ?? 0;
+    const started = Date.now();
+    const notes: string[] = [];
+    const trace: string[] = [];
+    let ran = 0;
+    let stop: { index: number; code: string; message: string; rest: string[] } | null = null;
+    for (const [i, step] of steps.entries()) {
+      if (Date.now() - started > RUN_TIMEOUT_MS) {
+        stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
+        break;
+      }
+      const at = Date.now();
+      const answer = await this.runStep(step);
+      const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
+      if (answer.isError === true) {
+        stop = { index: i, ...parseError(said) };
+        break;
+      }
+      notes.push(...stepNotes(said, i + 1));
+      if (step.expect !== undefined) {
+        const missed = await this.expectMissed(step.expect);
+        if (missed !== null) {
+          stop = { index: i, code: "expect_failed", message: missed, rest: [] };
+          break;
+        }
+      }
+      ran++;
+      if (args.trace === true) trace.push(`  ${i + 1}. ${said.split("\n")[0] ?? ""} (${((Date.now() - at) / 1000).toFixed(1)} s)`);
+    }
+    // The batch is one call: the changes below are measured from the list the agent had before it.
+    if (before > 0) this.unlistedActions.set(session.id, before);
+    else this.unlistedActions.delete(session.id);
+    const total = steps.length;
+    const failed = stop !== null;
+    const head = stop === null
+      ? `Ran ${total} of ${total} steps in ${((Date.now() - started) / 1000).toFixed(1)} s.`
+      : `Error ${stop.code}: Ran ${ran} of ${total} steps; stopped at step ${stop.index + 1} (${describeRunStep(steps[stop.index] as Step)}): ${stop.message}`;
+    const first = [head, ...trace, ...(stop?.rest ?? [])].join("\n");
+    let response: CallToolResult;
+    const live = this.host.current();
+    if (args.look === false || live === undefined) {
+      response = text([first, ...notes].join("\n"));
+    } else {
+      response = await this.withLook(live, first, args.screenshot === true);
+      if (notes.length > 0) {
+        const [top, ...rest] = response.content;
+        if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] };
+      }
+    }
+    return failed ? { ...response, isError: true } : response;
+  }
+
+  /** One step of `run`, as its own tool call without a list. */
+  private runStep(step: Step): Promise<CallToolResult> {
+    const { tool, expect: _expect, ...rest } = step;
+    const quiet = { ...rest, look: false, screenshot: false };
+    switch (tool as RunTool) {
+      case "tap":
+        return this.tap(quiet as Shape<"tap">);
+      case "long_press":
+        return this.longPress(quiet as Shape<"long_press">);
+      case "type_text":
+        return this.typeText(quiet as Shape<"type_text">);
+      case "scroll":
+        return this.scroll(quiet as Shape<"scroll">);
+      case "toggle":
+        return this.toggle(quiet as Shape<"toggle">);
+      case "back":
+        return this.back(quiet as Shape<"back">);
+      case "swipe":
+        return this.swipe(quiet as Shape<"swipe">);
+      case "open_url":
+        return this.openUrl(quiet as Shape<"open_url">);
+      case "wait":
+        return this.wait({ seconds: Number((rest as { seconds?: unknown }).seconds ?? 0) });
+      case "wait_for":
+        return this.waitFor(quiet as Shape<"wait_for">);
+      case "app_command":
+        return this.appCommand(quiet as Shape<"app_command">);
+    }
+  }
+
+  /** Null when the expectation holds within its time; else how it failed. */
+  private async expectMissed(e: Expect): Promise<string | null> {
+    const seconds = e.timeout ?? EXPECT_TIMEOUT_S;
+    const which = e.text !== undefined ? { text: e.text } : e.id !== undefined ? { id: e.id } : { label: e.label as string };
+    const seen = await this.waitFor({ ...which, ...(e.gone === true ? { gone: true } : {}), timeout: Math.max(0.5, seconds), look: false });
+    if (seen.isError === true) return expectFailure(e, seconds);
+    if (e.value === undefined || e.gone === true) return null;
+    // The element is there: wait for its value (a switch reads "on" or "off").
+    const session = this.host.current();
+    if (session === undefined) return expectFailure(e, seconds);
+    const until = Date.now() + seconds * 1000;
+    let actual: string | undefined;
+    for (;;) {
+      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+      const element = tree.success
+        ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : (el.label ?? "").toLowerCase() === (e.label ?? "").toLowerCase()))
+        : undefined;
+      if (element !== undefined) {
+        actual = typeof element.checked === "boolean" ? (element.checked ? "on" : "off") : typeof element.value === "string" ? element.value : undefined;
+        if (actual === e.value) return null;
+      }
+      if (Date.now() >= until) return expectFailure(e, seconds, actual);
+      await sleep(100);
+    }
   }
 
   // -- inspect (Tapline 1.1): from the screen to the code
