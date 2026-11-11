@@ -1263,7 +1263,8 @@ describe("viewer page: the tool's name (protocol 1.3, status.tool)", () => {
   it("starts as Live view in the title and the one heading, and names no tool in its text", () => {
     expect(VIEWER_HTML).toContain("<title>Live view</title>");
     expect(VIEWER_HTML).toContain('<h1 id="heading">Live view</h1>');
-    expect(VIEWER_HTML.match(/<h[1-6]\b/g)).toHaveLength(1);
+    // One h1, the page's name; a section of the page (the steps drawer) may have its own h2.
+    expect(VIEWER_HTML.match(/<h1\b/g)).toHaveLength(1);
     expect(VIEWER_HTML).not.toMatch(/<h1[^>]*\shidden/);
     expect(VIEWER_HTML).not.toMatch(/tapline|tapwright/i);
   });
