@@ -19,14 +19,31 @@ function isLocalNetwork(address) {
     const y = Number(v4[2]);
     return x === 10 || (x === 192 && y === 168) || (x === 172 && y >= 16 && y <= 31) || (x === 169 && y === 254);
   }
-  return /^f[cd][0-9a-f]{2}:/.test(a) || a.startsWith('fe80:');
+  // unique-local IPv6, but not Tailscale's own range (fd7a:115c:a1e0::/48)
+  return (/^f[cd][0-9a-f]{2}:/.test(a) && !a.startsWith('fd7a:115c:a1e0:')) || a.startsWith('fe80:');
+}
+
+/**
+ * Claims the offer in `file` for `peer` (the first device to fetch it): false when another device has it.
+ * @param {string} file @param {string} peer
+ */
+function claimOffer(file, peer) {
+  try {
+    const o = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (typeof o.claimedBy === 'string') return o.claimedBy === peer;
+    o.claimedBy = peer;
+    fs.writeFileSync(file, JSON.stringify(o), { mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * The newest open development offer a Tapline host on this computer wrote after `pair` (Tapline 1.1, zero-QR
  * pairing), or null. Files live in ~/.tapline/offers (or $TAPLINE_HOME/offers), one per host port.
  * @param {string} dir
- * @returns {{ code: string, name: string, port: number } | null}
+ * @returns {{ code: string, name: string, port: number, file: string, claimedBy: string | undefined } | null}
  */
 function readOffer(dir) {
   let best = null;
@@ -38,15 +55,16 @@ function readOffer(dir) {
   }
   for (const name of names) {
     try {
-      const o = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      const file = path.join(dir, name);
+      const o = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (typeof o.code !== 'string' || typeof o.name !== 'string' || typeof o.port !== 'number' || typeof o.until !== 'number') continue;
       if (o.until <= Date.now()) continue;
-      if (best === null || o.until > best.until) best = o;
+      if (best === null || o.until > best.until) best = { ...o, file };
     } catch {
       // a file being written, or not ours
     }
   }
-  return best === null ? null : { code: best.code, name: best.name, port: best.port };
+  return best === null ? null : { code: best.code, name: best.name, port: best.port, file: best.file, claimedBy: typeof best.claimedBy === 'string' ? best.claimedBy : undefined };
 }
 
 /**
@@ -62,9 +80,15 @@ function offerMiddleware(dir) {
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       res.end(JSON.stringify(body));
     };
-    if (!isLocalNetwork(req.socket && req.socket.remoteAddress)) return answer(403, { error: 'local network only' });
+    // Through a proxy (Tailscale Serve, a tunnel) the peer isn't on the Wi-Fi, whatever the socket says.
+    const forwarded = req.headers['x-forwarded-for'] !== undefined || req.headers['tailscale-user-login'] !== undefined;
+    const address = req.socket && req.socket.remoteAddress;
+    if (forwarded || !isLocalNetwork(address)) return answer(403, { error: 'local network only' });
     const offer = readOffer(dir);
-    return offer === null ? answer(404, { error: 'no offer open: call pair on the computer' }) : answer(200, offer);
+    const peer = (address ?? '').toLowerCase().replace(/^::ffff:/, '');
+    // The first device to fetch it claims it, and only that device can pair with it.
+    if (offer === null || !claimOffer(offer.file, peer)) return answer(404, { error: 'no offer open: call pair on the computer' });
+    return answer(200, { code: offer.code, name: offer.name, port: offer.port });
   };
 }
 

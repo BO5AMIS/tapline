@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 /**
  * AGENT-TOOLS 1.8 §11.3 / VIEWER-PROTOCOL 1.5: a person's OK for a touch the policy guards. The live view
  * is the only place a request is answered; an allow lets exactly one matching call through within 120 s.
@@ -76,7 +78,8 @@ export class Confirmations {
     }
     const request: ConfirmRequest = {
       type: "confirm",
-      id: `c${this.next++}`,
+      // Not guessable: an answer must name a request the page was shown.
+      id: `c${this.next++}-${randomBytes(6).toString("hex")}`,
       by: "agent",
       kind: ask.kind,
       caption: ask.caption,

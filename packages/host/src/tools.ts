@@ -588,6 +588,13 @@ export function describeError(error: unknown): string {
   return `Error internal: ${error instanceof Error ? error.message : String(error)}`;
 }
 
+/** Ends a guarded call inside the agent's turn with the policy's answer (nothing was touched). */
+class PolicyStop extends Error {
+  constructor(readonly answer: CallToolResult) {
+    super("stopped by the policy");
+  }
+}
+
 /** Adds a note line to the end of an answer's first text block. */
 function appendNote(answer: CallToolResult, note: string): CallToolResult {
   const [top, ...rest] = answer.content;
@@ -597,7 +604,7 @@ function appendNote(answer: CallToolResult, note: string): CallToolResult {
 
 /** An app's dry-run answer (AGENT-TOOLS 1.8 §11.4). */
 const dryRunResultSchema = z.object({
-  element: elementSchema,
+  element: elementSchema.nullish(),
   dryRun: z.literal(true),
   point: z.object({ x: z.number(), y: z.number() }).optional(),
   value: z.unknown().optional(),
@@ -802,6 +809,7 @@ export class TaplineTools {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const file = join(dir, `${port}.json`);
       writeFileSync(file, JSON.stringify({ code: offer.code, name: offer.name, port, until: offer.until }), { mode: 0o600 });
+      this.host.setDevOfferFile(file);
       const remove = (): void => {
         try {
           // only our own offer: a newer pair call has written its own
@@ -1263,6 +1271,8 @@ export class TaplineTools {
     extraNotes?: (result: unknown) => string[],
     /** True when the result means nothing was done: the first line is then the whole answer. */
     nothingDone?: (result: unknown) => boolean,
+    /** Runs inside the agent's turn, right before the request: an answer stops the call there (the policy). */
+    preflight?: () => Promise<CallToolResult | null>,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -1272,11 +1282,18 @@ export class TaplineTools {
     this.actionStartedAt = Date.now();
     try {
       const timeoutMs = answerTimeoutMs(method, params);
-      const run = (): Promise<unknown> =>
-        this.host.request(method, params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+      const run = async (): Promise<unknown> => {
+        if (preflight !== undefined) {
+          const stop = await preflight();
+          if (stop !== null) throw new PolicyStop(stop);
+        }
+        return this.host.request(method, params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+      };
       // With the live viewer, a person watching goes first.
       result = this.options.control ? await this.options.control.runAgent(run) : await run();
     } catch (error) {
+      if (error instanceof PolicyStop) return error.answer;
+      this.logExtra = undefined;
       this.showAction(
         "agent",
         method,
@@ -1288,7 +1305,10 @@ export class TaplineTools {
       return fail(describeError(error));
     }
     const line = describe(result);
-    if (nothingDone?.(result) === true) return text([line, ...this.takePersonNote()].join("\n"));
+    if (nothingDone?.(result) === true) {
+      this.logExtra = undefined;
+      return text([line, ...this.takePersonNote()].join("\n"));
+    }
     this.showAction("agent", method, result, params);
     let response: CallToolResult;
     this.lastLookRoute = undefined;
@@ -1419,7 +1439,8 @@ export class TaplineTools {
       by,
       tool,
       ...loggedTarget(params),
-      ...(element?.success ? { element: formatElement({ ...element.data, ref: "" }, { actions: false }) } : {}),
+      // typed text never reaches the log, not even as the field's value (§12)
+      ...(element?.success ? { element: formatElement({ ...element.data, ref: "", value: null, placeholder: null }, { actions: false }) } : {}),
       ok: code === undefined,
       ...(code !== undefined ? { code } : {}),
       ...(reason !== undefined ? { reason } : {}),
@@ -1730,8 +1751,12 @@ export class TaplineTools {
       const started = Date.now();
       if (args.tap !== undefined) {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
+        // The tap is a touch like any other: the safety policy decides first.
+        const pressParams = { target: toWireTarget(args.tap) };
+        const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
+        if ("stop" in gate) return gate.stop;
         frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-        await this.host.request("press", { target: toWireTarget(args.tap) }, { sessionId: session.id });
+        await this.host.request("press", pressParams, { sessionId: session.id });
       }
       for (let i = frames.length; i < count; i++) {
         const at = Date.now();
@@ -1915,73 +1940,112 @@ export class TaplineTools {
 
   /**
    * A guarded touch: the app resolves the target in a dry run, the policy's words are matched against the
-   * element's own label and text, and a confirm word waits for a person's OK in the live view.
+   * element's own label and text, and a confirm word waits for a person's OK in the live view. The check runs
+   * inside the agent's turn, right before the touch, so nothing a person does in between can change what is
+   * touched; when the check can't be made, nothing is touched (fail closed).
    */
   private async guarded(
-    tool: "tap" | "long_press" | "toggle",
+    tool: "tap" | "long_press" | "toggle" | "swipe",
     method: string,
     params: Record<string, unknown>,
     dryRun: boolean,
-    perform: () => Promise<CallToolResult>,
+    perform: (preflight?: () => Promise<CallToolResult | null>) => Promise<CallToolResult>,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    this.logExtra = undefined;
     this.actionStartedAt = Date.now();
     const lists = listsFor(this.policy, session.app);
     if (!dryRun && lists.confirm.length === 0 && lists.block.length === 0) return perform();
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
-    const resolved = await this.resolveForPolicy(session, method, params);
-    if (resolved.kind === "error") {
-      // The touch itself would fail the same way: let it answer (and log) as usual.
-      if (!dryRun) return perform();
-      this.logExtra = { dry_run: true };
-      this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
-      return fail(resolved.text);
-    }
-    const elements = resolved.elements;
-    const shown = elements[0];
-    for (const element of elements) {
-      const word = matchWord(lists.block, element);
-      if (word === null) continue;
-      const line = `Error not_allowed: blocked: ${this.shortName(element, false)} is blocked by the policy (${JSON.stringify(word)}); don't try another way.`;
-      if (dryRun) this.logExtra = { dry_run: true };
-      this.showAction("agent", method, { element }, params, "not_allowed", "blocked");
-      return fail(line);
-    }
-    let confirm: { element: TreeElement; word: string } | null = null;
-    for (const element of elements) {
-      const word = matchWord(lists.confirm, element);
-      if (word !== null) {
-        confirm = { element, word };
-        break;
-      }
-    }
     if (dryRun) {
-      const would = this.wouldLine(tool, shown, resolved.point, resolved.value);
-      const needs = confirm !== null ? ` It needs a person's OK (policy word ${JSON.stringify(confirm.word)}).` : "";
+      const resolved = await this.resolveForPolicy(session, method, params);
       this.logExtra = { dry_run: true };
+      if (resolved.kind === "error") {
+        this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
+        return fail(resolved.text);
+      }
+      const verdict = this.policyWords(lists, resolved.elements);
+      const shown = resolved.elements[0];
+      if (verdict.kind === "blocked") {
+        this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
+        return fail(this.blockedLine(verdict.element, verdict.word));
+      }
+      const would = this.wouldLine(tool, shown, resolved.point, resolved.value);
+      const needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
     }
-    if (confirm === null) return perform();
-    const name = this.shortName(confirm.element, false);
-    const label = confirm.element.label ?? confirm.element.text ?? undefined;
-    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    const check = this.confirmations.check(`${tool}|${elementKey(confirm.element)}`, { kind: tool, caption, word: confirm.word });
-    if (check.granted) {
-      this.logExtra = { confirmed: true };
-      const answer = await perform();
-      return appendNote(answer, "Note: a person allowed this.");
+    let granted = false;
+    const answer = await perform(async () => {
+      const gate = await this.policyGate(session, tool, method, params, lists);
+      if ("stop" in gate) return gate.stop;
+      granted = gate.granted;
+      if (granted) this.logExtra = { confirmed: true };
+      return null;
+    });
+    return granted && answer.isError !== true ? appendNote(answer, "Note: a person allowed this.") : answer;
+  }
+
+  /**
+   * The policy's verdict on a touch about to happen: stop with an answer (blocked, needs a person's OK, or
+   * the check couldn't be made: fail closed), or go on (`granted` when a person's OK is being used up).
+   */
+  private async policyGate(
+    session: SessionInfo,
+    tool: string,
+    method: string,
+    params: Record<string, unknown>,
+    lists: { confirm: string[]; block: string[] },
+  ): Promise<{ stop: CallToolResult } | { granted: boolean }> {
+    if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
+    const resolved = await this.resolveForPolicy(session, method, params);
+    if (resolved.kind === "error") {
+      // Fail closed: what can't be checked isn't touched. The answer is the one the touch would give.
+      this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
+      return { stop: fail(resolved.text) };
     }
+    const verdict = this.policyWords(lists, resolved.elements);
+    if (verdict.kind === "blocked") {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
+      return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
+    }
+    if (verdict.kind === "none") return { granted: false };
+    const label = verdict.element.label ?? verdict.element.text ?? undefined;
+    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
+    const check = this.confirmations.check(`${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
+    if (check.granted) return { granted: true };
     const where =
       this.options.canConfirm === false
         ? "The live view is off, so nobody can allow it here; ask your user."
         : "The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.";
-    this.showAction("agent", method, { element: confirm.element }, params, "not_allowed", "needs_confirmation");
-    return fail(
-      `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(confirm.word)}). ${where}${check.suffix}`,
-    );
+    this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+    return {
+      stop: fail(
+        `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${where}${check.suffix}`,
+      ),
+    };
+  }
+
+  /** Which policy word, if any, the elements the target could mean carry: a block word first, then a confirm word. */
+  private policyWords(
+    lists: { confirm: string[]; block: string[] },
+    elements: TreeElement[],
+  ): { kind: "blocked" | "confirm"; element: TreeElement; word: string } | { kind: "none" } {
+    for (const element of elements) {
+      const word = matchWord(lists.block, element);
+      if (word !== null) return { kind: "blocked", element, word };
+    }
+    for (const element of elements) {
+      const word = matchWord(lists.confirm, element);
+      if (word !== null) return { kind: "confirm", element, word };
+    }
+    return { kind: "none" };
+  }
+
+  private blockedLine(element: TreeElement, word: string): string {
+    return `Error not_allowed: blocked: ${this.shortName(element, false)} is blocked by the policy (${JSON.stringify(word)}); don't try another way.`;
   }
 
   /** A dry run the app answers itself (scroll, back, swipe): its checks, nothing touched, one line. */
@@ -2055,12 +2119,14 @@ export class TaplineTools {
       if (!parsed.success) return { kind: "error", text: "Error internal: the app didn't answer the dry run.", code: "internal" };
       return {
         kind: "ok",
-        elements: [parsed.data.element],
+        elements: parsed.data.element ? [parsed.data.element] : [],
         ...(parsed.data.point !== undefined ? { point: parsed.data.point } : {}),
         ...(parsed.data.value !== undefined ? { value: parsed.data.value } : {}),
       };
     }
-    if (method === "type" || params["target"] === undefined) {
+    // An app without dry runs: a swipe is checked by what lies under its start.
+    const target = method === "swipe" ? { x: params["x0"], y: params["y0"] } : params["target"];
+    if (method === "type" || target === undefined) {
       return { kind: "error", text: "Error unsupported: this app's Tapline is too old for dry runs; update react-native-tapline.", code: "unsupported" };
     }
     let raw: unknown;
@@ -2071,8 +2137,8 @@ export class TaplineTools {
     }
     const tree = treeResultSchema.safeParse(raw);
     if (!tree.success) return { kind: "error", text: "Error internal: the app returned an element list the host could not read.", code: "internal" };
-    const elements = candidatesFor(params["target"], tree.data.elements);
-    if (elements.length === 0) {
+    const elements = candidatesFor(target, tree.data.elements);
+    if (elements.length === 0 && method !== "swipe") {
       return { kind: "error", text: "Error not_found: nothing on screen matches that target.", code: "not_found" };
     }
     const first = elements[0];
@@ -2131,16 +2197,16 @@ export class TaplineTools {
 
   tap(args: Shape<"tap">): Promise<CallToolResult> {
     const params = { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) };
-    return this.guarded("tap", "press", params, args.dry_run === true, () =>
-      this.act("press", params, (r) => `Tapped ${this.elementName(r)}.`, args.look, args.screenshot),
+    return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
+      this.act("press", params, (r) => `Tapped ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
   /** `seconds` is accepted for the shared interface; Tapline calls the handler, so it doesn't hold. */
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
     const params = { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) };
-    return this.guarded("long_press", "longPress", params, args.dry_run === true, () =>
-      this.act("longPress", params, (r) => `Long-pressed ${this.elementName(r)}.`, args.look, args.screenshot),
+    return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
+      this.act("longPress", params, (r) => `Long-pressed ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
@@ -2233,7 +2299,7 @@ export class TaplineTools {
     if (args.force === true) params["force"] = true;
     // The switch already had the asked value: the app touched nothing, and that line is the whole answer.
     const unchanged = (r: unknown): boolean => typeof r === "object" && r !== null && "unchanged" in r && r.unchanged === true;
-    return this.guarded("toggle", "toggle", params, args.dry_run === true, () =>
+    return this.guarded("toggle", "toggle", params, args.dry_run === true, (preflight) =>
       this.act(
         "toggle",
         params,
@@ -2246,6 +2312,7 @@ export class TaplineTools {
         args.screenshot,
         undefined,
         unchanged,
+        preflight,
       ),
     );
   }
@@ -2312,7 +2379,7 @@ export class TaplineTools {
         return `Would swipe from (${args.x0}, ${args.y0}) to (${args.x1}, ${args.y1})${on === "element" ? "" : ` starting on ${on}`}.`;
       });
     }
-    return this.act(
+    return this.guarded("swipe", "swipe", params, false, (preflight) => this.act(
       "swipe",
       params,
       (r) => {
@@ -2321,7 +2388,10 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
-    );
+      undefined,
+      undefined,
+      preflight,
+    ));
   }
 
   back(args: Shape<"back">): Promise<CallToolResult> {

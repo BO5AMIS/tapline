@@ -146,6 +146,11 @@ interface StreamClient {
 interface WsClient {
   ws: WebSocket;
   overlay: boolean;
+  /**
+   * Opened by the viewer page in a browser (it sent the page's own Origin). Only such a socket may answer a
+   * confirmation: a script that only holds the key (an agent's) sends no Origin by default.
+   */
+  fromPage: boolean;
 }
 
 const COOKIE = "tapline_viewer";
@@ -391,12 +396,13 @@ export class ViewerHub implements HttpExtension {
       socket.destroy();
       return true;
     }
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.onSocket(ws));
+    const fromPage = origin !== undefined && originOk;
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.onSocket(ws, fromPage));
     return true;
   }
 
-  private onSocket(ws: WebSocket): void {
-    const client: WsClient = { ws, overlay: false };
+  private onSocket(ws: WebSocket, fromPage = false): void {
+    const client: WsClient = { ws, overlay: false, fromPage };
     this.sockets.add(client);
     ws.on("close", () => {
       this.sockets.delete(client);
@@ -437,7 +443,8 @@ export class ViewerHub implements HttpExtension {
       case "confirm_answer": {
         const id = message["id"];
         const allow = message["allow"];
-        if (typeof id === "string" && typeof allow === "boolean") this.options.confirmations?.answer(id, allow);
+        // A person's OK comes from the page in a browser, never from a bare socket.
+        if (client.fromPage && typeof id === "string" && typeof allow === "boolean") this.options.confirmations?.answer(id, allow);
         return;
       }
       case "quality": {

@@ -82,6 +82,7 @@ describe("the offer file for the Metro helper", () => {
       expect(Number(written["until"])).toBeGreaterThan(Date.now());
       // used once: Metro stops handing it out
       const { existsSync } = await import("node:fs");
+      expect((await offer(port)).status).toBe(200); // this device fetches it, so it may pair with it
       const { app } = await FakeApp.connect(port, { token: undefined, pairCode: String(written["code"]) });
       apps.push(app);
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -108,5 +109,29 @@ describe("open_url of the app's own forget link", () => {
     const answer = await tools.openUrl({ url: "demo://tapline/forget", look: false });
     expect(answer.isError).not.toBe(true);
     expect(textOf(answer)).toBe("Unpaired: the app forgot this computer and disconnected. To connect it again, call `pair`.");
+  });
+});
+
+describe("an offer is the fetching device's alone", () => {
+  it("a code another device claimed doesn't pair this one, and that device's later fetch finds nothing", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const opened = host.openDevOffer("Dev PC");
+    opened.claimedBy = "192.168.1.99";
+    expect((await offer(port)).status).toBe(404);
+    const app = await FakeApp.open(port);
+    apps.push(app);
+    app.send(FakeApp.hello({ token: undefined, pairCode: opened.code }));
+    const closed = await app.closed;
+    expect(closed.reason).toMatch(/pairing code invalid/);
+  });
+
+  it("a forwarded request (Tailscale Serve, a tunnel) gets no offer", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    host.openDevOffer("Dev PC");
+    const res = await fetch(`http://127.0.0.1:${port}/tapline/offer`, { headers: { "x-forwarded-for": "100.101.102.103" } });
+    expect(res.status).toBe(403);
+    expect(isLocalNetwork("fd7a:115c:a1e0::1")).toBe(false);
   });
 });

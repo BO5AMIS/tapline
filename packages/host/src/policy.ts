@@ -48,7 +48,8 @@ export function loadPolicy(path: string): PolicyFile {
   }
   const parsed = policySchema.safeParse(json);
   if (!parsed.success) throw new Error(`${path} isn't a policy (version 1, with confirm, block and apps lists)`);
-  return parsed.data;
+  // A file that names only words to block keeps the built-in words to confirm; `"confirm": []` turns them off.
+  return { ...parsed.data, confirm: parsed.data.confirm ?? DEFAULT_CONFIRM };
 }
 
 /** The lists for one app: its own lists replace the global ones where it has them. */

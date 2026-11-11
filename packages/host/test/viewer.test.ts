@@ -457,7 +457,12 @@ describe("a person's OK in the live view (VIEWER-PROTOCOL 1.5)", () => {
     if (check.granted) throw new Error("granted without asking");
     await until(() => first.messages.some((m) => m["type"] === "confirm"));
     expect(first.messages.find((m) => m["type"] === "confirm")).toMatchObject({ id: check.request.id, by: "agent", kind: "tap", caption: 'Tap "Delete trip"', word: "Delete" });
-    const late = await openWs(port);
+    // A bare socket that only holds the key (a script, an agent) can watch but not answer.
+    first.ws.send(JSON.stringify({ type: "confirm_answer", id: check.request.id, allow: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(first.messages.some((m) => m["type"] === "confirm_closed")).toBe(false);
+    // The page in a browser sends its own Origin: its answer counts.
+    const late = await openWs(port, { origin: `http://127.0.0.1:${port}` });
     await until(() => late.messages.some((m) => m["type"] === "confirm"));
     late.ws.send(JSON.stringify({ type: "confirm_answer", id: check.request.id, allow: true }));
     await until(() => first.messages.some((m) => m["type"] === "confirm_closed"));

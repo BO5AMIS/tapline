@@ -60,7 +60,7 @@ describe('the development offer on Metro (zero-QR pairing)', () => {
     const now = Date.now();
     fs.writeFileSync(path.join(dir, '7210.json'), JSON.stringify({ code: 'old', name: 'PC', port: 7210, until: now - 1 }));
     fs.writeFileSync(path.join(dir, '19001.json'), JSON.stringify({ code: 'c-9', name: 'Dev PC', port: 19001, until: now + 60_000 }));
-    expect(readOffer(dir)).toEqual({ code: 'c-9', name: 'Dev PC', port: 19001 });
+    expect(readOffer(dir)).toMatchObject({ code: 'c-9', name: 'Dev PC', port: 19001, file: path.join(dir, '19001.json') });
     fs.rmSync(dir, { recursive: true, force: true });
     expect(readOffer(dir)).toBeNull();
   });
@@ -69,9 +69,9 @@ describe('the development offer on Metro (zero-QR pairing)', () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, '7210.json'), JSON.stringify({ code: 'c-1', name: 'Dev PC', port: 7210, until: Date.now() + 60_000 }));
     const handler = offerMiddleware(dir);
-    const call = (url: string, remoteAddress: string) => {
+    const call = (url: string, remoteAddress: string, headers: Record<string, string> = {}) => {
       const out: { status?: number; body?: string; next: boolean } = { next: false };
-      const req = { url, socket: { remoteAddress } } as unknown as import('http').IncomingMessage;
+      const req = { url, headers, socket: { remoteAddress } } as unknown as import('http').IncomingMessage;
       const res = {
         writeHead: (status: number) => {
           out.status = status;
@@ -86,7 +86,13 @@ describe('the development offer on Metro (zero-QR pairing)', () => {
       return out;
     };
     expect(call('/tapline/offer', '192.168.1.30')).toMatchObject({ status: 200, body: JSON.stringify({ code: 'c-1', name: 'Dev PC', port: 7210 }) });
+    // the first device to fetch it claims it: the host pairs only that one, and others see no offer
+    expect(JSON.parse(fs.readFileSync(path.join(dir, '7210.json'), 'utf8')).claimedBy).toBe('192.168.1.30');
+    expect(call('/tapline/offer', '::ffff:192.168.1.30')).toMatchObject({ status: 200 });
+    expect(call('/tapline/offer', '192.168.1.31')).toMatchObject({ status: 404 });
     expect(call('/tapline/offer', '100.101.102.104')).toMatchObject({ status: 403 });
+    expect(call('/tapline/offer', '127.0.0.1', { 'x-forwarded-for': '100.101.102.104' })).toMatchObject({ status: 403 });
+    expect(isLocalNetwork('fd7a:115c:a1e0::5')).toBe(false);
     expect(call('/index.bundle?platform=ios', '192.168.1.30')).toMatchObject({ next: true });
     expect(isLocalNetwork('::ffff:10.1.2.3')).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });

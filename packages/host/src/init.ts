@@ -179,6 +179,16 @@ function entrySteps(ctx: Context): InitStep[] {
 
   if (main === "expo-router/entry") {
     if (files.isFile("index.js")) {
+      // An index.js that isn't Expo Router's entry is the app's own file for something else: leave main alone.
+      if (!/expo-router\/entry/.test(files.read("index.js"))) {
+        return [
+          {
+            file: "index.js",
+            action: "advice",
+            detail: `index.js exists but doesn't load expo-router/entry, so "main" stays as it is. Make an entry file that starts with the three Tapline lines (docs/setup.md, step 3), then import 'expo-router/entry', and set "main" to it.`,
+          },
+        ];
+      }
       entryFile = "index.js";
       mainEdit = true;
     } else {
@@ -188,7 +198,8 @@ function entrySteps(ctx: Context): InitStep[] {
       return steps;
     }
   } else if (main !== undefined) {
-    if (main.includes("node_modules") || !/^\.{0,2}\/?[\w@./-]+$/.test(main)) {
+    // Only a file inside the project: never node_modules, never a path that climbs out of it.
+    if (main.includes("node_modules") || main.split(/[\\/]/).includes("..") || main.startsWith("/") || !/^\.?\/?[\w@./-]+$/.test(main)) {
       return [
         {
           file: "package.json",

@@ -17,7 +17,7 @@ export interface TaplineMetroConfig {
 export function withTapline<C extends TaplineMetroConfig>(config: C, options?: { enabled?: boolean }): C;
 
 /** The newest open offer in `dir` (`~/.tapline/offers`), or null. */
-export function readOffer(dir: string): { code: string; name: string; port: number } | null;
+export function readOffer(dir: string): { code: string; name: string; port: number; file: string; claimedBy: string | undefined } | null;
 
 /** The `/tapline/offer` middleware, reading offers from `dir`. */
 export function offerMiddleware(dir: string): Middleware;

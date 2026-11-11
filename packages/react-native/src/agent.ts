@@ -61,7 +61,8 @@ export function isLocalNetworkHost(host: string): boolean {
     const b = Number(v4[2]);
     return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
   }
-  return /^f[cd][0-9a-f]{2}:/.test(h) || h.startsWith('fe80:');
+  // unique-local IPv6, but not Tailscale's own range (fd7a:115c:a1e0::/48)
+  return (/^f[cd][0-9a-f]{2}:/.test(h) && !h.startsWith('fd7a:115c:a1e0:')) || h.startsWith('fe80:');
 }
 
 export interface AgentDeps {

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -126,7 +127,13 @@ export function isLocalNetwork(address: string | undefined): boolean {
     const y = Number(v4[2]);
     return x === 10 || (x === 192 && y === 168) || (x === 172 && y >= 16 && y <= 31) || (x === 169 && y === 254);
   }
-  return /^f[cd][0-9a-f]{2}:/.test(a) || a.startsWith("fe80:");
+  // unique-local IPv6, but not Tailscale's own range (fd7a:115c:a1e0::/48)
+  return (/^f[cd][0-9a-f]{2}:/.test(a) && !a.startsWith("fd7a:115c:a1e0:")) || a.startsWith("fe80:");
+}
+
+/** One form of a peer's address for comparisons (IPv4-mapped IPv6 → IPv4). */
+export function peerAddress(address: string | undefined): string {
+  return (address ?? "").toLowerCase().replace(/^::ffff:/, "");
 }
 
 /** A development offer (Tapline 1.1, zero-QR pairing): a pairing code a development build may fetch for a while. */
@@ -134,6 +141,10 @@ export interface DevOffer {
   code: string;
   name: string;
   until: number;
+  /** The device that fetched it first: only it may pair with this code. */
+  claimedBy?: string;
+  /** The offer file Metro serves it from; Metro writes its claimer there. */
+  file?: string;
 }
 
 export interface RequestOptions {
@@ -381,9 +392,28 @@ export class TaplineHost extends EventEmitter<HostEvents> {
    * peers on the local network get it; it closes when its code is used.
    */
   openDevOffer(name: string, ms: number = 10 * 60 * 1000): DevOffer {
-    const offer = { code: createPairCode(this.token), name, until: Date.now() + ms };
+    // A millisecond earlier: codes come from the time, and a QR link made in the same call must get its own.
+    const offer: DevOffer = { code: createPairCode(this.token, Date.now() - 1), name, until: Date.now() + ms };
     this.devOffer = offer;
     return offer;
+  }
+
+  /** Where Metro serves the open offer from (the pair tool writes it), so a claim made through Metro counts. */
+  setDevOfferFile(file: string): void {
+    if (this.devOffer !== undefined) this.devOffer.file = file;
+  }
+
+  /** Who claimed the open offer: here, or through Metro's file. */
+  private offerClaimer(offer: DevOffer): string | undefined {
+    if (offer.claimedBy !== undefined) return offer.claimedBy;
+    if (offer.file === undefined) return undefined;
+    try {
+      const saved: unknown = JSON.parse(readFileSync(offer.file, "utf8"));
+      const by = isRecord(saved) ? saved["claimedBy"] : undefined;
+      return typeof by === "string" ? by : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** The open offer, if any (for tests and the pair tool). */
@@ -408,15 +438,21 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       answer(405, { error: "GET only" });
       return true;
     }
-    if (!isLocalNetwork(req.socket.remoteAddress)) {
+    // Through a proxy (Tailscale Serve, a tunnel) the peer isn't on the Wi-Fi, whatever the socket says.
+    const forwarded = req.headers["x-forwarded-for"] !== undefined || req.headers["tailscale-user-login"] !== undefined;
+    if (forwarded || !isLocalNetwork(req.socket.remoteAddress)) {
       answer(403, { error: "local network only" });
       return true;
     }
     const offer = this.currentDevOffer();
-    if (offer === undefined) {
+    const peer = peerAddress(req.socket.remoteAddress);
+    const claimer = offer === undefined ? undefined : this.offerClaimer(offer);
+    // The first device to fetch it claims it; for any other the offer isn't there.
+    if (offer === undefined || (claimer !== undefined && claimer !== peer)) {
       answer(404, { error: "no offer open: call pair on the computer" });
       return true;
     }
+    offer.claimedBy = peer;
     answer(200, { code: offer.code, name: offer.name });
     return true;
   }
@@ -684,6 +720,12 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     const paired = pairCode !== undefined;
     if (paired) {
       if (typeof pairCode !== "string" || !this.pairCodeUsable(pairCode)) {
+        socket.close(CLOSE_BAD_PAIR_CODE, "pairing code invalid, expired or already used");
+        return undefined;
+      }
+      // The development offer's code pairs only the device that fetched it.
+      const offer = this.devOffer;
+      if (offer !== undefined && offer.code === pairCode && this.offerClaimer(offer) !== peerAddress(this.remoteOf.get(socket))) {
         socket.close(CLOSE_BAD_PAIR_CODE, "pairing code invalid, expired or already used");
         return undefined;
       }
