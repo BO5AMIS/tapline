@@ -6,7 +6,7 @@ import { z } from "zod";
 import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
-import { agentKind, captionFor, personKind } from "./captions.js";
+import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { PAIR_CODE_TTL_MS, forgetLink, pairingLink } from "./pairing.js";
@@ -494,6 +494,14 @@ export function ambiguousBlock(message: string, candidates: string[], total?: nu
   return lines.join("\n");
 }
 
+/** A person's input that failed: its code, reason word (when refused) and message, for the viewer. */
+function failure(error: unknown): { ok: false; code: string; reason?: string; message: string } {
+  const code = error instanceof TaplineError ? error.code : "internal";
+  const message = error instanceof Error ? error.message : String(error);
+  const reason = reasonOf(code, message);
+  return { ok: false, code, ...(reason !== undefined ? { reason } : {}), message };
+}
+
 export function describeError(error: unknown): string {
   if (error instanceof TaplineError) {
     if (error.code === "ambiguous") {
@@ -889,7 +897,14 @@ export class TaplineTools {
       // With the live viewer, a person watching goes first.
       result = this.options.control ? await this.options.control.runAgent(run) : await run();
     } catch (error) {
-      this.showAction("agent", method, undefined, params, error instanceof TaplineError ? error.code : "internal");
+      this.showAction(
+        "agent",
+        method,
+        undefined,
+        params,
+        error instanceof TaplineError ? error.code : "internal",
+        error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
+      );
       return fail(describeError(error));
     }
     const line = describe(result);
@@ -974,7 +989,7 @@ export class TaplineTools {
     };
   }
 
-  private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string): void {
+  private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string, reason?: string): void {
     const onAction = this.options.onAction;
     if (onAction === undefined) return;
     const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
@@ -991,7 +1006,14 @@ export class TaplineTools {
       (t && typeof (t as { label?: unknown }).label === "string" ? (t as { label: string }).label : undefined);
     const caption = by === "agent" ? captionFor(kind, kind === "app_command" ? undefined : named, params) : undefined;
     try {
-      onAction({ by, ...described, ...(caption !== undefined ? { caption } : {}), ok: code === undefined, ...(code ? { code } : {}) });
+      onAction({
+        by,
+        ...described,
+        ...(caption !== undefined ? { caption } : {}),
+        ok: code === undefined,
+        ...(code ? { code } : {}),
+        ...(reason ? { reason } : {}),
+      });
     } catch {
       // a viewer's trouble must not fail the action
     }
@@ -1059,7 +1081,7 @@ export class TaplineTools {
           return { ok: true, action: this.describeAction(personKind(input, "swipe"), swiped, point) };
         } catch (error) {
           if (!(error instanceof TaplineError && error.code === "not_actionable")) {
-            return { ok: false, code: error instanceof TaplineError ? error.code : "internal", message: error instanceof Error ? error.message : String(error), action: { kind: personKind(input, "swipe"), ...(point ? { point } : {}) } };
+            return { ...failure(error), action: { kind: personKind(input, "swipe"), ...(point ? { point } : {}) } };
           }
         }
       }
@@ -1067,12 +1089,7 @@ export class TaplineTools {
         const result = await this.host.request(method, params, { sessionId: session.id });
         return { ok: true, action: this.describeAction(personKind(input, method), result, point) };
       } catch (error) {
-        return {
-          ok: false,
-          code: error instanceof TaplineError ? error.code : "internal",
-          message: error instanceof Error ? error.message : String(error),
-          action: { kind: personKind(input, method), ...(point ? { point } : {}) },
-        };
+        return { ...failure(error), action: { kind: personKind(input, method), ...(point ? { point } : {}) } };
       }
     };
     try {

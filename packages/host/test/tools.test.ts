@@ -375,6 +375,22 @@ describe("the live viewer's side of the tools", () => {
     expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "tap", label: "Log in", caption: 'Tap "Log in"', ok: true });
   });
 
+  it("a refused step carries its reason word for the viewer (VIEWER-PROTOCOL 1.4), the agent's and a person's", async () => {
+    const { app, tools, actions } = await viewerTools();
+    app.handler = (req) =>
+      req.method === "press"
+        ? { ok: false, error: { code: "not_actionable", message: "covered: Save is behind the sheet; close that first." } }
+        : viewerHandler(req);
+    await tools.tap({ target: { text: "Save" }, look: false });
+    expect(actions.at(-1)).toMatchObject({ by: "agent", kind: "tap", caption: 'Tap "Save"', ok: false, code: "not_actionable", reason: "covered" });
+    const person = await tools.personInput({ type: "gesture", points: [[0, 0.5, 0.25], [60, 0.5, 0.25]] });
+    expect(person).toMatchObject({ ok: false, code: "not_actionable", reason: "covered", action: { kind: "tap" } });
+    // An error that isn't a refusal has no reason word.
+    app.handler = (req) => (req.method === "press" ? { ok: false, error: { code: "timeout", message: "covered: not a reason here" } } : viewerHandler(req));
+    await tools.tap({ target: { text: "Save" }, look: false });
+    expect(actions.at(-1)).not.toHaveProperty("reason");
+  });
+
   it("after a person acts, ref targets are stale until the agent looks again; id targets still work", async () => {
     const { tools } = await viewerTools();
     await tools.look({ screenshot: false });

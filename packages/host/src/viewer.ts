@@ -35,6 +35,8 @@ export interface ViewerAction {
   label?: string;
   /** The agent's step in plain words, for people watching (1.4); a person's steps have none. */
   caption?: string;
+  /** For a refused step (code not_actionable): its reason word, e.g. "covered" (1.4). */
+  reason?: string;
   rect?: Rect;
   point?: { x: number; y: number };
   ok?: boolean;
@@ -44,6 +46,8 @@ export interface ViewerAction {
 export interface InputOutcome {
   ok: boolean;
   code?: string;
+  /** The reason word when the input was refused (code not_actionable). */
+  reason?: string;
   message?: string;
   action?: Omit<ViewerAction, "by" | "ok" | "code">;
 }
@@ -438,7 +442,15 @@ export class ViewerHub implements HttpExtension {
         } catch (error) {
           outcome = { ok: false, code: "unsupported", message: error instanceof Error ? error.message : String(error) };
         }
-        if (outcome.action) this.pushAction({ ...outcome.action, by: "person", ok: outcome.ok, ...(outcome.code ? { code: outcome.code } : {}) });
+        if (outcome.action) {
+          this.pushAction({
+            ...outcome.action,
+            by: "person",
+            ok: outcome.ok,
+            ...(outcome.code ? { code: outcome.code } : {}),
+            ...(outcome.reason ? { reason: outcome.reason } : {}),
+          });
+        }
         if (!outcome.ok) {
           this.send(client, { type: "error", message: outcome.message ?? "That didn't work.", ...(outcome.code ? { code: outcome.code } : {}) });
         }

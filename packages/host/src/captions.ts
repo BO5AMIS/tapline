@@ -42,6 +42,16 @@ export function personKind(input: PersonInput, method: string): string {
   }
 }
 
+/** AGENT-TOOLS §4's reason words: the first word of a not_actionable message. */
+const REASONS = new Set(["disabled", "off_screen", "covered", "under_tab_bar", "behind_alert", "no_action"]);
+
+/** The reason word of a refusal, for the viewer (1.4 `reason`); undefined for any other error. */
+export function reasonOf(code: string | undefined, message: string | undefined): string | undefined {
+  if (code !== "not_actionable" || message === undefined) return undefined;
+  const word = /^([a-z_]+):/.exec(message.trim())?.[1];
+  return word !== undefined && REASONS.has(word) ? word : undefined;
+}
+
 const NAME_MAX = 24;
 
 /** An element's name for a caption: 24 characters at most, then an ellipsis. */
