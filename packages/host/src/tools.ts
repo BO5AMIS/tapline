@@ -166,6 +166,7 @@ export const toolShapes = {
     target: targetField
       .optional()
       .describe('Scroll view to scroll, or an element inside it; default: the largest one on screen. With to: "target", the element to bring onto the screen'),
+    dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
   },
@@ -182,13 +183,14 @@ export const toolShapes = {
     look: lookField,
     screenshot: screenshotField,
   },
-  back: { look: lookField, screenshot: screenshotField },
+  back: { dry_run: dryRunField, look: lookField, screenshot: screenshotField },
   swipe: {
     x0: z.number().describe("Where the finger starts, in points from the left"),
     y0: z.number().describe("Where the finger starts, in points from the top"),
     x1: z.number().describe("Where it lifts, in points from the left"),
     y1: z.number().describe("Where it lifts, in points from the top"),
     seconds: z.number().min(0.05).max(5).optional().describe("How long the drag takes (default 0.35)"),
+    dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
   },
@@ -924,7 +926,7 @@ export class TaplineTools {
     const total = steps.length;
     const first = steps[0] as Step;
     const head = `Would run ${total} step${total === 1 ? "" : "s"}`;
-    if (first.tool === "tap" || first.tool === "long_press" || first.tool === "toggle" || first.tool === "type_text") {
+    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(first.tool)) {
       const answer = await this.runStep({ ...first, dry_run: true } as Step);
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       const [line, ...rest] = said.split("\n");
@@ -1918,6 +1920,32 @@ export class TaplineTools {
     );
   }
 
+  /** A dry run the app answers itself (scroll, back, swipe): its checks, nothing touched, one line. */
+  private async dryCall(method: string, params: Record<string, unknown>, line: (result: unknown) => string): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    if (!session.capabilities.includes("dryRun")) {
+      return fail("Error unsupported: this app's Tapline is too old for dry runs; update react-native-tapline.");
+    }
+    const stale = this.staleRef(params);
+    if (stale !== null) return stale;
+    this.actionStartedAt = Date.now();
+    let result: unknown;
+    try {
+      result = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id });
+    } catch (error) {
+      this.logExtra = { dry_run: true };
+      this.showAction("agent", method, undefined, params, error instanceof TaplineError ? error.code : "internal", error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
+      return fail(describeError(error));
+    }
+    if (typeof result !== "object" || result === null || (result as { dryRun?: unknown }).dryRun !== true) {
+      return fail("Error internal: the app didn't answer the dry run.");
+    }
+    this.logExtra = { dry_run: true };
+    this.showAction("agent", method, result, params);
+    return text([line(result), ...this.takePersonNote()].join("\n"));
+  }
+
   /** A dry run of a tool the policy doesn't guard (type_text): the app's checks, nothing touched. */
   private async dryRun(tool: string, method: string, params: Record<string, unknown>): Promise<CallToolResult> {
     const session = this.host.current();
@@ -2092,6 +2120,12 @@ export class TaplineTools {
       typeof r === "object" && r !== null && key in r ? (r as Record<string, unknown>)[key] : undefined;
     // The element was on screen and clear already: nothing was scrolled, and the first line says so.
     const alreadyThere = (r: unknown): boolean => toTarget && flag(r, "unchanged") === true;
+    if (args.dry_run === true) {
+      return this.dryCall("scroll", params, (r) => {
+        if (toTarget) return `Would scroll ${this.elementName(r)} to ${this.elementName(r, "target")}.`;
+        return `Would scroll ${this.elementName(r)} ${args.to !== undefined ? `to ${args.to}` : (args.direction ?? "down")}.`;
+      });
+    }
     const atEndAlready = (r: unknown): boolean => (args.to === "start" || args.to === "end") && flag(r, "moved") === false;
     return this.act(
       "scroll",
@@ -2208,6 +2242,12 @@ export class TaplineTools {
   swipe(args: Shape<"swipe">): Promise<CallToolResult> {
     const params: Record<string, unknown> = { x0: args.x0, y0: args.y0, x1: args.x1, y1: args.y1 };
     if (args.seconds !== undefined) params["seconds"] = args.seconds;
+    if (args.dry_run === true) {
+      return this.dryCall("swipe", params, (r) => {
+        const on = this.elementName(r);
+        return `Would swipe from (${args.x0}, ${args.y0}) to (${args.x1}, ${args.y1})${on === "element" ? "" : ` starting on ${on}`}.`;
+      });
+    }
     return this.act(
       "swipe",
       params,
@@ -2221,6 +2261,14 @@ export class TaplineTools {
   }
 
   back(args: Shape<"back">): Promise<CallToolResult> {
+    if (args.dry_run === true) {
+      return this.dryCall("back", {}, (r) => {
+        if (typeof r === "object" && r !== null && "closed" in r && r.closed === "sheet") return "Would close the sheet.";
+        const route = typeof r === "object" && r !== null && "route" in r ? (r as { route: unknown }).route : undefined;
+        const from = Array.isArray(route) && route.every((name) => typeof name === "string") ? ` from ${route.join(" › ")}` : "";
+        return `Would go back${from}.`;
+      });
+    }
     return this.act(
       "back",
       {},

@@ -869,8 +869,8 @@ function requestCloseOf(host: Fiber): ((...args: unknown[]) => unknown) | null {
 }
 
 /** `back`: what the back button or gesture does, on the focused screen; with a sheet open, closes the sheet. */
-export async function back(rawParams: unknown): Promise<{ route: string[]; closed?: 'sheet' } & SettleOutcome> {
-  paramsOf(rawParams);
+export async function back(rawParams: unknown): Promise<{ route: string[]; closed?: 'sheet'; dryRun?: true } & SettleOutcome> {
+  const dry = paramsOf(rawParams).dryRun === true;
   const snapshot = takeSnapshot();
   const current = currentRoute(snapshot.routes);
   // An open sheet is what back closes first (AGENT-TOOLS v1.4): the top Modal's own onRequestClose,
@@ -882,6 +882,7 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; close
     // a person taps that, so back does.
     const backdrop = onRequestClose ? null : await backdropOf(snapshot);
     if (backdrop) {
+      if (dry) return { route: current?.chain ?? [], closed: 'sheet', dryRun: true, settledMs: 0 };
       callHandler('onPress', backdrop.onPress, [pressEvent(backdrop.entry.node.fiber, backdrop.frame)]);
       return { route: current?.chain ?? [], closed: 'sheet', ...(await settleOutcome()) };
     }
@@ -893,6 +894,7 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; close
         `the open sheet${shows !== undefined ? ` (in front: ${shows})` : ''} has nothing for back to call (its Modal has no onRequestClose); tap its close control.`,
       );
     }
+    if (dry) return { route: current?.chain ?? [], closed: 'sheet', dryRun: true, settledMs: 0 };
     callHandler('onRequestClose', onRequestClose, []);
     return { route: current?.chain ?? [], closed: 'sheet', ...(await settleOutcome()) };
   }
@@ -909,6 +911,7 @@ export async function back(rawParams: unknown): Promise<{ route: string[]; close
   if (!canGoBack || typeof nav.goBack !== 'function') {
     throw notActionable('no_action', `Nothing to go back to from ${current.chain.join(' › ')}.`);
   }
+  if (dry) return { route: current.chain, dryRun: true, settledMs: 0 };
   callHandler('goBack', nav.goBack as (...args: unknown[]) => unknown, []);
   return { route: current.chain, ...(await settleOutcome()) };
 }
@@ -1375,6 +1378,8 @@ export type ScrollResult = {
   reached?: boolean;
   /** The element was clear already: nothing was scrolled. */
   unchanged?: true;
+  /** A dry run (AGENT-TOOLS 1.8 §11.4): resolved and checked, nothing scrolled. */
+  dryRun?: true;
 } & SettleOutcome;
 
 /** How far inside the clear area a scrolled-to element is placed, in points, when there is room (the same in Tapwright). */
@@ -1412,6 +1417,12 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
     const node = snapshot.nodes[p];
     if (!node) break;
     p = node.parent;
+  }
+  if (params.dryRun === true) {
+    const first = scrollers[0];
+    const target = (await elementFor(wanted)).element;
+    if (!first) return { element: target, target, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
+    return { element: (await elementFor(first)).element, target, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
   }
   const { width, height } = snapshot.screen;
   const navBar = nativeNavBar(snapshot);
@@ -1580,6 +1591,10 @@ export async function scroll(rawParams: unknown): Promise<ScrollResult> {
     frame = bestFrame;
   }
 
+  if (params.dryRun === true) {
+    const { element } = await elementFor(entry, frame);
+    return { element, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
+  }
   const candidates = scrollCandidates(entry);
   const key = rememberKey(entry, candidates);
   const horizontal = findProp(entry.node, 'horizontal') === true;
@@ -2036,7 +2051,7 @@ function isScrollHost(fiber: Fiber): boolean {
  */
 export async function swipe(
   rawParams: unknown,
-): Promise<{ element: TaplineElement | null; from: { x: number; y: number }; to: { x: number; y: number } } & SettleOutcome> {
+): Promise<{ element: TaplineElement | null; from: { x: number; y: number }; to: { x: number; y: number }; dryRun?: true } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const numbers = [params.x0, params.y0, params.x1, params.y1];
   if (!numbers.every((value) => typeof value === 'number' && Number.isFinite(value))) {
@@ -2063,6 +2078,12 @@ export async function swipe(
   if (!start) throw notActionable('no_action', `Nothing at (${x0}, ${y0}) to swipe on.`);
   const origin: Fiber = start;
   const chain = hostChain(origin);
+  if (params.dryRun === true) {
+    // Who would take the drag is only known by asking the views, which can act on it: a dry run names what lies under the start.
+    const under = snapshot.entries.filter((entry) => chain.some((fiber) => sameFiber(fiber, entry.node.fiber))).pop();
+    const element = under ? (await elementFor(under)).element : null;
+    return { element, from: { x: x0, y: y0 }, to: { x: x1, y: y1 }, dryRun: true, settledMs: 0 };
+  }
 
   const begin = Date.now();
   const record: TouchRecord = {

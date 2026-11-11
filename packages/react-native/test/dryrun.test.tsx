@@ -1,8 +1,8 @@
 import { frame, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
-import { Dimensions, PixelRatio, Pressable, Switch, Text, TextInput, View } from 'react-native';
+import { Dimensions, PixelRatio, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { act } from 'react-test-renderer';
-import { configureActions, press, toggle, typeText } from '../src/actions';
+import { back, configureActions, press, scroll, swipe, toggle, typeText } from '../src/actions';
 import { resetRefs, setMeasurer } from '../src/inspect';
 import { TaplineError } from '../src/types';
 
@@ -75,4 +75,30 @@ test('a dry type and a dry toggle change nothing', async () => {
   const toggled = await run(() => toggle({ target: { testID: 'remind' }, dryRun: true }));
   expect(toggled).toMatchObject({ dryRun: true, value: true });
   expect(onValueChange).not.toHaveBeenCalled();
+});
+
+test('a dry scroll names the scroll view and moves nothing; a dry swipe names what lies under the start', async () => {
+  const onScroll = jest.fn();
+  await mount(
+    <ScrollView testID="list" onScroll={onScroll}>
+      <Text>Row</Text>
+    </ScrollView>,
+  );
+  useFrames({ list: frame(0, 0, 400, 800) });
+  const scrolled = await run(() => scroll({ direction: 'down', dryRun: true }));
+  expect(scrolled).toMatchObject({ dryRun: true, moved: false, element: { testID: 'list' } });
+  expect(onScroll).not.toHaveBeenCalled();
+  const swiped = await run(() => swipe({ x0: 200, y0: 600, x1: 200, y1: 200, dryRun: true }));
+  expect(swiped).toMatchObject({ dryRun: true, from: { x: 200, y: 600 }, to: { x: 200, y: 200 } });
+});
+
+test('a dry back says there is nothing to go back to, as the real one would', async () => {
+  await mount(<Text>Home</Text>);
+  let error: unknown;
+  try {
+    await run(() => back({ dryRun: true }));
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toBeInstanceOf(TaplineError);
 });

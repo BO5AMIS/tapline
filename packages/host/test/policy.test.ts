@@ -257,3 +257,25 @@ describe("dry runs (§11.4)", () => {
     expect(textOf(bad)).toMatch(/^Error bad_params: step 1/);
   });
 });
+
+describe("dry runs of scroll, back and swipe (§11.4)", () => {
+  it("say what would happen and move nothing", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const LIST = { ref: "e1", type: "ScrollView", role: "scrollview", testID: "list", frame: { x: 0, y: 0, width: 400, height: 800 }, actions: ["scroll"] };
+    const { app } = await FakeApp.connect(port, {}, (req) => {
+      if (req.method === "scroll") return { ok: true, result: { element: LIST, offset: { x: 0, y: 0 }, moved: false } };
+      if (req.method === "back") return { ok: true, result: { route: ["Root", "Trip"], closed: "sheet" } };
+      if (req.method === "swipe") return { ok: true, result: { element: LIST, from: { x: 200, y: 600 }, to: { x: 200, y: 200 } } };
+      return { ok: true, result: {} };
+    });
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" } });
+    expect(textOf(await tools.scroll({ direction: "down", dry_run: true }))).toBe('Would scroll e1 scroll id=list down.');
+    expect(textOf(await tools.back({ dry_run: true }))).toBe("Would close the sheet.");
+    expect(textOf(await tools.swipe({ x0: 200, y0: 600, x1: 200, y1: 200, dry_run: true }))).toBe('Would swipe from (200, 600) to (200, 200) starting on e1 scroll id=list.');
+    expect(app.requests).toHaveLength(0);
+    expect(app.dryRuns.map((r) => r.method)).toEqual(["scroll", "back", "swipe"]);
+    expect(textOf(await tools.run({ steps: [{ tool: "back" }, { tool: "tap", target: { id: "x" } }], dry_run: true }))).toBe("Would run 2 steps; step 1 would close the sheet.");
+  });
+});
