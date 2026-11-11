@@ -116,6 +116,32 @@ describe('duplicates fold', () => {
     expect(byTestID(elements, 'inner')).toBeDefined();
   });
 
+  test("a component's testID passed on to its input belongs to the input, not to the component's wrapper", async () => {
+    // A form field component: <Field testID="name"> renders a plain wrapper with a label and a
+    // TextInput that gets the testID. The wrapper used to inherit the id from Field's props too,
+    // so `id=name` named two elements and a tap by id was ambiguous.
+    function Field({ testID, label }: { testID: string; label: string }) {
+      return (
+        <View>
+          <Text>{label}</Text>
+          <TextInput testID={testID} accessibilityLabel={label} />
+        </View>
+      );
+    }
+    await mount(
+      <View>
+        <Field testID="name" label="Name" />
+      </View>,
+    );
+    useFrames({ name: frame(24, 359, 382, 52) });
+    const { elements } = await tree({});
+    const named = elements.filter((element) => element.testID === 'name');
+    expect(named).toHaveLength(1);
+    expect(named[0]?.actions).toEqual(['press', 'type', 'submit']);
+    const { entry } = await run(() => resolveTarget({ testID: 'name' }));
+    expect(entry.info.actions).toContain('type');
+  });
+
   test('a different rect (more than 1 pt) or different text lists both', async () => {
     await mount(
       <View>

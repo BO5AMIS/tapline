@@ -470,13 +470,17 @@ function stringProp(node: HostNode, key: string): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
-/** Handlers shared with a descendant host belong to the descendant, not to this wrapper. */
+/**
+ * Handlers, and a testID, shared with a descendant host belong to the descendant, not to this
+ * wrapper. A component's props reach the first host it renders (`findProp` reads the owners), so
+ * a field component that passes its testID on to its TextInput would otherwise name two elements.
+ */
 function suppressedHandlers(nodes: HostNode[]): Set<string> {
   const suppressed = new Set<string>();
   for (const node of nodes) {
-    for (const key of ['onPress', 'onLongPress', 'onValueChange']) {
+    for (const key of ['onPress', 'onLongPress', 'onValueChange', 'testID']) {
       const handler = findProp(node, key);
-      if (typeof handler !== 'function') continue;
+      if (key === 'testID' ? typeof handler !== 'string' || handler === '' : typeof handler !== 'function') continue;
       for (let p = node.parent; p >= 0; ) {
         const ancestor = nodes[p];
         if (!ancestor) break;
@@ -504,7 +508,7 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
     if (toggleable && has('onValueChange')) actions.push('toggle');
     if (isScrollNode(node)) actions.push('scroll');
 
-    const testID = stringProp(node, 'testID');
+    const testID = suppressed.has(`${node.index}:testID`) ? null : stringProp(node, 'testID');
     const rawLabel = stringProp(node, 'accessibilityLabel') ?? stringProp(node, 'aria-label');
     const strippedLabel = rawLabel === null ? null : displayText(rawLabel);
     const label = strippedLabel === '' ? null : strippedLabel;
