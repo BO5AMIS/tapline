@@ -96,7 +96,7 @@ describe("inspect inside a shared component", () => {
         source: {
           components: ["LabScreen", "LabButton"],
           location: { file: "/proj/app/ui.tsx", line: 43, column: 7, component: "LabButton", direct: true },
-          usedAt: { file: "/proj/app/lab.tsx", line: 112, column: 9, component: "LabScreen" },
+          usedAt: [{ file: "/proj/app/lab.tsx", line: 112, column: 9, component: "LabScreen" }],
           props: {},
         },
       },
@@ -104,5 +104,34 @@ describe("inspect inside a shared component", () => {
     );
     expect(text).toContain("Written at: app/ui.tsx:43 (in LabButton)");
     expect(text).toContain('Used at: app/lab.tsx:112 (in LabScreen)\n  112 | <LabButton name="save" title="Save" />');
+  });
+});
+
+describe("inspect inside nested shared components", () => {
+  it("picks the call site whose line names the element, past a wrapper that only passes it on", async () => {
+    const { formatInspect } = await import("../src/inspect.js");
+    const lab = Array.from({ length: 300 }, (_, i) =>
+      i === 102 ? "return <LabButton id={id} label={label} onPress={() => setPressed(id)} />;" : i === 229 ? '<PressButton id="save" label="Save" />' : "",
+    ).join("\n");
+    const files = {
+      exists: (path: string) => path.endsWith(".tsx") || path.split("\\").join("/") === "/proj/package.json",
+      read: () => lab,
+    };
+    const text = formatInspect(
+      {
+        element: { ref: "e9", role: "button", text: "Save", label: "Save", testID: "lab-save", frame: { x: 16, y: 329, width: 193, height: 48 } },
+        source: {
+          components: ["LabScreen", "PressButton", "LabButton"],
+          location: { file: "/proj/app/lab.tsx", line: 82, column: 7, component: "LabButton", direct: true },
+          usedAt: [
+            { file: "/proj/app/lab.tsx", line: 103, column: 9, component: "PressButton" },
+            { file: "/proj/app/lab.tsx", line: 230, column: 9, component: "LabScreen" },
+          ],
+          props: {},
+        },
+      },
+      files,
+    );
+    expect(text).toContain('Used at: app/lab.tsx:230 (in LabScreen)\n  230 | <PressButton id="save" label="Save" />');
   });
 });

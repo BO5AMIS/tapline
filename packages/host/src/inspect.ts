@@ -17,7 +17,12 @@ export const inspectResultSchema = z.object({
     location: z
       .object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish(), direct: z.boolean().optional() })
       .nullable(),
-    usedAt: z.object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish() }).optional(),
+    usedAt: z
+      .union([
+        z.array(z.object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish() })),
+        z.object({ file: z.string(), line: z.number(), column: z.number(), component: z.string().nullish() }).transform((one) => [one]),
+      ])
+      .optional(),
     props: z.record(z.string(), z.string()),
   }),
 });
@@ -89,8 +94,17 @@ export function formatInspect(result: InspectResult, files: FileAccess = realFil
     );
     const code = sourceLine(location.file, location.line, files);
     if (code !== null) lines.push(`  ${location.line} | ${code}`);
-    // Inside the app's own shared component: where the screen uses it.
-    const used = result.source.usedAt;
+    // Inside the app's own shared component: where the screen uses it. Of the call sites up the chain, the
+    // first whose line names the element (its label, text or id, or the id's last part), else the nearest.
+    const sites = result.source.usedAt ?? [];
+    const el = result.element;
+    const elementId = el.testID ?? "";
+    const words = [el.label, el.text, elementId, elementId.split(/[-_.:]/).pop()].filter((w): w is string => typeof w === "string" && w.length >= 2);
+    const names = (site: { file: string; line: number }): boolean => {
+      const code = sourceLine(site.file, site.line, files) ?? "";
+      return words.some((w) => code.includes(`"${w}"`) || code.includes(`'${w}'`) || code.includes(`>${w}<`));
+    };
+    const used = sites.find(names) ?? sites[0];
     if (used !== undefined) {
       lines.push(`Used at: ${shownPath(used.file, files)}:${used.line}${used.component ? ` (in ${used.component})` : ""}`);
       const usedCode = sourceLine(used.file, used.line, files);

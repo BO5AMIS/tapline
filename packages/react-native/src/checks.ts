@@ -447,6 +447,16 @@ function traitProblem(item: Measured, nodes: HostNode[]): { problem: string; fix
   return { problem: "it acts like a button but has no role, so VoiceOver doesn't say it's a button", fix: 'set accessibilityRole="button"' };
 }
 
+/** `button "TL" id=lab-edge-tl`: enough to know the other element without its list. */
+function shortEntry(entry: Entry): string {
+  const { info } = entry;
+  const name = info.label ?? (info.text !== '' ? info.text : null);
+  const role = info.role === 'textfield' ? 'input' : info.role === 'scrollview' ? 'scroll' : (info.role ?? 'other');
+  return [role, name !== null ? JSON.stringify(name.length > 40 ? `${name.slice(0, 39)}…` : name) : '', info.testID ? `id=${info.testID}` : '']
+    .filter((part) => part !== '')
+    .join(' ');
+}
+
 /** `audit`: the screen's accessibility problems, in the shared types (AGENT-TOOLS 1.8 §10). */
 export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditFinding[]> {
   const snapshot = takeSnapshot();
@@ -526,7 +536,7 @@ export async function auditScreen(types: ReadonlySet<AuditType>): Promise<AuditF
         if (smaller <= 0 || shared <= smaller * OVERLAP_LIMIT) continue;
         refFor(a.fiber);
         const otherRef = refFor(b.fiber);
-        add(first, 'overlap', `it covers ${Math.round((shared / smaller) * 100)}% of ${otherRef}`, 'move them apart, or make one of them not take touches');
+        add(first, 'overlap', `it covers ${Math.round((shared / smaller) * 100)}% of ${otherRef} ${shortEntry(second.entry)}`, 'move them apart, or make one of them not take touches');
       }
     }
   }

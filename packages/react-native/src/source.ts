@@ -29,7 +29,7 @@ export interface ElementSource {
    * When `location` is inside one of the app's own components (a shared button): where the screen uses that
    * component, so a developer goes straight to the use as well as to the inside. Absent otherwise.
    */
-  usedAt?: SourceLocation;
+  usedAt?: SourceLocation[];
   /** The props of the component the app wrote, in short: strings, numbers, booleans, handler names. */
   props: Record<string, string>;
 }
@@ -221,10 +221,13 @@ export async function sourcesOf(fibers: Fiber[]): Promise<ElementSource[]> {
     const propsFrom = wrote && isCompositeTag(wrote.tag) ? wrote : compositesAbove(fiber, 1)[0] ?? null;
     // Inside an app component (LabButton): the first app line further up written by another component is
     // where that component is used (<LabButton …> in LabScreen).
-    let usedAt: SourceLocation | undefined;
+    // Up to four call sites further up, nearest first: a shared component may sit inside another one
+    // (PressButton › LabButton), and the host picks the line that names the element.
+    const usedAt: SourceLocation[] = [];
     const chosen: SourceLocation | null = location;
     if (chosen !== null && chosen.direct && chosen.component !== null) {
       let past = false;
+      let last = chosen.component;
       for (const span of spans[i]!) {
         if (span.fiber === wrote) {
           past = true;
@@ -233,13 +236,13 @@ export async function sourcesOf(fibers: Fiber[]): Promise<ElementSource[]> {
         if (!past) continue;
         const frame = appFrame(span);
         if (frame === null || frame.methodName === '' || INTERNAL.test(frame.methodName)) continue;
-        if (frame.methodName !== chosen.component) {
-          usedAt = { file: frame.file, line: frame.lineNumber, column: frame.column, component: frame.methodName, direct: true };
-        }
-        break;
+        if (frame.methodName === last) continue;
+        usedAt.push({ file: frame.file, line: frame.lineNumber, column: frame.column, component: frame.methodName, direct: true });
+        last = frame.methodName;
+        if (usedAt.length >= 4) break;
       }
     }
-    return { components, location, ...(usedAt !== undefined ? { usedAt } : {}), props: propsFrom ? shortProps(propsFrom) : {} };
+    return { components, location, ...(usedAt.length > 0 ? { usedAt } : {}), props: propsFrom ? shortProps(propsFrom) : {} };
   });
 }
 
