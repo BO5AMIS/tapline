@@ -27,7 +27,7 @@ async function setup(reply: (req: IncomingRequest) => Reply, scriptsDir?: string
   hosts.push(host);
   const { app } = await FakeApp.connect(port, {}, (req) => (req.method === "tree" ? { ok: true, result: TREE } : reply(req)));
   apps.push(app);
-  return { tools: new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, ...(scriptsDir ? { scriptsDir } : {}) }), app };
+  return { tools: new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, reloadWaitMs: 50, ...(scriptsDir ? { scriptsDir } : {}) }), app };
 }
 
 describe("swipe", () => {
@@ -59,7 +59,7 @@ describe("swipe in a recording", () => {
     expect(stopped).toContain("1 step");
     expect(app.requests.filter((r) => r.method === "swipe")).toHaveLength(1);
     const replayed = textOf(await tools.replay({ name: "swipe-close" }));
-    expect(replayed).toContain("swipe 215,720 → 215,900");
+    expect(replayed).toMatch(/^Ran 1 of 1 steps/);
     expect(app.requests.filter((r) => r.method === "swipe")).toHaveLength(2);
     rmSync(dir, { recursive: true, force: true });
   });

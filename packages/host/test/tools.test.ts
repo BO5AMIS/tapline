@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -590,38 +590,33 @@ describe("record and replay", () => {
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
       scriptsDir: dir,
+      reloadWaitMs: 50,
     });
     return { app, tools, dir };
   }
 
-  it("records actions with targets that survive a new run, and the screen each one ended on", async () => {
+  it("records actions as a shared script (AGENT-TOOLS 1.8 §9.4): tool steps, targets that survive a new run, the screen each ended on", async () => {
     const { tools, dir } = await shopTools(["basket"]);
     try {
-      expect(textOf(await tools.record({ action: "start", name: "checkout" }))).toContain("Recording");
+      expect(textOf(await tools.record({ start: true, name: "checkout" }))).toContain("Recording");
       await tools.tap({ target: { ref: "e7" } });
       await tools.tap({ target: { ref: "e9" } });
       await tools.typeText({ target: { ref: "e4" }, text: "Ann" });
       await tools.wait({ seconds: 0.1 });
       await tools.waitFor({ text: "Thanks", timeout: 5 });
       await tools.look({ screenshot: false }); // not an action: not recorded
-      const stopped = textOf(await tools.record({ action: "stop" }));
-      expect(stopped).toContain("5 steps");
-      expect(stopped).toContain("step 3 targets ref e4");
-      const script = JSON.parse(readFileSync(join(dir, "checkout.json"), "utf8")) as {
-        version: number;
-        app: { name: string };
-        steps: Array<{ method: string; params: Record<string, unknown>; route?: string[] }>;
-      };
-      expect(script.version).toBe(1);
-      expect(script.app.name).toBe("Demo");
-      expect(script.steps.map((s) => [s.method, s.params])).toEqual([
-        ["press", { target: { testID: "save" } }],
-        ["press", { target: { label: "Pay now" } }],
-        ["type", { target: { ref: "e4" }, text: "Ann", replace: true, submit: false }],
-        ["sleep", { seconds: 0.1 }],
-        ["waitFor", { text: "Thanks", timeout: 5 }],
+      const stopped = textOf(await tools.record({ stop: true }));
+      expect(stopped).toMatch(/^Saved 5 steps to .*checkout\.json\./);
+      expect(stopped).toContain("step 3 targets a ref");
+      const script = JSON.parse(readFileSync(join(dir, "checkout.json"), "utf8")) as Record<string, unknown> & { steps: Array<Record<string, unknown>> };
+      expect(script).toMatchObject({ format: "agent-tools-script", version: 1, name: "checkout", app: "com.example.demo", fresh: true });
+      expect(script.steps).toEqual([
+        { tool: "tap", target: { id: "save" }, route: ["basket"] },
+        { tool: "tap", target: { label: "Pay now" }, route: ["basket"] },
+        { tool: "type_text", target: { ref: "e4" }, text: "Ann", replace: true, submit: false, route: ["basket"] },
+        { tool: "wait", seconds: 0.1 },
+        { tool: "wait_for", text: "Thanks", timeout: 5, route: ["basket"] },
       ]);
-      expect(script.steps[0]?.route).toEqual(["basket"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -630,66 +625,65 @@ describe("record and replay", () => {
   it("keeps a target the agent gave by text, label or testID (it already picked one element)", async () => {
     const { tools, dir } = await shopTools(["basket"]);
     try {
-      await tools.record({ action: "start", name: "kept" });
+      await tools.record({ start: true, name: "kept" });
       await tools.tap({ target: { text: "Pay" } }); // the element also has label "Pay now"
-      await tools.record({ action: "stop" });
-      const script = JSON.parse(readFileSync(join(dir, "kept.json"), "utf8")) as { steps: Array<{ params: unknown }> };
-      expect(script.steps[0]?.params).toEqual({ target: { text: "Pay" } });
+      await tools.record({ stop: true });
+      const script = JSON.parse(readFileSync(join(dir, "kept.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
+      expect(script.steps[0]).toMatchObject({ tool: "tap", target: { text: "Pay" } });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("replays a script step by step and reports each one", async () => {
+  it("folds a wait_for after an action into that step's expect, and replays the script like run", async () => {
     const { app, tools, dir } = await shopTools(["basket"]);
     try {
-      await tools.record({ action: "start", name: "checkout" });
+      await tools.record({ start: true, name: "checkout" });
       await tools.tap({ target: { id: "save" } });
       await tools.waitFor({ text: "Thanks" });
-      await tools.record({ action: "stop" });
+      await tools.record({ stop: true });
+      const script = JSON.parse(readFileSync(join(dir, "checkout.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
+      expect(script.steps).toEqual([{ tool: "tap", target: { id: "save" }, route: ["basket"], expect: { text: "Thanks" } }]);
       app.requests.length = 0;
-      const text = textOf(await tools.replay({ name: "checkout" }));
-      expect(app.requests.filter((r) => r.method !== "tree").map((r) => r.method)).toEqual(["press", "waitFor"]);
-      expect(text).toContain('Replayed "checkout"');
-      expect(text).toContain("2 of 2 steps passed");
-      expect(text).toContain("1 ✓ press id=save");
+      const answer = await tools.replay({ name: "checkout" });
+      expect(app.requests.map((r) => r.method).filter((m) => m !== "tree")).toEqual(["reload", "press", "waitFor"]);
+      expect(textOf(answer)).toMatch(/^Ran 1 of 1 steps in \d+\.\d s\./);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("shows a recorded wait_for id as id=, not testID", async () => {
+  it("replays a wait_for id as the app's testID", async () => {
     const { app, tools, dir } = await shopTools(["basket"]);
     try {
-      await tools.record({ action: "start", name: "waiting" });
+      await tools.record({ start: true, name: "waiting" });
       await tools.waitFor({ id: "done" });
-      await tools.record({ action: "stop" });
+      await tools.record({ stop: true });
+      const script = JSON.parse(readFileSync(join(dir, "waiting.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
+      expect(script.steps[0]).toMatchObject({ tool: "wait_for", id: "done" });
       app.requests.length = 0;
-      const text = textOf(await tools.replay({ name: "waiting" }));
+      await tools.replay({ name: "waiting" });
       expect(app.requests.find((r) => r.method === "waitFor")?.params).toMatchObject({ testID: "done" });
-      expect(text).toContain('wait for id="done"');
-      expect(text).not.toContain("testID");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("stops at the first failing step and says why", async () => {
+  it("stops at the first failing step and says why, like run", async () => {
     const first = await shopTools(["basket"]);
-    await first.tools.record({ action: "start", name: "broken" });
+    await first.tools.record({ start: true, name: "broken" });
     await first.tools.tap({ target: { id: "save" } });
     await first.tools.tap({ target: { label: "Pay now" } });
-    await first.tools.record({ action: "stop" });
+    await first.tools.record({ stop: true });
     const { host, port } = await startHost();
     hosts.push(host);
     const { app } = await FakeApp.connect(port, {}, shop(["basket"], "press"));
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir });
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir, reloadWaitMs: 50 });
     try {
       const result = await tools.replay({ name: "broken" });
       expect(result.isError).toBe(true);
-      expect(textOf(result)).toContain("failed at step 1 of 2");
-      expect(textOf(result)).toContain("not_found");
+      expect(textOf(result).split("\n")[0]).toBe('Error not_found: Ran 0 of 2 steps; stopped at step 1 (tap id=save): No element matches testID "save"');
     } finally {
       rmSync(first.dir, { recursive: true, force: true });
     }
@@ -697,30 +691,43 @@ describe("record and replay", () => {
 
   it("fails a step that ends on a different screen than when it was recorded", async () => {
     const first = await shopTools(["basket"]);
-    await first.tools.record({ action: "start", name: "nav" });
+    await first.tools.record({ start: true, name: "nav" });
     await first.tools.tap({ target: { id: "save" } });
-    await first.tools.record({ action: "stop" });
+    await first.tools.record({ stop: true });
     const { host, port } = await startHost();
     hosts.push(host);
     const { app } = await FakeApp.connect(port, {}, shop(["home"]));
     apps.push(app);
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir });
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: first.dir, reloadWaitMs: 50 });
     try {
       const result = await tools.replay({ name: "nav" });
       expect(result.isError).toBe(true);
-      expect(textOf(result)).toContain("ended on home");
-      expect(textOf(result)).toContain("recording ended on basket");
+      expect(textOf(result).split("\n")[0]).toBe("Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (tap id=save): it ended on home; the recording ended on basket");
     } finally {
       rmSync(first.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still replays a Tapline script from before 1.1", async () => {
+    const { app, tools, dir } = await shopTools(["basket"]);
+    try {
+      const old = { version: 1, name: "old", app: { name: "Demo" }, recordedAt: "2026-11-10T00:00:00Z", steps: [{ method: "press", params: { target: { testID: "save" } }, route: ["basket"] }] };
+      writeFileSync(join(dir, "old.json"), JSON.stringify(old));
+      app.requests.length = 0;
+      const answer = await tools.replay({ name: "old" });
+      expect(textOf(answer)).toMatch(/^Ran 1 of 1 steps/);
+      expect(app.requests.find((r) => r.method === "press")?.params).toMatchObject({ target: { testID: "save" } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("lists saved scripts, refuses bad names, and stop without start", async () => {
     const { tools, dir } = await shopTools(["basket"]);
     try {
-      expect((await tools.record({ action: "stop" })).isError).toBe(true);
-      expect((await tools.record({ action: "start", name: "../evil" })).isError).toBe(true);
-      await tools.record({ action: "start", name: "one" });
+      expect((await tools.record({ stop: true })).isError).toBe(true);
+      expect((await tools.record({ start: true, name: "../evil" })).isError).toBe(true);
+      await tools.record({ action: "start", name: "one" }); // the older form still works
       await tools.tap({ target: { id: "save" } });
       await tools.record({ action: "stop" });
       expect(textOf(await tools.replay({}))).toContain("one (1 step");

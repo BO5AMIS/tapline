@@ -1,0 +1,158 @@
+import { z } from "zod";
+import { stepSchema, type Step } from "./run.js";
+
+/**
+ * AGENT-TOOLS 1.8 §9.4: the shared script file, a saved batch both tools write and replay.
+ *   {"format": "agent-tools-script", "version": 1, "name", "app", "fresh", "steps": [ {tool, …, expect?} ]}
+ * Tapline records the app's methods as they run (press, type, …); this turns them into tool steps, and
+ * still reads Tapline's own scripts from before 1.1.
+ */
+
+export const sharedScriptSchema = z.object({
+  format: z.literal("agent-tools-script"),
+  version: z.literal(1),
+  name: z.string(),
+  app: z.string().optional(),
+  fresh: z.boolean().optional(),
+  steps: z.array(stepSchema),
+});
+export type SharedScript = z.infer<typeof sharedScriptSchema>;
+
+/** Tapline's script before 1.1: the app's methods and their parameters. */
+export const legacyScriptSchema = z.object({
+  version: z.literal(1),
+  name: z.string(),
+  app: z.object({ name: z.string(), id: z.string().optional() }),
+  recordedAt: z.string(),
+  steps: z.array(
+    z.object({
+      method: z.string(),
+      params: z.record(z.string(), z.unknown()),
+      route: z.array(z.string()).optional(),
+      fragile: z.boolean().optional(),
+    }),
+  ),
+});
+export type LegacyScript = z.infer<typeof legacyScriptSchema>;
+export interface MethodStep {
+  method: string;
+  params: Record<string, unknown>;
+  /** Tapline: the screen's route when the step was recorded, checked on replay (a step field, not a parameter). */
+  route?: string[];
+}
+
+const TOOL_OF: Record<string, string> = {
+  press: "tap",
+  longPress: "long_press",
+  type: "type_text",
+  scroll: "scroll",
+  toggle: "toggle",
+  back: "back",
+  swipe: "swipe",
+  openURL: "open_url",
+  command: "app_command",
+  waitFor: "wait_for",
+  sleep: "wait",
+};
+
+/** The app's target (`testID`) as a tool target (`id`). */
+function toolTarget(target: unknown): unknown {
+  if (typeof target !== "object" || target === null) return target;
+  const { testID, ...rest } = target as Record<string, unknown>;
+  return typeof testID === "string" ? { id: testID, ...rest } : rest;
+}
+
+/** One recorded app call as a script step; null for calls a script doesn't keep. */
+export function toToolStep(step: MethodStep): Step | null {
+  const tool = TOOL_OF[step.method];
+  if (tool === undefined) return null;
+  const params: Record<string, unknown> = { ...step.params };
+  if ("target" in params) params["target"] = toolTarget(params["target"]);
+  if (tool === "wait_for" && typeof params["testID"] === "string") {
+    params["id"] = params["testID"];
+    delete params["testID"];
+  }
+  return { tool, ...params, ...(step.route !== undefined && step.route.length > 0 ? { route: step.route } : {}) } as Step;
+}
+
+/**
+ * Steps from recorded calls. A `wait_for` right after an action becomes that step's `expect` (text, id or
+ * label, with gone and timeout), so the script reads as "do this, then this must show".
+ */
+export function scriptSteps(calls: MethodStep[]): Step[] {
+  const steps: Step[] = [];
+  for (const call of calls) {
+    const step = toToolStep(call);
+    if (step === null) continue;
+    const previous = steps[steps.length - 1];
+    if (step.tool === "wait_for" && previous !== undefined && previous.tool !== "wait_for" && previous.tool !== "wait" && previous.expect === undefined) {
+      const w = step as Record<string, unknown>;
+      const which = ["text", "id", "label"].find((key) => typeof w[key] === "string");
+      if (which !== undefined && w["network_idle"] !== true) {
+        previous.expect = {
+          [which]: w[which] as string,
+          ...(w["gone"] === true ? { gone: true } : {}),
+          ...(typeof w["timeout"] === "number" ? { timeout: w["timeout"] } : {}),
+        };
+        continue;
+      }
+    }
+    steps.push(step);
+  }
+  return steps;
+}
+
+export function fromLegacy(script: LegacyScript): SharedScript {
+  return {
+    format: "agent-tools-script",
+    version: 1,
+    name: script.name,
+    app: script.app.id ?? script.app.name,
+    fresh: true,
+    steps: scriptSteps(script.steps),
+  };
+}
+
+/** A script from a file's text, either format; null when it is neither. */
+export function readScript(text: string): SharedScript | null {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const shared = sharedScriptSchema.safeParse(json);
+  if (shared.success) return shared.data;
+  const legacy = legacyScriptSchema.safeParse(json);
+  return legacy.success ? fromLegacy(legacy.data) : null;
+}
+
+/** A step a script can't keep: a ref (it doesn't survive a session). */
+export function refStep(steps: Step[]): number | null {
+  const at = steps.findIndex((step) => {
+    const target = (step as Record<string, unknown>)["target"];
+    return typeof target === "object" && target !== null && "ref" in target;
+  });
+  return at >= 0 ? at : null;
+}
+
+/** JUnit XML for `tapline replay --junit`: one test case per script, the stop message as the failure. */
+export function junitXml(results: Array<{ name: string; seconds: number; failure: string | null }>): string {
+  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const failures = results.filter((r) => r.failure !== null).length;
+  const total = results.reduce((sum, r) => sum + r.seconds, 0);
+  const cases = results.map((r) =>
+    r.failure === null
+      ? `    <testcase classname="tapline" name="${esc(r.name)}" time="${r.seconds.toFixed(3)}"/>`
+      : `    <testcase classname="tapline" name="${esc(r.name)}" time="${r.seconds.toFixed(3)}">\n      <failure message="${esc(r.failure.split("\n")[0] ?? "")}">${esc(r.failure)}</failure>\n    </testcase>`,
+  );
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuites tests="${results.length}" failures="${failures}" time="${total.toFixed(3)}">`,
+    `  <testsuite name="tapline replay" tests="${results.length}" failures="${failures}" time="${total.toFixed(3)}">`,
+    ...cases,
+    "  </testsuite>",
+    "</testsuites>",
+    "",
+  ].join("\n");
+}

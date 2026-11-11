@@ -10,6 +10,7 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
+import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import {
   EXPECT_TIMEOUT_S,
   MAX_STEPS,
@@ -197,13 +198,20 @@ export const toolShapes = {
   },
   viewer: {},
   record: {
+    start: z.boolean().optional().describe("Start recording: every action that succeeds from now on becomes a step"),
+    stop: z.boolean().optional().describe("Stop and save the script (to path, else to the scripts folder under name)"),
+    name: z.string().optional().describe("The script's name: letters, digits, '.', '_' and '-'"),
+    path: z.string().optional().describe("Where stop saves the script file (optional)"),
     action: z
       .enum(["start", "stop", "status", "discard"])
-      .describe("start a recording (needs name), stop and save it, see the status, or discard it"),
-    name: z.string().optional().describe("Script name for start: letters, digits, '.', '_' and '-'"),
+      .optional()
+      .describe("Older form: start, stop, status or discard"),
   },
   replay: {
-    name: z.string().optional().describe("The script to replay; omit to list saved scripts"),
+    name: z.string().optional().describe("A saved script's name; omit name and path to list saved scripts"),
+    path: z.string().optional().describe("A script file to replay (the shared agent-tools-script format)"),
+    look: lookField,
+    screenshot: screenshotField,
   },
   wait_for: {
     text: z.string().optional().describe("Wait until this visible text is on screen (or gone)"),
@@ -755,7 +763,7 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, ...params } = step;
+      const { tool: _tool, expect: _expect, route: _route, ...params } = step as Step & { route?: unknown };
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
@@ -787,6 +795,14 @@ export class TaplineTools {
           break;
         }
       }
+      const route = (step as { route?: unknown }).route;
+      if (Array.isArray(route) && route.every((part) => typeof part === "string")) {
+        const now = await this.currentRoute();
+        if (now !== null && now.join(" \u203a ") !== route.join(" \u203a ")) {
+          stop = { index: i, code: "expect_failed", message: `it ended on ${now.join(" \u203a ")}; the recording ended on ${route.join(" \u203a ")}`, rest: [] };
+          break;
+        }
+      }
       ran++;
       if (args.trace === true) trace.push(`  ${i + 1}. ${said.split("\n")[0] ?? ""} (${((Date.now() - at) / 1000).toFixed(1)} s)`);
     }
@@ -815,7 +831,7 @@ export class TaplineTools {
 
   /** One step of `run`, as its own tool call without a list. */
   private runStep(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, ...rest } = step;
+    const { tool, expect: _expect, route: _route, ...rest } = step as Step & { route?: unknown };
     const quiet = { ...rest, look: false, screenshot: false };
     switch (tool as RunTool) {
       case "tap":
@@ -841,6 +857,14 @@ export class TaplineTools {
       case "app_command":
         return this.appCommand(quiet as Shape<"app_command">);
     }
+  }
+
+  /** The screen's route names now (one cheap read), or null when the app has no router or didn't answer. */
+  private async currentRoute(): Promise<string[] | null> {
+    const session = this.host.current();
+    if (session === undefined) return null;
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    return tree.success && tree.data.route !== undefined ? tree.data.route.names : null;
   }
 
   /** Null when the expectation holds within its time; else how it failed. */
@@ -1480,9 +1504,10 @@ export class TaplineTools {
   }
 
   async record(args: Shape<"record">): Promise<CallToolResult> {
-    switch (args.action) {
+    const op = args.action ?? (args.start === true ? "start" : args.stop === true ? "stop" : "status");
+    switch (op) {
       case "start": {
-        const name = (args.name ?? "").trim();
+        const name = (args.name ?? "").trim() || `session-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
         if (this.scriptPath(name) === null) {
           return fail("Error bad_params: give the script a name of letters, digits, '.', '_' and '-' (e.g. \"checkout\").");
         }
@@ -1491,7 +1516,7 @@ export class TaplineTools {
         if (session === undefined) return this.notConnected();
         this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [] };
         return text(
-          `Recording "${name}" on ${session.app.name}. Every action from now on is a step; wait_for steps check the app is where it should be. Prefer testIDs: they replay best. Stop with record { action: "stop" }.`,
+          `Recording "${name}" on ${session.app.name}. Every action from now on is a step; wait_for steps check the app is where it should be. Prefer testIDs: they replay best. Stop with record { stop: true }.`,
         );
       }
       case "status":
@@ -1507,15 +1532,16 @@ export class TaplineTools {
       }
       case "stop": {
         const recording = this.recording;
-        if (recording === null) return fail("Error bad_params: not recording; start with record { action: \"start\", name }.");
-        const path = this.scriptPath(recording.name);
-        if (path === null) return fail("Error internal: no scripts folder is configured.");
-        const script: Script = {
+        if (recording === null) return fail("Error bad_params: not recording; start with record { start: true, name }.");
+        const path = args.path !== undefined && args.path.trim() !== "" ? args.path.trim() : this.scriptPath(recording.name);
+        if (path === null) return fail("Error internal: no scripts folder is configured; give a path.");
+        const script: SharedScript = {
+          format: "agent-tools-script",
           version: 1,
           name: recording.name,
-          app: recording.app,
-          recordedAt: new Date().toISOString(),
-          steps: recording.steps,
+          app: recording.app.id ?? recording.app.name,
+          fresh: true,
+          steps: scriptSteps(recording.steps),
         };
         try {
           mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -1525,16 +1551,14 @@ export class TaplineTools {
         }
         this.recording = null;
         const count = script.steps.length;
-        const lines = [`Saved "${script.name}": ${count} step${count === 1 ? "" : "s"} in ${path}. Replay it with replay { name: "${script.name}" }.`];
-        script.steps.forEach((step, i) => {
-          if (step.fragile) {
-            const target = step.params["target"] as { ref?: unknown };
-            lines.push(
-              `Note: step ${i + 1} targets ref ${String(target.ref)}, which won't exist on a new run. Give that element a testID, or record it again by its text or label.`,
-            );
-          }
-        });
-        if (script.steps.some((step) => step.method === "type")) {
+        const lines = [`Saved ${count} step${count === 1 ? "" : "s"} to ${path}.`];
+        const ref = refStep(script.steps);
+        if (ref !== null) {
+          lines.push(
+            `Note: step ${ref + 1} targets a ref, which won't exist on a new run, so replay refuses the script. Give that element a testID, or record it again by its text or label.`,
+          );
+        }
+        if (script.steps.some((step) => step.tool === "type_text")) {
           lines.push("The script keeps the text typed in it (test passwords too): keep it private.");
         }
         return text(lines.join("\n"));
@@ -1548,10 +1572,9 @@ export class TaplineTools {
     const lines: string[] = [];
     for (const file of readdirSync(dir).filter((f) => f.endsWith(".json")).sort()) {
       try {
-        const parsed = scriptSchema.safeParse(JSON.parse(readFileSync(join(dir, file), "utf8")));
-        if (!parsed.success) continue;
-        const s = parsed.data;
-        lines.push(`- ${s.name} (${s.steps.length} step${s.steps.length === 1 ? "" : "s"}, recorded ${s.recordedAt.slice(0, 10)} on ${s.app.name})`);
+        const s = readScript(readFileSync(join(dir, file), "utf8"));
+        if (s === null) continue;
+        lines.push(`- ${s.name} (${s.steps.length} step${s.steps.length === 1 ? "" : "s"}${s.app ? `, ${s.app}` : ""})`);
       } catch {
         // skip unreadable files
       }
@@ -1561,64 +1584,42 @@ export class TaplineTools {
 
   async replay(args: Shape<"replay">): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
-    if (name === "") return text(this.scriptList());
+    const given = (args.path ?? "").trim();
+    if (name === "" && given === "") return text(this.scriptList());
     if (this.recording !== null) return fail(`Error bad_params: stop recording "${this.recording.name}" before replaying.`);
-    const path = this.scriptPath(name);
-    if (path === null || !existsSync(path)) return fail(`Error not_found: no script "${name}".\n${this.scriptList()}`);
-    let script: Script;
+    const path = given !== "" ? given : this.scriptPath(name);
+    if (path === null || !existsSync(path)) return fail(`Error not_found: no script "${given || name}".\n${this.scriptList()}`);
+    let script: SharedScript | null;
     try {
-      const parsed = scriptSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
-      if (!parsed.success) return fail(`Error bad_params: ${path} isn't a Tapline script.`);
-      script = parsed.data;
+      script = readScript(readFileSync(path, "utf8"));
     } catch (error) {
       return fail(`Error internal: couldn't read ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (script === null) return fail(`Error bad_params: ${path} isn't a script (format agent-tools-script, version 1).`);
+    const ref = refStep(script.steps);
+    if (ref !== null) return fail(`Error bad_params: step ${ref + 1} targets a ref; a script needs an id, label, text or point.`);
+    if (script.steps.length === 0) return text(`Ran 0 of 0 steps in 0.0 s.`);
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
-
-    const started = Date.now();
-    const total = script.steps.length;
-    const lines: string[] = [];
-    const seconds = (ms: number): string => (Math.round(ms / 100) / 10).toFixed(1);
+    const notes: string[] = [];
+    if (script.fresh !== false) {
+      // Tapline can't close and open the app: it starts its JavaScript again (a development build).
+      const fresh = await this.reload({});
+      const said = fresh.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      if (fresh.isError === true) notes.push("Note: couldn't start the app fresh (a release build has no reload); the script ran on the screen as it was.");
+      else if (said.startsWith("Reload requested, but")) notes.push("Note: the app hadn't reconnected after starting fresh when the steps began.");
+    }
     this.replaying = true;
     try {
-      for (const [i, step] of script.steps.entries()) {
-        const at = Date.now();
-        const label = `${i + 1} ${describeStep(step)}`;
-        if (step.method === "sleep") {
-          const s = typeof step.params["seconds"] === "number" ? step.params["seconds"] : 0;
-          await sleep(Math.min(30, Math.max(0, s)) * 1000);
-          lines.push(`${i + 1} ✓ ${describeStep(step)} (${seconds(Date.now() - at)} s)`);
-          continue;
-        }
-        const result = await this.act(step.method, step.params, () => "", true);
-        const problem = result.isError
-          ? result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim()
-          : step.route !== undefined &&
-              this.lastLookRoute !== undefined &&
-              step.route.join(" › ") !== this.lastLookRoute.join(" › ")
-            ? `It ended on ${this.lastLookRoute.join(" › ")}; the recording ended on ${step.route.join(" › ")}.`
-            : null;
-        if (problem !== null) {
-          return fail(
-            [
-              `Replay "${script.name}" failed at step ${i + 1} of ${total}: ${describeStep(step)}`,
-              problem,
-              ...(lines.length > 0 ? ["Steps before it passed:", ...lines] : []),
-              ...(step.fragile ? ["Note: this step targets a ref from the recording run; give the element a testID."] : []),
-            ].join("\n"),
-          );
-        }
-        lines.push(`${label.replace(/^(\d+) /, "$1 ✓ ")} (${seconds(Date.now() - at)} s)`);
-      }
+      const answer = await this.run({ steps: script.steps, look: args.look, screenshot: args.screenshot });
+      if (notes.length === 0) return answer;
+      const [top, ...rest] = answer.content;
+      return top !== undefined && top.type === "text"
+        ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] }
+        : answer;
     } finally {
       this.replaying = false;
     }
-    return text(
-      [`Replayed "${script.name}" on ${session.app.name}: ${total} of ${total} steps passed in ${seconds(Date.now() - started)} s.`, ...lines].join(
-        "\n",
-      ),
-    );
   }
 
   private async withLook(session: SessionInfo, line: string, screenshot = false): Promise<CallToolResult> {

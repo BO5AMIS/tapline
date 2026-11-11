@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { toString as qrText } from "qrcode";
@@ -17,6 +18,7 @@ import { formatDoctor, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
+import { junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
@@ -33,7 +35,8 @@ Commands:
   doctor   Check the setup (Node, the Wi-Fi address, Tailscale if used, token, ports, firewall)
   dev      Serve Metro over https in your tailnet (iOS needs it); \`tapline dev -- <command>\`
            also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
-  replay   Replay a recorded script without an agent: tapline replay <name>
+  replay   Replay scripts without an agent: tapline replay <file.json | name>… [--junit out.xml]
+           (exit 0: all held, 1: one stopped, 2: one couldn't start)
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
            Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills);
@@ -158,12 +161,16 @@ async function runDev(
   });
 }
 
-/** Replays a script with its own host: the app must connect to it (stop agents using this port first). */
-async function runReplay(config: HostConfig, name: string, waitRaw: string | undefined): Promise<number> {
+/**
+ * Replays scripts with its own host, no agent (AGENT-TOOLS 1.8 §9.4): each argument is a script file or a saved
+ * script's name. Exit 0 when every script held, 1 when one stopped, 2 when one couldn't start (no app, a bad
+ * file). `--junit out.xml` writes one test case per script.
+ */
+async function runReplay(config: HostConfig, scripts: string[], waitRaw: string | undefined, junitPath: string | undefined): Promise<number> {
   const waitSeconds = waitRaw === undefined ? 60 : Number(waitRaw);
   if (!(waitSeconds > 0)) {
     process.stderr.write("--wait is in seconds, above 0\n");
-    return 1;
+    return 2;
   }
   const host = new TaplineHost({ token: config.token, port: config.port, portFallback: config.portFallback, hosts: config.hosts });
   const result = await host.listen();
@@ -185,12 +192,23 @@ async function runReplay(config: HostConfig, name: string, waitRaw: string | und
     while (host.current() === undefined && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
     if (host.current() === undefined) {
       process.stderr.write("The app didn't connect. Is it open, on the same Wi-Fi as this computer?\n");
-      return 1;
+      return 2;
     }
-    const outcome = await tools.replay({ name });
-    const textOut = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
-    (outcome.isError ? process.stderr : process.stdout).write(`${textOut}\n`);
-    return outcome.isError ? 1 : 0;
+    let code = 0;
+    const results: Array<{ name: string; seconds: number; failure: string | null }> = [];
+    for (const script of scripts) {
+      const isFile = /[\\/]|\.json$/i.test(script);
+      const started = Date.now();
+      const outcome = await tools.replay(isFile ? { path: script } : { name: script });
+      const textOut = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      process.stdout.write(`${script}\n${textOut}\n\n`);
+      const couldntStart = outcome.isError === true && /^Error (not_found|bad_params|not_connected|internal):/.test(textOut) && !/^Error \w+: Ran \d+ of/.test(textOut);
+      if (couldntStart) code = 2;
+      else if (outcome.isError === true && code === 0) code = 1;
+      results.push({ name: script, seconds: (Date.now() - started) / 1000, failure: outcome.isError === true ? textOut : null });
+    }
+    if (junitPath !== undefined) writeFileSync(junitPath, junitXml(results));
+    return code;
   } finally {
     await host.close();
   }
@@ -210,6 +228,7 @@ async function main(argv: string[]): Promise<number> {
       "https-port": { type: "string" },
       stop: { type: "boolean" },
       wait: { type: "string" },
+      junit: { type: "string" },
       project: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
@@ -260,12 +279,12 @@ async function main(argv: string[]): Promise<number> {
     case "dev":
       return runDev(values, positionals.slice(1));
     case "replay": {
-      const name = positionals[1];
-      if (name === undefined) {
-        process.stderr.write("replay needs a script name: tapline replay <name>\n");
-        return 1;
+      const scripts = positionals.slice(1);
+      if (scripts.length === 0) {
+        process.stderr.write("replay needs scripts: tapline replay <file.json | name>… [--junit out.xml]\n");
+        return 2;
       }
-      return runReplay(await resolveConfig(options), name, values.wait);
+      return runReplay(await resolveConfig(options), scripts, values.wait, values.junit);
     }
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);
