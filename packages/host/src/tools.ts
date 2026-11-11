@@ -46,13 +46,13 @@ import { TaplineError, type SessionInfo, type TaplineHost } from "./server.js";
 
 export const targetSchema = z
   .object({
-    ref: z.string().optional().describe('Element ref from your latest list, e.g. "e12"'),
-    id: z.string().optional().describe("Exact identifier (React Native testID, the iOS accessibility identifier)"),
-    label: z.string().optional().describe("Accessibility label, exact, ignoring case"),
-    text: z.string().optional().describe("Visible text: an exact match first (ignoring case), then a substring"),
-    index: z.number().int().min(0).optional().describe("With id, label or text: pick the Nth match (0-based, reading order)"),
-    x: z.number().optional().describe("X in points; use together with y"),
-    y: z.number().optional().describe("Y in points; use together with x"),
+    ref: z.string().optional().describe('From your latest list, e.g. "e12"'),
+    id: z.string().optional().describe("The testID, exact"),
+    label: z.string().optional().describe("Accessibility label, exact"),
+    text: z.string().optional().describe("Visible text: exact first, then part"),
+    index: z.number().int().min(0).optional().describe("The Nth match of id, label or text (0-based)"),
+    x: z.number().optional().describe("Points, with y"),
+    y: z.number().optional().describe("Points, with x"),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -76,29 +76,23 @@ export const targetSchema = z
   });
 export type Target = z.infer<typeof targetSchema>;
 
-const targetField = targetSchema.describe(
-  "Which element: exactly one of {ref}, {id}, {label}, {text} or {x, y}; add index to pick among several id, label or text matches. Prefer ref or id from your latest list.",
-);
+const targetField = targetSchema.describe("Exactly one of ref, id, label, text or x and y");
 const lookField = z
   .boolean()
   .optional()
-  .describe(
-    "Set false to answer only the first line, with no change list. Call look when you need the screen.",
-  );
+  .describe("false: only the first line, no changes");
 
-const screenshotField = z.boolean().optional().describe("Add a screenshot to the answer (default false)");
+const screenshotField = z.boolean().optional().describe("Add a screenshot (default false)");
 
 const dryRunField = z
   .boolean()
   .optional()
-  .describe("Resolve the target and run every check (and the safety policy), then touch nothing: the answer says what would happen");
+  .describe("true: run every check and say what would happen; touch nothing");
 
 const forceField = z
   .boolean()
   .optional()
-  .describe(
-    "Skip the off-screen, covered, under-the-tab-bar and behind-an-alert checks (never disabled). Default false; prefer scrolling or dismissing what covers it, since a person would have to.",
-  );
+  .describe("Skip the reach checks (never disabled), only when you've decided a refusal is wrong");
 
 export const toolShapes = {
   apps: {},
