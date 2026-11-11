@@ -99,7 +99,7 @@ export function viewerStatusFor(
   if (session === undefined) {
     const dropped = context.lastDrop;
     if (dropped?.silentForMs !== undefined) return { state: "not-answering", detail: dropped.session.app.name };
-    return { state: "no-device", detail: "The app isn't connected: open it on the phone, with Tailscale on." };
+    return { state: "no-device", detail: "The app isn't connected: open it on the phone, on the same Wi-Fi as this computer." };
   }
   if (session.appState?.state === "background") {
     return {

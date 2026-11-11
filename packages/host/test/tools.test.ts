@@ -1078,7 +1078,7 @@ describe("no app connected", () => {
       expect(text).toContain("No app is connected");
       expect(text).toContain(`ws://100.101.102.103:${port}/`);
       expect(text).toContain("`pair`");
-      expect(text).toContain("Tailscale");
+      expect(text).toContain("same Wi-Fi");
     }
     const apps = tools.apps();
     expect(apps.isError).toBeUndefined();

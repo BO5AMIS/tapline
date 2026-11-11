@@ -21,7 +21,7 @@ import { TaplineHost } from "./server.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
 
-const HELP = `tapline - let agents see and drive your own app on your phone, over Tailscale
+const HELP = `tapline - let agents see and drive your own app on a test phone, over the same Wi-Fi
 
 Usage: tapline <command> [options]
 
@@ -30,7 +30,7 @@ Commands:
   host     Run the host in the foreground and log connections and app logs
   pair     Print a pairing link and QR code for a phone (needs --scheme)
   info     Show this computer's address and how to add Tapline to an app
-  doctor   Check the setup (Node, Tailscale, token, ports, firewall, Metro over https)
+  doctor   Check the setup (Node, the Wi-Fi address, Tailscale if used, token, ports, firewall)
   dev      Serve Metro over https in your tailnet (iOS needs it); \`tapline dev -- <command>\`
            also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
   replay   Replay a recorded script without an agent: tapline replay <name>
@@ -42,7 +42,7 @@ Commands:
 Options:
   --scheme <s>   The app's URL scheme, e.g. myapp (for pair; host also prints the QR code)
   --port <n>     Port (default 7210, or TAPLINE_PORT; without either, a taken port moves up to 7219)
-  --host <addr>  Bind address(es), comma separated (default: Tailscale IP + 127.0.0.1)
+  --host <addr>  Bind address(es), comma separated (default: Wi-Fi/LAN IP, Tailscale IP if any, 127.0.0.1)
   --screenshots <inline|file>
                  For mcp: put screenshots in the tool result (default), or save them in
                  ~/.tapline/shots and return the path (or TAPLINE_SCREENSHOTS)
@@ -65,7 +65,7 @@ function printInfo(config: HostConfig): void {
   const out = process.stdout;
   const last = config.port + config.portFallback;
   out.write(`Computer    ${config.name}\n`);
-  out.write(`Address     ${hostUrl(config, config.port)}${config.tailscaleIp === null ? "" : " (Tailscale)"}\n`);
+  out.write(`Address     ${hostUrl(config, config.port)}${config.advertisedHost === config.tailscaleIp ? " (Tailscale)" : config.lanIps.includes(config.advertisedHost) ? " (Wi-Fi/LAN)" : ""}\n`);
   if (config.portFallback > 0) {
     out.write(`Ports       ${config.port}, or up to ${last} when several hosts run (one per agent)\n`);
   }
@@ -183,7 +183,7 @@ async function runReplay(config: HostConfig, name: string, waitRaw: string | und
     const deadline = Date.now() + waitSeconds * 1000;
     while (host.current() === undefined && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
     if (host.current() === undefined) {
-      process.stderr.write("The app didn't connect. Is it open, with Tailscale on?\n");
+      process.stderr.write("The app didn't connect. Is it open, on the same Wi-Fi as this computer?\n");
       return 1;
     }
     const outcome = await tools.replay({ name });

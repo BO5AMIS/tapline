@@ -582,7 +582,7 @@ export class TaplineTools {
       ...lines,
       `This host listens at ${url} on ${name}.`,
       'To connect a phone, call `pair` with the app\'s URL scheme ("scheme" in app.json, e.g. "myapp") and show the user the QR code. They scan it with the phone\'s camera and tap Connect in the app.',
-      "The phone needs Tailscale on (the same network as this computer), and the app must be a build with Tapline turned on, open in the foreground.",
+      "The phone needs to be on the same Wi-Fi as this computer, and the app must be a build with Tapline turned on, open in the foreground.",
       "A phone that paired with this host before reconnects by itself while the app is open; one paired with a host on another port (e.g. before a restart) needs `pair` again. Once it connects, retry.",
     ].join("\n");
   }
@@ -622,7 +622,7 @@ export class TaplineTools {
       link,
       "",
       `Show the user the QR code (attached).${saved} They scan it with the phone's camera, open the app and tap Connect.`,
-      "The phone needs Tailscale on, and the app must be a build with Tapline turned on.",
+      "The phone needs to be on the same Wi-Fi as this computer, and the app must be a build with Tapline turned on.",
       "Once paired, the app reconnects to this host (this address and port) by itself whenever it is open; call `apps` to check.",
       `To unpair the phone, open ${forget} on it.`,
     ];
@@ -677,7 +677,7 @@ export class TaplineTools {
     const session = matches[0];
     if (session === undefined) {
       return fail(
-        `Error not_connected: ${args.app} isn't connected. Tapline can't launch apps: open it on the phone with Tailscale on (it reconnects by itself), or pair it with pair.`,
+        `Error not_connected: ${args.app} isn't connected. Tapline can't launch apps: open it on the phone, on the same Wi-Fi as this computer (it reconnects by itself), or pair it with pair.`,
       );
     }
     try {
