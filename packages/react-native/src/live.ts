@@ -199,7 +199,7 @@ function deps(): FeedDeps {
   const g = globalThis as { requestAnimationFrame?: Raf; cancelAnimationFrame?: (handle: unknown) => void };
   const base: FeedDeps = {
     // A viewer's frame shows what is on screen; it must not make iOS render one (native module only).
-    capture: (params) => screenshot({ ...params, fresh: false }),
+    capture: (params) => screenshot({ ...params, fresh: false, fitShortSide: true }),
     send: (frame) => {
       if (frameAcks) {
         inFlight += 1;

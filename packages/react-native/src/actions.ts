@@ -1794,7 +1794,11 @@ export async function screenshot(
 
   const screen = getScreen();
   const nativeWidth = Math.round(screen.width * screen.scale);
-  const width = Math.min(maxWidth, nativeWidth);
+  // The live viewer sizes frames by the screen's short side, so a turned phone keeps the preset's
+  // sharpness in px per point (in landscape the width is the long side); a screenshot keeps its width.
+  const shortSide = Math.min(screen.width, screen.height);
+  const target = params.fitShortSide === true && shortSide > 0 ? Math.round((maxWidth * screen.width) / shortSide) : maxWidth;
+  const width = Math.min(target, nativeWidth);
   const height = Math.round((width * screen.height) / screen.width);
   const native = Platform.OS === 'ios' && format === 'jpg' ? nativeModule() : null;
   if (native !== null) {

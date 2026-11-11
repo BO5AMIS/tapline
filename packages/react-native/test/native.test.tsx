@@ -137,3 +137,15 @@ describe('what UIKit draws over the app', () => {
     expect((await run(() => tree({}))).alerts).toBeUndefined();
   });
 });
+
+test('viewer frames keep their sharpness in landscape: the size follows the short side', async () => {
+  jest.spyOn(Dimensions, 'get').mockReturnValue({ width: 800, height: 400, scale: 3, fontScale: 1 });
+  const { module, captures } = fakeNative();
+  setNativeModule(module);
+  const frame = await screenshot({ maxWidth: 600, quality: 0.6, fresh: false, fitShortSide: true });
+  expect(frame.width).toBe(1200);
+  expect(frame.height).toBe(600);
+  const shot = await screenshot({ maxWidth: 600, quality: 0.6 });
+  expect(shot.width).toBe(600);
+  expect(captures.map((c) => c[0])).toEqual([1200, 600]);
+});
