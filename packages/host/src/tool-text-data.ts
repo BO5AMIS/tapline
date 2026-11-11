@@ -75,7 +75,8 @@ export const CORE_TOOL_TEXT = {
     "shared": "Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` right after an action becomes that step's `expect`. Targets are saved by id, else label, else text (with `index` when it matched several); refs only last one run."
   },
   "replay": {
-    "shared": "Run a saved script like `run` and answer the same way: it stops at the first step that fails, whose expectation doesn't hold, or that ends on a different screen than when it was recorded. Give `name` (a saved script) or `path` (a script file); without either, lists saved scripts. It starts the app fresh first unless the script says `\"fresh\": false`. The user can run the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`)."
+    "shared": "Run a saved script like `run` and answer the same way: it stops at the first step that fails or whose expectation doesn't hold. Give `name` (a saved script) or `path` (a script file); without either, lists saved scripts. It starts the app fresh first unless the script says `\"fresh\": false`. The user can run the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`).",
+    "tapline": "Tapline: also stops when a step ends on a different screen (route) than when it was recorded."
   }
 } as const satisfies Record<string, { readonly shared: string; readonly tapline?: string }>;
 
