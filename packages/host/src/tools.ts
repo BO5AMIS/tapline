@@ -952,7 +952,7 @@ export class TaplineTools {
       if (step.expect !== undefined) {
         const missed = await this.expectMissed(step.expect);
         if (missed !== null) {
-          stop = { index: i, code: "expect_failed", message: missed, rest: [] };
+          stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
           break;
         }
       }
@@ -960,7 +960,7 @@ export class TaplineTools {
       if (Array.isArray(route) && route.every((part) => typeof part === "string")) {
         const now = await this.currentRoute();
         if (now !== null && now.join(" \u203a ") !== route.join(" \u203a ")) {
-          stop = { index: i, code: "expect_failed", message: `it ended on ${now.join(" \u203a ")}; the recording ended on ${route.join(" \u203a ")}`, rest: [] };
+          stop = { index: i, code: "expect_failed", message: `its action ran, but it ended on ${now.join(" \u203a ")}; the recording ended on ${route.join(" \u203a ")}`, rest: [] };
           break;
         }
       }

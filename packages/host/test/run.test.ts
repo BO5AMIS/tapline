@@ -88,7 +88,7 @@ describe("run", () => {
     const answer = await tools.run({ steps: [{ tool: "tap", target: { id: "save" }, expect: { text: "Saved", timeout: 0.5 } }] });
     expect(answer.isError).toBe(true);
     expect(textOf(answer).split("\n")[0]).toBe(
-      'Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (tap id=save): text "Saved" didn\'t appear within 0.5 s',
+      'Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (tap id=save): its action ran, but text "Saved" didn\'t appear within 0.5 s',
     );
   });
 

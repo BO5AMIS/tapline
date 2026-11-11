@@ -704,7 +704,7 @@ describe("record and replay", () => {
     try {
       const result = await tools.replay({ name: "nav" });
       expect(result.isError).toBe(true);
-      expect(textOf(result).split("\n")[0]).toBe("Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (tap id=save): it ended on home; the recording ended on basket");
+      expect(textOf(result).split("\n")[0]).toBe("Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (tap id=save): its action ran, but it ended on home; the recording ended on basket");
     } finally {
       rmSync(first.dir, { recursive: true, force: true });
     }
