@@ -74,6 +74,7 @@ function getVersion(): number {
 }
 
 function closeAlert(id: number): void {
+  ownAlertIds.delete(id);
   const next = queue.filter((entry) => entry.info.id !== id);
   if (next.length === queue.length) return;
   queue = next;
@@ -296,6 +297,14 @@ export function uninstallAlertTracking(): void {
   if (hadAlerts || listeners.size > 0) notify();
 }
 
+/** Ids of Tapline's own prompts (nativeAlert) while they are open. */
+const ownAlertIds = new Set<number>();
+
+/** True for an open alert that is one of Tapline's own prompts, which only the person answers. */
+export function isOwnAlert(id: number): boolean {
+  return ownAlertIds.has(id) && queue.some((entry) => entry.info.id === id);
+}
+
 /**
  * A real (native) alert, never replaced by the stand-in: for Tapline's own prompts, such as
  * "Connect for testing?", which only the person holding the phone should answer. It is listed as
@@ -309,6 +318,7 @@ export function nativeAlert(...args: Parameters<AlertFn>): void {
   let forwarded: Parameters<AlertFn> = args;
   try {
     entry = record('alert', title, message, buttons, false);
+    ownAlertIds.add(entry.info.id);
     forwarded = [title, message, wrapButtons(entry.info.id, buttons), wrapOptions(entry.info.id, options)];
   } catch {
     if (entry) closeAlert(entry.info.id);

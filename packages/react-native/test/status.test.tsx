@@ -132,5 +132,9 @@ test("Tapline's own prompts stay native: listed as a real alert, never a stand-i
   expect((await tree({})).alerts).toEqual([expect.objectContaining({ title: 'Connect for testing?', standIn: false })]);
   const error = await failure(run(() => press({ target: { testID: 'save' } })));
   expect(error.message).toMatch(/^behind_alert: /);
+  // Its own words: only the person answers it, and no stand-in can help.
+  expect(error.message).toContain("Tapline's own prompt");
+  expect(error.message).toContain('ask the user');
+  expect(error.message).not.toContain('stand-in');
   expect(onSave).not.toHaveBeenCalled();
 });

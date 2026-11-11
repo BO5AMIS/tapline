@@ -35,7 +35,7 @@ import {
   type Snapshot,
   type TabFound,
 } from './inspect';
-import { openAlerts } from './alerts';
+import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import { onCommit } from './register';
@@ -725,6 +725,13 @@ function assertNoBlockingAlert(actor?: Entry): void {
   const blocking = openAlerts().find((alert) => !alert.standIn);
   if (blocking) {
     const buttons = blocking.buttons.map((button) => `[${button.text}]`).join(' ');
+    if (isOwnAlert(blocking.id)) {
+      throw notActionable(
+        'behind_alert',
+        `Tapline's own prompt is open: "${blocking.title}" ${buttons}. Only the person holding the phone answers it: ` +
+          'ask the user to tap a button. force: true acts anyway.',
+      );
+    }
     throw notActionable(
       'behind_alert',
       `An alert is open: "${blocking.title}" ${buttons}. A person would have to answer it first, and Tapline can't press OS alerts: ` +
