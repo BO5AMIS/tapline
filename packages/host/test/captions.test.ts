@@ -69,11 +69,13 @@ describe("captions for the agent's steps", () => {
     expect(captionFor("wait_for", "Done")).toBeUndefined();
   });
 
-  it("cuts an element's name after 24 characters with an ellipsis, and stays within 60", () => {
-    // 24 characters ("A very long button name "), the trailing space dropped, then the ellipsis.
-    expect(captionFor("tap", "A very long button name that goes on")).toBe('Tap "A very long button name…"');
+  it("cuts an element's name after 32 characters with an ellipsis, and stays within 60", () => {
+    // 25 characters: whole (it used to be cut at 24).
+    expect(captionFor("toggle", "Remind me before the trip")).toBe('Switch "Remind me before the trip"');
+    // 32 characters ("A very long button name that goe"), then the ellipsis.
+    expect(captionFor("tap", "A very long button name that goes on and on")).toBe('Tap "A very long button name that goe…"');
     const long = captionFor("long_press", "x".repeat(100)) ?? "";
-    expect(long).toBe(`Press and hold "${"x".repeat(24)}…"`);
+    expect(long).toBe(`Press and hold "${"x".repeat(32)}…"`);
     expect(long.length).toBeLessThanOrEqual(60);
   });
 });

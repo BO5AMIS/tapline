@@ -52,9 +52,9 @@ export function reasonOf(code: string | undefined, message: string | undefined):
   return word !== undefined && REASONS.has(word) ? word : undefined;
 }
 
-const NAME_MAX = 24;
+const NAME_MAX = 32;
 
-/** An element's name for a caption: 24 characters at most, then an ellipsis. */
+/** An element's name for a caption: 32 characters at most, then an ellipsis. */
 function shortName(label: string): string {
   const clean = label.replace(/\s+/g, " ").trim();
   return clean.length <= NAME_MAX ? clean : `${clean.slice(0, NAME_MAX).trimEnd()}…`;
