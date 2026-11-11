@@ -10,8 +10,8 @@ up to use someone else's computer or network.
 ## What is needed
 
 - A computer with Node.js 20 or later and git (Windows, macOS or Linux).
-- An iPhone, and the user's own Expo or React Native app, which they can build as a
-  development build or a TestFlight build. Expo Go can't run it.
+- An iPhone, and the user's own Expo or React Native app: a development build, a
+  TestFlight build, or an Expo app in Expo Go (see "In Expo Go" below).
 - The phone on the same Wi-Fi as the computer (or the computer on a cable to the same
   router). Tailscale is optional, only for a phone away from that Wi-Fi (not part of v1).
 
@@ -69,6 +69,15 @@ commit or a file.
 
 A paired phone connects by itself when the app is opened. `<scheme>://tapline/forget` on the
 phone unpairs it.
+
+**In Expo Go:** call `pair` with the address Expo prints instead of a scheme
+(`exp://<computer's address>:8081`). The link opens the app in Expo Go and pairs in one step.
+Expo Go has no Tapline native module, so the live view runs at about 6 frames a second (15 in
+a development build) and iOS's own alerts aren't seen from inside the app. Current Expo Go
+opens a project only when both Expo Go and the Expo CLI are signed in to an Expo account:
+that is the user's step, never yours. On a first load, Expo Go's developer-menu intro can open
+by itself: tap Continue, then close it. The **Connect for testing?** prompt is a system alert:
+the user taps Connect (or, with Tapwright connected, its `alert` tool answers it).
 
 ## The MCP server, per host
 

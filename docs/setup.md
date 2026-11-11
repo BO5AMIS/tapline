@@ -108,8 +108,8 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 
 ## 3. The app
 
-Your own React Native or Expo app, in a development build or a TestFlight build. Expo Go
-can't run it.
+Your own React Native or Expo app, in a development build or a TestFlight build, or an Expo
+app in Expo Go (see "In Expo Go" below).
 
 **Install the package.** Until it's on npm, pack it from the clone (after `npm run build`)
 and install the tarball in your app (Metro handles a tarball better than a linked folder):
@@ -287,6 +287,17 @@ Without an agent: `tapline pair --scheme <your scheme>` prints one in the termin
 the phone on the same Wi-Fi, scan the code with the phone's camera and open the app. It asks **Connect for
 testing?** and names the computer: tap **Connect**. The code works once and expires after 10
 minutes.
+
+**In Expo Go.** An Expo app also runs Tapline in Expo Go, with no build: install the package
+and the three Expo modules above (Expo Go carries them), set `EXPO_PUBLIC_TAPLINE_ENABLED=1` in
+`.env.local`, and start Metro (`npx expo start --go`). To pair, give `pair` the address Expo
+prints instead of a scheme: `tapline pair --scheme exp://192.168.1.20:8081`, or ask your agent
+to pair with that address. Scanning the code opens the app in Expo Go and pairs in one step.
+Expo Go has no room for Tapline's native module, so the live view runs at about 6 frames a
+second instead of 15, and iOS's own alerts and the share sheet aren't seen from inside the app.
+Current Expo Go opens a project only when you're signed in to your Expo account both in Expo Go
+and in the Expo CLI (`npx expo login`). On a first load, Expo Go's developer-menu intro may
+open by itself: tap Continue and close it.
 
 In the agent, `apps` lists the phone and `look` shows its screen. From now on the app
 reconnects by itself whenever it's open, as long as the agent (the host) is running on

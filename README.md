@@ -44,8 +44,8 @@ outside** (any app, system alerts) through Apple's UI automation.
 
 ## You need
 
-- A React Native or Expo app you build yourself (development builds or TestFlight;
-  Expo Go can't load it).
+- A React Native or Expo app: a development build, TestFlight, or Expo Go (there the live
+  view runs at about 6 frames a second instead of 15).
 - A computer with Node.js 20 or later, on the same Wi-Fi as your phone (or on a cable to
   the same router). Tailscale is optional.
 - An MCP client for the agent, such as Claude Code.

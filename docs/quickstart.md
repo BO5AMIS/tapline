@@ -7,8 +7,8 @@ every option: [setup.md](setup.md).
 ## What you need
 
 - A computer with Node.js 20 or later and git (Windows, macOS or Linux).
-- An iPhone, and your own Expo or React Native app that you can build as a development
-  build or a TestFlight build. Expo Go can't run it.
+- An iPhone, and your own Expo or React Native app: a development build, a TestFlight
+  build, or an Expo app in Expo Go.
 - The phone on the same Wi-Fi as the computer (or the computer on a cable to the same
   router). [Tailscale](https://tailscale.com) is optional, only for a phone away from
   your Wi-Fi.
