@@ -10,7 +10,8 @@ matters asks a person first. The interface is AGENT-TOOLS 1.8, shared with Tapwr
 - `inspect` (development builds): for any element on screen, it names the components that draw it, the
   file and line of your app's code that wrote it (the path is relative to the project), and that line. For
   an element a library draws, such as a tab bar button, it names your line around it and where its id is
-  set.
+  set. Inside one of the app's own shared components (a button used on many screens) it also says
+  where the screen uses it.
 
 **Do more per call**
 - `run`: several steps in one call, each an ordinary tool call with an optional `expect` (text, id or

@@ -221,13 +221,18 @@ order, pair again (or give each agent a fixed `--port`).
   answers `not_allowed: needs_confirmation`. The live view asks you (Allow once / Don't allow);
   one allow lets the same call on the same element through once, within 120 seconds.
   `tapline mcp --policy FILE` sets your own words to confirm or to block; `--no-policy` turns
-  it off, for a test phone with test data.
+  it off, for a test phone with test data. The answer must come from the live view page in a
+  browser, and when the check can't be made, nothing is touched. This guards against an agent's
+  mistakes. An agent that can run any command on your computer could still get around it (it could
+  also edit the policy), so give such agents only the access you would give a person.
 - **Action log.** Every action, by the agent or a person, is one JSON line in
   `~/.tapline/log/`. Typed text is logged only as its length. Files are kept for 14 days;
   `--no-log` turns it off.
-- **Pairing without a QR code** is for your own test phone on your own Wi-Fi. The Connect
-  prompt is your consent. A tool that makes real touches on the same phone (Tapwright) could
-  accept it, so keep this to phones that only you drive.
+- **Pairing without a QR code** is for your own test phone on your own Wi-Fi. An offer exists
+  only for 10 minutes after the agent calls `pair`, goes only to devices on the local network
+  (not Tailscale, not through a proxy), and belongs to the first device that fetches it: no
+  other device can pair with it. The Connect prompt is your consent. A tool that makes real
+  touches on the same phone (Tapwright) could accept it, so keep this to phones that only you drive.
 - To unpair one phone, open `<your-scheme>://tapline/forget` on it (deleting the app doesn't: iOS
   keeps the pairing in the keychain). To unpair every phone,
   delete `~/.tapline/token`; phones then need a new pairing code.
