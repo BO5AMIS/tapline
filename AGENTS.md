@@ -16,9 +16,10 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 
 **Computer side**
 
-1. Clone and build Tapline (`npm install`, `npm run build`), then `npm install -g
-   ./packages/host` (or use `node <clone>/packages/host/dist/cli.js`). `tapline doctor`
-   checks the whole computer side and says what to fix.
+1. `npm install -g tapline-host` puts the `tapline` command on the PATH (from a clone
+   instead: `npm install`, `npm run build`, then `npm install -g ./packages/host`, or use
+   `node <clone>/packages/host/dist/cli.js`). `tapline doctor` checks the whole computer side
+   and says what to fix.
 2. The computer and the phone must be on the same Wi-Fi (or the computer on a cable to the
    same router). `tapline doctor` fails when the computer has no Wi-Fi or LAN address; ask
    the user to join the phone's Wi-Fi. Tailscale is optional, only for a phone away from
@@ -35,10 +36,10 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
 
 **App side** (the user's repository)
 
-1. Install `@tapline/react-native` (a tarball from `npm pack` until it's on npm),
-   `expo-secure-store` (remembers the pairing) and, for screenshots,
-   `react-native-view-shot`.
-2. Make `import '@tapline/react-native/register'` the first line of the app's entry file.
+1. Install `react-native-tapline`, `expo-secure-store` (remembers the pairing) and, for
+   screenshots, `react-native-view-shot` (`npx expo install react-native-tapline
+   expo-secure-store react-native-view-shot`).
+2. Make `import 'react-native-tapline/register'` the first line of the app's entry file.
    For Expo Router apps that means a new `index.js` (register, then `expo-router/entry`)
    and `"main": "index.js"`. Getting this wrong is the most common failure: the tree comes
    back empty with "No React roots recorded".

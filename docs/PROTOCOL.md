@@ -2,15 +2,15 @@
 
 Tapline lets an agent on your computer see and drive **your own app** on a phone,
 from anywhere, over Tailscale (or any network that reaches the computer). The app
-carries a small in-app agent (`@tapline/react-native`); the computer runs the host
-(`@tapline/host`), which agents use through MCP or the CLI.
+carries a small in-app agent (`react-native-tapline`); the computer runs the host
+(`tapline-host`), which agents use through MCP or the CLI.
 
 ```
  phone (anywhere)                                  computer (home)
  ┌───────────────────────┐   WebSocket over        ┌──────────────────────────┐
  │ your app (dev build / │   Tailscale             │ tapline host             │
  │ TestFlight)           │ ──────────────────────▶ │  ws server  :7210-7219   │
- │  @tapline/react-native│ ◀── requests ────────── │  MCP server (stdio)  ◀── agent (Claude …)
+ │  react-native-tapline│ ◀── requests ────────── │  MCP server (stdio)  ◀── agent (Claude …)
  └───────────────────────┘ ─── responses/events ─▶ │  CLI                     │
                                                     └──────────────────────────┘
 ```

@@ -1,13 +1,19 @@
 {
   "name": "tapline",
   "private": true,
-  "description": "Let agents see and drive your own app on your phone from anywhere, over Tailscale.",
+  "description": "Let AI agents see and drive your own React Native / Expo app on a test phone on the same Wi-Fi.",
   "license": "MIT",
-  "workspaces": ["packages/host", "packages/react-native", "bench"],
+  "workspaces": [
+    "packages/host",
+    "packages/react-native",
+    "bench"
+  ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

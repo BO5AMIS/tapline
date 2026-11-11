@@ -1,11 +1,11 @@
-# @tapline/react-native
+# react-native-tapline
 
-The in-app agent of [Tapline](../../README.md): lets an AI agent on your computer see and
+The in-app agent of [Tapline](https://github.com/bo5amis/tapline#readme): lets an AI agent on your computer see and
 drive **your own** React Native / Expo app on your test phone, on the same Wi-Fi as the
 computer. TypeScript, plus an optional Expo native module that any new build of an Expo app
 picks up by itself (faster live-view frames, and iOS alerts and the share sheet seen over the
 app); no config plugin. Full setup:
-[docs/setup.md](../../docs/setup.md).
+[docs/setup.md](https://github.com/bo5amis/tapline/blob/main/docs/setup.md).
 
 ## Use
 
@@ -13,8 +13,8 @@ First line of the app's entry file (for Expo Router, your own `index.js` that th
 `expo-router/entry`):
 
 ```js
-import '@tapline/react-native/register';
-import { startTapline } from '@tapline/react-native';
+import 'react-native-tapline/register';
+import { startTapline } from 'react-native-tapline';
 
 startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
 ```
@@ -30,7 +30,7 @@ startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
 - Expo Router: add `app/+native-intent.ts` so the router leaves pairing links alone:
 
   ```ts
-  import { isTaplineLink } from '@tapline/react-native';
+  import { isTaplineLink } from 'react-native-tapline';
 
   export function redirectSystemPath({ path }: { path: string; initial: boolean }) {
     return isTaplineLink(path) ? null : path;

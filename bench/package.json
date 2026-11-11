@@ -1,5 +1,5 @@
 {
-  "name": "@tapline/bench",
+  "name": "tapline-bench",
   "version": "0.1.0",
   "private": true,
   "description": "Tool-agnostic benchmark runner for QA tools that let agents drive a phone app (scores against docs/QUALITY-BAR.md).",

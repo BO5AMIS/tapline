@@ -1,8 +1,26 @@
 {
-  "name": "@tapline/react-native",
+  "name": "react-native-tapline",
   "version": "0.1.0",
-  "description": "Tapline in-app agent: lets AI agents see and drive your own React Native / Expo app from anywhere, over Tailscale.",
+  "description": "Tapline in-app agent: lets AI agents see and drive your own React Native / Expo app on a test phone on the same Wi-Fi.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bo5amis/tapline.git",
+    "directory": "packages/react-native"
+  },
+  "homepage": "https://github.com/bo5amis/tapline/tree/main/packages/react-native#readme",
+  "bugs": {
+    "url": "https://github.com/bo5amis/tapline/issues"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "testing",
+    "mcp",
+    "ai-agent",
+    "e2e",
+    "ios"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

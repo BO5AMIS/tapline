@@ -1,8 +1,8 @@
-# @tapline/host
+# tapline-host
 
-The computer side of [Tapline](../../README.md): the server your app's
-`@tapline/react-native` connects to over the same Wi-Fi, an MCP server for agents, and a CLI.
-Node.js 20 or later. Full setup: [docs/setup.md](../../docs/setup.md).
+The computer side of [Tapline](https://github.com/bo5amis/tapline#readme): the server your app's
+`react-native-tapline` connects to over the same Wi-Fi, an MCP server for agents, and a CLI.
+Node.js 20 or later. Full setup: [docs/setup.md](https://github.com/bo5amis/tapline/blob/main/docs/setup.md).
 
 ## CLI
 
@@ -58,7 +58,7 @@ Tapline ignores.
   nothing buffered it asks the app for its own.
 - `viewer` returns the live viewer's link, plus the app's capture and stutter numbers while
   someone watches. The viewer rides on the host's port (`/viewer`, `/stream`, `/ws`) and
-  speaks [docs/VIEWER-PROTOCOL.md](../../docs/VIEWER-PROTOCOL.md). The app captures frames
+  speaks [docs/VIEWER-PROTOCOL.md](https://github.com/bo5amis/tapline/blob/main/docs/VIEWER-PROTOCOL.md). The app captures frames
   only while someone watches. A person's input goes ahead of the agent's actions, which
   wait until the person has been idle for 3 s (`busy` after 30 s; `paused` while paused).
 

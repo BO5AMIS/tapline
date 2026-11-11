@@ -23,7 +23,7 @@ is optional and not part of the tested v1 setup.
  ┌─────────────────────────┐    WebSocket over        ┌────────────────────────────┐
  │ your app (dev build or  │    the local network     │ tapline host  :7210        │
  │ TestFlight)             │ ───────────────────────▶ │   MCP server (stdio) ◀──── agent
- │   @tapline/react-native │ ◀──── requests ───────── │   CLI                      │
+ │   react-native-tapline │ ◀──── requests ───────── │   CLI                      │
  └─────────────────────────┘ ───── responses, logs ─▶ └────────────────────────────┘
 ```
 
@@ -39,8 +39,8 @@ address and no secret, only an on switch, so one TestFlight build serves every t
 each pairs the app with their own computer.
 
 Tapline drives **your own app from the inside**. Its sibling project
-[Tapwright](https://github.com/<owner>/tapwright) drives **the whole phone from the
-outside** (any app, system alerts) through Apple's UI automation.
+[Tapwright](https://github.com/bo5amis/tapwright) drives **the whole phone from the
+outside** (any app, system alerts) through Apple's UI automation (`pip install tapwright`).
 
 ## You need
 
@@ -52,9 +52,10 @@ outside** (any app, system alerts) through Apple's UI automation.
 
 ## Quick start
 
-Not on npm yet: clone this repository and build it (`npm install && npm run build`).
-Start with the [quickstart](docs/quickstart.md); [docs/setup.md](docs/setup.md) has the
-detail, including installing from the clone.
+`npm install -g tapline-host` on the computer (the `tapline` command), and
+`npx expo install react-native-tapline` in your app. Start with the
+[quickstart](docs/quickstart.md); [docs/setup.md](docs/setup.md) has the detail, including
+building from a clone.
 
 **The computer:**
 
@@ -78,8 +79,8 @@ how to test well and report, and the mistakes agents new to it make. Ask for it 
 **The app**, first lines of its entry file:
 
 ```js
-import '@tapline/react-native/register';      // before anything imports React
-import { startTapline } from '@tapline/react-native';
+import 'react-native-tapline/register';      // before anything imports React
+import { startTapline } from 'react-native-tapline';
 
 startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
 ```
@@ -277,8 +278,8 @@ order, pair again (or give each agent a fixed `--port`).
 ## Repository
 
 ```
-packages/host           @tapline/host: WebSocket server, MCP server, CLI (Node 20+)
-packages/react-native   @tapline/react-native: the in-app agent (TypeScript, no native code)
+packages/host           tapline-host: WebSocket server, MCP server, CLI (Node 20+)
+packages/react-native   react-native-tapline: the in-app agent (TypeScript, no native code)
 docs/quickstart.md      the short way to start
 docs/setup.md           step-by-step setup
 docs/PROTOCOL.md        the wire protocol

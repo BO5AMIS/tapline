@@ -10,7 +10,7 @@ const path = require('path');
  *
  *   // metro.config.js
  *   const { getDefaultConfig } = require('expo/metro-config');
- *   const { withTapline } = require('@tapline/react-native/metro');
+ *   const { withTapline } = require('react-native-tapline/metro');
  *   module.exports = withTapline(getDefaultConfig(__dirname));
  *
  * The app still calls startTapline() (for example at the top of app/_layout.tsx).

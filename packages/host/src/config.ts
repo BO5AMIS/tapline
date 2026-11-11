@@ -236,8 +236,8 @@ export async function resolveConfig(options: ResolveOptions = {}): Promise<HostC
  */
 export function connectSnippet(): string {
   return [
-    `import '@tapline/react-native/register'; // first line of the entry file`,
-    `import { startTapline } from '@tapline/react-native';`,
+    `import 'react-native-tapline/register'; // first line of the entry file`,
+    `import { startTapline } from 'react-native-tapline';`,
     ``,
     `startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });`,
   ].join("\n");
@@ -246,7 +246,7 @@ export function connectSnippet(): string {
 /** For Expo Router apps: `app/+native-intent.ts`, so pairing links don't open a "not found" screen. */
 export function nativeIntentSnippet(): string {
   return [
-    `import { isTaplineLink } from '@tapline/react-native';`,
+    `import { isTaplineLink } from 'react-native-tapline';`,
     ``,
     `export function redirectSystemPath({ path }: { path: string; initial: boolean }) {`,
     `  return isTaplineLink(path) ? null : path;`,

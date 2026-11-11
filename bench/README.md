@@ -1,4 +1,4 @@
-# @tapline/bench
+# tapline-bench
 
 Private, tool-agnostic benchmark runner. It spawns a QA tool's MCP server over stdio, exactly as an
 agent does, and scores it against `docs/QUALITY-BAR.md`. Part 1 covers speed (S1-S3, S5) on the

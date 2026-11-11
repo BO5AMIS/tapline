@@ -1,9 +1,9 @@
 /// <reference types="node" />
 /**
- * Interop: the real host (@tapline/host's CLI, `tapline mcp`, as a child process) and
+ * Interop: the real host (tapline-host's CLI, `tapline mcp`, as a child process) and
  * the real in-app agent (TaplineClient + the inspector over a rendered screen) talking
  * over a real WebSocket, driven the way an agent drives them: MCP tool calls over the
- * host's stdio. Needs the host built (`npm run build -w @tapline/host`); skipped otherwise.
+ * host's stdio. Needs the host built (`npm run build -w tapline-host`); skipped otherwise.
  */
 // First, as in an app's entry file: the hook must exist before React Native loads.
 import '../src/register';

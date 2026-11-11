@@ -25,20 +25,23 @@ address.
 
 Node.js 20 or later, and git.
 
-Tapline isn't on npm yet. From a clone:
-
 ```sh
-git clone https://github.com/<owner>/tapline
-cd tapline
-npm install                        # about 40 s
-npm run build                      # about 10 s
-npm install -g ./packages/host     # puts `tapline` on your PATH
+npm install -g tapline-host        # puts `tapline` on your PATH
 tapline doctor                     # about 5 s: checks the computer side
 ```
 
-`npm install` ends with a few `deprecated` warnings and "6 low severity vulnerabilities".
-They come from the test tools (Jest), not from anything Tapline ships; ignore them.
+**From a clone instead** (to change Tapline, or to run it unreleased):
 
+```sh
+git clone https://github.com/bo5amis/tapline
+cd tapline
+npm install                        # about 30 s
+npm run build                      # about 10 s
+npm install -g ./packages/host
+```
+
+`npm install` in a clone ends with a few `deprecated` warnings and "low severity
+vulnerabilities". They come from the test tools (Jest), not from anything Tapline ships; ignore them.
 Or skip the global install and run `node /path/to/tapline/packages/host/dist/cli.js`
 wherever this guide says `tapline`, for example
 `node /path/to/tapline/packages/host/dist/cli.js doctor`.
@@ -111,14 +114,10 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 Your own React Native or Expo app, in a development build or a TestFlight build, or an Expo
 app in Expo Go (see "In Expo Go" below).
 
-**Install the package.** Until it's on npm, pack it from the clone (after `npm run build`)
-and install the tarball in your app (Metro handles a tarball better than a linked folder):
+**Install the package:**
 
 ```sh
-# in the tapline clone, after npm run build
-npm pack -w @tapline/react-native           # makes tapline-react-native-0.1.0.tgz in the clone's folder
-# in your app
-npm install /path/to/tapline-react-native-0.1.0.tgz
+npx expo install react-native-tapline       # the SDK (or npm install react-native-tapline)
 npx expo install expo-secure-store          # remembers the paired computer
 npx expo install react-native-view-shot     # optional: screenshots
 npx expo install expo-keep-awake            # optional: keeps the screen on while an agent is connected
@@ -128,6 +127,10 @@ All three have native code: a new development build or TestFlight build includes
 Without `expo-secure-store`, pairing works but lasts only until the app restarts (or pass
 your own `storage`, see below). Without `expo-keep-awake` the phone's screen can lock while
 an agent works; it matters most for a dedicated test device.
+
+From a clone of Tapline instead, `npm pack -w react-native-tapline` (after `npm run build`)
+makes `react-native-tapline-0.1.0.tgz`; install that file in your app (Metro handles a tarball
+better than a linked folder).
 
 The package also carries a small Expo native module, which any new build of an Expo app picks
 up by itself (no config plugin). With it, the live viewer runs at about 15 frames a second
@@ -140,7 +143,7 @@ builds are untouched):
 
 ```js
 const { getDefaultConfig } = require('expo/metro-config');
-const { withTapline } = require('@tapline/react-native/metro');
+const { withTapline } = require('react-native-tapline/metro');
 
 module.exports = withTapline(getDefaultConfig(__dirname));
 ```
@@ -153,7 +156,7 @@ entry file:
   `"main": "index.js"`:
 
   ```js
-  import '@tapline/react-native/register';
+  import 'react-native-tapline/register';
   import 'expo-router/entry';
   ```
 
@@ -163,7 +166,7 @@ entry file:
 **Start it.** In the same file, after the `register` line:
 
 ```js
-import { startTapline } from '@tapline/react-native';
+import { startTapline } from 'react-native-tapline';
 
 startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
 ```
@@ -180,7 +183,7 @@ pairing somewhere other than `expo-secure-store`.
 for a pairing link. Add `app/+native-intent.ts` (next to your other routes):
 
 ```ts
-import { isTaplineLink } from '@tapline/react-native';
+import { isTaplineLink } from 'react-native-tapline';
 
 export function redirectSystemPath({ path }: { path: string; initial: boolean }) {
   return isTaplineLink(path) ? null : path;
@@ -210,7 +213,7 @@ where its state lives, and remove it on unmount (`registerTaplineCommand` return
 remover). The agent lists them with `app_command`.
 
 ```tsx
-import { registerTaplineCommand } from '@tapline/react-native';
+import { registerTaplineCommand } from 'react-native-tapline';
 
 useEffect(
   () =>
@@ -347,6 +350,6 @@ your Wi-Fi.
 ## Undo
 
 Open the forget link on each phone, remove the `register` and `startTapline` lines (and
-your custom `index.js` and `+native-intent.ts`), uninstall `@tapline/react-native`, remove
+your custom `index.js` and `+native-intent.ts`), uninstall `react-native-tapline`, remove
 `EXPO_PUBLIC_TAPLINE_ENABLED`, delete `~/.tapline` on the computer, the firewall rule if
 you added one, and the Tailscale Serve entry for Metro (`tailscale serve --https=8443 off`).

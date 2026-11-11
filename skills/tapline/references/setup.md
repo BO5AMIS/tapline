@@ -20,15 +20,13 @@ commit or a file.
 
 ## Steps on the computer
 
-1. Get Tapline, build it, and check the computer:
+1. Install Tapline and check the computer:
    ```sh
-   git clone https://github.com/<owner>/tapline
-   cd tapline
-   npm install
-   npm run build
-   npm install -g ./packages/host
+   npm install -g tapline-host
    tapline doctor
    ```
+   (From a clone instead: `git clone https://github.com/bo5amis/tapline`, `npm install`,
+   `npm run build`, `npm install -g ./packages/host`.)
    Fix what `doctor` reports. If it finds no Wi-Fi or LAN address, ask the user to join
    the same Wi-Fi as the phone. Tailscale warnings can be ignored on the same Wi-Fi. On
    Windows the firewall rule it names needs an administrator prompt that the user approves.
@@ -36,16 +34,15 @@ commit or a file.
 
 ## Steps in the user's app
 
-1. Install the SDK: from the clone, `npm pack -w @tapline/react-native`, then install that
-   file in the app. Also `expo-secure-store` (remembers the pairing) and, for screenshots,
-   `react-native-view-shot`.
-2. Make `import '@tapline/react-native/register';` the first line of the app's entry file.
+1. Install the SDK: `npx expo install react-native-tapline expo-secure-store
+   react-native-view-shot` (the second remembers the pairing; the third takes screenshots).
+2. Make `import 'react-native-tapline/register';` the first line of the app's entry file.
    For Expo Router that means a new `index.js` (that line, then
    `import 'expo-router/entry';`) and `"main": "index.js"` in package.json. When this is
    wrong the element list comes back empty with "No React roots recorded".
 3. Right after it:
    ```js
-   import { startTapline } from '@tapline/react-native';
+   import { startTapline } from 'react-native-tapline';
    startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
    ```
    The build carries no address and no token.

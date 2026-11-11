@@ -1,7 +1,7 @@
 /**
  * Import this FIRST in the app's entry file, before React / React Native:
  *
- *   import '@tapline/react-native/register';
+ *   import 'react-native-tapline/register';
  *
  * It installs a minimal React DevTools global hook (or wraps the existing one,
  * chaining every call) so Tapline can see the app's fiber roots. This file must

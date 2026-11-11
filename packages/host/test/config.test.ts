@@ -151,7 +151,7 @@ describe("viewerMode", () => {
 describe("app snippets", () => {
   it("turns Tapline on with a build switch and carries no address or token", () => {
     const snippet = connectSnippet();
-    expect(snippet.split("\n")[0]).toContain("@tapline/react-native/register");
+    expect(snippet.split("\n")[0]).toContain("react-native-tapline/register");
     expect(snippet).toContain("startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });");
     expect(snippet).not.toMatch(/TOKEN|_URL|ws:\/\//);
   });

@@ -1,8 +1,27 @@
 {
-  "name": "@tapline/host",
+  "name": "tapline-host",
   "version": "0.1.0",
-  "description": "Tapline host: lets AI agents see and drive your own mobile app over Tailscale (MCP server + CLI).",
+  "description": "Tapline host: lets AI agents see and drive your own React Native / Expo app on a test phone on the same Wi-Fi (MCP server and CLI).",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bo5amis/tapline.git",
+    "directory": "packages/host"
+  },
+  "homepage": "https://github.com/bo5amis/tapline/tree/main/packages/host#readme",
+  "bugs": {
+    "url": "https://github.com/bo5amis/tapline/issues"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "testing",
+    "mcp",
+    "mcp-server",
+    "ai-agent",
+    "e2e",
+    "ios"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

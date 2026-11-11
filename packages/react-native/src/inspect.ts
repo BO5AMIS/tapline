@@ -961,7 +961,7 @@ export function takeSnapshot(): Snapshot {
   if (roots.length === 0) {
     throw new TaplineError(
       'internal',
-      "No React roots recorded. Import '@tapline/react-native/register' first in the app's entry file, before React.",
+      "No React roots recorded. Import 'react-native-tapline/register' first in the app's entry file, before React.",
     );
   }
   const { nodes, routes, tabs, behind } = collect(roots);

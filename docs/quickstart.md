@@ -16,25 +16,19 @@ every option: [setup.md](setup.md).
 
 ## On the computer
 
-Times are measured from a clean copy on Windows 11 with Node 22.
-
 ```sh
-git clone https://github.com/<owner>/tapline
-cd tapline
-npm install                        # about 40 s
-npm run build                      # about 10 s
-npm install -g ./packages/host     # puts `tapline` on your PATH
+npm install -g tapline-host        # puts `tapline` on your PATH
 tapline doctor                     # about 5 s
 claude mcp add tapline -- tapline mcp
 tapline skill install              # the skill that teaches agents to test with Tapline
 ```
 
-- `npm install` ends with a few `deprecated` warnings and "6 low severity
-  vulnerabilities". They come from the test tools; ignore them.
 - `tapline doctor` checks Node, the Wi-Fi or LAN address, the token, the ports and, on Windows, the
   firewall. (Tailscale checks are optional warnings.) It says how to fix anything that's missing. Fix that before you go on.
-- Without the global install, run `node /path/to/tapline/packages/host/dist/cli.js` where
-  this page says `tapline`.
+- From a clone instead: `git clone https://github.com/bo5amis/tapline`, then in it
+  `npm install` (about 30 s), `npm run build` (about 10 s) and `npm install -g ./packages/host`.
+  Without any global install, run `node /path/to/tapline/packages/host/dist/cli.js` where this
+  page says `tapline`.
 - `claude mcp add` gives Tapline to Claude Code. Codex: `[mcp_servers.tapline]` with
   `command = "tapline"` and `args = ["mcp"]` in `~/.codex/config.toml`. Other agents: run
   `tapline mcp` as an MCP server on stdio.
@@ -46,19 +40,18 @@ tapline skill install              # the skill that teaches agents to test with 
 Everything here is in your app's code, except the QR code at the end. See
 [setup.md](setup.md#3-the-app) for each step in full.
 
-1. Install the SDK in your app: from the clone, `npm pack -w @tapline/react-native`, then
-   `npm install /path/to/tapline-react-native-0.1.0.tgz` in your app. Also
-   `npx expo install expo-secure-store` (remembers the pairing), and optionally
-   `react-native-view-shot` (screenshots) and `expo-keep-awake` (screen stays on).
+1. Install the SDK in your app: `npx expo install react-native-tapline expo-secure-store`
+   (the second remembers the pairing), and optionally `react-native-view-shot` (screenshots)
+   and `expo-keep-awake` (screen stays on).
 2. Make this the first line of the app's entry file. For Expo Router, that's a new
    `index.js` (this, then `import 'expo-router/entry'`) and `"main": "index.js"` in
    package.json:
    ```js
-   import '@tapline/react-native/register';
+   import 'react-native-tapline/register';
    ```
 3. Right after it, start Tapline:
    ```js
-   import { startTapline } from '@tapline/react-native';
+   import { startTapline } from 'react-native-tapline';
    startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
    ```
 4. Expo Router only: add `app/+native-intent.ts` so pairing links don't open a "not found"
