@@ -80,7 +80,7 @@ const targetField = targetSchema.describe("Exactly one of ref, id, label, text o
 const lookField = z
   .boolean()
   .optional()
-  .describe("false: only the first line, no changes");
+  .describe("false: only the first line; the next answer's changes then cover this action too");
 
 const screenshotField = z.boolean().optional().describe("Add a screenshot (default false)");
 

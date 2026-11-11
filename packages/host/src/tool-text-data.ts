@@ -70,7 +70,7 @@ export const CORE_TOOL_TEXT = {
   },
   "audit": {
     "shared": "Checks the screen in front for accessibility problems: `contrast`, `hit_region`, `description`, `dynamic_type`, `clipped_text`, `trait`, `element_detection`, `overlap`, `duplicate_id`; `types` narrows it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: run it on each new screen.",
-    "tapline": "Tapline: runs its checks in the app; in a development build each issue adds the file and line that wrote the element."
+    "tapline": "Tapline: runs its checks in the app; in a development build each issue adds the file and line that wrote the element. `dynamic_type` and `element_detection` need iOS's own audit, so Tapline lists them as not checked."
   },
   "record": {
     "shared": "Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` right after an action becomes that step's `expect`. Targets are saved by id, else label, else text (with `index` when it matched several); refs only last one run."
@@ -83,7 +83,7 @@ export const CORE_TOOL_TEXT = {
 
 /** Tapline extras (TOOL-TEXT section 3). */
 export const EXTRA_TOOL_TEXT = {
-  "check_layout": "Checks the current screen from the element tree, with no screenshot: tap areas under 44x44 pt, elements cut off at the edges, overlaps, text contrast below WCAG, buttons with no label, and text likely cut off. Findings name elements by ref.",
+  "check_layout": "A quick layout check of the screen from the element tree, with no screenshot: tap areas under 44x44 pt, elements cut off at the edges, overlaps, text contrast below WCAG, buttons with no label, and text likely cut off. Findings name elements by ref. `audit` covers the same and more, in the shared report format with fixes and code lines; it judges native switches as iOS does.",
   "inspect": "Shows where an element comes from, in a development build: the components that draw it (screen first), the file and line of the app's code that wrote it, that line itself, and the component's props in short. Use it to say where to fix a bug you found. Release builds answer unsupported.",
   "compare_screen": "Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the reference; later calls compare it pixel by pixel and report how much changed, where, and an image with changes in red. Keep the same `width` for a name.",
   "filmstrip": "Several screenshots in one numbered image, for animations and loading states; cheaper than separate shots. `tap` first taps an element, then films what it sets off.",
