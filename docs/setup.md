@@ -307,7 +307,9 @@ With several agents, ports go to whichever starts first; if a phone stops connec
 restart, pair it again, or give each agent a fixed port (`tapline mcp --port 7211`).
 
 **Unpair** a phone by opening `<your-scheme>://tapline/forget` on it (the agent's `pair`
-answer shows the exact link). Pairing with another computer replaces the old pairing.
+answer shows the exact link). Pairing with another computer replaces the old pairing. Deleting
+the app (or Expo Go) doesn't unpair it: iOS keeps the keychain, so a reinstalled app reconnects
+by itself. Use the forget link.
 
 **Simulators and emulators** on the same computer can pair the same way (open the link with
 `xcrun simctl openurl booted '<link>'`), or skip pairing:

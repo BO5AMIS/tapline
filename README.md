@@ -201,7 +201,8 @@ order, pair again (or give each agent a fixed `--port`).
   Tapline does nothing at all, not even listen for pairing links.
 - The agent inside your app can do whatever your app's UI can do. Turn it on only in
   builds you test with.
-- To unpair one phone, open `<your-scheme>://tapline/forget` on it. To unpair every phone,
+- To unpair one phone, open `<your-scheme>://tapline/forget` on it (deleting the app doesn't: iOS
+  keeps the pairing in the keychain). To unpair every phone,
   delete `~/.tapline/token`; phones then need a new pairing code.
 - **With a tool that makes real touches** (Tapwright) driving the same app, that tool tells the
   host before each touch, so its agent's touches aren't reported as a person's:

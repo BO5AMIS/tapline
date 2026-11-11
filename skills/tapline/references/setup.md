@@ -68,7 +68,8 @@ commit or a file.
 2. `apps` should now list the app, and `look` should show its screen.
 
 A paired phone connects by itself when the app is opened. `<scheme>://tapline/forget` on the
-phone unpairs it.
+phone unpairs it; deleting and reinstalling the app (or Expo Go) doesn't, because iOS keeps the
+keychain.
 
 **In Expo Go:** call `pair` with the address Expo prints instead of a scheme
 (`exp://<computer's address>:8081`). The link opens the app in Expo Go and pairs in one step.
