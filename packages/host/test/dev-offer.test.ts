@@ -91,3 +91,22 @@ describe("the offer file for the Metro helper", () => {
     }
   });
 });
+
+describe("open_url of the app's own forget link", () => {
+  it("answers that the app unpaired, not an error, when the app drops the connection as it should", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, (req) => {
+      if (req.method === "openURL") {
+        setTimeout(() => app.ws.close(), 5);
+        return "ignore";
+      }
+      return { ok: true, result: {} };
+    });
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" } });
+    const answer = await tools.openUrl({ url: "demo://tapline/forget", look: false });
+    expect(answer.isError).not.toBe(true);
+    expect(textOf(answer)).toBe("Unpaired: the app forgot this computer and disconnected. To connect it again, call `pair`.");
+  });
+});

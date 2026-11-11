@@ -16,6 +16,7 @@ import {
 import { setUpDevServe } from "./dev.js";
 import { formatDoctor, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
+import { runInit } from "./init.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { junitXml } from "./script.js";
@@ -33,6 +34,8 @@ Commands:
   pair     Print a pairing link and QR code for a phone (needs --scheme)
   info     Show this computer's address and how to add Tapline to an app
   doctor   Check the setup (Node, the Wi-Fi address, Tailscale if used, token, ports, firewall)
+  init     Set up Tapline in your app in one go: packages, entry file, Metro helper, .env.local
+           (run it in the app's folder; --dry-run shows the plan, --no-install skips the install)
   dev      Serve Metro over https in your tailnet (iOS needs it); \`tapline dev -- <command>\`
            also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
   replay   Replay scripts without an agent: tapline replay <file.json | name>… [--junit out.xml]
@@ -61,7 +64,10 @@ Options:
   --stop             For dev: stop serving Metro
   --wait <s>         For replay: how long to wait for the app to connect (default 60)
   --project <dir>    For skill install: install into that project's .claude/skills and
-                     .agents/skills instead of your home folder
+                     .agents/skills instead of your home folder. For init: the app's folder
+                     (default: this folder)
+  --dry-run          For init: print what it would do and change nothing
+  --no-install       For init: don't install packages; print the command instead
   -h, --help     Show this help
 
 Claude Code:  claude mcp add tapline -- tapline mcp
@@ -236,6 +242,8 @@ async function main(argv: string[]): Promise<number> {
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
       project: { type: "string" },
+      "dry-run": { type: "boolean" },
+      "no-install": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -310,6 +318,17 @@ async function main(argv: string[]): Promise<number> {
       const { written } = installSkill(values.project !== undefined ? { project: values.project } : {});
       process.stdout.write(`${formatInstalled(written)}\n`);
       return 0;
+    }
+    case "init": {
+      const result = runInit(
+        {
+          ...(values.project !== undefined ? { project: values.project } : {}),
+          ...(values["dry-run"] === true ? { dryRun: true } : {}),
+          ...(values["no-install"] === true ? { install: false } : {}),
+        },
+        { print: (line) => process.stdout.write(`${line}\n`) },
+      );
+      return result.exitCode;
     }
     case "info":
       printInfo(await resolveConfig(options));

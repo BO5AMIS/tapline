@@ -2345,8 +2345,16 @@ export class TaplineTools {
     );
   }
 
-  openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
-    return this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
+  async openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
+    const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
+    // The app's own forget link unpairs it, so it drops the connection before answering: that is the link working.
+    if (answer.isError === true && /(^|\/)tapline\/forget\/?$/.test(args.url.replace(/[?#].*$/, ""))) {
+      const said = answer.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+      if (/^Error (reconnecting|not_connected)\b/.test(said)) {
+        return text("Unpaired: the app forgot this computer and disconnected. To connect it again, call `pair`.");
+      }
+    }
+    return answer;
   }
 
   async logs(args: Shape<"logs">): Promise<CallToolResult> {
