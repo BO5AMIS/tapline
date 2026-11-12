@@ -149,7 +149,13 @@ export const treeResultSchema = z.object({
     )
     .optional(),
   /** Network requests still running. */
-  network: z.object({ inFlight: z.number() }).optional(),
+  network: z
+    .object({
+      inFlight: z.number().optional(),
+      /** The condition Tapline's `network` command put on the app's requests; absent when normal. */
+      condition: z.string().optional(), // any string: a mode a newer SDK adds must not make the whole tree unreadable
+    })
+    .optional(),
   /** True while the software keyboard is up (absent from older SDKs and when it is down). */
   keyboard: z.boolean().nullish(),
   /** With `changes: true`: what changed since the previous tree call. */

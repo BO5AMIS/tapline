@@ -215,7 +215,9 @@ describe("the pass bar uses the exact share (finding 4)", () => {
   it("a few changed pixels fail threshold 0 even when the shown percent rounds to 0", async () => {
     let n = 0;
     const shots = [picture(600, 1200), picture(600, 1200, [[300, 600, 3]])];
-    const { tools } = await rig(() => shots[Math.min(n++, 1)] ?? "", { width: 600, height: 1200 });
+    // compare_screen waits for two pictures in a row that agree (1.4): the reference is the plain screen twice, then
+    // every later picture has the small change
+    const { tools } = await rig(() => shots[n++ < 2 ? 0 : 1] ?? "", { width: 600, height: 1200 });
     await tools.compareScreen({ name: "tiny", width: 600 });
     const out = textOf(await tools.compareScreen({ name: "tiny", width: 600, threshold: 0 }));
     expect(out).toMatch(/^Differs from the reference "tiny"/);

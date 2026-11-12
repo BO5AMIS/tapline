@@ -474,7 +474,10 @@ describe('the settle cap', () => {
     );
     useFrames({ go: frame(0, 0, 100, 40) });
     const result = await press({ target: { testID: 'go' } });
-    expect(result).toMatchObject({ settledMs: 120, settleCapMs: 120 });
+    expect(result).toMatchObject({ settleCapMs: 120 });
+    // settledMs is measured: on Windows a 120 ms timer can read 119 ms by the clock (CI, 2026-11-12)
+    expect(result.settledMs).toBeGreaterThanOrEqual(110);
+    expect(result.settledMs).toBeLessThanOrEqual(200);
   });
 });
 

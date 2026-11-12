@@ -494,12 +494,14 @@ describe("compare_screen and filmstrip", () => {
     const tools = new TaplineTools(host, {
       connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
       baselinesDir: dir,
+      // a still screen: two pictures in a row that agree, taken without a real wait
+      stillGapMs: 1,
     });
     return { app, tools, dir };
   }
 
   it("saves a baseline the first time, then reports what changed with a marked image", async () => {
-    const { app, tools, dir } = await screenTools([picture(false), picture(true)]);
+    const { app, tools, dir } = await screenTools([picture(false), picture(false), picture(true), picture(true)]);
     try {
       const first = textOf(await tools.compareScreen({ name: "home" }));
       expect(first).toContain("Saved");
@@ -520,8 +522,21 @@ describe("compare_screen and filmstrip", () => {
     }
   });
 
+  it("waits for the screen to stop moving before it saves or compares (a screen still sliding in)", async () => {
+    // the first picture is mid-transition (the square not there yet); the next two agree
+    const { app, tools, dir } = await screenTools([picture(false), picture(true), picture(true), picture(true), picture(true)]);
+    try {
+      expect(textOf(await tools.compareScreen({ name: "moving" }))).toContain("Saved");
+      expect(app.requests.filter((r) => r.method === "screenshot")).toHaveLength(3);
+      // the reference is the settled screen, so the next look at the same screen matches
+      expect(textOf(await tools.compareScreen({ name: "moving" }))).toContain('Matches the reference "moving": 0% changed.');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("says nothing changed, and update replaces the baseline", async () => {
-    const { tools, dir } = await screenTools([picture(false), picture(false), picture(true), picture(true)]);
+    const { tools, dir } = await screenTools([picture(false), picture(false), picture(false), picture(false), picture(true), picture(true), picture(true), picture(true)]);
     try {
       await tools.compareScreen({ name: "home" });
       expect(textOf(await tools.compareScreen({ name: "home" }))).toContain('Matches the reference "home": 0% changed.');
@@ -1497,7 +1512,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "crash", "reload", "performance", "wait"].sort(),
+        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "crash", "reload", "performance", "wait", "session_report"].sort(),
       );
       const ok = await client.callTool({ name: "tap", arguments: { target: { id: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Tapped e3");

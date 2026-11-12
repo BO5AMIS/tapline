@@ -121,6 +121,8 @@ Tapline on. Read its output, then go on with step 6. By hand:
    `Candidates:`: pick one by its ref or add `index` (it works with `id`, `label` and
    `text`). After a person acts in the live viewer or touches the phone itself, `{ref}`
    targets fail with `stale` until you `look` again; `id`, `label` and `text` keep working.
+   A `not_found` adds `Closest:` with up to 3 elements whose id, label or text is close to what
+   you asked for, each with its ref (and `off screen, below` when it is): use one of those.
 5. Screens load and animate. Actions already wait for the screen to settle. If a spinner
    shows or content is missing, `wait_for` what you expect (`text`, `id` or `label`;
    `gone: true` for a spinner; `network_idle` for loading) instead of acting on a
@@ -129,9 +131,11 @@ Tapline on. Read its output, then go on with step 6. By hand:
    animations.
 6. Inputs: `type_text` with the input as target; `replace` (default) clears it first,
    `submit` presses return. Typing is refused where a person couldn't type (an input that is
-   off screen, covered or behind an alert), with the same reasons and `force` as a tap. Toggles: `toggle`. Lists: to reach an
-   element you know (by `id` or text), `scroll` with it as `target` and `to: "target"`: one
-   call brings it onto the screen, clear of the bars. Otherwise `scroll` until what you need
+   off screen, covered or behind an alert), with the same reasons and `force` as a tap. Toggles: `toggle`. Lists: an
+   action (`tap`, `long_press`, `toggle`, `type_text`) on an element that is in the list but off screen
+   scrolls it into view and acts in the same call: `Scrolled to it, then tapped …`. To only bring
+   one into view, `scroll` with it as `target` and `to: "target"`. A row a long list hasn't made yet
+   isn't in the list (`+N below`): `scroll` until it appears, or `to: "end"`. Otherwise `scroll` until what you need
    appears (`down` shows what is below), or `to: "end"`. `amount` is a share of the scroll
    area, 0.1 to 1 (default 0.8). `Keyboard: shown` or `Keyboard: hidden` in an answer says the
    on-screen keyboard came or went. While it is up and you act on something outside the focused
@@ -166,7 +170,7 @@ Tapline on. Read its output, then go on with step 6. By hand:
    `not_answering` means the app is connected but stopped answering: try once more; if it
    repeats, ask the user to close the app and open it again (Tapline can't close apps). An
    action that a person couldn't do is `not_actionable`, and the message starts with the
-   reason: `disabled`, `off_screen` (scroll to it: `to: "target"`), `covered` (dismiss what
+   reason: `disabled`, `off_screen` (no scroll brings it on screen; the message says why), `covered` (dismiss what
    covers it), `under_tab_bar`, `behind_alert` or `no_action` (nothing at that point takes
    the action). That is often a real bug worth reporting. Pass `force: true` only when you've
    decided the check is wrong; the answer then ends `Note: forced (covered): a person
@@ -192,8 +196,15 @@ Tapline on. Read its output, then go on with step 6. By hand:
    with `tapline mcp --policy FILE`, or turn it off for a test phone with `--no-policy`.
 13. `app_command` without a name lists what the app offers for testing (for example
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
-   `appearance` (light / dark) is always there. Use them to reach a state quickly and to
-   check stress views: dark mode, right-to-left languages. Put things back when you're done.
+   `appearance` (light / dark) and `network` (`offline`, `3g`, `lossy`, `normal`: the app's own
+   requests; every answer says `Network: 3g (Tapline).` while it is on, and it goes back to normal by
+   itself when the session ends) are always there. Apps can offer the standard `language`
+   (`{ language: "ar" }`), `region` (`{ region: "QA" }`) and `text_size` (`{ size: "xl" }`, `xs` to
+   `xxxl` and `ax1` to `ax5`; it needs the app to use `useTaplineFontScale()`); `tapline init` adds
+   `language` and `region` for i18next and expo-localization. A switch to or from a right-to-left
+   language reloads a development build. Use them to reach a state quickly and to check stress views:
+   dark mode, right-to-left languages, large text, a bad network, instead of the phone's Settings.
+   Put things back when you're done.
 14. What you tap calls the element's handler; it isn't a real touch. `swipe` (`x0, y0, x1, y1`,
    `seconds`) drags a finger through React Native's own touch system: a sheet's swipe to close,
    a pan view, a drawer. Gestures that react-native-gesture-handler or a native view handle
@@ -281,6 +292,11 @@ not on driving.
   nothing animates, the screen hasn't either; skip the new screenshot.
 
 ## Reporting
+
+`session_report` (or `tapline report` in a terminal) says where this session's calls went: calls per
+tool, failures by code, and the waste to cut (a `look` right after an answer that had the changes, a
+retry after `not_found`, scroll hunts, actions that could have been one `run`). Read it after a long
+session.
 
 For each problem: what you did (the steps, short), what you expected, what happened, and
 where (screen, element `id` or text). Quote the relevant log lines. Separate real bugs

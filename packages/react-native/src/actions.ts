@@ -38,6 +38,7 @@ import {
   type TabFound,
 } from './inspect';
 import { sourcesOf, type ElementSource } from './source';
+import { closestMatches } from './closest';
 import { AUDIT_TYPES, auditScreen, type AuditFinding, type AuditType } from './checks';
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
@@ -351,6 +352,44 @@ function notFoundMessage(target: ParsedTarget): string {
   }
 }
 
+/** Where an off-screen frame lies from the screen: `above`, `below`, `left` or `right`; null when any of it is on screen. */
+function sideOffScreen(frame: Frame, screen: { width: number; height: number }): 'above' | 'below' | 'left' | 'right' | null {
+  if (visiblePart(frame, screen) !== null) return null;
+  if (frame.y + frame.height <= 0) return 'above';
+  if (frame.y >= screen.height) return 'below';
+  if (frame.x + frame.width <= 0) return 'left';
+  return 'right';
+}
+
+/**
+ * A `not_found`, with up to 3 closest matches when there are any (AGENT-TOOLS 1.12 §16.2):
+ * `Closest: e12 button "Save draft" id=save-draft, e30 text "Saved" (off screen, below).` An element
+ * the list doesn't show gets its ref here, so the agent can use it (refs count on from the highest given).
+ */
+async function notFoundError(snapshot: Snapshot, target: ParsedTarget): Promise<TaplineError> {
+  const base = notFoundMessage(target);
+  if (target.kind !== 'testID' && target.kind !== 'label' && target.kind !== 'text') return new TaplineError('not_found', base);
+  const pool = inFrontLayer(snapshot.entries.filter((entry) => entry.info.interesting && !entry.tab));
+  const picks = closestMatches(
+    target.kind,
+    target.value,
+    pool.map((entry) => ({ testID: entry.info.testID, label: entry.info.label, text: entry.info.text })),
+  ).map((index) => pool[index]);
+  const lines: string[] = [];
+  for (const entry of picks) {
+    if (!entry) continue;
+    const { info } = entry;
+    const shown = cutText(info.text !== '' ? info.text : (info.label ?? ''), 0, MAX_TEXT);
+    const frame = await measureFiber(entry.node.fiber);
+    const side = frame ? sideOffScreen(frame, snapshot.screen) : null;
+    const line = [refFor(entry.node.fiber), roleName(info), shown !== '' ? `"${shown}"` : '', info.testID ? `id=${info.testID}` : '']
+      .filter((part) => part !== '')
+      .join(' ');
+    lines.push(side ? `${line} (off screen, ${side})` : line);
+  }
+  return new TaplineError('not_found', lines.length > 0 ? `${base} Closest: ${lines.join(', ')}.` : base);
+}
+
 /**
  * What a `label` target matches: the element's own accessibility label, else its text. iOS forms
  * the label of an element that has none from the text inside it, and Tapwright reads that label, so
@@ -562,7 +601,7 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
     return { snapshot, entry: picked };
   }
   const [only, ...rest] = matches;
-  if (!only) throw new TaplineError('not_found', notFoundMessage(target));
+  if (!only) throw await notFoundError(snapshot, target);
   if (rest.length > 0) {
     const shown = matches.slice(0, 5);
     throw new TaplineError(
@@ -1002,24 +1041,44 @@ async function pressLike(
     const { route: _route, ...outcome } = await back({});
     return { element: toElement(entry, null), ...outcome };
   }
-  const actor = findActionable(snapshot, entry, kind, false);
   const handlerName = kind === 'press' ? 'onPress' : 'onLongPress';
   const actionName = kind === 'press' ? 'tap' : 'long-press';
-  if (!actor) {
-    if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is disabled; ${ENABLE_FIRST}.`);
-    throw notActionable('no_action', `${describe(entry)} has no ${actionName} action`);
+  const plan = (snap: Snapshot, picked: Entry): { actor: Entry; handler: ReturnType<typeof findHandler>; focusing: boolean } => {
+    const found = findActionable(snap, picked, kind, false);
+    if (!found) {
+      if (picked.info.disabled) throw notActionable('disabled', `${describe(picked)} is disabled; ${ENABLE_FIRST}.`);
+      throw notActionable('no_action', `${describe(picked)} has no ${actionName} action`);
+    }
+    if (found.info.disabled || picked.info.disabled) {
+      throw notActionable('disabled', `${describe(found)} is disabled; ${ENABLE_FIRST}.`);
+    }
+    // A finger on an input focuses it (AGENT-TOOLS v1.3): an input never answers no_action to a tap.
+    const isInput = kind === 'press' && found.info.actions.includes('type');
+    const own = isInput ? null : findHandler(found.node, handlerName);
+    if (!own && !isInput) {
+      throw notActionable('no_action', `${describe(found)} has no ${actionName} action`);
+    }
+    return { actor: found, handler: own, focusing: isInput };
+  };
+  let planned = plan(snapshot, entry);
+  // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2). The policy ran before this call.
+  let reach: Reach = {};
+  let current = snapshot;
+  if (params.force !== true) {
+    // What doesn't depend on where the element is comes first: an open alert is answered before anything scrolls.
+    assertNoBlockingAlert(planned.actor);
+    reach = await scrollIntoReach(snapshot, planned.actor, params.dryRun === true);
+    if (reach.scrolled) {
+      const again = await reresolve(planned.actor, kind, params.target);
+      current = again.snapshot;
+      planned = plan(again.snapshot, again.entry);
+      await assertRefoundOnScreen(current, planned.actor, reach);
+    }
   }
-  if (actor.info.disabled || entry.info.disabled) {
-    throw notActionable('disabled', `${describe(actor)} is disabled; ${ENABLE_FIRST}.`);
-  }
-  // A finger on an input focuses it (AGENT-TOOLS v1.3): an input never answers no_action to a tap.
-  const focusing = kind === 'press' && actor.info.actions.includes('type');
-  const handler = focusing ? null : findHandler(actor.node, handlerName);
-  if (!handler && !focusing) {
-    throw notActionable('no_action', `${describe(actor)} has no ${actionName} action`);
-  }
+  const { actor, handler, focusing } = planned;
   const { element, frame } = await elementFor(actor);
-  const forced = await checkedOrForced(params.force === true, () => assertReachable(snapshot, actor, frame));
+  if (reach.scrolls) return { element, dryRun: true, scrolls: true, ...(reach.point ? { point: reach.point } : {}), settledMs: 0 };
+  const forced = await checkedAfterScroll(params.force === true, reach, () => assertReachable(current, actor, frame));
   // A dry run (AGENT-TOOLS 1.8 §11.4): every check ran; nothing is touched.
   if (params.dryRun === true) return { element, dryRun: true, ...pointOf(frame), ...forced, settledMs: 0 };
   const closedKeyboard = closeKeyboardFor(actor);
@@ -1031,14 +1090,24 @@ async function pressLike(
     const own = appHandler(actor, 'onPress');
     if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
   }
-  return { element, ...keyboardNote(closedKeyboard), ...forced, ...(await settleOutcome()) };
+  return { element, ...(reach.scrolled ? { scrolled: true as const } : {}), ...keyboardNote(closedKeyboard), ...forced, ...(await settleOutcome()) };
 }
 
 /**
  * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
  * closed first, and `forced` (the reason word) when `force` let through what the checks refuse.
+ * `scrolled` says the element was off screen and was scrolled into view first (§16.2); on a dry run,
+ * `scrolls` says it would be and `point` is where the touch is expected after the scroll.
  */
-export type PressResult = { element: TaplineElement; closedKeyboard?: true; forced?: string; dryRun?: true; point?: { x: number; y: number } } & SettleOutcome;
+export type PressResult = {
+  element: TaplineElement;
+  closedKeyboard?: true;
+  forced?: string;
+  dryRun?: true;
+  scrolled?: true;
+  scrolls?: true;
+  point?: { x: number; y: number };
+} & SettleOutcome;
 
 /** Where a finger would land: the middle of the element (points, rounded). */
 function pointOf(frame: Frame | null): { point?: { x: number; y: number } } {
@@ -1222,7 +1291,7 @@ function setNativeText(entry: Entry, text: string): void {
 
 export async function typeText(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: string; secure?: true; closedKeyboard?: true; forced?: string; dryRun?: true } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: string; secure?: true; closedKeyboard?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   const submit = params.submit === true;
   if (params.text !== undefined && typeof params.text !== 'string') throw badParams('text must be a string');
@@ -1235,12 +1304,39 @@ export async function typeText(
   // Deleting from the end edits what is there, so it never replaces the whole text.
   const replace = params.replace !== false && !deleting;
 
-  const { snapshot, entry } = await resolveInput(null, params.target);
+  let { snapshot, entry } = await resolveInput(null, params.target);
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
+  // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2; the policy ran before this
+  // call). The input that already has focus is typed into without touching it, so it is not scrolled to.
+  let reach: Reach = {};
+  if (params.force !== true) assertNoBlockingAlert(entry);
+  if (params.force !== true && !ownsInstance(entry, keyboard.focusedInput())) {
+    reach = await scrollIntoReach(snapshot, entry, params.dryRun === true);
+    if (reach.scrolled) {
+      let again: Awaited<ReturnType<typeof resolveInput>>;
+      try {
+        again = await resolveInput(null, { ref: refFor(entry.node.fiber) });
+      } catch (error) {
+        // a list unmounted the row while scrolling: find it again by the original target
+        const refind = error instanceof TaplineError && error.code === 'not_found' ? refindTarget(entry, params.target) : null;
+        if (refind === null) throw error;
+        again = await resolveInput(null, refind);
+      }
+      assertSameTarget(entry, again.entry);
+      snapshot = again.snapshot;
+      entry = again.entry;
+      if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
+      await assertRefoundOnScreen(snapshot, entry, reach);
+    }
+  }
+  if (reach.scrolls) {
+    const { element } = await elementFor(entry);
+    return { element, value: displayText(currentInputValue(entry.node)), dryRun: true, scrolls: true, ...(reach.point ? { point: reach.point } : {}), settledMs: 0 };
+  }
   // Typing is a tap that focuses the input, then keys: a person couldn't do it where they couldn't tap,
   // so the checks are a tap's, with the same reasons and the same `force`. The input that already has
   // focus is the exception: the keyboard is up for it and a person types without touching it.
-  const forced = await checkedOrForced(params.force === true, async () => {
+  const forced = await checkedAfterScroll(params.force === true, reach, async () => {
     if (ownsInstance(entry, keyboard.focusedInput())) {
       // An alert takes the keyboard away even from the focused input: a person answers it first.
       assertNoBlockingAlert(entry);
@@ -1295,6 +1391,7 @@ export async function typeText(
     element: { ...rest, ...(next === '' && placeholder !== undefined ? { placeholder } : {}), value: shown },
     value: shown,
     ...(secure ? { secure: true as const } : {}),
+    ...(reach.scrolled ? { scrolled: true as const } : {}),
     ...keyboardNote(closedKeyboard),
     ...forced,
     ...outcome,
@@ -1410,6 +1507,18 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
     throw badParams('to: "target" needs an element (ref, id, label or text), not a point');
   }
   const { snapshot, entry: wanted } = await resolveTarget(raw);
+  const scrollers = scrollersOf(snapshot, wanted);
+  if (params.dryRun === true) {
+    const first = scrollers[0];
+    const target = (await elementFor(wanted)).element;
+    if (!first) return { element: target, target, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
+    return { element: (await elementFor(first)).element, target, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
+  }
+  return scrollEntryIntoView(snapshot, wanted, scrollers);
+}
+
+/** The scroll views that hold an element, innermost first. */
+function scrollersOf(snapshot: Snapshot, wanted: Entry): Entry[] {
   const scrollers: Entry[] = [];
   for (let p = wanted.node.parent; p >= 0; ) {
     const candidate = snapshot.entries[p];
@@ -1418,25 +1527,23 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
     if (!node) break;
     p = node.parent;
   }
-  if (params.dryRun === true) {
-    const first = scrollers[0];
-    const target = (await elementFor(wanted)).element;
-    if (!first) return { element: target, target, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
-    return { element: (await elementFor(first)).element, target, offset: { x: 0, y: 0 }, moved: false, dryRun: true, settledMs: 0 };
-  }
+  return scrollers;
+}
+
+/**
+ * How far the element is from clear inside a scroll view, per axis. The area is the part of the
+ * scroll view that is on screen between the bars. A scroll view that is itself out of view (a
+ * list further down the page) has no such part: there the element only has to be inside the
+ * scroll view, and the outer one brings both onto the screen. Without a scroll view the area is
+ * the screen between the bars.
+ */
+function shiftsFor(snapshot: Snapshot, wanted: Entry): (frame: Frame, area: Frame | null) => { x: number; y: number } {
   const { width, height } = snapshot.screen;
   const navBar = nativeNavBar(snapshot);
   const tabBar = nativeTabBar(snapshot);
   const clearTop = navBar && !inNavBarHeader(navBar, wanted.node.fiber) ? navBar.bottom : 0;
   const clearBottom = tabBar ? tabBar.top : height;
-  /**
-   * How far the element is from clear inside a scroll view, per axis. The area is the part of the
-   * scroll view that is on screen between the bars. A scroll view that is itself out of view (a
-   * list further down the page) has no such part: there the element only has to be inside the
-   * scroll view, and the outer one brings both onto the screen. Without a scroll view the area is
-   * the screen between the bars.
-   */
-  const shiftsIn = (frame: Frame, area: Frame | null): { x: number; y: number } => {
+  return (frame, area) => {
     let left = Math.max(area?.x ?? 0, 0);
     let right = Math.min(area ? area.x + area.width : width, width);
     let top = Math.max(area?.y ?? 0, clearTop);
@@ -1449,7 +1556,11 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
     }
     return { x: axisShift(frame.x, frame.width, left, right), y: axisShift(frame.y, frame.height, top, bottom) };
   };
+}
 
+/** The scrolling half of `scroll` with `to: "target"`: scrolls the given scroll views until `wanted` is clear. */
+async function scrollEntryIntoView(snapshot: Snapshot, wanted: Entry, scrollers: Entry[]): Promise<ScrollResult> {
+  const shiftsIn = shiftsFor(snapshot, wanted);
   let settledMs = 0;
   let settleCapMs: number | undefined;
   let scrolled: { entry: Entry; offset: { x: number; y: number } } | null = null;
@@ -1534,6 +1645,189 @@ async function scrollToTarget(params: Record<string, unknown>): Promise<ScrollRe
   }
   const { element } = await elementFor(scrolled.entry);
   return { element, target, offset: scrolled.offset, moved: true, reached, ...settle };
+}
+
+/**
+ * What an action did about a target that is off screen (AGENT-TOOLS 1.12 §16.2): `scrolled` when its scroll
+ * views brought it on screen first; `scrolls` and `point` on a dry run, which touches nothing.
+ */
+interface Reach {
+  scrolled?: true;
+  scrolls?: true;
+  point?: { x: number; y: number };
+  /** The element could not be measured after the scroll (a list unmounted its row): the caller finds it again and checks it is on screen. */
+  unverified?: true;
+}
+
+/** The part of a frame that is on the screen, or null when none of it is. */
+function visiblePart(frame: Frame, screen: { width: number; height: number }): Frame | null {
+  const left = Math.max(frame.x, 0);
+  const top = Math.max(frame.y, 0);
+  const right = Math.min(frame.x + frame.width, screen.width);
+  const bottom = Math.min(frame.y + frame.height, screen.height);
+  return right <= left || bottom <= top ? null : { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+/**
+ * An action on an element that is in the tree but entirely off screen scrolls it into view first, clear
+ * of the bars (§16.2). The caller has run the policy check already. The touch checks (covered, behind an
+ * alert, under a bar) run afterwards, as for any element. Refused as `off_screen`, with the reason, when
+ * no scroll can bring it on screen. `dry` predicts the point after the scroll and scrolls nothing.
+ */
+async function scrollIntoReach(snapshot: Snapshot, entry: Entry, dry: boolean): Promise<Reach> {
+  const frame = await measureFiber(entry.node.fiber);
+  if (frame === null) return {};
+  // Partly on screen (over the edge, or under a bar): scrolled clear too, with one attempt; if that
+  // can't be done the action goes on as before and the touch checks decide. Never refused for this.
+  const partial = visiblePart(frame, snapshot.screen) !== null;
+  if (partial && !isNotClear(snapshot, entry, frame)) return {};
+  const { width, height } = snapshot.screen;
+  const name = describe(entry);
+  const where = `at ${Math.round(frame.x)},${Math.round(frame.y)}; the screen is ${width}x${height}`;
+  const scrollers = scrollersOf(snapshot, entry);
+  if (scrollers.length === 0 && partial) return {};
+  if (scrollers.length === 0) {
+    throw notActionable(
+      'off_screen',
+      `${name} is off screen (${where}). It isn't inside a scroll view, so no scroll can bring it on screen; pass force: true to call its handler anyway.`,
+    );
+  }
+  if (dry) {
+    const shiftsIn = shiftsFor(snapshot, entry);
+    let predicted = frame;
+    for (const scroller of scrollers) {
+      const [area, state] = await Promise.all([measureFiber(scroller.node.fiber), measureScrollState(scroller)]);
+      if (!area) continue;
+      const horizontal = findProp(scroller.node, 'horizontal') === true;
+      const shifts = shiftsIn(predicted, area);
+      const wanted = horizontal ? shifts.x : shifts.y;
+      if (Math.abs(wanted) < 1) continue;
+      let delta = wanted;
+      if (state) {
+        const current = horizontal ? state.offset.x : state.offset.y;
+        const max = horizontal ? state.max.x : state.max.y;
+        delta = Math.max(Math.min(0, current), Math.min(current + wanted, Math.max(max, current))) - current;
+      }
+      predicted = horizontal ? { ...predicted, x: predicted.x - delta } : { ...predicted, y: predicted.y - delta };
+    }
+    if (partial) {
+      return predicted.x === frame.x && predicted.y === frame.y ? {} : { scrolls: true, ...pointOf(visiblePart(predicted, snapshot.screen)) };
+    }
+    const seen = visiblePart(predicted, snapshot.screen);
+    if (seen === null) {
+      throw notActionable(
+        'off_screen',
+        `${name} is off screen (${where}), and its scroll view can't bring it on screen: it is as far as it goes; pass force: true to call its handler anyway.`,
+      );
+    }
+    return { scrolls: true, ...pointOf(seen) };
+  }
+  let outcome: ScrollResult;
+  try {
+    outcome = await scrollEntryIntoView(snapshot, entry, scrollers);
+  } catch (error) {
+    if (partial && error instanceof TaplineError) return {};
+    throw error;
+  }
+  const after = await measureFiber(entry.node.fiber);
+  if (partial) {
+    if (!outcome.moved) return {};
+    return after === null ? { scrolled: true, unverified: true } : { scrolled: true };
+  }
+  // A list may have unmounted the row on the way: the caller finds it again, and checks it is on screen.
+  if (after === null && outcome.moved) return { scrolled: true, unverified: true };
+  if (after === null || visiblePart(after, snapshot.screen) === null) {
+    throw notActionable(
+      'off_screen',
+      `${name} is off screen (${where}), and scrolling its scroll view${outcome.moved ? '' : ' (already as far as it goes)'} didn't bring it on screen; pass force: true to call its handler anyway.`,
+    );
+  }
+  return outcome.moved ? { scrolled: true } : {};
+}
+
+/** Whether a partly visible element is off the screen edge or under a bar, and would fit clear of them if scrolled. */
+function isNotClear(snapshot: Snapshot, entry: Entry, frame: Frame): boolean {
+  const navBar = nativeNavBar(snapshot);
+  const tabBar = nativeTabBar(snapshot);
+  const clearTop = navBar && !inNavBarHeader(navBar, entry.node.fiber) ? navBar.bottom : 0;
+  const clearBottom = tabBar ? tabBar.top : snapshot.screen.height;
+  // Taller or wider than the room there is: no scroll makes it clear, so it is left as it is.
+  if (frame.height > clearBottom - clearTop || frame.width > snapshot.screen.width) return false;
+  const shift = shiftsFor(snapshot, entry)(frame, null);
+  return Math.abs(shift.x) >= 1 || Math.abs(shift.y) >= 1;
+}
+
+/** A target that finds an element again by what it shows: the app's own target, else its id, label or text. */
+function refindTarget(entry: Entry, original: unknown): Record<string, unknown> | null {
+  if (isRecord(original) && original.ref === undefined && original.x === undefined && original.y === undefined) return original;
+  const { testID, label, text } = entry.info;
+  if (testID) return { testID };
+  if (label) return { label };
+  if (text !== '') return { text };
+  return null;
+}
+
+/**
+ * The same element after a scroll, from a fresh snapshot (the list may have laid out other rows on the
+ * way). When a list unmounted the row, the ref is gone: it is found again by the original target.
+ */
+async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: unknown): Promise<Resolved> {
+  let found: Resolved;
+  try {
+    found = await resolveTarget({ ref: refFor(entry.node.fiber) }, hint);
+  } catch (error) {
+    if (!(error instanceof TaplineError) || error.code !== 'not_found') throw error;
+    const again = refindTarget(entry, original);
+    if (again === null) throw error;
+    found = await resolveTarget(again, hint);
+  }
+  assertSameTarget(entry, found.entry);
+  return found;
+}
+
+/**
+ * After a scroll the element found again must still be the one the safety check saw: a list that recycles its rows
+ * can hand the same component another row ("Continue" becomes "Delete account"). A changed id, label or text is
+ * refused before anything is touched (Codex review of 1.4.0).
+ */
+function assertSameTarget(before: Entry, after: Entry): void {
+  // id, label and text each on their own: a row can keep its id and accessibility label while its text changes
+  const was = { id: before.info.testID, name: labelOf(before.info) };
+  const now = { id: after.info.testID, name: labelOf(after.info) };
+  const same = was.id === now.id && before.info.label === after.info.label && before.info.text === after.info.text;
+  if (same) return;
+  if (was.name === now.name) {
+    was.name = before.info.text;
+    now.name = after.info.text;
+  }
+  throw new TaplineError(
+    'not_found',
+    `the element changed while the list scrolled (it was ${JSON.stringify(was.name || was.id || "?")}, now ${JSON.stringify(now.name || now.id || "?")}); nothing was touched: look, then try again`,
+  );
+}
+
+/** After an element was found again because it could not be measured: it must now be on screen. */
+async function assertRefoundOnScreen(snapshot: Snapshot, entry: Entry, reach: Reach): Promise<void> {
+  if (!reach.unverified) return;
+  const frame = await measureFiber(entry.node.fiber);
+  if (frame === null || visiblePart(frame, snapshot.screen) === null) {
+    throw notActionable(
+      'off_screen',
+      `${describe(entry)} is off screen, and scrolling its scroll view didn't bring it on screen; pass force: true to call its handler anyway.`,
+    );
+  }
+}
+
+/** `checkedOrForced`, and a refusal that comes after Tapline scrolled to the element says so. */
+async function checkedAfterScroll(force: boolean, reach: Reach, check: () => Promise<void> | void): Promise<{ forced?: string }> {
+  try {
+    return await checkedOrForced(force, check);
+  } catch (error) {
+    if (reach.scrolled && error instanceof TaplineError && error.code === 'not_actionable') {
+      throw new TaplineError(error.code, `${error.message} (after scrolling to it)`, error.refs, error.candidates);
+    }
+    throw error;
+  }
 }
 
 export async function scroll(rawParams: unknown): Promise<ScrollResult> {
@@ -1734,18 +2028,40 @@ async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
 
 export async function toggle(
   rawParams: unknown,
-): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; point?: { x: number; y: number } } & SettleOutcome> {
+): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
-  const { snapshot, entry } = await resolveTarget(params.target, 'toggle');
-  const control = findActionable(snapshot, entry, 'toggle', true);
-  if (!control) throw notActionable('no_action', `${describe(entry)} is not a switch`);
-  if (control.info.disabled) throw notActionable('disabled', `${describe(control)} is disabled; ${ENABLE_FIRST}.`);
-  const handler = findHandler(control.node, 'onValueChange');
-  if (!handler) throw notActionable('no_action', `${describe(control)} is not a switch`);
+  const first = await resolveTarget(params.target, 'toggle');
+  const plan = (snap: Snapshot, picked: Entry): { control: Entry; handler: NonNullable<ReturnType<typeof findHandler>> } => {
+    const found = findActionable(snap, picked, 'toggle', true);
+    if (!found) throw notActionable('no_action', `${describe(picked)} is not a switch`);
+    if (found.info.disabled) throw notActionable('disabled', `${describe(found)} is disabled; ${ENABLE_FIRST}.`);
+    const own = findHandler(found.node, 'onValueChange');
+    if (!own) throw notActionable('no_action', `${describe(found)} is not a switch`);
+    return { control: found, handler: own };
+  };
+  let snapshot = first.snapshot;
+  let planned = plan(snapshot, first.entry);
+  // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2). The policy ran before this call.
+  let reach: Reach = {};
+  if (params.force !== true) {
+    assertNoBlockingAlert(planned.control);
+    reach = await scrollIntoReach(snapshot, planned.control, params.dryRun === true);
+    if (reach.scrolled) {
+      const again = await reresolve(planned.control, 'toggle', params.target);
+      snapshot = again.snapshot;
+      planned = plan(snapshot, again.entry);
+      await assertRefoundOnScreen(snapshot, planned.control, reach);
+    }
+  }
+  const { control, handler } = planned;
   const current = control.info.checked === true;
   const next = typeof params.value === 'boolean' ? params.value : !current;
-  const forced = await checkedOrForced(params.force === true, async () =>
+  if (reach.scrolls) {
+    const { element } = await elementFor(control);
+    return { element, value: next, dryRun: true, scrolls: true, ...(reach.point ? { point: reach.point } : {}), settledMs: 0 };
+  }
+  const forced = await checkedAfterScroll(params.force === true, reach, async () =>
     assertReachable(snapshot, control, await measureFiber(control.node.fiber)),
   );
   if (params.dryRun === true) {
@@ -1755,13 +2071,13 @@ export async function toggle(
   if (typeof params.value === 'boolean' && control.info.checked === params.value) {
     // Already there: a person wouldn't touch it, so the handler isn't called and the keyboard stays.
     const { element } = await elementFor(control);
-    return { element, value: params.value, unchanged: true, settledMs: 0 };
+    return { element, value: params.value, unchanged: true, ...(reach.scrolled ? { scrolled: true as const } : {}), settledMs: 0 };
   }
   const closedKeyboard = closeKeyboardFor(control);
   callHandler('onValueChange', handler, [next]);
   const outcome = await settleOutcome();
   const { element } = await elementFor(control);
-  return { element: { ...element, checked: next }, value: next, ...keyboardNote(closedKeyboard), ...forced, ...outcome };
+  return { element: { ...element, checked: next }, value: next, ...(reach.scrolled ? { scrolled: true as const } : {}), ...keyboardNote(closedKeyboard), ...forced, ...outcome };
 }
 
 /* -------------------------------------------------------------------------- */

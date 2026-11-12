@@ -132,8 +132,8 @@ export interface TreeResult {
   offScreen?: { above: number; below: number };
   /** Open alerts (Alert.alert / Alert.prompt) the app showed, oldest first. */
   alerts?: TreeAlert[];
-  /** Network requests still running (fetch / XMLHttpRequest); absent when none. */
-  network?: { inFlight: number };
+  /** Network requests still running (fetch / XMLHttpRequest) and the condition Tapline put on them; absent when neither. */
+  network?: { inFlight?: number; condition?: 'offline' | '3g' | 'lossy' };
   /** True while the software keyboard is up; absent when it is down or isn't known. */
   keyboard?: true;
   /** The focused screen, when the app uses React Navigation (Expo Router included). */

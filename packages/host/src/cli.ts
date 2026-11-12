@@ -18,6 +18,7 @@ import { setUpDevServe } from "./dev.js";
 import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runInit } from "./init.js";
+import { runReport } from "./report.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { failureWithDiff, junitXml } from "./script.js";
@@ -42,6 +43,8 @@ Commands:
            also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
   replay   Replay scripts without an agent: tapline replay <file.json | name>… [--junit out.xml] [--update-references]
            (exit 0: all held, 1: one stopped, 2: one couldn't start)
+  report   Where an agent's calls went and the waste in them, from the action log:
+           tapline report [--since <90m | 2h | 1d | date | epoch ms>] (default: the last 24 hours)
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
            Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills);
@@ -253,6 +256,7 @@ async function main(argv: string[]): Promise<number> {
       "https-port": { type: "string" },
       stop: { type: "boolean" },
       wait: { type: "string" },
+      since: { type: "string" },
       junit: { type: "string" },
       "update-references": { type: "boolean" },
       "no-log": { type: "boolean" },
@@ -332,6 +336,12 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return runReplay(await resolveConfig(options), scripts, values.wait, values.junit, values["update-references"] === true);
+    }
+    case "report": {
+      // Reads the action log; needs no host and no app.
+      const outcome = runReport({ dir: join(configDir(), "log"), ...(values.since !== undefined ? { since: values.since } : {}) });
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
     }
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);

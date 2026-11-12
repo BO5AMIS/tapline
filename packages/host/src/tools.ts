@@ -9,11 +9,13 @@ import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { alertNotes, networkLine, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
+import { reportFor } from "./report.js";
+import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
@@ -288,6 +290,9 @@ export const toolShapes = {
     tap: targetField.optional().describe("Tap this first, then measure what it sets off"),
   },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
+  session_report: {
+    since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
+  },
   run: {
     steps: z
       .array(stepSchema)
@@ -430,6 +435,8 @@ export interface ToolsOptions {
   pairedBefore?: () => boolean;
   /** Where the action log goes (AGENT-TOOLS 1.8 §12); none: no log. */
   logDir?: string;
+  /** The agent's client id for the call log (the MCP client's name); read at each call, as it is known after initialize. */
+  clientId?: () => string | undefined;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
   policy?: PolicyFile;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
@@ -449,6 +456,9 @@ export interface ToolsOptions {
   reloadWaitMs?: number;
   /** Extra delay after a reload before looking. Default 1500 ms. */
   reloadSettleMs?: number;
+  /** compare_screen waits for two pictures in a row to agree: the gap between them and the cap (ms; tests set them low). */
+  stillGapMs?: number;
+  stillCapMs?: number;
   /**
    * How `look` delivers screenshots: "inline" puts the image in the tool result; "file" saves it
    * and returns only its path, so a lead agent can hand it to a smaller model without seeing it.
@@ -781,7 +791,19 @@ const dryRunResultSchema = z.object({
   dryRun: z.literal(true),
   point: z.object({ x: z.number(), y: z.number() }).optional(),
   value: z.unknown().optional(),
+  /** The element is off screen and the action would scroll it into view first (§16.2); `point` is where it expects to touch after. */
+  scrolls: z.boolean().optional(),
 });
+
+/** Whether an app's answer says the action scrolled the element into view first (AGENT-TOOLS 1.12 §16.2). */
+function scrolledFirst(result: unknown): boolean {
+  return typeof result === "object" && result !== null && "scrolled" in result && result.scrolled === true;
+}
+
+/** `Scrolled to it, then tapped …` when the action scrolled first: the sentence goes on after a lead-in. */
+function afterScroll(result: unknown, sentence: string): string {
+  return scrolledFirst(result) ? `Scrolled to it, then ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}` : sentence;
+}
 
 /** For an app without dry runs: every element on its list the target could mean. */
 function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] {
@@ -817,6 +839,42 @@ const CRASH_NOTED_TOOLS = [
   "openUrl", "logs", "reload", "performance", "wait",
 ] as const satisfies readonly (keyof TaplineTools)[];
 
+/** Every tool the agent calls, by handler name (the call log numbers these). */
+const CALL_TOOLS: Readonly<Record<string, string>> = {
+  apps: "apps", openApp: "open_app", pair: "pair", look: "look", run: "run", inspect: "inspect", audit: "audit",
+  checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
+  replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
+  appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report",
+};
+/** Calls logged with `"kind": "read"` when they logged no action of their own. */
+const READ_TOOLS: ReadonlySet<string> = new Set([
+  "apps", "open_app", "pair", "look", "inspect", "audit", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
+  "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
+]);
+/** A look's picture arguments for the call log: booleans and numbers only; undefined when it gave none. */
+function pictureArgs(input: Record<string, unknown>): { screenshot?: boolean; width?: number; labels?: boolean } | undefined {
+  const out: { screenshot?: boolean; width?: number; labels?: boolean } = {};
+  if (typeof input["screenshot"] === "boolean") out.screenshot = input["screenshot"];
+  if (typeof input["width"] === "number" && Number.isFinite(input["width"])) out.width = input["width"];
+  if (typeof input["labels"] === "boolean") out.labels = input["labels"];
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Tools whose answer carries the changes or the full list unless the call said `look: false`. */
+const LISTING_TOOLS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "run"]);
+/** Tools that act on one element: after a run of scrolls they log whether the element was already in the list. */
+const ELEMENT_ACTIONS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "toggle"]);
+
+/** What a call in flight collects for the call log. */
+interface CallState {
+  call: number;
+  tool: string;
+  /** The call before this one was a scroll. */
+  afterScrolls: boolean;
+  entries: Array<{ entry: Omit<ActionLogEntry, "t" | "source">; at: Date }>;
+}
+
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
   private readonly reloadWaitMs: number;
@@ -828,9 +886,28 @@ export class TaplineTools {
   private batch: { id: string; step: number } | undefined;
   /** Extra fields for the next log line (a dry run, a confirmed touch). */
   private logExtra: Partial<ActionLogEntry> | undefined;
+  /** The call log (AGENT-TOOLS 1.11 §16.1): this run's id, when it began, and how many calls the agent has made. */
+  private readonly sessionTag = randomBytes(4).toString("hex");
+  private readonly startedAt = Date.now();
+  private callCount = 0;
+  /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
+  private readonly callScope = new AsyncLocalStorage<CallState>();
+  private clientIdFn: (() => string | undefined) | undefined;
+  /** The tool of the previous call, for scroll runs. */
+  private prevCallTool: string | undefined;
+  /**
+   * The latest full element list the agent was given. `stale`: only changes since. `unseen`: an action since then
+   * answered with no list and no changes (`look: false`), so the screen may be another one: neither "in the
+   * list" nor "not in it" can be said until a list is seen again.
+   */
+  private listBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
+  /** The list as it was before the current run of scrolls began. */
+  private scrollBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   readonly confirmations: Confirmations;
   private readonly policy: PolicyFile;
   private readonly reloadSettleMs: number;
+  private readonly stillGapMs: number;
+  private readonly stillCapMs: number;
   private readonly noScreenshot = new Set<string>();
   private readonly shotFiles: string[] = [];
   /** Sessions this agent has had an element list for (so later lists can be just the changes). */
@@ -879,6 +956,8 @@ export class TaplineTools {
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
+    this.stillGapMs = options.stillGapMs ?? 150;
+    this.stillCapMs = options.stillCapMs ?? 2000;
     // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
     host.on("touch", (session) => {
@@ -892,6 +971,126 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args)));
     }
+    // Outermost: every call of the agent is numbered and logged (reads too) once its answer is known.
+    for (const [name, tool] of Object.entries(CALL_TOOLS)) {
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.loggedCall(tool, args[0], () => method.apply(this, args)));
+    }
+  }
+
+  /** The agent's client id for the call log; the MCP server passes the client's name once it is known. */
+  setClientId(read: () => string | undefined): void {
+    this.clientIdFn = read;
+  }
+
+  /** A call refused before it reached its tool (an unknown argument): numbered and logged like any other, so the report counts it. */
+  rejectedCall(tool: string, args: unknown, answer: CallToolResult): CallToolResult {
+    const result = this.loggedCall(tool, args, () => answer);
+    return result instanceof Promise ? answer : result;
+  }
+
+  /** Numbers a call of the agent and logs it when its answer is known (§16.1). Calls within a call (`run`'s steps) are part of it. */
+  private loggedCall(
+    tool: string,
+    args: unknown,
+    run: () => CallToolResult | Promise<CallToolResult>,
+  ): CallToolResult | Promise<CallToolResult> {
+    if (this.actionLog === null || this.callScope.getStore() !== undefined) return run();
+    const afterScrolls = this.prevCallTool === "scroll";
+    if (tool === "scroll" && !afterScrolls) this.scrollBase = this.listBase;
+    this.prevCallTool = tool;
+    const state: CallState = { call: ++this.callCount, tool, afterScrolls, entries: [] };
+    const began = new Date();
+    let result: CallToolResult | Promise<CallToolResult>;
+    try {
+      result = this.callScope.run(state, run);
+    } catch (error) {
+      this.flushCall(state, args, began, undefined);
+      throw error;
+    }
+    if (result instanceof Promise) {
+      return result.then(
+        (answer) => {
+          this.flushCall(state, args, began, answer);
+          return answer;
+        },
+        (error: unknown) => {
+          this.flushCall(state, args, began, undefined);
+          throw error;
+        },
+      );
+    }
+    this.flushCall(state, args, began, result);
+    return result;
+  }
+
+  private flushCall(state: CallState, args: unknown, began: Date, answer: CallToolResult | undefined): void {
+    if (this.actionLog === null) return;
+    const said = (answer?.content ?? []).map((block) => (block.type === "text" ? block.text : ""));
+    const size = said.reduce((sum, part) => sum + part.length, 0);
+    const failed = answer === undefined || answer.isError === true;
+    const input = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {};
+    const listed =
+      LISTING_TOOLS.has(state.tool) && !failed && input["look"] !== false && input["dry_run"] !== true && !(state.tool === "app_command" && input["name"] === undefined);
+    const client = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60);
+    const common = {
+      session: this.sessionTag,
+      call: state.call,
+      ...(client !== undefined && client !== "" ? { client } : {}),
+      size,
+    };
+    const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
+    if (state.entries.length > 0) {
+      // Actions that went through, in a call that failed after them (an expectation that didn't hold): the call's
+      // own outcome goes with them, so the report doesn't count it as a success (Codex review of 1.4.0).
+      const callFailed = failed && state.entries.every(({ entry }) => entry.ok) ? { call_failed: code ?? "internal" } : {};
+      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, at);
+      return;
+    }
+    // A call that logged no action: a read, or an action refused before it began (then without `kind`).
+    const session = this.host.current();
+    const lookArgs = state.tool === "look" ? pictureArgs(input) : undefined;
+    this.actionLog.write(
+      {
+        by: "agent",
+        tool: state.tool,
+        ...(READ_TOOLS.has(state.tool) ? { kind: "read" as const } : {}),
+        // the target only (as given); typed text, pictures and log text never
+        ...(loggedTarget(args).target !== undefined ? { target: loggedTarget(args).target } : {}),
+        ok: !failed,
+        ...(code !== undefined ? { code } : {}),
+        ms: Date.now() - began.getTime(),
+        ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
+        ...common,
+        ...(listed ? { listed: true } : {}),
+        ...(lookArgs !== undefined ? { look_args: lookArgs } : {}),
+      },
+      began,
+    );
+  }
+
+  /**
+   * Whether a touch's target was in the list the agent had before its run of scrolls: true (it was), false (it
+   * wasn't), undefined (can't be known: no list, a point, or a list that only changed since).
+   */
+  private knownBeforeScrolls(params: unknown): boolean | undefined {
+    const base = this.scrollBase;
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (base === undefined || typeof target !== "object" || target === null) return undefined;
+    const t = target as Record<string, unknown>;
+    if (!["ref", "testID", "label", "text"].some((key) => typeof t[key] === "string")) return undefined;
+    if (base.unseen) return undefined;
+    if (candidatesFor(target, base.elements).length > 0) return true;
+    return base.stale ? undefined : false;
+  }
+
+  /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
+  sessionReport(args: Shape<"session_report"> = {}): CallToolResult {
+    const dir = this.options.logDir;
+    if (dir === undefined) return fail("Error unsupported: the action log is off (--no-log), so there is nothing to report.");
+    return text(reportFor(dir, args.since ?? this.startedAt, this.sessionTag));
   }
 
   /**
@@ -1352,6 +1551,7 @@ export class TaplineTools {
     let response: CallToolResult;
     const live = this.host.current();
     if (args.look === false || live === undefined) {
+      this.markListUnseen();
       response = text([first, ...tail].join("\n"));
     } else {
       response = await this.withLook(live, first, args.screenshot === true);
@@ -1618,6 +1818,9 @@ export class TaplineTools {
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
     const changesText = askChanges ? formatChanges(tree, { alertGone }) : null;
+    // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
+    if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
+    else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
@@ -1681,6 +1884,11 @@ export class TaplineTools {
     return ["Note: a person used the app since your last look."];
   }
 
+  /** An action answered with no list and no changes: the call log can't say what is in the list any more. */
+  private markListUnseen(): void {
+    if (this.listBase !== undefined) this.listBase = { ...this.listBase, unseen: true };
+  }
+
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
   private async act(
     method: string,
@@ -1738,6 +1946,7 @@ export class TaplineTools {
       ? `Settled in ${(settledMs / 1000).toFixed(2)} s.`
       : undefined;
     if (withLook === false) {
+      this.markListUnseen();
       this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
       response = text([line, ...this.takePersonNote()].join("\n"));
     } else {
@@ -1858,7 +2067,8 @@ export class TaplineTools {
         ? elementSchema.safeParse((result as { element: unknown }).element)
         : null;
     const session = this.host.current();
-    this.actionLog.write({
+    const state = by === "agent" ? this.callScope.getStore() : undefined;
+    const entry: Omit<ActionLogEntry, "t" | "source"> = {
       by,
       tool,
       ...loggedTarget(params),
@@ -1871,8 +2081,19 @@ export class TaplineTools {
       ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
       ...(by === "agent" && this.batch !== undefined ? { batch: this.batch } : {}),
       ...(by === "agent" ? (this.logExtra ?? {}) : {}),
-    });
+    };
     if (by === "agent") this.logExtra = undefined;
+    if (state === undefined) {
+      this.actionLog.write(entry);
+      return;
+    }
+    if (state.tool !== tool) entry.of = state.tool;
+    // After scrolls: was the target already in the list before the first one? (a scroll hunt is exact when it was)
+    if (state.afterScrolls && state.tool === tool && ELEMENT_ACTIONS.has(tool)) {
+      const known = this.knownBeforeScrolls(params);
+      if (known !== undefined) entry.in_list = known;
+    }
+    state.entries.push({ entry, at: new Date() });
   }
 
   private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string, reason?: string): void {
@@ -2129,7 +2350,7 @@ export class TaplineTools {
   private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
     let shot: ShotImage;
     try {
-      shot = await this.takeShot(session.id, options.width, 0.9);
+      shot = await this.stillShot(session.id, options.width, 0.9);
     } catch (error) {
       return { kind: "error", line: describeError(error) };
     }
@@ -2272,10 +2493,33 @@ export class TaplineTools {
     }
   }
 
+  /**
+   * A picture of the screen once it stopped moving: two in a row about 150 ms apart that agree (under 0.1% changed),
+   * at most 2 s. The app's settle sees React commits, not a native transition, so a screen pushed by the action before
+   * can still be sliding in (found on the phone, 2026-11-12). Past the cap, the last picture.
+   */
+  private async stillShot(sessionId: string, width: number, quality: number): Promise<ShotImage> {
+    let previous = await this.takeShot(sessionId, width, quality);
+    const started = Date.now();
+    while (Date.now() - started < this.stillCapMs) {
+      await sleep(this.stillGapMs);
+      const next = await this.takeShot(sessionId, width, quality);
+      if (next.data === previous.data) return next;
+      try {
+        const diff = diffImages(previous, next, { mask: [] });
+        if (diff.changedPercent < 0.1) return next;
+      } catch {
+        return next; // sizes differ (a rotation): nothing to wait for
+      }
+      previous = next;
+    }
+    return previous;
+  }
+
   /** Takes the screen and saves it as the reference `name` in `dir`. */
   private async saveReferenceHere(session: SessionInfo, name: string, width: number, dir: string): Promise<CallToolResult> {
     try {
-      return this.writeReference(dir, name, await this.takeShot(session.id, width, 0.9));
+      return this.writeReference(dir, name, await this.stillShot(session.id, width, 0.9));
     } catch (error) {
       return fail(describeError(error));
     }
@@ -2436,7 +2680,7 @@ export class TaplineTools {
     const save = (shot: ShotImage): CallToolResult => this.writeReference(folder, name, shot);
     if (args.update === true) {
       try {
-        return save(await this.takeShot(session.id, width, 0.9));
+        return save(await this.stillShot(session.id, width, 0.9));
       } catch (error) {
         return fail(describeError(error));
       }
@@ -2752,7 +2996,7 @@ export class TaplineTools {
         this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
         return fail(this.blockedLine(verdict.element, verdict.word));
       }
-      const would = this.wouldLine(tool, shown, resolved.point, resolved.value);
+      const would = this.wouldLine(tool, shown, resolved.point, resolved.value, resolved.scrolls);
       const needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
@@ -2877,7 +3121,7 @@ export class TaplineTools {
       return fail(resolved.text);
     }
     this.showAction("agent", method, resolved.elements[0] !== undefined ? { element: resolved.elements[0] } : undefined, params);
-    return text([this.wouldLine(tool, resolved.elements[0], resolved.point, resolved.value), ...this.takePersonNote()].join("\n"));
+    return text([this.wouldLine(tool, resolved.elements[0], resolved.point, resolved.value, resolved.scrolls), ...this.takePersonNote()].join("\n"));
   }
 
   /**
@@ -2889,7 +3133,7 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
   ): Promise<
-    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown }
+    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown; scrolls?: true }
     | { kind: "error"; text: string; code: string; reason?: string }
   > {
     if (session.capabilities.includes("dryRun")) {
@@ -2912,6 +3156,7 @@ export class TaplineTools {
         elements: parsed.data.element ? [parsed.data.element] : [],
         ...(parsed.data.point !== undefined ? { point: parsed.data.point } : {}),
         ...(parsed.data.value !== undefined ? { value: parsed.data.value } : {}),
+        ...(parsed.data.scrolls === true ? { scrolls: true } : {}),
       };
     }
     // An app without dry runs: a swipe is checked by what lies under its start.
@@ -2941,26 +3186,35 @@ export class TaplineTools {
   }
 
   /** `Would tap e12 button "Delete trip" at 215,640.` */
-  private wouldLine(tool: string, element: TreeElement | undefined, point: { x: number; y: number } | undefined, value: unknown): string {
-    const name = element !== undefined ? this.shortName(element, true) : "the element";
+  private wouldLine(
+    tool: string,
+    element: TreeElement | undefined,
+    point: { x: number; y: number } | undefined,
+    value: unknown,
+    scrolls?: boolean,
+  ): string {
+    const name = element !== undefined ? this.shortName(element, true, scrolls === true) : "the element";
+    // Off screen (§16.2): `Would scroll to it, then tap e41 button "Save" id=save at 215,640.` The point is the one expected after the scroll.
+    const lead = scrolls === true ? "Would scroll to it, then" : "Would";
     const at = point !== undefined ? ` at ${point.x},${point.y}` : "";
     switch (tool) {
       case "long_press":
-        return `Would long-press ${name}${at}.`;
+        return `${lead} long-press ${name}${at}.`;
       case "toggle":
-        return `Would toggle ${name}${typeof value === "boolean" ? ` to ${String(value)}` : ""}${at}.`;
+        return `${lead} toggle ${name}${typeof value === "boolean" ? ` to ${String(value)}` : ""}${at}.`;
       case "type_text":
-        return `Would type into ${name}.`;
+        return `${lead} type into ${name}${scrolls === true ? at : ""}.`;
       default:
-        return `Would tap ${name}${at}.`;
+        return `${lead} tap ${name}${at}.`;
     }
   }
 
   /** `e12 button "Delete trip"`: ref (when asked), role and name, nothing else. */
-  private shortName(element: TreeElement, withRef: boolean): string {
+  private shortName(element: TreeElement, withRef: boolean, withId = false): string {
     return formatElement(
       {
         ref: withRef ? element.ref : "",
+        ...(withId ? { testID: element.testID ?? null } : {}),
         role: element.role ?? null,
         type: element.type ?? null,
         label: element.label ?? null,
@@ -2988,7 +3242,7 @@ export class TaplineTools {
   tap(args: Shape<"tap">): Promise<CallToolResult> {
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
-      this.act("press", params, (r) => `Tapped ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
@@ -2996,7 +3250,7 @@ export class TaplineTools {
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
-      this.act("longPress", params, (r) => `Long-pressed ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
@@ -3018,7 +3272,7 @@ export class TaplineTools {
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
-        return `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`;
+        return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
       args.look,
       args.screenshot,
@@ -3095,8 +3349,8 @@ export class TaplineTools {
         params,
         (r) => {
           const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
-          if (unchanged(r)) return `${this.elementName(r)} is already ${JSON.stringify(value)}.`;
-          return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
+          if (unchanged(r)) return `${scrolledFirst(r) ? "Scrolled to it; " : ""}${this.elementName(r)} is already ${JSON.stringify(value)}.`;
+          return afterScroll(r, `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`);
         },
         args.look,
         args.screenshot,
@@ -3127,11 +3381,30 @@ export class TaplineTools {
       );
     }
     const name = args.name.trim();
+    // AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes.
+    if (name === "network") {
+      const mode = (args.args as { mode?: unknown } | undefined)?.mode;
+      const app = this.host.current()?.app;
+      const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
+      const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
+      if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
+        const where = own?.block !== undefined && app !== undefined ? `for ${app.name}` : "here";
+        return fail(`Error not_allowed: blocked: the safety policy blocks network ${where}.`);
+      }
+    }
     return this.act(
       "command",
       { name, args: args.args ?? {} },
       (r) => {
         const result = typeof r === "object" && r !== null && "result" in r ? (r as { result: unknown }).result : null;
+        // Built in `network`: the same line every header carries while a condition is on (AGENT-TOOLS §16.4),
+        // then one sentence on what it reaches.
+        if (name === "network" && typeof result === "object" && result !== null && "mode" in result && typeof result.mode === "string") {
+          const covers = "covers" in result && typeof result.covers === "string" ? ` ${result.covers}` : "";
+          return `${networkLine(result.mode)}${covers}`;
+        }
+        // Standard `language`, `region` and `text_size` (AGENT-TOOLS §16.3): the app's own sentence, e.g. `Text size xl (1.12×).`
+        if (typeof result === "object" && result !== null && "say" in result && typeof result.say === "string") return result.say;
         return result === null || result === undefined ? `Ran ${name}.` : `Ran ${name}: ${JSON.stringify(result)}`;
       },
       args.look,
@@ -3266,7 +3539,10 @@ export class TaplineTools {
         const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
         if (!worked) return fail(describeError(error));
       }
-      if (args.look === false) return text("Reload requested.");
+      if (args.look === false) {
+        this.markListUnseen();
+        return text("Reload requested.");
+      }
       const deadline = Date.now() + this.reloadWaitMs;
       for (;;) {
         const now = this.host.current();

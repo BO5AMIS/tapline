@@ -1,4 +1,16 @@
-import { Appearance } from 'react-native';
+import { Appearance, I18nManager } from 'react-native';
+import { reload } from './actions';
+import { originalWarn } from './logs';
+import {
+  RESERVED_COMMANDS,
+  SYSTEM_TEXT_SIZE,
+  TEXT_SIZES,
+  isRtlLanguage,
+  parseLanguage,
+  parseRegion,
+  runTextSize,
+} from './locale';
+import { NETWORK_MODES, setNetworkCondition, type NetworkMode } from './network';
 import { TaplineError, isRecord, type Json } from './types';
 
 /**
@@ -17,6 +29,9 @@ const COMMAND_TIMEOUT_MS = 15_000;
 const MAX_RESULT_CHARS = 4000;
 
 const registry = new Map<string, TaplineCommand>();
+/** The direction we last asked React Native for; it only shows in `I18nManager.isRTL` after a restart. */
+let forcedRtl: boolean | null = null;
+const warnedReserved = new Set<string>();
 
 /** Built in: light or dark appearance, for checking both. */
 const appearance: TaplineCommand = {
@@ -31,8 +46,108 @@ const appearance: TaplineCommand = {
   },
 };
 
+/** The one sentence the answer gives about what the conditions reach and what they leave out. */
+export const NETWORK_COVERAGE =
+  "It covers the app's own fetch and XMLHttpRequest requests; WebSockets, images the native side loads and native SDKs are not affected.";
+
+/** Built in: slow, flaky or no network for the app's own requests; back to normal by itself when the session ends. */
+const network: TaplineCommand = {
+  description:
+    'Make the app\'s own network requests slow, flaky or fail (args: { mode: "offline" | "3g" | "lossy" | "normal" }); back to normal when the session ends',
+  run: (args) => {
+    const mode = args.mode;
+    if (typeof mode !== 'string' || !NETWORK_MODES.includes(mode as NetworkMode)) {
+      throw new Error('mode must be "offline", "3g", "lossy" or "normal"');
+    }
+    setNetworkCondition(mode as NetworkMode);
+    return mode === 'normal' ? { mode } : { mode, covers: NETWORK_COVERAGE };
+  },
+};
+
+/** Built in: the text size, through Tapline's font-scale helper (the app must use it; see locale.ts). */
+const textSize: TaplineCommand = {
+  description: `Set the text size the app shows (args: { size: ${[...TEXT_SIZES, SYSTEM_TEXT_SIZE].map((s) => `"${s}"`).join(' | ')} }; "system" restores the phone's own size); needs the app to use useTaplineFontScale; back to normal when the session ends`,
+  run: runTextSize,
+};
+
 function installBuiltIns(): void {
   registry.set('appearance', appearance);
+  registry.set('network', network);
+  registry.set('text_size', textSize);
+}
+
+function isDevelopmentBuild(): boolean {
+  return typeof __DEV__ !== 'undefined' && __DEV__;
+}
+
+/**
+ * The standard `language` command (args: { language }): checks the code, runs the app's handler, and when
+ * the switch changes the layout direction (to or from ar, he, fa, ur) reloads a development build or says
+ * the app must be restarted, because React Native only reads the direction at start.
+ */
+function languageCommand(command: TaplineCommand): TaplineCommand {
+  return {
+    description: command.description,
+    run: async (args) => {
+      const language = parseLanguage(args);
+      await command.run({ ...args, language });
+      const rtl = isRtlLanguage(language);
+      const direction = rtl ? 'right-to-left' : 'left-to-right';
+      const running = I18nManager.isRTL;
+      // What the next start will use: our last request if we made one, else what is running now.
+      const pending = forcedRtl ?? running;
+      if (rtl === pending) {
+        if (rtl === running) return { language, say: `Language ${language}.` };
+        // asked for earlier and still waiting for the restart
+        return {
+          language,
+          restart: 'required',
+          say: `Language ${language}. The ${direction} layout is already set and takes effect when the app restarts (close it and open it again).`,
+        };
+      }
+      I18nManager.allowRTL(true);
+      I18nManager.forceRTL(rtl);
+      forcedRtl = rtl;
+      if (rtl === running) {
+        // the running layout is already right: undoing an earlier request needs no restart
+        return {
+          language,
+          say: `Language ${language}. The layout stays ${direction}, as it is running now; the earlier change is undone and no restart is needed.`,
+        };
+      }
+      if (isDevelopmentBuild()) {
+        await reload();
+        return {
+          language,
+          restart: 'reload',
+          say: `Language ${language}. The layout is now ${direction}, which React Native only reads at start, so Tapline is reloading the app. Wait for it to reconnect.`,
+        };
+      }
+      return {
+        language,
+        restart: 'required',
+        say: `Language ${language}. The layout is now ${direction}, which React Native only reads at start: the app must be restarted (close it and open it again).`,
+      };
+    },
+  };
+}
+
+/** The standard `region` command (args: { region }): checks the country code, then runs the app's handler. */
+function regionCommand(command: TaplineCommand): TaplineCommand {
+  return {
+    description: command.description,
+    run: async (args) => {
+      const region = parseRegion(args);
+      await command.run({ ...args, region });
+      return { region, say: `Region ${region}.` };
+    },
+  };
+}
+
+function standardCommand(name: string, command: TaplineCommand): TaplineCommand {
+  if (name === 'language') return languageCommand(command);
+  if (name === 'region') return regionCommand(command);
+  return command;
 }
 installBuiltIns();
 
@@ -42,15 +157,46 @@ export function registerTaplineCommand(name: string, command: TaplineCommand): (
     throw new Error(`Tapline command names are letters, digits, ".", "_" and "-", starting with a letter: "${name}"`);
   }
   if (typeof command.run !== 'function') throw new Error(`Tapline command "${name}" needs a run function`);
-  registry.set(name, command);
+  if (RESERVED_COMMANDS.includes(name)) {
+    // Never throw into the app (an app that registered this name under an older version must still start).
+    if (!warnedReserved.has(name)) {
+      warnedReserved.add(name);
+      originalWarn(`[tapline] "${name}" is a built-in Tapline command; your registration of it is ignored.`);
+    }
+    return () => undefined;
+  }
+  // `language` and `region` are standard names: their arguments are checked here, wherever the app registers them.
+  const registered = standardCommand(name, command);
+  registry.set(name, registered);
   return () => {
-    if (registry.get(name) === command) registry.delete(name);
+    if (registry.get(name) === registered) registry.delete(name);
   };
+}
+
+/**
+ * Registers the standard `language` command: `handler` receives a checked BCP 47 code (`ar`, `en-GB`) and
+ * switches the app's language. A switch to or from a right-to-left language reloads a development build.
+ */
+export function registerLanguageCommand(handler: (language: string) => unknown): () => void {
+  return registerTaplineCommand('language', {
+    description: 'Switch the app language (args: { language: BCP 47 code such as "ar" or "en-GB" })',
+    run: (args) => handler(String(args.language)),
+  });
+}
+
+/** Registers the standard `region` command: `handler` receives a checked ISO 3166 country code (`QA`). */
+export function registerRegionCommand(handler: (region: string) => unknown): () => void {
+  return registerTaplineCommand('region', {
+    description: 'Switch the app region (args: { region: ISO 3166 country code such as "QA" })',
+    run: (args) => handler(String(args.region)),
+  });
 }
 
 /** Removes the app's commands and restores the built-ins (tests). */
 export function resetCommands(): void {
   registry.clear();
+  forcedRtl = null;
+  warnedReserved.clear();
   installBuiltIns();
 }
 
