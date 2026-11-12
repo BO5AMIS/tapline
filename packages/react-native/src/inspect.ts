@@ -1379,6 +1379,12 @@ export interface Listed {
   frame: Frame | null;
 }
 
+/** What a journey in a user's eyes does to the list: keeps what shows on the glass, says whether a view scrolls further (see glass.ts). */
+export type GlassPass = (
+  snapshot: Snapshot,
+  listed: Listed[],
+) => Promise<{ kept: Listed[]; moreAbove: boolean; moreBelow: boolean }>;
+
 /** What an element line quotes, for comparing two elements: the text, else the label, whitespace flattened, its first MAX_TEXT characters. */
 function quotedText(entry: Entry): string {
   const { info } = entry;
@@ -1430,7 +1436,7 @@ export function foldDuplicates(snapshot: Snapshot, listed: Listed[]): Listed[] {
  * ref never lands on another element; it also reports what changed since the previous call. A new
  * host session has no previous call (`forgetLastTree`), so its first list starts over like a look.
  */
-export async function tree(params: unknown = {}): Promise<TreeResult> {
+export async function tree(params: unknown = {}, glass?: GlassPass): Promise<TreeResult> {
   const all = isRecord(params) && params.all === true;
   // `peek`: a list for the host's own use (naming what a picture shows). The agent isn't given it,
   // so its refs keep their meaning and the baseline for changes stays where it is.
@@ -1465,6 +1471,15 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
     above = foldDuplicates(snapshot, above);
     below = foldDuplicates(snapshot, below);
   }
+  // A journey in a user's eyes (AGENT-TOOLS 1.12 §17.1): only what shows on the glass, and no counts of the rest.
+  let glassMore: { moreAbove: boolean; moreBelow: boolean } | undefined;
+  if (glass !== undefined && !all && !peek) {
+    const seen = await glass(snapshot, listed);
+    listed = seen.kept;
+    glassMore = { moreAbove: seen.moreAbove, moreBelow: seen.moreBelow };
+    above = [];
+    below = [];
+  }
   for (const { entry, frame } of listed) {
     const element = peek ? toElement(entry, frame, peekRef(entry.node.fiber) ?? '') : toElement(entry, frame);
     elements.push(element);
@@ -1472,6 +1487,7 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
   }
   const result: TreeResult = { screen: snapshot.screen, elements };
   if (above.length > 0 || below.length > 0) result.offScreen = { above: above.length, below: below.length };
+  if (glassMore !== undefined) result.glass = glassMore;
   // What lies above and below, without refs (it isn't listed): the baseline for changes off screen.
   const offKey = new Map<object, TaplineElement>();
   for (const { entry, frame } of [...above, ...below]) offKey.set(stableKey(entry), toElement(entry, frame, ''));

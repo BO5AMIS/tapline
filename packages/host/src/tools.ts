@@ -15,6 +15,22 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
+import {
+  EYES,
+  IDS_HIDDEN,
+  Journey,
+  OPEN_URL,
+  conditionsSchema,
+  exportSchema,
+  summaryLine,
+  summaryNotes,
+  stressSchema,
+  survivesSchema,
+  withoutIds,
+  type ConditionRecord,
+  type Conditions,
+  type JourneyState,
+} from "./journey.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
@@ -297,6 +313,27 @@ export const toolShapes = {
   session_report: {
     since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
   },
+  journey: {
+    start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
+    goal: z.string().min(1).max(300).optional().describe('What the user wants to do, e.g. "log breakfast by scanning its barcode"'),
+    persona: z.string().max(500).optional().describe("Who is using the app: free text, or the name of an example persona"),
+    conditions: conditionsSchema
+      .optional()
+      .describe("language, region, text_size, network: applied at the start, undone at the stop"),
+    allow: z
+      .array(z.string().min(1).max(60))
+      .max(30)
+      .optional()
+      .describe('Shortcuts the journey may use: "open_url", and the names of app commands'),
+    eyes: z.enum(EYES).optional().describe('"user" (default): see the screen as a user does; "agent" turns that off for the rest of the journey'),
+    stop: z.boolean().optional().describe("End the journey (needs reached)"),
+    reached: z.boolean().optional().describe("With stop: whether the goal was reached"),
+    why: z.string().max(1000).optional().describe("With stop: why, in a line"),
+    export: exportSchema.optional().describe("With stop, only when your user asks: put the report in a GitHub PR or issue"),
+    stress: stressSchema.optional().describe("A real-world moment during the journey (comes later)"),
+    survives: survivesSchema.optional().describe("With stress: what must still be there after (comes later)"),
+    done: z.boolean().optional().describe("With stress: a person has done the moment you asked for (comes later)"),
+  },
   run: {
     steps: z
       .array(stepSchema)
@@ -483,6 +520,13 @@ export interface ToolsOptions {
   viewerLinkToAgent?: boolean;
   /** Whether the app's frames are on and at which quality, for the `viewer` tool's stats. */
   viewerFeed?: () => { on: boolean; quality: QualityPreset };
+  /** The clock a journey measures with, in ms (tests pass their own). Default: Date.now. */
+  clock?: () => number;
+  /**
+   * Called when a journey stops (AGENT-TOOLS 1.12 §17.5), with its state: the report writer's hook. The lines it
+   * returns follow the summary in the answer (`Findings: …`, `Report: <folder>`).
+   */
+  onJourneyStop?: (state: JourneyState) => string[] | Promise<string[]>;
 }
 
 /**
@@ -526,6 +570,9 @@ type Script = z.infer<typeof scriptSchema>;
 function stableParams(params: unknown, result: unknown): { params: Record<string, unknown>; fragile: boolean } {
   const copy: Record<string, unknown> =
     typeof params === "object" && params !== null ? { ...(params as Record<string, unknown>) } : {};
+  // A journey's own flags are not part of a script.
+  delete copy["noScroll"];
+  delete copy["glass"];
   const target = copy["target"];
   if (typeof target !== "object" || target === null) return { params: copy, fragile: false };
   // A target the agent gave by testID, label, text or point already picked one element: keep it.
@@ -686,6 +733,16 @@ function toWireTarget(target: Target): WireTarget {
   return { x: target.x ?? 0, y: target.y ?? 0 };
 }
 
+/** The target of a call as the agent wrote it, in words (`"Save"`, `e3`, `120,300`); undefined when it gave none. */
+function journeyTargetWords(input: Record<string, unknown>): string | undefined {
+  const raw = input["target"] ?? input["tap"];
+  const parsed = typeof raw === "object" && raw !== null ? targetSchema.safeParse(raw) : null;
+  if (parsed?.success === true) return targetWords(parsed.data);
+  if (typeof input["url"] === "string") return input["url"];
+  if (typeof input["name"] === "string") return input["name"];
+  return undefined;
+}
+
 /** A target as the agent wrote it, in words: `id=save`, `"Save"`, `e3`, `120,300`. */
 function targetWords(target: Target): string {
   if (target.id !== undefined) return `id=${target.id}`;
@@ -726,6 +783,8 @@ function candidateLines(details: unknown): string[] {
 
 /** At most this many candidates are listed in an `ambiguous` answer (AGENT-TOOLS §4). */
 const MAX_CANDIDATES = 5;
+
+const NO_JOURNEY = "Error bad_params: no journey is running; start one with start: true and a goal.";
 
 /**
  * The `ambiguous` block (AGENT-TOOLS §4): the message, `Candidates:` with up to 5 lines indented two
@@ -838,8 +897,13 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey",
 };
+/** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
+const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
+  "look", "run", "inspect", "audit", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll", "toggle",
+  "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
+]);
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
   "apps", "open_app", "pair", "look", "inspect", "audit", "ux_check", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
@@ -940,12 +1004,20 @@ export class TaplineTools {
   private readonly crashBaseline: number;
   /** Set inside a tool call (and everything it awaits), so a call within a call (`run`'s steps) adds no notes. */
   private readonly noteScope = new AsyncLocalStorage<true>();
+  /** The journey this agent has running (AGENT-TOOLS 1.12 §17.1); one at a time. */
+  private journeyRun: Journey | undefined;
+  /** The state of the journey that stopped last, for the report writer and the stress moments. */
+  private journeyDone: JourneyState | undefined;
+  /** Inside `run`: "run" for the batch's own checks (not counted), "step" for a step (counted like a call of its own). */
+  private readonly journeyScope = new AsyncLocalStorage<"run" | "step">();
+  private readonly clock: () => number;
 
   constructor(
     private readonly host: TaplineHost,
     private readonly options: ToolsOptions,
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
+    this.clock = options.clock ?? Date.now;
     this.confirmations = options.confirmations ?? new Confirmations();
     this.policy = options.policy ?? DEFAULT_POLICY;
     this.uxRules = options.uxRules ?? NO_UX_RULES;
@@ -972,6 +1044,116 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.loggedCall(tool, args[0], () => method.apply(this, args)));
     }
+    // A running journey measures the agent's looks and actions, and shows its answers as a user would see them.
+    for (const [name, tool] of Object.entries(CALL_TOOLS)) {
+      if (!JOURNEY_TOOLS.has(tool)) continue;
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.journeyCall(tool, args[0], () => method.apply(this, args)));
+    }
+  }
+
+  /** The journey running now, for the stress moments and the report writer (AGENT-TOOLS 1.12 §17). */
+  currentJourney(): Journey | undefined {
+    return this.journeyRun;
+  }
+
+  /** The state of the journey that stopped last. */
+  finishedJourney(): JourneyState | undefined {
+    return this.journeyDone;
+  }
+
+  /** Whether the agent sees the app as a user does: a journey is running and its eyes are the user's. */
+  private userEyes(): boolean {
+    return this.journeyRun?.userEyes === true;
+  }
+
+  /**
+   * Measures one call of a running journey and shows its answer as a user would see it. Calls inside `run` count
+   * as steps (the batch itself and its expectation checks do not); a dry run counts as nothing.
+   */
+  private journeyCall(tool: string, args: unknown, run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+    const journey = this.journeyRun;
+    if (journey === undefined) return run();
+    const input = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {};
+    const scope = this.journeyScope.getStore();
+    if (tool === "run") {
+      const answer = this.journeyScope.run("run", run);
+      return answer instanceof Promise ? answer.then((a) => this.shownToUser(a)) : this.shownToUser(answer);
+    }
+    if (scope === "run" || input["dry_run"] === true) return run();
+    const at = this.clock();
+    const pre = journey.pre();
+    const done = (answer: CallToolResult): CallToolResult => {
+      const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      const code = answer.isError === true ? /^Error (\w+):/.exec(said)?.[1] : undefined;
+      const target = journeyTargetWords(input);
+      journey.record(
+        { tool, ok: answer.isError !== true, ...(code !== undefined ? { code } : {}), ...(target !== undefined ? { target } : {}), text: said, at, ms: this.clock() - at },
+        pre,
+      );
+      return this.shownToUser(answer);
+    };
+    const result = run();
+    return result instanceof Promise ? result.then(done) : done(result);
+  }
+
+  /** In a user's eyes no id reaches the agent, not even inside an error the app composed. */
+  private shownToUser(answer: CallToolResult): CallToolResult {
+    if (!this.userEyes()) return answer;
+    return { ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: withoutIds(block.text) } : block)) };
+  }
+
+  /** `id` and `label` answer `bad_params` in a journey's user's eyes (§17.1). */
+  private hiddenTarget(target: { id?: unknown; label?: unknown } | undefined): CallToolResult | null {
+    if (!this.userEyes() || target === undefined) return null;
+    return target.id !== undefined || target.label !== undefined ? fail(IDS_HIDDEN) : null;
+  }
+
+  /** Whether the journey's `allow` lets this shortcut through (always, outside a user's eyes). */
+  private shortcutAllowed(tool: "open_url" | "app_command", what: string): boolean {
+    const journey = this.journeyRun;
+    return journey === undefined || !journey.userEyes || journey.allows(tool === "open_url" ? OPEN_URL : what);
+  }
+
+  private shortcutWords(tool: "open_url" | "app_command", what: string): string {
+    return tool === "open_url"
+      ? "Error not_allowed: in a journey, open_url is a shortcut a user doesn't have, and this journey's allow doesn't name it; reach the screen the way a user would."
+      : `Error not_allowed: in a journey, app_command ${JSON.stringify(what)} is a shortcut a user doesn't have, and this journey's allow doesn't name it.`;
+  }
+
+  /** A shortcut in a user's eyes: refused unless `allow` names it, and noted for the report when it goes through. */
+  private shortcutRefusal(tool: "open_url" | "app_command", what: string): CallToolResult | null {
+    const journey = this.journeyRun;
+    if (journey === undefined || !journey.userEyes) return null;
+    if (!this.shortcutAllowed(tool, what)) return fail(this.shortcutWords(tool, what));
+    journey.noteShortcut({ tool, what });
+    return null;
+  }
+
+  private static readonly SCROLL_TO_TARGET_OFF =
+    'Error not_allowed: in a journey, scroll to: "target" is off: a person scrolls until they see it. Scroll down or up, then look.';
+
+  /** What a journey's user's eyes refuse in a step of `run`, before anything runs (a step number first); null when it is fine. */
+  private journeyStepRefusal(step: Step, index: number): string | null {
+    if (!this.userEyes()) return null;
+    const s = step as Record<string, unknown>;
+    const hidden = (value: unknown): boolean =>
+      typeof value === "object" && value !== null && ("id" in value || "label" in value);
+    const expect = s["expect"];
+    if (hidden(s["target"]) || hidden(s["tap"]) || hidden(expect) || (step.tool === "wait_for" && ("id" in s || "label" in s))) {
+      return IDS_HIDDEN.replace("Error bad_params: ", `Error bad_params: step ${index + 1}: `);
+    }
+    if (step.tool === "scroll" && s["to"] === "target") return TaplineTools.SCROLL_TO_TARGET_OFF.replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
+    if (step.tool === "open_url" && !this.shortcutAllowed("open_url", String(s["url"] ?? ""))) {
+      return this.shortcutWords("open_url", "").replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
+    }
+    const name = String(s["name"] ?? "");
+    if (step.tool === "app_command" && name !== "" && !this.shortcutAllowed("app_command", name)) {
+      return this.shortcutWords("app_command", name).replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
+    }
+    return null;
   }
 
   /** The agent's client id for the call log; the MCP server passes the client's name once it is known. */
@@ -1436,6 +1618,10 @@ export class TaplineTools {
         }
       }
     }
+    for (const [i, step] of steps.entries()) {
+      const refused = this.journeyStepRefusal(step, i);
+      if (refused !== null) return fail(refused);
+    }
     this.diffSaved = null;
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
@@ -1574,6 +1760,10 @@ export class TaplineTools {
 
   /** One step of `run`, as its own tool call without a list. */
   private runStep(step: Step): Promise<CallToolResult> {
+    return this.journeyScope.run("step", () => this.runStepNow(step));
+  }
+
+  private runStepNow(step: Step): Promise<CallToolResult> {
     const { tool, expect: _expect, route: _route, ...rest } = step as Step & { route?: unknown };
     const quiet = { ...rest, look: false, screenshot: false };
     switch (tool as RunTool) {
@@ -1654,6 +1844,8 @@ export class TaplineTools {
   // -- inspect (Tapline 1.1): from the screen to the code
 
   async inspect(args: Shape<"inspect">): Promise<CallToolResult> {
+    const hiddenInspect = this.hiddenTarget(args.target);
+    if (hiddenInspect !== null) return hiddenInspect;
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     let raw: unknown;
@@ -1804,7 +1996,8 @@ export class TaplineTools {
     const askChanges = onlyChanges && this.listed.has(sid);
     // `onlyChanges` is the after-an-action call. With `changes: true` the app keeps the refs and
     // counts on from the highest one; `look` (onlyChanges false) always restarts at e1.
-    const treeParams: Record<string, unknown> = askChanges ? { changes: true } : {};
+    const eyes = this.userEyes();
+    const treeParams: Record<string, unknown> = { ...(askChanges ? { changes: true } : {}), ...(eyes ? { glass: true } : {}) };
     const treePromise = this.host.request("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
@@ -1834,15 +2027,17 @@ export class TaplineTools {
     const alertGone = this.alertOpen.has(sid) && !alertsNow;
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
-    const changesText = askChanges ? formatChanges(tree, { alertGone }) : null;
+    const changesText = askChanges ? formatChanges(tree, { alertGone, eyes }) : null;
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
     if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
     else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
-    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
+    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes })];
+    // A journey keeps the first full list of each screen (and counts the screens entered) for its report.
+    if (changesText === null) this.journeyRun?.noteFullList({ route: tree.route?.names ?? [], text: lines[0] ?? "", fromAction: onlyChanges });
     // A full list in place of the changes (most of the screen changed) still says what changed out of view.
-    if (askChanges && changesText === null) lines.push(...formatOffScreenAfterList(tree));
+    if (askChanges && changesText === null && !eyes) lines.push(...formatOffScreenAfterList(tree));
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [...alertNotes(tree)];
@@ -2639,6 +2834,8 @@ export class TaplineTools {
   }
 
   async filmstrip(args: Shape<"filmstrip">): Promise<CallToolResult> {
+    const hiddenFilm = this.hiddenTarget(args.tap);
+    if (hiddenFilm !== null) return hiddenFilm;
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const count = args.frames ?? 6;
@@ -2876,7 +3073,7 @@ export class TaplineTools {
       const element = elementSchema.safeParse((result as Record<string, unknown>)[key]);
       if (element.success) {
         const shown = withoutValue ? { ...element.data, value: null, placeholder: null } : element.data;
-        return formatElement(shown, { actions: false, frame: false });
+        return formatElement(shown, { actions: false, frame: false, eyes: this.userEyes() });
       }
     }
     return "element";
@@ -3143,7 +3340,7 @@ export class TaplineTools {
         text: element.text ?? null,
         textMore: element.textMore ?? null,
       },
-      { actions: false },
+      { actions: false, eyes: this.userEyes() },
     );
   }
 
@@ -3162,7 +3359,9 @@ export class TaplineTools {
   }
 
   tap(args: Shape<"tap">): Promise<CallToolResult> {
-    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
+    const hiddenTap = this.hiddenTarget(args.target);
+    if (hiddenTap !== null) return Promise.resolve(hiddenTap);
+    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
       this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
@@ -3170,17 +3369,22 @@ export class TaplineTools {
 
   /** `seconds` is accepted for the shared interface; Tapline calls the handler, so it doesn't hold. */
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
-    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
+    const hiddenPress = this.hiddenTarget(args.target);
+    if (hiddenPress !== null) return Promise.resolve(hiddenPress);
+    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
       this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
+    const hiddenField = this.hiddenTarget(args.target);
+    if (hiddenField !== null) return Promise.resolve(hiddenField);
     const params: Record<string, unknown> = {
       text: args.text,
       replace: args.replace ?? true,
       submit: args.submit ?? false,
+      ...(this.userEyes() ? { noScroll: true } : {}),
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
@@ -3205,7 +3409,10 @@ export class TaplineTools {
     if (args.to !== undefined && (args.direction !== undefined || args.amount !== undefined)) {
       return Promise.resolve(fail("Error bad_params: use either `to` or `direction`/`amount`, not both."));
     }
+    const hiddenScroll = this.hiddenTarget(args.target);
+    if (hiddenScroll !== null) return Promise.resolve(hiddenScroll);
     const toTarget = args.to === "target";
+    if (toTarget && this.userEyes()) return Promise.resolve(fail(TaplineTools.SCROLL_TO_TARGET_OFF));
     if (toTarget && args.target === undefined) {
       return Promise.resolve(fail('Error bad_params: to: "target" needs a target: the element to bring onto the screen.'));
     }
@@ -3260,7 +3467,9 @@ export class TaplineTools {
   }
 
   toggle(args: Shape<"toggle">): Promise<CallToolResult> {
-    const params: Record<string, unknown> = { target: toWireTarget(withIndex(args.target, args.index)) };
+    const hiddenSwitch = this.hiddenTarget(args.target);
+    if (hiddenSwitch !== null) return Promise.resolve(hiddenSwitch);
+    const params: Record<string, unknown> = { target: toWireTarget(withIndex(args.target, args.index)), ...(this.userEyes() ? { noScroll: true } : {}) };
     if (args.value !== undefined) params["value"] = args.value;
     if (args.force === true) params["force"] = true;
     // The switch already had the asked value: the app touched nothing, and that line is the whole answer.
@@ -3303,17 +3512,10 @@ export class TaplineTools {
       );
     }
     const name = args.name.trim();
-    // AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes.
-    if (name === "network") {
-      const mode = (args.args as { mode?: unknown } | undefined)?.mode;
-      const app = this.host.current()?.app;
-      const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
-      const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
-      if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
-        const where = own?.block !== undefined && app !== undefined ? `for ${app.name}` : "here";
-        return fail(`Error not_allowed: blocked: the safety policy blocks network ${where}.`);
-      }
-    }
+    const shortcut = this.shortcutRefusal("app_command", name);
+    if (shortcut !== null) return shortcut;
+    const blocked = name === "network" ? this.networkRefusal((args.args as { mode?: unknown } | undefined)?.mode) : null;
+    if (blocked !== null) return blocked;
     return this.act(
       "command",
       { name, args: args.args ?? {} },
@@ -3334,8 +3536,23 @@ export class TaplineTools {
     );
   }
 
+  /** AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes. */
+  private networkRefusal(mode: unknown): CallToolResult | null {
+    const app = this.host.current()?.app;
+    const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
+    const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
+    if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
+      const where = own?.block !== undefined && app !== undefined ? `for ${app.name}` : "here";
+      return fail(`Error not_allowed: blocked: the safety policy blocks network ${where}.`);
+    }
+    return null;
+  }
+
   waitFor(args: Shape<"wait_for">): Promise<CallToolResult> {
-    const params: Record<string, unknown> = {};
+    const hiddenWait = this.hiddenTarget(args);
+    if (hiddenWait !== null) return Promise.resolve(hiddenWait);
+    // In a user's eyes it matches what is on the glass only (§17.1).
+    const params: Record<string, unknown> = this.userEyes() ? { glass: true } : {};
     if (args.text !== undefined) params["text"] = args.text;
     if (args.id !== undefined) params["testID"] = args.id;
     if (args.label !== undefined) params["label"] = args.label;
@@ -3406,6 +3623,8 @@ export class TaplineTools {
   }
 
   async openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
+    const refused = this.shortcutRefusal("open_url", args.url);
+    if (refused !== null) return refused;
     const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
     // The app's own forget link unpairs it, so it drops the connection before answering: that is the link working.
     if (answer.isError === true && /(^|\/)tapline\/forget\/?$/.test(args.url.replace(/[?#].*$/, ""))) {
@@ -3555,6 +3774,8 @@ export class TaplineTools {
     if (args.launch === true && args.tap !== undefined) {
       return fail("Error bad_params: launch reloads the app and tap taps in it; give one of them.");
     }
+    const hiddenPerf = this.hiddenTarget(args.tap);
+    if (hiddenPerf !== null) return hiddenPerf;
     const seconds = args.seconds ?? 3;
     try {
       let measure: PerfMeasure;
@@ -3589,6 +3810,190 @@ export class TaplineTools {
       return text([perfFirstLine(measure, tapWords), ...formatPerfLines(measure.result), ...this.takePersonNote()].join("\n"));
     } catch (error) {
       return fail(describeError(error));
+    }
+  }
+
+  // -- journey (AGENT-TOOLS 1.12 §17.1)
+
+  async journey(args: Shape<"journey"> = {}): Promise<CallToolResult> {
+    if (args.start === true && args.stop === true) return fail("Error bad_params: give start or stop, not both.");
+    if (args.start === true) return this.journeyStart(args);
+    const startOnly = ["goal", "persona", "conditions", "allow"].filter((key) => (args as Record<string, unknown>)[key] !== undefined);
+    if (startOnly.length > 0) return fail(`Error bad_params: ${startOnly.join(", ")} go with start: true.`);
+    if (args.stop === true) return this.journeyStop(args);
+    const stopOnly = ["reached", "why", "export"].filter((key) => (args as Record<string, unknown>)[key] !== undefined);
+    if (stopOnly.length > 0) return fail(`Error bad_params: ${stopOnly.join(", ")} go with stop: true.`);
+    const running = this.journeyRun;
+    if (args.stress !== undefined || args.survives !== undefined || args.done !== undefined) {
+      if (running === undefined) return fail(NO_JOURNEY);
+      return fail("Error unsupported: stress moments are not in this build yet; test the flow without them.");
+    }
+    if (args.eyes !== undefined) {
+      if (running === undefined) return fail(NO_JOURNEY);
+      if (args.eyes === "user") {
+        return running.userEyes
+          ? text("Already in a user's eyes.")
+          : fail("Error bad_params: eyes: \"agent\" can't be turned back to a user's during a journey; start a new one.");
+      }
+      if (!running.userEyes) return text("Already in the agent's eyes.");
+      running.switchEyes();
+      // The next list is a full one: what the agent can see just changed.
+      const session = this.host.current();
+      if (session !== undefined) this.listed.delete(session.id);
+      return text("Eyes: the agent's from now on (ids, labels, everything in the tree; jumps and shortcuts allowed). The report says so.");
+    }
+    if (running !== undefined) {
+      const m = running.state.measures;
+      return text(
+        `Journey running: ${JSON.stringify(running.state.goal)}, ${running.userEyes ? "in a user's eyes" : "in the agent's eyes"}; ${m.taps} taps, ${m.screensEntered} screens so far.`,
+      );
+    }
+    return fail("Error bad_params: give start: true with a goal, or stop: true with reached.");
+  }
+
+  private async journeyStart(args: Shape<"journey">): Promise<CallToolResult> {
+    const running = this.journeyRun;
+    if (running !== undefined) {
+      return fail(`Error bad_params: a journey is already running (${JSON.stringify(running.state.goal)}); stop it first with stop: true and reached.`);
+    }
+    const goal = args.goal?.trim() ?? "";
+    if (goal === "") return fail("Error bad_params: start needs a goal: what the user wants to do.");
+    if (args.reached !== undefined || args.why !== undefined || args.export !== undefined) {
+      return fail("Error bad_params: reached, why and export go with stop: true.");
+    }
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const journey = new Journey(
+      {
+        goal,
+        ...(args.persona !== undefined && args.persona.trim() !== "" ? { persona: args.persona.trim() } : {}),
+        ...(args.conditions !== undefined ? { conditions: args.conditions } : {}),
+        ...(args.allow !== undefined ? { allow: args.allow } : {}),
+        ...(args.eyes !== undefined ? { eyes: args.eyes } : {}),
+      },
+      this.clock,
+    );
+    const notes: string[] = [];
+    const conditions: Conditions = args.conditions ?? {};
+    // Network first: the others then run under it. Each goes through the app's own commands (AGENT-TOOLS §16).
+    const order = ["network", "language", "region", "text_size"] as const;
+    for (const name of order) {
+      const value = conditions[name];
+      if (value === undefined) continue;
+      const record = await this.applyCondition(session, name, value);
+      journey.state.conditionRecords.push(record);
+      if (!record.applied) notes.push(`Note: condition ${name} ${value} was not applied: ${record.failure ?? "the app refused"}.`);
+    }
+    this.journeyRun = journey;
+    this.journeyDone = undefined;
+    const live = this.host.current();
+    const persona = journey.state.persona ?? "no persona";
+    const eyesWords = journey.userEyes ? "in a user's eyes" : "in the agent's eyes";
+    const first = `Journey started: "${goal}" as ${persona}, ${eyesWords}.`;
+    const applied = journey.state.conditionRecords.filter((r) => r.applied).map((r) => `${r.name.replace("_", " ")} ${r.value}`);
+    const head = [first, ...(applied.length > 0 ? [`Conditions: ${applied.join(", ")}.`] : []), ...notes];
+    if (live === undefined) {
+      return text([...head, "Note: the app is reconnecting, so there's no screen yet; look in a few seconds."].join("\n"));
+    }
+    const parts = await this.lookParts(live, false, DEFAULT_SCREENSHOT_WIDTH, false);
+    const [top, ...rest] = parts.content;
+    const list = top !== undefined && top.type === "text" ? top.text : "";
+    return this.shownToUser({ content: [{ type: "text", text: [...head, list].join("\n") }, ...rest], ...(parts.isError ? { isError: true } : {}) });
+  }
+
+  private async journeyStop(args: Shape<"journey">): Promise<CallToolResult> {
+    const running = this.journeyRun;
+    if (running === undefined) return fail(NO_JOURNEY);
+    if (args.reached === undefined) return fail("Error bad_params: stop needs reached: true or false.");
+    const state = running.finish(args.reached, args.why);
+    this.journeyRun = undefined;
+    this.journeyDone = state;
+    await this.undoConditions(state);
+    const session = this.host.current();
+    // The agent's next list is a full one: the journey's lists were of the glass only.
+    if (session !== undefined) this.listed.delete(session.id);
+    const lines = [summaryLine(state), ...summaryNotes(state)];
+    if (args.export !== undefined) {
+      lines.push("Export comes later: the report folder isn't written in this build, so nothing was exported.");
+    }
+    if (this.options.onJourneyStop !== undefined) {
+      try {
+        lines.push(...(await this.options.onJourneyStop(state)));
+      } catch (error) {
+        lines.push(`Note: the report could not be written: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return text(lines.join("\n"));
+  }
+
+  /** The command and arguments that set one of a journey's conditions. */
+  private conditionCall(name: keyof Conditions, value: string): { command: string; args: Record<string, unknown> } {
+    switch (name) {
+      case "network":
+        return { command: "network", args: { mode: value } };
+      case "language":
+        return { command: "language", args: { language: value } };
+      case "region":
+        return { command: "region", args: { region: value } };
+      case "text_size":
+        return { command: "text_size", args: { size: value } };
+    }
+  }
+
+  /** Runs one condition command straight on the app (a journey's own, not the agent's shortcut); the app's answer may say what it was before. */
+  private async runCondition(
+    session: SessionInfo,
+    name: keyof Conditions,
+    value: string,
+  ): Promise<{ ok: true; previous?: string } | { ok: false; failure: string }> {
+    const call = this.conditionCall(name, value);
+    if (name === "network") {
+      const refused = this.networkRefusal(value);
+      if (refused !== null) {
+        const said = refused.content.map((block) => (block.type === "text" ? block.text : "")).join(" ");
+        return { ok: false, failure: said.replace(/^Error \w+: /, "").replace(/\.$/, "") };
+      }
+    }
+    try {
+      const raw = await this.host.request("command", { name: call.command, args: call.args }, { sessionId: session.id });
+      const inner = typeof raw === "object" && raw !== null && "result" in raw ? (raw as { result: unknown }).result : undefined;
+      const previous = typeof inner === "object" && inner !== null && "previous" in inner ? (inner as { previous: unknown }).previous : undefined;
+      return { ok: true, ...(typeof previous === "string" && previous !== "" ? { previous } : {}) };
+    } catch (error) {
+      return { ok: false, failure: describeError(error).replace(/^Error \w+: /, "").replace(/\.$/, "") };
+    }
+  }
+
+  private async applyCondition(session: SessionInfo, name: keyof Conditions, value: string): Promise<ConditionRecord> {
+    const done = await this.runCondition(session, name, value);
+    if (!done.ok) return { name, value, applied: false, failure: done.failure };
+    return { name, value, applied: true, ...(done.previous !== undefined ? { previous: done.previous } : {}) };
+  }
+
+  /** At the stop: network goes back to normal, text size to the phone's own, language and region to what the app said they were. */
+  private async undoConditions(state: JourneyState): Promise<void> {
+    const session = this.host.current();
+    for (const record of state.conditionRecords) {
+      if (!record.applied) continue;
+      const words = record.name.replace("_", " ");
+      if ((record.name === "language" || record.name === "region") && record.previous === undefined) {
+        record.undone = false;
+        record.undo = `Note: ${words} ${record.value} was not restored: the app doesn't report what it was before.`;
+        continue;
+      }
+      if (session === undefined) {
+        record.undone = false;
+        record.undo = `Note: ${words} ${record.value} was not undone: no app is connected.`;
+        continue;
+      }
+      const back = record.name === "network" ? "normal" : record.name === "text_size" ? "system" : (record.previous ?? "");
+      const done = await this.runCondition(session, record.name, back);
+      record.undone = done.ok;
+      record.undo = done.ok
+        ? record.name === "text_size"
+          ? "Undone: text size is the phone's own again."
+          : `Undone: ${words} is ${back} again.`
+        : `Note: ${words} ${record.value} was not undone: ${done.failure}.`;
     }
   }
 

@@ -383,6 +383,16 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "journey",
+    {
+      title: "Journey",
+      description: toolDescription("journey"),
+      inputSchema: looseInput("journey"),
+    },
+    guarded("journey", (args) => tools.journey(args)),
+  );
+
+  server.registerTool(
     "session_report",
     {
       title: "Session report",
