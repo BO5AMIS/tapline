@@ -304,6 +304,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** How many ended sessions' logs the host keeps. */
 const GONE_LOGS_KEPT = 8;
 
+/** Requests that only read the app: sending one never changes what a call has done (`actingMark`). */
+const READ_METHODS = new Set(["tree", "screenshot", "logs", "inspect", "audit", "check", "overlay", "commands", "waitFor", "feed", "perfSettle", "place", "places"]);
+
 export function identityOf(info: AppIdentity): string {
   const device = info.device.id ?? info.device.name ?? info.device.model ?? "";
   // An app that sends no id (the default "unknown") is told apart by its name, so two such apps never share crashes.
@@ -346,6 +349,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly crashMap = new Map<string, CrashRecord[]>();
   private readonly crashLog: CrashEvent[] = [];
   private crashSeq = 0;
+  /** Requests that may have acted on the app (not reads, not dry runs), once past the checks that refuse before sending. */
+  private actingSent = 0;
   private httpExtension: HttpExtension | undefined;
   private readonly api: ApiHandler | undefined;
   /** Open after `pair`: development builds on the local network may fetch this code (one use, 10 minutes). */
@@ -698,6 +703,14 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     if (session !== undefined) session.expectedEnd = expected;
   }
 
+  /**
+   * How many requests that may have acted on an app were sent so far. A call whose mark didn't move did nothing, so
+   * it is safe to run it again (AGENT-TOOLS 1.13 §11.5).
+   */
+  actingMark(): number {
+    return this.actingSent;
+  }
+
   /** The number of crash events so far; pass it to `crashEventsAfter` later. */
   crashMark(): number {
     return this.crashSeq;
@@ -793,6 +806,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       );
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+    const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
+    if (!dry && !READ_METHODS.has(method)) this.actingSent++;
     const id = session.nextId++;
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {

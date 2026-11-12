@@ -190,7 +190,7 @@ export interface MediaContext {
 }
 
 /** What the dialog says when the photo-access prompt is up (AGENT-TOOLS 1.13 §11.5). */
-const PERSON_ASK = "Needs a person: allow photo access on the phone.";
+const PERSON_ASK = "Needs a person: allow photo access on the phone. I'll go on by myself when the prompt is gone.";
 
 const PERSON_NOTE = "Note: needs a person: allow photo access on the phone (an OS alert Tapline can't tap).";
 
@@ -263,14 +263,17 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
       raw = await ctx.request({ op: "add", name: file.name, mime: file.mime, data: file.data, owner: ctx.state.owner });
     } catch (error) {
       if (app !== null) ctx.state.remember(app, added);
-      const done = added.length > 0 ? ` ${plural(added.length, "picture")} were added before it.` : "";
+      const left = files.slice(i).map((f) => f.name).join(", ");
+      const done = added.length > 0 ? ` ${plural(added.length, "picture")} were added before it; left: ${left}.` : "";
       return fail(`${ctx.describeError(error)}${done}`);
     }
     const result = parseOr(addResultSchema, raw);
     if (result !== null && result.late !== undefined && app !== null) ctx.state.remember(app, result.late);
     if (result !== null && (result.needsPerson === true || result.id === undefined) && !asked && ctx.askPerson !== undefined) {
       asked = true;
-      if (await ctx.askPerson(PERSON_ASK)) {
+      // With pictures already added the call is not run again: the person is waited for, then the answer below says
+      // which pictures are left, and the agent calls media again with them.
+      if ((await ctx.askPerson(PERSON_ASK)) && added.length === 0) {
         i--;
         continue;
       }

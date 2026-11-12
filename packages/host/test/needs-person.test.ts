@@ -242,7 +242,7 @@ describe("needs a person (§11.5): the app is not there", () => {
     const r = await rigWith({ app: false, pairedBefore: false });
     const call = r.tools.tap({ target: { id: "save" }, look: false });
     await r.client.shownCount(1);
-    expect(r.client.shown[0]?.message).toBe("Needs a person: pair the phone (scan the QR code, or open the app and tap Connect).");
+    expect(r.client.shown[0]?.message).toBe("Needs a person: pair the phone (scan the QR code, or open the app and tap Connect). I'll go on by myself when the app connects.");
     await r.connect();
     expect((await call).isError).not.toBe(true);
   });
@@ -326,7 +326,7 @@ describe("needs a person (§11.5): an alert, and what is not a moment", () => {
     r.world.pressError = BEHIND;
     const call = r.tools.tap({ target: { id: "save" }, look: false });
     await r.client.shownCount(1);
-    expect(r.client.shown[0]?.message).toBe('Needs a person: tap "Allow" on the alert.');
+    expect(r.client.shown[0]?.message).toBe("Needs a person: tap \"Allow\" on the alert. I'll go on by myself when the alert is gone.");
     // The refusal came from the safety check's dry run: nothing was touched.
     expect(presses(r.app())).toBe(0);
     r.world.alerts = [];
@@ -343,7 +343,7 @@ describe("needs a person (§11.5): an alert, and what is not a moment", () => {
     r.world.pressError = BEHIND;
     const call = r.tools.tap({ target: { id: "save" }, look: false });
     await r.client.shownCount(1);
-    expect(r.client.shown[0]?.message).toBe('Needs a person: answer the alert "Delete item?" on the phone.');
+    expect(r.client.shown[0]?.message).toBe("Needs a person: answer the alert \"Delete item?\" on the phone. I'll go on by myself when the alert is gone.");
     r.client.answer(doneAnswer(CANT_NOW));
     const answer = await call;
     expect(textOf(answer)).toMatch(/^Error not_actionable: behind_alert: /);
@@ -391,7 +391,7 @@ describe("needs a person (§11.5): a stress moment, media and a stopped app", ()
     await r.tools.journey({ start: true, goal: "log two eggs", persona: "a first-timer" });
     const call = r.tools.journey({ stress: { kind: "background" }, survives: { text: "2 eggs" } });
     await client.shownCount(1);
-    expect(client.shown[0]?.message).toBe("Needs a person: switch to another app and back.");
+    expect(client.shown[0]?.message).toBe("Needs a person: switch to another app and back. I'll go on by myself when the app shows it.");
     r.app.send({ type: "event", event: "appState", data: { state: "background" } });
     await pause(30);
     expect(client.shown[0]?.signal.aborted).toBe(false);
@@ -407,7 +407,7 @@ describe("needs a person (§11.5): a stress moment, media and a stopped app", ()
     await r.tools.journey({ start: true, goal: "log two eggs", persona: "a first-timer" });
     const call = r.tools.journey({ stress: { kind: "rotate" } });
     await client.shownCount(1);
-    expect(client.shown[0]?.message).toBe("Needs a person: turn the phone and keep it turned.");
+    expect(client.shown[0]?.message).toBe("Needs a person: turn the phone and keep it turned. I'll go on by myself when the app shows it.");
     client.answer(doneAnswer(CANT_NOW));
     const answer = await call;
     expect(answer.isError).toBe(true);
@@ -442,7 +442,7 @@ describe("needs a person (§11.5): a stress moment, media and a stopped app", ()
     const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, dialogs: new Dialogs(client, { ttlMs: 2000 }), personWaitMs: 2000, personPollMs: 5, personDoneGraceMs: 20 });
     const call = tools.media({ add: [file], confirm: true });
     await client.shownCount(1);
-    expect(client.shown[0]?.message).toBe("Needs a person: allow photo access on the phone.");
+    expect(client.shown[0]?.message).toBe("Needs a person: allow photo access on the phone. I'll go on by myself when the prompt is gone.");
     client.answer(doneAnswer(DONE));
     const answer = await call;
     expect(textOf(answer)).toMatch(/^Added 1 picture to the phone's photo library/);
@@ -478,11 +478,134 @@ describe("needs a person (§11.5): a stress moment, media and a stopped app", ()
     expect(client.shown).toHaveLength(0);
     const call = tools.tap({ target: { id: "save" }, look: false });
     await client.shownCount(1);
-    expect(client.shown[0]?.message).toBe("Needs a person: close Demo and open it again.");
-    // the app comes back as a new session: the call goes on and the press now works
+    expect(client.shown[0]?.message).toBe("Needs a person: close Demo and open it again. I'll go on by myself when it connects again.");
+    // The app comes back as a new session. The press was sent to the old one and may have acted, so it is not sent again.
     const again = await FakeApp.connect(port, {}, handlerFor({ alerts: [] }));
     apps.push(again.app);
-    expect((await call).isError).not.toBe(true);
+    const answer = await call;
+    expect(textOf(answer)).toMatch(/^Error not_answering: /);
+    expect(textOf(answer)).toContain("The person is done; the call had already acted, so it was not run again.");
+    expect(presses(again.app)).toBe(0);
     expect(client.shown[0]?.signal.aborted).toBe(true);
+  });
+});
+
+// ---- a call that already acted is never run again ----
+
+describe("needs a person (§11.5): a call that already did something", () => {
+  const mediaRig = async (
+    client: FakeDialogClient,
+    onAdd: (n: number, app: () => FakeApp) => { ok: true; result: unknown },
+  ): Promise<{ tools: TaplineTools; app: FakeApp; adds: () => number; files: string[] }> => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-needs-person-"));
+    dirs.push(dir);
+    const files = ["a.jpg", "b.jpg"].map((name) => {
+      const path = join(dir, name);
+      writeFileSync(path, tinyJpeg());
+      return path;
+    });
+    const { host, port } = await startHost();
+    hosts.push(host);
+    let n = 0;
+    let self: FakeApp | undefined;
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "media"], device: { platform: "ios", osVersion: "26.1", model: "x", name: "p", id: "install-1" } }, (req) => {
+      if (req.method === "tree") return { ok: true, result: { screen: { width: 400, height: 800 }, elements: [] } };
+      n += 1;
+      return onAdd(n, () => {
+        if (self === undefined) throw new Error("no app");
+        return self;
+      });
+    });
+    self = app;
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, dialogs: new Dialogs(client, { ttlMs: 2000 }), personWaitMs: 2000, personPollMs: 5, personDoneGraceMs: 30 });
+    return { tools, app, adds: () => app.requests.filter((r) => r.method === "media").length, files };
+  };
+
+  it("media: a later picture failing in_background waits for the person, then adds each picture once", async () => {
+    const client = new FakeDialogClient();
+    const m = await mediaRig(client, (n, app) => {
+      // After the first picture the app goes to the background (the event reaches the host before the answer).
+      if (n === 1) app().send({ type: "event", event: "appState", data: { state: "background" } });
+      return { ok: true, result: { id: `asset-${n}` } };
+    });
+    const call = m.tools.media({ add: m.files, confirm: true });
+    await client.shownCount(1);
+    expect(client.shown[0]?.message).toBe("Needs a person: open Demo on the phone (unlock it first if it's locked).");
+    m.app.send({ type: "event", event: "appState", data: { state: "active" } });
+    const answer = await call;
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error in_background: /);
+    expect(textOf(answer)).toContain("1 picture were added before it; left: b.jpg.");
+    expect(textOf(answer)).toContain("The person is done; the call had already acted, so it was not run again.");
+    // one add per file at most: the first picture was added once, the second was never sent
+    expect(m.adds()).toBe(1);
+  });
+
+  it("media: the photo-access prompt after a picture was added waits, then names what is left and adds nothing twice", async () => {
+    const client = new FakeDialogClient();
+    const m = await mediaRig(client, (n) => (n === 1 ? { ok: true, result: { id: "asset-1" } } : { ok: true, result: { needsPerson: true } }));
+    const call = m.tools.media({ add: m.files, confirm: true });
+    await client.shownCount(1);
+    client.answer(doneAnswer(DONE));
+    const answer = textOf(await call);
+    expect(answer).toContain("Added 1 of 2 pictures.");
+    expect(answer).toContain("with the 1 picture left (b.jpg)");
+    expect(m.adds()).toBe(2);
+  });
+
+  it("media: ids that arrive twice are remembered once", async () => {
+    const { MediaState } = await import("../src/media.js");
+    const state = new MediaState();
+    state.remember("app@1", ["a", "b", "a"]);
+    state.remember("app@1", ["b", "c"]);
+    expect(state.addedIds("app@1")).toEqual(["a", "b", "c"]);
+  });
+
+  const STEPS = [
+    { tool: "tap" as const, target: { id: "save" } },
+    { tool: "tap" as const, target: { id: "save" } },
+    { tool: "tap" as const, target: { id: "save" } },
+  ];
+
+  /** A run whose second press finds the app in the background. */
+  async function backgroundedRun(client: FakeDialogClient): Promise<{ call: Promise<CallToolResult>; r: Rig }> {
+    const r = await rigWith({ dialog: true });
+    const tools = new TaplineTools(r.host, { connect: { url: "", name: "Dev PC" }, policy: NO_POLICY, dialogs: new Dialogs(client, { ttlMs: 2000 }), personWaitMs: 2000, personPollMs: 5, personDoneGraceMs: 30 });
+    let presses = 0;
+    const app = r.app();
+    if (app === undefined) throw new Error("no app");
+    app.handler = (req) => {
+      if (req.method === "tree") return { ok: true, result: { screen: { width: 430, height: 932 }, elements: [SAVE] } };
+      if (req.method === "press") {
+        presses += 1;
+        if (presses === 1) app.send({ type: "event", event: "appState", data: { state: "background" } });
+        return { ok: true, result: { element: SAVE, point: { x: 200, y: 630 } } };
+      }
+      return { ok: true, result: {} };
+    };
+    return { call: tools.run({ steps: STEPS, look: false }), r: { ...r, tools } };
+  }
+
+  it("a batch that stops on a moment waits, never runs again, and says where to continue", async () => {
+    const client = new FakeDialogClient();
+    const { call, r } = await backgroundedRun(client);
+    await client.shownCount(1);
+    r.app()?.send({ type: "event", event: "appState", data: { state: "active" } });
+    const answer = await call;
+    expect(textOf(answer)).toMatch(/^Error in_background: Ran 1 of 3 steps; stopped at step 2 /);
+    expect(textOf(answer).split("\n").at(-1)).toBe("The person is done; continue from step 2.");
+    expect(presses(r.app())).toBe(1);
+  });
+
+  it("a batch with Can't now answers the usual failure plus the can't-now line", async () => {
+    const client = new FakeDialogClient();
+    const { call, r } = await backgroundedRun(client);
+    await client.shownCount(1);
+    client.answer(doneAnswer(CANT_NOW));
+    const answer = await call;
+    expect(textOf(answer)).toMatch(/^Error in_background: Ran 1 of 3 steps; stopped at step 2 /);
+    expect(textOf(answer).split("\n").at(-1)).toBe("They can't now. Ask your user what to do.");
+    expect(presses(r.app())).toBe(1);
   });
 });
