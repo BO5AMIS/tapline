@@ -3,6 +3,7 @@ import { checkLayout } from './checks';
 import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
+import { media } from './media';
 import { feedMethod, frameAfterAction } from './live';
 import { perfStart, perfStop } from './perf';
 import { waitFor } from './wait';
@@ -45,6 +46,7 @@ export const methods: Record<string, MethodFn> = {
   inspect: (params) => inspect(params),
   audit: (params) => audit(params),
   uxCheck: (params) => uxCheck(params),
+  media: (params) => media(params),
   reload: () => reload(),
   perfStart: () => perfStart(),
   perfStop: () => perfStop(),
