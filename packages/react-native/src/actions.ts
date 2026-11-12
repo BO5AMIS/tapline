@@ -1067,7 +1067,7 @@ async function pressLike(
   if (params.force !== true) {
     // What doesn't depend on where the element is comes first: an open alert is answered before anything scrolls.
     assertNoBlockingAlert(planned.actor);
-    reach = await scrollIntoReach(snapshot, planned.actor, params.dryRun === true);
+    reach = await scrollIntoReach(snapshot, planned.actor, params.dryRun === true, params.noScroll === true);
     if (reach.scrolled) {
       const again = await reresolve(planned.actor, kind, params.target);
       current = again.snapshot;
@@ -1311,7 +1311,7 @@ export async function typeText(
   let reach: Reach = {};
   if (params.force !== true) assertNoBlockingAlert(entry);
   if (params.force !== true && !ownsInstance(entry, keyboard.focusedInput())) {
-    reach = await scrollIntoReach(snapshot, entry, params.dryRun === true);
+    reach = await scrollIntoReach(snapshot, entry, params.dryRun === true, params.noScroll === true);
     if (reach.scrolled) {
       let again: Awaited<ReturnType<typeof resolveInput>>;
       try {
@@ -1673,9 +1673,17 @@ function visiblePart(frame: Frame, screen: { width: number; height: number }): F
  * alert, under a bar) run afterwards, as for any element. Refused as `off_screen`, with the reason, when
  * no scroll can bring it on screen. `dry` predicts the point after the scroll and scrolls nothing.
  */
-async function scrollIntoReach(snapshot: Snapshot, entry: Entry, dry: boolean): Promise<Reach> {
+async function scrollIntoReach(snapshot: Snapshot, entry: Entry, dry: boolean, noScroll = false): Promise<Reach> {
   const frame = await measureFiber(entry.node.fiber);
   if (frame === null) return {};
+  // A journey in a user's eyes (`noScroll`, §17.1): nothing scrolls by itself. An element wholly off screen is refused.
+  if (noScroll) {
+    if (visiblePart(frame, snapshot.screen) !== null) return {};
+    throw notActionable(
+      'off_screen',
+      `${describe(entry)} is off screen; in a journey nothing scrolls by itself: scroll the way a person would, then try again.`,
+    );
+  }
   // Partly on screen (over the edge, or under a bar): scrolled clear too, with one attempt; if that
   // can't be done the action goes on as before and the touch checks decide. Never refused for this.
   const partial = visiblePart(frame, snapshot.screen) !== null;
@@ -1960,7 +1968,7 @@ const round2 = (value: number): number => Math.round(value * 100) / 100;
  * architecture `measureInWindow` includes the content offset, so scroll frame minus content frame
  * is the offset. Null when either can't be measured (old architecture, nothing laid out).
  */
-async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
+export async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
   const scrollFiber = entry.node.fiber;
   const horizontal = findProp(entry.node, 'horizontal') === true;
   const children = hostChildren(scrollFiber);
@@ -2021,7 +2029,7 @@ export async function toggle(
   let reach: Reach = {};
   if (params.force !== true) {
     assertNoBlockingAlert(planned.control);
-    reach = await scrollIntoReach(snapshot, planned.control, params.dryRun === true);
+    reach = await scrollIntoReach(snapshot, planned.control, params.dryRun === true, params.noScroll === true);
     if (reach.scrolled) {
       const again = await reresolve(planned.control, 'toggle', params.target);
       snapshot = again.snapshot;

@@ -2,7 +2,9 @@ import { audit, back, getLogs, inspect, longPress, onActed, openURL, press, relo
 import { checkLayout } from './checks';
 import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
+import { glassTree } from './glass';
 import { overlay, tree } from './inspect';
+import { isRecord } from './types';
 import { feedMethod, frameAfterAction } from './live';
 import { perfStart, perfStop } from './perf';
 import { waitFor } from './wait';
@@ -25,7 +27,7 @@ function action(fn: MethodFn): MethodFn {
 
 /** Protocol method name -> implementation. */
 export const methods: Record<string, MethodFn> = {
-  tree: (params) => tree(params),
+  tree: (params) => (isRecord(params) && params.glass === true ? glassTree(params) : tree(params)),
   press: action((params) => press(params)),
   longPress: action((params) => longPress(params)),
   type: action((params) => typeText(params)),
