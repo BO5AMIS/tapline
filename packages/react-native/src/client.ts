@@ -1,6 +1,7 @@
 import { AppState, Platform } from 'react-native';
 import { screenshotAvailable } from './actions';
 import { keepAwake } from './awake';
+import { deliverSavedCrash } from './crash';
 import { emitEvent, setEventSink } from './events';
 import { onRealTouch } from './touches';
 import { onFrameAck, setFrameAcks, stopLiveFeed } from './live';
@@ -8,6 +9,7 @@ import { forgetLastTree } from './inspect';
 import { originalLog, setLogSink } from './logs';
 import { methods as defaultMethods, type MethodFn } from './methods';
 import { refreshCover } from './native';
+import { stopPerf } from './perf';
 import {
   PROTOCOL_VERSION,
   TaplineError,
@@ -113,7 +115,7 @@ export function collectDeviceInfo(): DeviceInfo {
 }
 
 export function defaultCapabilities(): string[] {
-  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit'];
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance'];
   if (screenshotAvailable()) capabilities.push('screenshot', 'feed');
   if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload', 'inspect');
   return capabilities;
@@ -180,6 +182,7 @@ export class TaplineClient {
     setLogSink(null);
     setEventSink(null);
     stopLiveFeed();
+    stopPerf();
     this.setAwake(false);
     const subscription = this.appStateSubscription;
     this.appStateSubscription = null;
@@ -351,6 +354,8 @@ export class TaplineClient {
     this.setAwake(true);
     setLogSink((event, payload) => this.send({ type: 'event', event, data: payload }));
     setEventSink((event, data) => this.send({ type: 'event', event, data }));
+    // A fatal error the app kept on the phone before it went away, not yet told to this computer.
+    void deliverSavedCrash();
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => this.safely(() => this.onPingTick()), PING_INTERVAL_MS);
   }
@@ -396,6 +401,7 @@ export class TaplineClient {
     setEventSink(null);
     // Nobody can watch while disconnected; the host asks again after it reconnects.
     stopLiveFeed();
+    stopPerf();
     this.setAwake(false);
     if (this.ready) {
       this.status(code ? `disconnected (code ${code})` : 'disconnected');

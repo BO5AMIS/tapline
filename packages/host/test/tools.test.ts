@@ -1379,8 +1379,65 @@ describe("other tools", () => {
     const id = host.sessions()[0]?.id ?? "";
     for (let i = 0; i < 100 && host.logs(id).length === 0; i++) await new Promise((r) => setTimeout(r, 10));
     const text = textOf(await tools.logs({}));
-    expect(text).toContain("warn careful");
-    expect(text).toContain("since=5000");
+    expect(text).toContain("warning careful");
+    expect(text).toContain("Latest: 5000");
+  });
+
+  it("logs with nothing to show falls back to `since`, else 0, never this computer's clock", async () => {
+    const { tools } = await setup(defaultHandler)();
+    expect(textOf(await tools.logs({}))).toMatch(/\nLatest: 0$/);
+    expect(textOf(await tools.logs({ since: 7000 }))).toMatch(/\nLatest: 7000$/);
+  });
+
+  it("logs filters by level, grep and limit (AGENT-TOOLS 1.10 §15.1)", async () => {
+    const { host, app, tools } = await setup(defaultHandler)();
+    app.send({ type: "event", event: "log", data: { level: "log", message: "loaded trips", ts: 1000 } });
+    app.send({ type: "event", event: "log", data: { level: "warn", message: "[network] GET /trips → 404", ts: 2000 } });
+    app.send({ type: "event", event: "log", data: { level: "error", message: "Request timeout", ts: 3000 } });
+    app.send({ type: "event", event: "log", data: { level: "debug", message: "cache hit", ts: 4000 } });
+    const id = host.sessions()[0]?.id ?? "";
+    for (let i = 0; i < 100 && host.logs(id).length < 4; i++) await new Promise((r) => setTimeout(r, 10));
+    const warn = textOf(await tools.logs({ level: "warning" }));
+    expect(warn).toContain("warning [network] GET /trips → 404");
+    expect(warn).toContain("error Request timeout");
+    expect(warn).not.toContain("loaded trips");
+    expect(warn).toMatch(/Latest: 4000$/);
+    expect(textOf(await tools.logs({ grep: "TIMEOUT" }))).toMatch(/error Request timeout\nLatest: 4000$/);
+    const one = textOf(await tools.logs({ limit: 1 }));
+    expect(one).toContain("info cache hit");
+    expect(one.split("\n")).toHaveLength(2);
+    expect(textOf(await tools.logs({ level: "error", grep: "nothing" }))).toBe('No log entries at error or above, matching "nothing".\nLatest: 4000');
+  });
+
+  it("a failed run step carries the app's warnings since that step began (AGENT-TOOLS 1.10 §15.4)", async () => {
+    const holder: { app?: FakeApp } = {};
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "press") {
+        holder.app?.send({ type: "event", event: "log", data: { level: "log", message: "pressed", ts: 9000 } });
+        holder.app?.send({ type: "event", event: "log", data: { level: "error", message: "TypeError: trip is undefined", ts: 9001 } });
+        return { ok: false, error: { code: "not_found", message: "No element with id \"save\"." } };
+      }
+      return defaultHandler(req);
+    };
+    const { host, app, tools } = await setup(handler)();
+    holder.app = app;
+    app.send({ type: "event", event: "log", data: { level: "warn", message: "before the run", ts: 1000 } });
+    const id = host.sessions()[0]?.id ?? "";
+    for (let i = 0; i < 100 && host.logs(id).length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    const result = await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }], look: false });
+    expect(result.isError).toBe(true);
+    const said = textOf(result);
+    expect(said).toContain("stopped at step 1");
+    expect(said).toMatch(/\nLogs \(since step 1\):\n\d\d:\d\d:\d\d\.\d{3} error TypeError: trip is undefined/);
+    expect(said).not.toContain("before the run");
+    expect(said).not.toContain("pressed");
+  });
+
+  it("a passing run carries no logs", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    app.send({ type: "event", event: "log", data: { level: "error", message: "noise", ts: 1000 } });
+    const said = textOf(await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }], look: false }));
+    expect(said).not.toContain("Logs (since");
   });
 
   it("wait returns a fresh look", async () => {
@@ -1440,7 +1497,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
+        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "crash", "reload", "performance", "wait"].sort(),
       );
       const ok = await client.callTool({ name: "tap", arguments: { target: { id: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Tapped e3");

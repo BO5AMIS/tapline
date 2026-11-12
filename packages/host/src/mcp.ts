@@ -25,7 +25,7 @@ import { TaplineTools, toolShapes } from "./tools.js";
 
 /** Registers every Tapline tool on an MCP server. */
 export function createMcpServer(tools: TaplineTools): McpServer {
-  const server = new McpServer({ name: "tapline", version: "1.2.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: "1.3.0" }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     "apps",
@@ -277,6 +277,17 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "crash",
+    {
+      title: "App crash",
+      description: toolDescription("crash"),
+      inputSchema: toolShapes.crash,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => tools.crash(args),
+  );
+
+  server.registerTool(
     "reload",
     {
       title: "Reload app",
@@ -284,6 +295,16 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: toolShapes.reload,
     },
     (args) => tools.reload(args),
+  );
+
+  server.registerTool(
+    "performance",
+    {
+      title: "Performance",
+      description: toolDescription("performance"),
+      inputSchema: toolShapes.performance,
+    },
+    (args) => tools.performance(args),
   );
 
   server.registerTool(

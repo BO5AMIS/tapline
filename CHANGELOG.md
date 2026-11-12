@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.3.0, "the Diagnostics Update" (2026-11-12)
+
+When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.10, shared with Tapwright.
+
+- `logs` takes `level` (`error`, `warning` or `info`: that level and above), `grep` (lines containing a
+  text) and `limit` (the newest, 1 to 500, default 100). Each entry is one line, `HH:MM:SS.mmm <level> <text>`,
+  cut at 300 characters; the answer ends with `Latest:`, to pass back as `since`. `console.debug` is kept too.
+- Crashes say so. A fatal JavaScript error is kept on the phone before the app dies and sent when it connects
+  again. The answer of the call it ended, error answers too, says `Note: the app crashed: <the error>, at
+  <file:line>. logs and crash show more.`; one that arrives later says when it happened. When the app goes away
+  mid-call without a JavaScript error, the note says it may have crashed, and that Tapwright's `crash` reads
+  native crash reports. A reload you asked for, the app going to the background or a normal close are no crash.
+- `crash`: the newest fatal JavaScript error (`all: true`: the last 5), with its time, the top 8 frames with the
+  app's own marked `*` (mapped to your files in a development build), and the component stack.
+- `performance`: for `seconds` (default 3, optionally after a `tap`), the JS heap, JS frames (fps, the lowest
+  second, drops over 50 ms) and the longest JS stall, and in a development build the slowest renders by
+  component. `launch: true` times a JavaScript reload to the first settled screen (development builds). It
+  says what it doesn't measure: CPU and the process's memory.
+- In `run` and scripts, a `performance` step can carry `expect: {"under": {…}}` (`launch_s`, `js_heap_mb`,
+  `fps_min`, `drops`, `busy_ms`); a limit not kept stops the batch with `expect_failed`.
+- A failed `run` or `replay` step adds `Logs (since step <n>):` with up to 20 warnings and errors since that
+  step began. `tapline replay --junit` puts them, and the crash note, in the test case's `<system-out>`.
+
 ## 1.2.0, "the Regression Update" (2026-11-12)
 
 A script now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with

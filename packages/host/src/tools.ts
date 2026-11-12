@@ -1,4 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
@@ -8,18 +9,21 @@ import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
+import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
   MAX_STEPS,
   RUN_TIMEOUT_MS,
   RUN_TOOLS,
+  UNDER_KEYS,
   describeRunStep,
   expectFailure,
   parseError,
@@ -40,7 +44,7 @@ import {
   type TreeResult,
   type WireTarget,
 } from "./protocol.js";
-import { TaplineError, type SessionInfo, type TaplineHost } from "./server.js";
+import { TaplineError, identityOf, type AppIdentity, type SessionInfo, type TaplineHost } from "./server.js";
 
 // ---- input schemas ----------------------------------------------------------
 
@@ -267,8 +271,22 @@ export const toolShapes = {
   },
   logs: {
     since: z.number().optional().describe("Only lines after this timestamp (epoch milliseconds)"),
+    level: z.enum(["error", "warning", "info"]).optional().describe("That level and above (default info: everything)"),
+    grep: z.string().optional().describe("Only lines containing this text (case-insensitive)"),
+    limit: z.number().int().min(1).max(500).optional().describe("At most this many lines, the newest (1 to 500, default 100)"),
+  },
+  crash: {
+    all: z.boolean().optional().describe("The last 5 crashes instead of only the newest"),
   },
   reload: { look: lookField },
+  performance: {
+    launch: z
+      .boolean()
+      .optional()
+      .describe("true: reload the app's JavaScript and time it to the first settled screen (development builds only; not a cold start)"),
+    seconds: z.number().min(0.5).max(30).optional().describe("Measure for this long, 0.5 to 30 seconds (default 3)"),
+    tap: targetField.optional().describe("Tap this first, then measure what it sets off"),
+  },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
   run: {
     steps: z
@@ -276,7 +294,7 @@ export const toolShapes = {
       .min(1)
       .max(MAX_STEPS)
       .describe(
-        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves). expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold.',
+        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves), performance. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold; on a performance step, under: limits such as {"launch_s": 2, "drops": 0, "fps_min": 50, "busy_ms": 200, "js_heap_mb": 80}.',
       ),
     trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
     dry_run: z
@@ -643,6 +661,15 @@ function toWireTarget(target: Target): WireTarget {
   return { x: target.x ?? 0, y: target.y ?? 0 };
 }
 
+/** A target as the agent wrote it, in words: `id=save`, `"Save"`, `e3`, `120,300`. */
+function targetWords(target: Target): string {
+  if (target.id !== undefined) return `id=${target.id}`;
+  if (target.text !== undefined) return JSON.stringify(target.text);
+  if (target.label !== undefined) return JSON.stringify(target.label);
+  if (target.ref !== undefined) return target.ref;
+  return `${target.x ?? 0},${target.y ?? 0}`;
+}
+
 function candidateLines(details: unknown): string[] {
   const lines: string[] = [];
   const bareRefs: string[] = [];
@@ -761,6 +788,13 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 
 // ---- tool handlers ----------------------------------------------------------
 
+/** Every tool whose answer can end with a crash note (all but `crash`, which tells it in full). */
+const CRASH_NOTED_TOOLS = [
+  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "checkLayout", "viewer", "compareScreen", "filmstrip",
+  "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
+  "openUrl", "logs", "reload", "performance", "wait",
+] as const satisfies readonly (keyof TaplineTools)[];
+
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
   private readonly reloadWaitMs: number;
@@ -798,12 +832,20 @@ export class TaplineTools {
   private replayContext: { referencesDir: string; diffDir: string; update: boolean } | null = null;
   /** Where the latest failed check of the running batch saved its picture. */
   private diffSaved: string | null = null;
+  /** What the last `performance` call measured, for the `under` limits of a `run` step. */
+  private lastPerf: PerfMeasure | undefined;
   /** The elements the latest comparison painted its ignore list from: a recording saves its mask from the same list. */
   private lastMaskElements: TreeResult["elements"] | undefined;
   /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
   private pairWrites = 0;
+  /** Per app (by identity): crash events up to this one have been told to the agent. */
+  private readonly notedCrashSeqs = new Map<string, number>();
+  /** Crash events up to this one happened before this agent's session: an app with no entry above starts here. */
+  private readonly crashBaseline: number;
+  /** Set inside a tool call (and everything it awaits), so a call within a call (`run`'s steps) adds no notes. */
+  private readonly noteScope = new AsyncLocalStorage<true>();
 
   constructor(
     private readonly host: TaplineHost,
@@ -820,6 +862,70 @@ export class TaplineTools {
     host.on("touch", (session) => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
     });
+    // Crashes before this agent's session began are not its news.
+    this.crashBaseline = host.crashMark();
+    for (const name of CRASH_NOTED_TOOLS) {
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args)));
+    }
+  }
+
+  /**
+   * Runs a tool call and ends its answer with a note when the app stopped (AGENT-TOOLS 15.2): during this
+   * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
+   */
+  private noting(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+    // Nesting belongs to the call and what it awaits (not to this object), so calls running side by side each
+    // count as outermost, and only a step inside a call is skipped.
+    if (this.noteScope.getStore() === true) return run();
+    const mark = this.host.crashMark();
+    const startedWith: AppIdentity | undefined = this.host.current();
+    return this.noteScope.run(true, () => {
+      const result = run();
+      if (result instanceof Promise) return result.then((answer) => this.withCrashNotes(answer, mark, startedWith));
+      return this.withCrashNotes(result, mark, startedWith);
+    });
+  }
+
+  /** What was told about this app's crashes so far: the crash events up to this number. */
+  private notedSeqOf(app: AppIdentity): number {
+    return this.notedCrashSeqs.get(identityOf(app)) ?? this.crashBaseline;
+  }
+
+  /**
+   * The notes for the app this call used (the one at its start, the one at its end, or, with none connected, the
+   * one that dropped last). Other apps' events stay pending until that app is the one being driven.
+   */
+  private withCrashNotes(answer: CallToolResult, mark: number, startedWith: AppIdentity | undefined): CallToolResult {
+    const apps = new Map<string, AppIdentity>();
+    const current = this.host.current();
+    // A call that started on an app answers for that app only: another app that became current meanwhile (the first
+    // one dropped) keeps its crashes pending until it is the one being driven (Codex review of 1.3.0).
+    const endedWith: AppIdentity | undefined =
+      startedWith === undefined ? (current ?? this.host.lastDisconnect()?.session) : current !== undefined && identityOf(current) === identityOf(startedWith) ? current : undefined;
+    for (const app of [startedWith, endedWith]) if (app !== undefined) apps.set(identityOf(app), app);
+    const events = [...apps.values()]
+      .flatMap((app) => this.host.crashEventsAfter(this.notedSeqOf(app), app))
+      .sort((a, b) => a.seq - b.seq);
+    if (events.length === 0) return answer;
+    const told = this.host.crashMark();
+    for (const key of apps.keys()) this.notedCrashSeqs.set(key, told);
+    let noted = answer;
+    for (const event of events) {
+      // During this call: no time. A crash the phone had kept and sent later says when it happened.
+      const during = event.seq > mark;
+      // A crash kept by an earlier run of the app (this host had not started yet) says so, with its date.
+      const earlier = event.kind === "crash" && event.crash.source === "saved" && event.crash.ts < this.host.startedAt;
+      noted = appendNote(
+        noted,
+        event.kind === "crash"
+          ? crashNote(event.crash, !(during && event.crash.source === "live"), earlier)
+          : disconnectNote(during ? undefined : event.at),
+      );
+    }
+    return noted;
   }
 
   /** A person used the app: the next answer says so once, and `{ref}` targets are stale until the next full list. */
@@ -1058,6 +1164,39 @@ export class TaplineTools {
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
         return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
       }
+      const under = step.expect?.under;
+      if (under !== undefined) {
+        if (step.tool !== "performance") {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): under goes only on a performance step.`);
+        }
+        const unknown = badUnderKeys(under);
+        if (unknown.length > 0) {
+          return fail(
+            `Error bad_params: step ${i + 1} (${describeRunStep(step)}): under has ${unknown.map((key) => JSON.stringify(key)).join(", ")}; the limits are ${UNDER_KEYS.join(", ")}.`,
+          );
+        }
+        if (Object.keys(under).length === 0) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): under is empty; give at least one limit (${UNDER_KEYS.join(", ")}).`);
+        }
+        const negative = Object.entries(under).filter(([, limit]) => limit < 0 || !Number.isFinite(limit));
+        if (negative.length > 0) {
+          return fail(
+            `Error bad_params: step ${i + 1} (${describeRunStep(step)}): under limits can't be negative (${negative.map(([key]) => key).join(", ")}).`,
+          );
+        }
+        if (under["launch_s"] !== undefined && (step as { launch?: unknown }).launch !== true) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch_s goes only on a launch step (performance with launch: true).`);
+        }
+      }
+      // A step's own look and screenshot are ignored (§9.1).
+      if (step.tool === "performance") {
+        delete params["look"];
+        delete params["screenshot"];
+        // Checked before any step runs (and in a dry run), not when this step's turn comes.
+        if (params["launch"] === true && params["tap"] !== undefined) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch reloads the app and tap taps in it; give one of them.`);
+        }
+      }
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
@@ -1083,12 +1222,15 @@ export class TaplineTools {
     const trace: string[] = [];
     let ran = 0;
     let stop: { index: number; code: string; message: string; rest: string[] } | null = null;
+    // The newest log time when the current step began: a failed step shows the app's warnings since then (§15.4).
+    let stepMark: number | undefined;
     for (const [i, step] of steps.entries()) {
       if (Date.now() - started > RUN_TIMEOUT_MS) {
         stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
         break;
       }
       const at = Date.now();
+      stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
       const answer = await this.runStep(step).finally(() => {
         this.batch = undefined;
@@ -1099,7 +1241,21 @@ export class TaplineTools {
         break;
       }
       notes.push(...stepNotes(said, i + 1));
-      if (step.expect !== undefined) {
+      if (step.expect?.under !== undefined) {
+        // AGENT-TOOLS §15.3: the limits a performance step must keep; every broken one is listed.
+        const measured = this.lastPerf;
+        if (measured === undefined) {
+          // A limit nobody measured must not pass.
+          stop = { index: i, code: "expect_failed", message: "no measurement to check.", rest: [] };
+          break;
+        }
+        const checked = checkUnder(step.expect.under, measured);
+        notes.push(...checked.notes.map((note) => `Note (step ${i + 1}): ${note}`));
+        if (checked.missed.length > 0) {
+          stop = { index: i, code: "expect_failed", message: `${checked.missed.join("; ")}.`, rest: [] };
+          break;
+        }
+      } else if (step.expect !== undefined) {
         const missed = await this.expectMissed(step.expect);
         if (missed !== null) {
           stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
@@ -1140,18 +1296,46 @@ export class TaplineTools {
       : `Error ${stop.code}: Ran ${ran} of ${total} steps; stopped at step ${stop.index + 1} (${describeRunStep(steps[stop.index] as Step)}): ${stop.message}`;
     const diffNote = stop !== null && this.diffSaved !== null ? [`Note: the difference is saved at ${this.diffSaved}.`] : [];
     const first = [head, ...trace, ...(stop?.rest ?? []), ...diffNote].join("\n");
+    const tail = [...(stop !== null ? this.failureLogs(session.id, stop.index + 1, stepMark) : []), ...notes];
     let response: CallToolResult;
     const live = this.host.current();
     if (args.look === false || live === undefined) {
-      response = text([first, ...notes].join("\n"));
+      response = text([first, ...tail].join("\n"));
     } else {
       response = await this.withLook(live, first, args.screenshot === true);
-      if (notes.length > 0) {
+      if (tail.length > 0) {
         const [top, ...rest] = response.content;
-        if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] };
+        if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...tail].join("\n") }, ...rest] };
       }
     }
     return failed ? { ...response, isError: true } : response;
+  }
+
+  /** The newest log time of a session (or of the app's current session), undefined without lines. */
+  private newestLogTs(sessionId: string): number | undefined {
+    return this.sessionLogs(sessionId).reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
+  }
+
+  /**
+   * A session's buffered lines, also when it has ended. When the same app on the same phone came back as a new
+   * session, that session's lines follow. Another app's lines never stand in for it (Codex review of 1.3.0).
+   */
+  private sessionLogs(sessionId: string): LogEntry[] {
+    const record = this.host.sessionRecord(sessionId);
+    if (record === undefined) return [];
+    const now = this.host.current();
+    if (now === undefined || now.id === sessionId || identityOf(now) !== record.identity) return record.events;
+    try {
+      return [...record.events, ...this.host.logs(now.id)];
+    } catch {
+      return record.events;
+    }
+  }
+
+  /** AGENT-TOOLS §15.4: `Logs (since step <n>):` and up to 20 lines at warning or above since the step began. */
+  private failureLogs(sessionId: string, step: number, since: number | undefined): string[] {
+    const lines = filterLogs(this.sessionLogs(sessionId), { since, level: "warning", limit: 20 });
+    return lines.length === 0 ? [] : [`Logs (since step ${step}):`, ...formatLogs(lines).split("\n")];
   }
 
   /** `run` with dry_run (§11.4): the steps are checked already; step 1 is resolved, nothing is touched. */
@@ -1159,8 +1343,11 @@ export class TaplineTools {
     const total = steps.length;
     const first = steps[0] as Step;
     const head = `Would run ${total} step${total === 1 ? "" : "s"}`;
-    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(first.tool)) {
-      const answer = await this.runStep({ ...first, dry_run: true } as Step);
+    // A performance step with a tap: the tap resolves like any touch; nothing is measured (AGENT-TOOLS §15.3).
+    const perfTap = first.tool === "performance" ? (first as Record<string, unknown>)["tap"] : undefined;
+    const probe = perfTap !== undefined ? ({ tool: "tap", target: perfTap } as Step) : first;
+    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(probe.tool)) {
+      const answer = await this.runStep({ ...probe, dry_run: true } as Step);
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       const [line, ...rest] = said.split("\n");
       if (answer.isError === true) {
@@ -1169,6 +1356,10 @@ export class TaplineTools {
       }
       const would = (line ?? "").replace(/^Would /, "would ");
       return text([`${head}; step 1 ${would}`, ...rest].join("\n"));
+    }
+    if (first.tool === "performance") {
+      const p = first as Record<string, unknown>;
+      return text(`${head}; step 1 would ${p["launch"] === true ? "reload the app and time it to the first settled screen" : `measure ${Number(p["seconds"] ?? 3)} s`}.`);
     }
     return text(`${head}; step 1 would ${describeRunStep(first)}.`);
   }
@@ -1202,6 +1393,8 @@ export class TaplineTools {
         return this.appCommand(quiet as Shape<"app_command">);
       case "compare_screen":
         return this.compareStep(rest as Shape<"compare_screen">);
+      case "performance":
+        return this.performance(rest as Shape<"performance">);
     }
   }
 
@@ -2234,10 +2427,17 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap) };
-        const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
-        if ("stop" in gate) return gate.stop;
-        frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-        await this.host.request("press", pressParams, { sessionId: session.id });
+        // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
+        // it, a person's input goes first, and the screen can't change between the check and the tap (PR #4 review).
+        const turn = async (): Promise<CallToolResult | null> => {
+          const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
+          if ("stop" in gate) return gate.stop;
+          frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+          await this.host.request("press", pressParams, { sessionId: session.id });
+          return null;
+        };
+        const stopped = this.options.control ? await this.options.control.runAgent(turn) : await turn();
+        if (stopped !== null) return stopped;
       }
       for (let i = frames.length; i < count; i++) {
         const at = Date.now();
@@ -2984,31 +3184,189 @@ export class TaplineTools {
         // fall through with an empty list
       }
     }
-    const last = entries.reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
-    const footer = last !== undefined ? `\n(latest ts ${last}; pass since=${last} for newer lines)` : "";
-    return text(`${formatLogs(entries)}${footer}`);
+    const newest = entries.reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
+    const query = { since: args.since, level: args.level, grep: args.grep, limit: args.limit };
+    return text(formatLogAnswer(filterLogs(entries, query), query, newest ?? args.since ?? 0));
+  }
+
+  /** The newest fatal JS error of the app (`all`: the last 5). Reading them tells the agent what the notes did. */
+  crash(args: Shape<"crash"> = {}): CallToolResult {
+    // The app being driven, else the one that stopped last. Never every app's crashes at once.
+    const known: AppIdentity | undefined = this.host.current() ?? this.host.lastCrashEvent()?.of;
+    if (known === undefined) return text(NO_CRASH_TEXT);
+    // Reading them tells the agent what the notes of this app said; other apps' stay pending.
+    this.notedCrashSeqs.set(identityOf(known), this.host.crashMark());
+    const crashes = this.host.crashes(known);
+    if (crashes.length === 0) return text(NO_CRASH_TEXT);
+    return text(crashes.slice(0, args.all === true ? 5 : 1).map(formatCrash).join("\n\n"));
   }
 
   async reload(args: Shape<"reload">): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     try {
-      await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
-    } catch (error) {
-      // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
-      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
-      if (!worked) return fail(describeError(error));
-    }
-    if (args.look === false) return text("Reload requested.");
-    const deadline = Date.now() + this.reloadWaitMs;
-    for (;;) {
-      const now = this.host.current();
-      if (now !== undefined && now.id !== session.id) break;
-      if (Date.now() > deadline) return text("Reload requested, but the app has not reconnected yet. Try look in a few seconds.");
-      await sleep(100);
+      try {
+        // The app goes away on purpose: that is no crash.
+        this.host.expectEnd(session.id);
+        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+      } catch (error) {
+        // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
+        const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
+        if (!worked) return fail(describeError(error));
+      }
+      if (args.look === false) return text("Reload requested.");
+      const deadline = Date.now() + this.reloadWaitMs;
+      for (;;) {
+        const now = this.host.current();
+        if (now !== undefined && now.id !== session.id) break;
+        if (Date.now() > deadline) return text("Reload requested, but the app has not reconnected yet. Try look in a few seconds.");
+        await sleep(100);
+      }
+    } finally {
+      // Whatever happened, the wait is over: a reload that "worked" without the app going away must not
+      // leave a later, real crash of this session explained.
+      this.host.expectEnd(session.id, false);
     }
     await sleep(this.reloadSettleMs);
     return this.withLook(this.host.current() ?? session, "Reloaded; the app reconnected.");
+  }
+
+  // -- performance (AGENT-TOOLS §15.3)
+
+  /**
+   * `launch`: a JavaScript reload (development builds), timed from the request to the new session's first
+   * settled screen. Stops with the answer when the reload can't be made or the app doesn't come back.
+   */
+  private async timedReload(session: SessionInfo): Promise<{ stop: CallToolResult } | { session: SessionInfo; seconds: number }> {
+    const started = Date.now();
+    let fresh: SessionInfo | undefined;
+    try {
+      try {
+        // The app goes away on purpose: that is no crash.
+        this.host.expectEnd(session.id);
+        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+      } catch (error) {
+        // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
+        const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
+        if (!worked) {
+          if (error instanceof TaplineError && error.code === "unsupported") {
+            return { stop: fail(`Error unsupported: launch is a JavaScript reload, and only development builds can do one (${error.message}).`) };
+          }
+          return { stop: fail(describeError(error)) };
+        }
+      }
+      const deadline = Date.now() + this.reloadWaitMs;
+      // Only the same app on the same phone, back as a new session, counts: another connected app that became
+      // current meanwhile is never measured as the reload (Codex review of 1.3.0).
+      const same = identityOf(session);
+      while (fresh === undefined) {
+        const back = this.host.sessions().find((s) => s.id !== session.id && identityOf(s) === same);
+        if (back !== undefined) {
+          fresh = back;
+          // and the agent goes on driving it, not whichever app the host picked when the old session dropped
+          if (this.host.current()?.id !== back.id) this.host.select(back.id);
+        } else if (Date.now() > deadline) {
+          return { stop: fail(`Error timeout: the app hadn't reconnected ${Number((this.reloadWaitMs / 1000).toFixed(1))} s after the reload; try look in a few seconds.`) };
+        } else await sleep(100);
+      }
+    } finally {
+      // The wait is over, whatever happened: a reload that "worked" without the app going away must not leave
+      // a later crash of this session explained away.
+      this.host.expectEnd(session.id, false);
+    }
+    // The first settled screen: the app waits until React hasn't committed for a moment (§6).
+    // The first settled screen: a launch time is only reported when the app said it settled.
+    try {
+      await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
+    } catch (error) {
+      return { stop: fail(describeError(error)) };
+    }
+    return { session: fresh, seconds: (Date.now() - started) / 1000 };
+  }
+
+  /** One measuring window in the app: start, (the tap,) wait out `seconds`, stop. */
+  private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>): Promise<PerfResult> {
+    const id = { sessionId: session.id };
+    // The window's number: the stop names it, so a call never takes another call's numbers (an older SDK has none).
+    let stopParams: Record<string, unknown> = {};
+    try {
+      const started = await this.host.request("perfStart", {}, id);
+      const windowId = typeof started === "object" && started !== null ? (started as { id?: unknown }).id : undefined;
+      if (typeof windowId === "number") stopParams = { id: windowId };
+    } catch (error) {
+      if (error instanceof TaplineError && error.code === "unsupported") {
+        throw new TaplineError("unsupported", "this app's Tapline is too old for performance; update react-native-tapline.");
+      }
+      throw error;
+    }
+    const started = Date.now();
+    try {
+      // The caller holds the live view's queue for the whole window when there is a tap (see performance).
+      if (press !== undefined) await this.host.request("press", press, id);
+      const rest = seconds * 1000 - (Date.now() - started);
+      if (rest > 0) await sleep(rest);
+    } catch (error) {
+      await this.host.request("perfStop", stopParams, id).catch(() => undefined);
+      throw error;
+    }
+    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", stopParams, id));
+    if (!parsed.success) throw new TaplineError("internal", "the app returned performance numbers the host could not read.");
+    return parsed.data;
+  }
+
+  async performance(args: Shape<"performance"> = {}): Promise<CallToolResult> {
+    this.lastPerf = undefined;
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    if (args.launch === true && args.tap !== undefined) {
+      return fail("Error bad_params: launch reloads the app and tap taps in it; give one of them.");
+    }
+    const seconds = args.seconds ?? 3;
+    try {
+      let measure: PerfMeasure;
+      if (args.launch === true) {
+        const launched = await this.timedReload(session);
+        if ("stop" in launched) return launched.stop;
+        measure = { result: await this.measureWindow(launched.session, seconds), launchS: launched.seconds };
+      } else {
+        let press: Record<string, unknown> | undefined;
+        if (args.tap !== undefined) {
+          // The tap is a touch like any other: the safety policy decides first (as for filmstrip).
+          press = { target: toWireTarget(args.tap) };
+          const stale = this.staleRef(press);
+          if (stale !== null) return stale;
+        }
+        // With a tap, the policy check and the whole window are one turn of the live view's queue: a pause refuses
+        // it, a person's input goes first and waits for the window, and the screen can't change between the check
+        // and the tap (Codex and CodeRabbit reviews of 1.3.0).
+        const tapped = press;
+        const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
+          if (tapped !== undefined) {
+            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app));
+            if ("stop" in gate) return { stop: gate.stop };
+          }
+          return { result: await this.measureWindow(session, seconds, tapped) };
+        };
+        const outcome = tapped !== undefined && this.options.control ? await this.options.control.runAgent(window) : await window();
+        if ("stop" in outcome) return outcome.stop;
+        measure = { result: outcome.result };
+      }
+      this.lastPerf = measure;
+      if (this.recording !== null && !this.replaying) {
+        this.recording.steps.push({
+          method: "performance",
+          params: {
+            ...(args.launch === true ? { launch: true } : {}),
+            ...(args.seconds !== undefined ? { seconds: args.seconds } : {}),
+            ...(args.tap !== undefined ? { tap: args.tap } : {}),
+          },
+        });
+      }
+      const tapWords = args.tap === undefined ? undefined : targetWords(args.tap);
+      return text([perfFirstLine(measure, tapWords), ...formatPerfLines(measure.result), ...this.takePersonNote()].join("\n"));
+    } catch (error) {
+      return fail(describeError(error));
+    }
   }
 
   async wait(args: Shape<"wait">): Promise<CallToolResult> {

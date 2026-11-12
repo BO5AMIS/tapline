@@ -122,6 +122,30 @@ async function symbolicate(frames: Frame[]): Promise<Array<Frame | null>> {
   return frames.map((f) => cache.get(keyOf(f)) ?? null);
 }
 
+/**
+ * A stack (as Hermes or V8 print it) with each frame Metro can map rewritten to the app's file and line.
+ * Frames Metro can't map, and lines that aren't frames, stay as they were. Development builds only.
+ */
+export async function symbolicateStack(stack: string): Promise<string> {
+  const lines = stack.split('\n');
+  const frames: Frame[] = [];
+  const at: number[] = [];
+  lines.forEach((line, i) => {
+    const m = /^\s*at\s+(?:(.*?)\s+\()?(.+?):(\d+):(\d+)\)?\s*$/.exec(line);
+    if (!m) return;
+    frames.push({ methodName: m[1] ?? '', file: m[2]!.replace(/^address at\s+/, ''), lineNumber: Number(m[3]), column: Number(m[4]) });
+    at.push(i);
+  });
+  if (frames.length === 0) return stack;
+  const mapped = await symbolicate(frames);
+  mapped.forEach((frame, k) => {
+    if (frame === null) return;
+    const name = frame.methodName !== '' ? frame.methodName : frames[k]!.methodName;
+    lines[at[k]!] = `    at ${name !== '' ? `${name} (` : ''}${frame.file}:${frame.lineNumber}:${frame.column}${name !== '' ? ')' : ''}`;
+  });
+  return lines.join('\n');
+}
+
 /** A file of the app's own code (not a library, not React's internals). */
 export function isAppFile(file: string): boolean {
   return !/[\\/]node_modules[\\/]/.test(file) && !/^https?:/.test(file) && !/^\[native code\]$/.test(file);

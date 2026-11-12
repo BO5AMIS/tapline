@@ -1,8 +1,10 @@
 import { audit, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
+import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
 import { feedMethod, frameAfterAction } from './live';
+import { perfStart, perfStop } from './perf';
 import { waitFor } from './wait';
 
 export type MethodFn = (params: unknown) => Promise<unknown>;
@@ -43,6 +45,11 @@ export const methods: Record<string, MethodFn> = {
   inspect: (params) => inspect(params),
   audit: (params) => audit(params),
   reload: () => reload(),
+  perfStart: () => perfStart(),
+  perfStop: (params) => perfStop(params),
+  perfSettle: () => settleOutcome(),
+  // The computer has the crash saved at `ts`: the phone may forget that one (and no other).
+  crashAck: (params) => crashAck(params),
   screenshot: (params) => screenshot(params),
   feed: (params) => feedMethod(params),
   overlay: () => overlay(),

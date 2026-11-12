@@ -135,8 +135,19 @@ Tapline on. Read its output, then go on with step 6. By hand:
    field, Tapline closes the keyboard first and the answer ends with
    `Note: closed the keyboard first.` Typing into another field that shows above the keyboard
    moves the focus there and leaves the keyboard up, as a person filling a form does.
-7. Read `logs` after anything that misbehaves: JavaScript errors and warnings often
-   explain a broken screen. Check them at the end of a run too.
+7. **When something breaks, say why.** Read `logs` after anything that misbehaves: JavaScript errors
+   and warnings often explain a broken screen. `level: "warning"` keeps warnings and errors, `grep`
+   keeps lines with a text, `limit` caps the count; reuse the `Latest:` value as `since`. Check them at
+   the end of a run too. A failed `run` or `replay` step already adds `Logs (since step 4):`.
+   `Note: the app crashed: …` on any answer means a fatal JavaScript error ended the app: `crash` shows
+   it with its stack (the app's own frames marked `*`) and the components it was in. `Note: the app
+   disconnected during this call (it may have crashed …)` means it went away without a JavaScript error:
+   possibly a native crash, which Tapline can't read (Tapwright's `crash` can). `performance` measures for
+   `seconds` (optionally after a `tap`): JS heap, JS frames (fps, the lowest second, drops over 50 ms),
+   the longest JS stall and, in a development build, the slowest renders by component; `launch: true`
+   times a JavaScript reload to the first settled screen (development builds). CPU and the app's whole
+   memory aren't measured here. In `run` and scripts, `expect: {"under": {"drops": 0, "busy_ms": 200}}`
+   on a `performance` step is a check.
 8. Deep links (`open_url`) jump straight to a screen; `back` goes back like the back
    button, and closes what is open on top first: with a sheet or modal open, its first line
    is `Closed the sheet.` It calls the sheet's own close request, or taps its backdrop as a

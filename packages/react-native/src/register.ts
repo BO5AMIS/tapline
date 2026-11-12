@@ -54,6 +54,19 @@ export function onCommit(listener: (revision: number) => void): () => void {
   };
 }
 
+const rootListeners = new Set<(root: unknown) => void>();
+
+/**
+ * Called with the committed root after every React commit (before `onCommit` listeners); returns a
+ * function that stops it. Only the performance sampler uses it, and only while it measures.
+ */
+export function onCommitRoot(listener: (root: unknown) => void): () => void {
+  rootListeners.add(listener);
+  return () => {
+    rootListeners.delete(listener);
+  };
+}
+
 function record(rendererId: number, root: unknown): void {
   if (!isFiberRoot(root)) return;
   let set = rootsByRenderer.get(rendererId);
@@ -157,6 +170,7 @@ export function installHook(target: object = globalThis): unknown {
 
   wrap(hook, 'onCommitFiberRoot', (args) => {
     record(numberArg(args[0]), args[1]);
+    for (const listener of rootListeners) safely(() => listener(args[1]));
     committed();
   });
   wrap(hook, 'onCommitFiberUnmount', (args) => forgetByFiber(args[1]));

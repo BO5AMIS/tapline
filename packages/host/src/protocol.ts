@@ -197,8 +197,20 @@ export const logEntrySchema = z.object({
   ts: z.number().optional(),
   stack: z.string().optional(),
   fatal: z.boolean().optional(),
+  /** On a fatal error: the error type, and React's component stack when the SDK had one. */
+  name: z.string().optional(),
+  componentStack: z.string().optional(),
 });
 export type LogEntry = z.infer<typeof logEntrySchema>;
+
+/** The `crash` event: a fatal JS error the SDK kept on the phone and sends after it connects again. */
+export const crashEventSchema = z.object({
+  name: z.string().optional(),
+  message: z.string(),
+  stack: z.string().optional(),
+  componentStack: z.string().optional(),
+  ts: z.number().optional(),
+});
 
 /** A target exactly as it travels on the wire. */
 export type WireTarget =
@@ -219,4 +231,9 @@ export type Method =
   | "toggle"
   | "openURL"
   | "logs"
-  | "reload";
+  | "reload"
+  | "perfStart"
+  | "perfStop"
+  | "perfSettle"
+  /** Tells the app the host has its saved crash (`{ ts }`), so it can forget it. */
+  | "crashAck";
