@@ -589,6 +589,8 @@ let fetchInstalled: { target: Record<string, unknown>; original: AnyFn } | null 
  * may call it after an await, so `insideFetch` can't tell) and one left after uninstall pass straight through.
  */
 let activeFetchWrapper: AnyFn | null = null;
+/** Each wrapper's own fetch, so the one that is active again can be undone at uninstall. */
+const wrapperOriginals = new WeakMap<AnyFn, AnyFn>();
 /** Where the global fetch lives: the install target (globalThis in an app). */
 let fetchTarget: Record<string, unknown> | null = null;
 
@@ -619,6 +621,9 @@ function abortError(signal: SignalLike): unknown {
  * Waits `ms`, or rejects at once when the request is aborted (also when it already was): a held request never
  * outlives its cancel, and a response held back is not delivered after it (Codex review of 1.4.0).
  */
+/** A fetch's condition waits still running, as the function that ends each now: uninstalling ends them all. */
+const fetchWaits = new Set<() => void>();
+
 function wait(ms: number, signal: SignalLike | null = null): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal !== null && signal.aborted === true) {
@@ -626,13 +631,18 @@ function wait(ms: number, signal: SignalLike | null = null): Promise<void> {
       return;
     }
     let onAbort: (() => void) | null = null;
-    const timer = setTimeout(() => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      fetchWaits.delete(finish);
       if (onAbort !== null && signal !== null && isFn(signal.removeEventListener)) (signal.removeEventListener as AnyFn).call(signal, 'abort', onAbort);
       resolve();
-    }, Math.max(0, ms));
+    };
+    const timer = setTimeout(finish, Math.max(0, ms));
+    fetchWaits.add(finish);
     if (signal !== null && isFn(signal.addEventListener)) {
       onAbort = () => {
         clearTimeout(timer);
+        fetchWaits.delete(finish);
         reject(abortError(signal));
       };
       (signal.addEventListener as AnyFn).call(signal, 'abort', onAbort);
@@ -694,7 +704,9 @@ function wrapFetch(original: AnyFn): AnyFn {
         insideFetch -= 1;
       }
     };
-    // Called from inside another Tapline-wrapped fetch (an app's wrapper in between): that one counts and conditions it.
+    // The global fetch may be an earlier wrapper again; the wrapper that is global then counts. Called from inside
+    // another Tapline-wrapped fetch (an app's wrapper in between), or not the active wrapper: it passes through.
+    followGlobalWrapper();
     if (wrapped !== activeFetchWrapper || insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
     const devServer = defaultIgnore(rawUrl);
     const signal = signalOf(input, init);
@@ -713,14 +725,17 @@ function wrapFetch(original: AnyFn): AnyFn {
       const at = Date.now();
       notify({ method, url, status, error, ms: Math.max(0, at - startedAt), at });
     };
+    // Tapline stopped since the request started: no more delays or made-up failures, it goes out as normal
+    const live = (): boolean => forGeneration === generation;
     try {
       const mode = devServer ? 'normal' : condition;
       if (mode === 'offline' || (mode === 'lossy' && random() < LOSSY_FAIL_SHARE)) {
         await wait(mode === 'offline' ? 0 : between(LOSSY_FAIL_DELAY_MS), signal);
-        failed(null, 'network error');
-        throw new TypeError('Network request failed');
-      }
-      if (mode === '3g') {
+        if (live()) {
+          failed(null, 'network error');
+          throw new TypeError('Network request failed');
+        }
+      } else if (mode === '3g') {
         const body = typeof init === 'object' && init !== null ? (init as { body?: unknown }).body : undefined;
         await wait(Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + bodyBytes(body) / THREE_G_BYTES_PER_MS), signal);
       } else if (mode === 'lossy') {
@@ -733,7 +748,7 @@ function wrapFetch(original: AnyFn): AnyFn {
         if (!isAbort(error)) failed(null, 'network error');
         throw error;
       }
-      if (mode === '3g') await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS), signal);
+      if (mode === '3g' && live()) await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS), signal);
       const status = responseStatus(response);
       if (status !== null && status >= 400) failed(status, null);
       return response;
@@ -743,6 +758,29 @@ function wrapFetch(original: AnyFn): AnyFn {
   };
   (wrapped as unknown as Record<symbol, boolean>)[FETCH_MARK] = true;
   return wrapped as AnyFn;
+}
+
+function isFetchWrapper(fn: unknown): fn is AnyFn {
+  return isFn(fn) && (fn as unknown as Record<symbol, unknown>)[FETCH_MARK] === true;
+}
+
+/** The app put an earlier wrapper back as the global fetch (an interceptor cleaning up): that one counts again. */
+function reactivate(target: Record<string, unknown>, wrapper: AnyFn): void {
+  const original = wrapperOriginals.get(wrapper);
+  if (wrapper === activeFetchWrapper || original === undefined) return;
+  activeFetchWrapper = wrapper;
+  fetchInstalled = { target, original };
+}
+
+/** At each fetch: when the global fetch is a Tapline wrapper again, it is the active one. Wraps nothing new. */
+function followGlobalWrapper(): void {
+  if (!installed || fetchTarget === null) return;
+  try {
+    const current = fetchTarget.fetch;
+    if (isFetchWrapper(current)) reactivate(fetchTarget, current);
+  } catch {
+    // never throw into the app
+  }
 }
 
 /**
@@ -756,8 +794,13 @@ export function ensureFetchWrapped(given?: Record<string, unknown>): void {
   if (target === null) return;
   try {
     const current = target.fetch;
-    if (!isFn(current) || (current as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) return;
+    if (!isFn(current)) return;
+    if (isFetchWrapper(current)) {
+      reactivate(target, current);
+      return;
+    }
     const wrapper = wrapFetch(current);
+    wrapperOriginals.set(wrapper, current);
     target.fetch = wrapper;
     activeFetchWrapper = wrapper;
     fetchInstalled = { target, original: current };
@@ -843,7 +886,7 @@ export function uninstallNetworkTracking(): void {
   condition = 'normal';
   // Held responses finish now and their wrappers come off: once the patched abort is gone, nothing else would clean
   // them up, and a reused XHR would stay held (Codex review of 1.4.0).
-  for (const release of [...heldSends, ...openHolds]) {
+  for (const release of [...heldSends, ...openHolds, ...fetchWaits]) {
     try {
       release();
     } catch {
@@ -852,6 +895,7 @@ export function uninstallNetworkTracking(): void {
   }
   heldSends.clear();
   openHolds.clear();
+  fetchWaits.clear();
   activeFetchWrapper = null;
   const wrappedFetch = fetchInstalled;
   fetchInstalled = null;

@@ -82,6 +82,48 @@ test('an app wrapper that awaits before calling Tapline\'s older fetch: counted 
   off();
 });
 
+test('an interceptor that puts the earlier global fetch back: that wrapper conditions again, and uninstall undoes it', async () => {
+  const sent: string[] = [];
+  const own = (input: unknown): Promise<unknown> => {
+    sent.push(String(input));
+    return ok();
+  };
+  const target = makeTarget(own);
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  setNetworkCondition('offline');
+  const first = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  target.fetch = (input: unknown, init?: unknown) => first(input, init); // an interceptor
+  ensureFetchWrapped();
+  target.fetch = first; // the interceptor cleans up
+  await expect((target.fetch as (input: unknown) => Promise<unknown>)('https://api.example.com/x')).rejects.toThrow('Network request failed');
+  expect(sent).toEqual([]);
+  uninstallNetworkTracking();
+  expect(target.fetch).toBe(own);
+});
+
+test('stopping Tapline ends a fetch\'s condition: no 3G delays after it, no made-up offline failure', async () => {
+  const sent: string[] = [];
+  const big = { status: 200, headers: { get: (name: string) => (name === 'content-length' ? '937500' : null) } };
+  const target = makeTarget((input) => {
+    sent.push(String(input));
+    return Promise.resolve(big);
+  });
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const app = target.fetch as (input: unknown) => Promise<unknown>;
+  setNetworkCondition('3g');
+  const startedAt = Date.now();
+  const slow = app('https://api.example.com/big');
+  uninstallNetworkTracking(); // during the send delay
+  await expect(slow).resolves.toBe(big);
+  expect(Date.now() - startedAt).toBeLessThan(300); // not 0.4 s + 10 s
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  setNetworkCondition('offline');
+  const offline = (target.fetch as (input: unknown) => Promise<unknown>)('https://api.example.com/later');
+  uninstallNetworkTracking();
+  await expect(offline).resolves.toBe(big);
+  expect(sent).toEqual(['https://api.example.com/big', 'https://api.example.com/later']);
+});
+
 test('offline fails a fetch without sending it, and the failure is reported', async () => {
   const sent: string[] = [];
   const target = makeTarget((input) => {
