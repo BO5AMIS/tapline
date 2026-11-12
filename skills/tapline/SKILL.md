@@ -65,6 +65,38 @@ run {"steps": [
 Ran 3 of 3 steps in 1.2 s.
 ```
 
+The common shapes, each one call:
+
+```
+Choose from a sheet, save, check:
+run {"steps": [
+  {"tool": "tap", "target": {"id": "currency-row"}, "expect": {"text": "Choose a currency"}},
+  {"tool": "tap", "target": {"text": "QAR"}},
+  {"tool": "tap", "target": {"id": "save"}, "expect": {"text": "Choose a currency", "gone": true}}]}
+
+Fill a form, submit, wait for the confirmation:
+run {"steps": [
+  {"tool": "type_text", "target": {"id": "name"}, "text": "Test User"},
+  {"tool": "type_text", "target": {"id": "note"}, "text": "Window seat", "submit": true},
+  {"tool": "tap", "target": {"id": "submit"}, "expect": {"text": "Booking confirmed", "timeout": 8}}]}
+
+Tour the tabs and check each looks as before:
+run {"steps": [
+  {"tool": "tap", "target": {"label": "Trips"}, "expect": {"matches": "trips"}},
+  {"tool": "tap", "target": {"label": "Saved"}, "expect": {"matches": "saved"}},
+  {"tool": "tap", "target": {"label": "Profile"}, "expect": {"matches": "profile"}}]}
+```
+
+**Spend fewer calls.** Each of these is a call you don't need:
+- Read the change list in the answer instead of calling `look` after an action.
+- Target by `id` the first time. After a `not_found`, the answer's `Closest:` names what is there.
+- Don't scroll to hunt for something. An action on an element that is in the list but off screen scrolls to
+  it and acts in the same call, and `scroll` with `to: "target"` brings one into view.
+- Put steps you are sure of in one `run`.
+- Set language, text size and the network with `app_command` (`language`, `text_size`, `network`), not
+  through the phone's Settings.
+- After a long session, `session_report` shows where the calls went and which ones were wasted.
+
 Name the element with one of, in this order of preference: `id` (the app's own identifier,
 React Native's `testID`), `ref` (from your last list, like `e3`), `label`, `text`. Use `x`
 and `y` only for things with no element.
