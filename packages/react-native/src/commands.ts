@@ -1,7 +1,9 @@
 import { Appearance, I18nManager } from 'react-native';
 import { reload } from './actions';
+import { originalWarn } from './logs';
 import {
-  BUILT_IN_COMMANDS,
+  RESERVED_COMMANDS,
+  SYSTEM_TEXT_SIZE,
   TEXT_SIZES,
   isRtlLanguage,
   parseLanguage,
@@ -27,6 +29,9 @@ const COMMAND_TIMEOUT_MS = 15_000;
 const MAX_RESULT_CHARS = 4000;
 
 const registry = new Map<string, TaplineCommand>();
+/** The direction we last asked React Native for; it only shows in `I18nManager.isRTL` after a restart. */
+let forcedRtl: boolean | null = null;
+const warnedReserved = new Set<string>();
 
 /** Built in: light or dark appearance, for checking both. */
 const appearance: TaplineCommand = {
@@ -61,7 +66,7 @@ const network: TaplineCommand = {
 
 /** Built in: the text size, through Tapline's font-scale helper (the app must use it; see locale.ts). */
 const textSize: TaplineCommand = {
-  description: `Set the text size the app shows (args: { size: ${TEXT_SIZES.map((s) => `"${s}"`).join(' | ')} }); needs the app to use useTaplineFontScale`,
+  description: `Set the text size the app shows (args: { size: ${[...TEXT_SIZES, SYSTEM_TEXT_SIZE].map((s) => `"${s}"`).join(' | ')} }; "system" restores the phone's own size); needs the app to use useTaplineFontScale; back to normal when the session ends`,
   run: runTextSize,
 };
 
@@ -87,10 +92,29 @@ function languageCommand(command: TaplineCommand): TaplineCommand {
       const language = parseLanguage(args);
       await command.run({ ...args, language });
       const rtl = isRtlLanguage(language);
-      if (rtl === I18nManager.isRTL) return { language, say: `Language ${language}.` };
+      const direction = rtl ? 'right-to-left' : 'left-to-right';
+      const running = I18nManager.isRTL;
+      // What the next start will use: our last request if we made one, else what is running now.
+      const pending = forcedRtl ?? running;
+      if (rtl === pending) {
+        if (rtl === running) return { language, say: `Language ${language}.` };
+        // asked for earlier and still waiting for the restart
+        return {
+          language,
+          restart: 'required',
+          say: `Language ${language}. The ${direction} layout is already set and takes effect when the app restarts (close it and open it again).`,
+        };
+      }
       I18nManager.allowRTL(true);
       I18nManager.forceRTL(rtl);
-      const direction = rtl ? 'right-to-left' : 'left-to-right';
+      forcedRtl = rtl;
+      if (rtl === running) {
+        // the running layout is already right: undoing an earlier request needs no restart
+        return {
+          language,
+          say: `Language ${language}. The layout stays ${direction}, as it is running now; the earlier change is undone and no restart is needed.`,
+        };
+      }
       if (isDevelopmentBuild()) {
         await reload();
         return {
@@ -132,8 +156,15 @@ export function registerTaplineCommand(name: string, command: TaplineCommand): (
   if (!NAME.test(name)) {
     throw new Error(`Tapline command names are letters, digits, ".", "_" and "-", starting with a letter: "${name}"`);
   }
-  if (BUILT_IN_COMMANDS.includes(name)) throw new Error(`Tapline command "${name}" is built in and cannot be replaced`);
   if (typeof command.run !== 'function') throw new Error(`Tapline command "${name}" needs a run function`);
+  if (RESERVED_COMMANDS.includes(name)) {
+    // Never throw into the app (an app that registered this name under an older version must still start).
+    if (!warnedReserved.has(name)) {
+      warnedReserved.add(name);
+      originalWarn(`[tapline] "${name}" is a built-in Tapline command; your registration of it is ignored.`);
+    }
+    return () => undefined;
+  }
   // `language` and `region` are standard names: their arguments are checked here, wherever the app registers them.
   const registered = standardCommand(name, command);
   registry.set(name, registered);
@@ -164,6 +195,8 @@ export function registerRegionCommand(handler: (region: string) => unknown): () 
 /** Removes the app's commands and restores the built-ins (tests). */
 export function resetCommands(): void {
   registry.clear();
+  forcedRtl = null;
+  warnedReserved.clear();
   installBuiltIns();
 }
 

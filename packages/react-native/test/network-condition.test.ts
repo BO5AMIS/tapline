@@ -207,8 +207,73 @@ describe('network conditions', () => {
     xhr.abort();
     jest.advanceTimersByTime(1000);
     expect(sentCount(xhr)).toBe(0);
-    expect(xhr.aborted).toBe(true);
+    expect(xhr.aborted).toBe(false);
     expect(inFlight()).toBe(0);
+  });
+
+  test.each(['3g', 'offline', 'lossy'] as const)('%s: abort of a held request fires readystatechange, abort and loadend', (mode) => {
+    setNetworkCondition(mode);
+    const xhr = request('GET', 'https://api.example.com/a');
+    const onAbort = jest.fn();
+    const onLoadEnd = jest.fn();
+    xhr.addEventListener('abort', onAbort);
+    xhr.addEventListener('loadend', onLoadEnd);
+    expect(inFlight()).toBe(1);
+    xhr.abort();
+    expect(inFlight()).toBe(0);
+    expect(xhr.readyState).toBe(4);
+    expect(xhr.status).toBe(0);
+    jest.advanceTimersByTime(1000);
+    expect(xhr.seen).toEqual(['readystatechange', 'abort', 'loadend']);
+    expect(onAbort).toHaveBeenCalledTimes(1);
+    expect(onLoadEnd).toHaveBeenCalledTimes(1);
+    expect(sentCount(xhr)).toBe(0);
+    expect(failures).toHaveLength(0);
+  });
+
+  test('3g: an abort event is not held back behind a slow response', () => {
+    setNetworkCondition('3g');
+    const xhr = request('GET', 'https://api.example.com/big');
+    jest.advanceTimersByTime(400);
+    xhr.headers = { 'content-length': String(9_375_000) };
+    xhr.readyState = 4;
+    xhr.dispatchEvent({ type: 'readystatechange' });
+    expect(xhr.seen).toEqual([]);
+    xhr.dispatchEvent({ type: 'abort' });
+    xhr.dispatchEvent({ type: 'loadend' });
+    expect(xhr.seen).toEqual(['readystatechange', 'abort', 'loadend']);
+    expect(inFlight()).toBe(0);
+    jest.advanceTimersByTime(60_000);
+    expect(xhr.seen).toEqual(['readystatechange', 'abort', 'loadend']);
+  });
+
+  test('3g: error and timeout are not held either', () => {
+    setNetworkCondition('3g');
+    for (const type of ['error', 'timeout']) {
+      const xhr = request('GET', `https://api.example.com/${type}`);
+      jest.advanceTimersByTime(400);
+      xhr.headers = { 'content-length': String(9_375_000) };
+      xhr.readyState = 4;
+      xhr.dispatchEvent({ type: 'readystatechange' });
+      xhr.dispatchEvent({ type });
+      expect(xhr.seen).toEqual(['readystatechange', type]);
+    }
+  });
+
+  test('3g: abort() after the answer finished but is still held ends the request at once', () => {
+    setNetworkCondition('3g');
+    const xhr = request('GET', 'https://api.example.com/big');
+    const onLoad = jest.fn();
+    xhr.addEventListener('load', onLoad);
+    jest.advanceTimersByTime(400);
+    xhr.respond(200, '', { 'content-length': String(9_375_000) });
+    expect(inFlight()).toBe(1);
+    xhr.abort();
+    expect(inFlight()).toBe(0);
+    expect(xhr.seen).toEqual(['abort', 'loadend']);
+    jest.advanceTimersByTime(60_000);
+    expect(onLoad).not.toHaveBeenCalled();
+    expect(xhr.seen).toEqual(['abort', 'loadend']);
   });
 
   test('lossy: about one request in five fails after a short delay, the rest get a little extra latency', () => {

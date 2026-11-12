@@ -133,6 +133,12 @@ export function originalLog(...args: unknown[]): void {
   if (typeof log === 'function') log.apply(console, args);
 }
 
+/** The unpatched console.warn, for Tapline's own notices to the developer (not captured as an app log). */
+export function originalWarn(...args: unknown[]): void {
+  const warn = originals.get('warn') ?? (consoleOf().warn as ConsoleFn | undefined);
+  if (typeof warn === 'function') warn.apply(console, args);
+}
+
 export function installLogs(): void {
   if (installed) return;
   installed = true;

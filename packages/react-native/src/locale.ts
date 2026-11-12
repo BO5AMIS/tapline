@@ -31,8 +31,8 @@ export function isTextSize(value: unknown): value is TextSize {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TEXT_SIZE_SCALES, value);
 }
 
-/** Names the SDK provides itself; an app cannot register over them. */
-export const BUILT_IN_COMMANDS: readonly string[] = ['appearance', 'network', 'text_size'];
+/** Names the SDK provides itself that an app cannot replace (`appearance` can be replaced, as in 1.3). */
+export const RESERVED_COMMANDS: readonly string[] = ['network', 'text_size'];
 
 // --- validation ---------------------------------------------------------------------------------------------
 
@@ -61,10 +61,14 @@ export function parseRegion(args: Record<string, unknown>): string {
   return value.toUpperCase();
 }
 
-export function parseTextSize(args: Record<string, unknown>): TextSize {
+/** `system` clears the override and goes back to the phone's own text size. */
+export const SYSTEM_TEXT_SIZE = 'system';
+
+export function parseTextSize(args: Record<string, unknown>): TextSize | typeof SYSTEM_TEXT_SIZE {
   const value = args.size;
+  if (value === SYSTEM_TEXT_SIZE) return value;
   if (!isTextSize(value)) {
-    throw badParams(`size must be one of ${TEXT_SIZES.join(', ')}`);
+    throw badParams(`size must be one of ${TEXT_SIZES.join(', ')}, or "system" for the phone's own`);
   }
   return value;
 }
@@ -82,21 +86,25 @@ export function isRtlLanguage(language: string): boolean {
 // --- font scale override ------------------------------------------------------------------------------------
 
 let override: number | null = null;
-let helperUsed = false;
+let getterUsed = false;
 const listeners = new Set<() => void>();
 
 function emit(): void {
   for (const listener of [...listeners]) listener();
 }
 
-/** The font scale to use: the one an agent set with `text_size`, else the system's. */
-export function getTaplineFontScale(): number {
+function currentScale(): number {
   return override ?? PixelRatio.getFontScale();
 }
 
-/** Calls `listener` when the override changes; returns the function that stops it. Counts as using the helper. */
+/** The font scale to use: the one an agent set with `text_size`, else the system's. Calling it counts as using the helper. */
+export function getTaplineFontScale(): number {
+  getterUsed = true;
+  return currentScale();
+}
+
+/** Calls `listener` when the override changes; returns the function that stops it. A live subscriber counts as using the helper. */
 export function subscribeTaplineFontScale(listener: () => void): () => void {
-  helperUsed = true;
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
@@ -109,9 +117,9 @@ export function subscribeTaplineFontScale(listener: () => void): () => void {
  * change it; an app that multiplies its font sizes by this value opts in to `text_size`.
  */
 export function useTaplineFontScale(): number {
-  const [scale, setScale] = useState(getTaplineFontScale);
+  const [scale, setScale] = useState(currentScale);
   useEffect(() => {
-    const update = (): void => setScale(getTaplineFontScale());
+    const update = (): void => setScale(currentScale());
     const stop = subscribeTaplineFontScale(update);
     update();
     return stop;
@@ -119,9 +127,9 @@ export function useTaplineFontScale(): number {
   return scale;
 }
 
-/** True once the app has used the hook or the subscriber (a mounted `useTaplineFontScale`). */
+/** True while a hook or subscriber is live (a mounted `useTaplineFontScale`), or the app has called the getter this session. */
 export function fontScaleHelperUsed(): boolean {
-  return helperUsed;
+  return listeners.size > 0 || getterUsed;
 }
 
 export function setTaplineFontScale(scale: number | null): void {
@@ -129,11 +137,25 @@ export function setTaplineFontScale(scale: number | null): void {
   emit();
 }
 
+/** The session ended (host gone, Tapline stopped): the phone's own text size again, and the getter no longer counts as used. */
+export function resetTaplineTextSize(): void {
+  const changed = override !== null;
+  override = null;
+  getterUsed = false;
+  if (changed) emit();
+}
+
 /** Forgets the override and that the helper was used (tests). */
 export function resetFontScale(): void {
   override = null;
-  helperUsed = false;
+  getterUsed = false;
   listeners.clear();
+}
+
+/** `1.0×`, `1.3×`: the phone's own scale as the answer writes it (always one decimal at least). */
+function formatSystemScale(scale: number): string {
+  const text = String(Number(scale.toFixed(2)));
+  return `${text.includes('.') ? text : `${text}.0`}×`;
 }
 
 /** `1.12×`, `1×`: the scale as the answer writes it. */
@@ -145,9 +167,14 @@ export const TEXT_SIZE_UNSUPPORTED =
   "This app doesn't use Tapline's font-scale helper (useTaplineFontScale), and React Native reads the system text size natively. To check large text, use audit's dynamic_type check or Tapwright's open_app { text_size }.";
 
 /** The built-in `text_size` run: validates, then sets the override. */
-export function runTextSize(args: Record<string, unknown>): { size: TextSize; scale: number; say: string } {
+export function runTextSize(args: Record<string, unknown>): { size: TextSize | typeof SYSTEM_TEXT_SIZE; scale: number; say: string } {
   const size = parseTextSize(args);
-  if (!helperUsed) throw new TaplineError('unsupported', TEXT_SIZE_UNSUPPORTED);
+  if (!fontScaleHelperUsed()) throw new TaplineError('unsupported', TEXT_SIZE_UNSUPPORTED);
+  if (size === SYSTEM_TEXT_SIZE) {
+    setTaplineFontScale(null);
+    const scale = PixelRatio.getFontScale();
+    return { size, scale, say: `Text size: the phone's own (${formatSystemScale(scale)}).` };
+  }
   const scale = TEXT_SIZE_SCALES[size];
   setTaplineFontScale(scale);
   return { size, scale, say: `Text size ${size} (${formatScale(scale)}).` };

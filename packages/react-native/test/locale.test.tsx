@@ -3,7 +3,7 @@ import { I18nManager, PixelRatio } from 'react-native';
 import { act, create } from 'react-test-renderer';
 import * as actions from '../src/actions';
 import { listCommands, registerLanguageCommand, registerRegionCommand, registerTaplineCommand, resetCommands, runCommand } from '../src/commands';
-import { TEXT_SIZES, TEXT_SIZE_SCALES, getTaplineFontScale, resetFontScale, useTaplineFontScale } from '../src/locale';
+import { TEXT_SIZES, TEXT_SIZE_SCALES, getTaplineFontScale, resetFontScale, resetTaplineTextSize, useTaplineFontScale } from '../src/locale';
 import { TaplineError } from '../src/types';
 
 async function failure(promise: Promise<unknown>): Promise<TaplineError> {
@@ -87,10 +87,27 @@ describe('language and region validation', () => {
   });
 });
 
-describe('built-in names are reserved', () => {
-  test.each(['appearance', 'network', 'text_size'])('%s cannot be registered over', (name) => {
-    expect(() => registerTaplineCommand(name, { description: 'mine', run: () => undefined })).toThrow(/built in/);
-    expect(listCommands().find((c) => c.name === name)?.description).not.toBe('mine');
+describe('built-in names', () => {
+  test.each(['network', 'text_size'])('%s: the app registration is ignored with a one-time warning, never a throw', (name) => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let off: (() => void) | undefined;
+    expect(() => {
+      off = registerTaplineCommand(name, { description: 'mine', run: () => undefined });
+    }).not.toThrow();
+    expect(() => off?.()).not.toThrow();
+    registerTaplineCommand(name, { description: 'mine again', run: () => undefined });
+    expect(listCommands().find((c) => c.name === name)?.description).not.toMatch(/mine/);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(name);
+  });
+
+  test('appearance: the app may replace the built-in, as in 1.3', async () => {
+    const run = jest.fn(() => ({ mine: true }));
+    const off = registerTaplineCommand('appearance', { description: 'mine', run });
+    expect(listCommands().find((c) => c.name === 'appearance')?.description).toBe('mine');
+    expect((await runCommand({ name: 'appearance', args: {} })).result).toEqual({ mine: true });
+    off();
+    expect(listCommands().find((c) => c.name === 'appearance')).toBeUndefined();
   });
 });
 
@@ -144,6 +161,66 @@ describe('text_size and the font-scale helper', () => {
     act(() => tree?.unmount());
   });
 
+  test('size "system" clears the override and answers with the phone\'s own scale', async () => {
+    jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(1);
+    const seen: number[] = [];
+    let tree: ReturnType<typeof create> | undefined;
+    act(() => {
+      tree = create(<Probe seen={seen} />);
+    });
+    await act(async () => {
+      await run('text_size', { size: 'ax3' });
+    });
+    expect(seen[seen.length - 1]).toBe(2.35);
+    let answer: Answer | undefined;
+    await act(async () => {
+      answer = await run('text_size', { size: 'system' });
+    });
+    expect(answer?.result?.say).toBe("Text size: the phone's own (1.0×).");
+    expect(answer?.result?.scale).toBe(1);
+    expect(seen[seen.length - 1]).toBe(1);
+    jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(1.3);
+    await act(async () => {
+      answer = await run('text_size', { size: 'system' });
+    });
+    expect(answer?.result?.say).toBe("Text size: the phone's own (1.3×).");
+    act(() => tree?.unmount());
+  });
+
+  test('resetTaplineTextSize (session ended) clears the override', async () => {
+    jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(1);
+    let tree: ReturnType<typeof create> | undefined;
+    act(() => {
+      tree = create(<Probe seen={[]} />);
+    });
+    await act(async () => {
+      await run('text_size', { size: 'xl' });
+    });
+    expect(getTaplineFontScale()).toBe(1.12);
+    act(() => resetTaplineTextSize());
+    expect(getTaplineFontScale()).toBe(1);
+    act(() => tree?.unmount());
+  });
+
+  test('after the hook unmounts the helper is no longer in use', async () => {
+    let tree: ReturnType<typeof create> | undefined;
+    act(() => {
+      tree = create(<Probe seen={[]} />);
+    });
+    await act(async () => {
+      await run('text_size', { size: 'xl' });
+    });
+    act(() => tree?.unmount());
+    expect((await failure(runCommand({ name: 'text_size', args: { size: 'l' } }))).code).toBe('unsupported');
+  });
+
+  test('an app that only calls the getter counts as using the helper until the session ends', async () => {
+    getTaplineFontScale();
+    expect((await run('text_size', { size: 'xl' })).result?.size).toBe('xl');
+    resetTaplineTextSize();
+    expect((await failure(runCommand({ name: 'text_size', args: { size: 'l' } }))).code).toBe('unsupported');
+  });
+
   test('without an override the getter is the system font scale', () => {
     jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(1.3);
     expect(getTaplineFontScale()).toBe(1.3);
@@ -188,6 +265,34 @@ describe('right-to-left', () => {
     jest.spyOn(I18nManager, 'allowRTL').mockImplementation(() => undefined);
     registerLanguageCommand(() => undefined);
     expect((await run('language', { language })).result?.restart).toBe('required');
+  });
+
+  test('ar then en before any restart: the second switch undoes the first and needs no restart', async () => {
+    globals.__DEV__ = false;
+    rtl.isRTL = false;
+    const force = jest.spyOn(I18nManager, 'forceRTL').mockImplementation(() => undefined);
+    jest.spyOn(I18nManager, 'allowRTL').mockImplementation(() => undefined);
+    registerLanguageCommand(() => undefined);
+    expect((await run('language', { language: 'ar' })).result?.restart).toBe('required');
+    expect(force).toHaveBeenLastCalledWith(true);
+    const back = await run('language', { language: 'en' });
+    expect(force).toHaveBeenCalledTimes(2);
+    expect(force).toHaveBeenLastCalledWith(false);
+    expect(back.result?.restart).toBeUndefined();
+    expect(back.result?.say).toContain('no restart');
+  });
+
+  test('ar twice before a restart: the direction is set once and the answer says it waits for a restart', async () => {
+    globals.__DEV__ = false;
+    rtl.isRTL = false;
+    const force = jest.spyOn(I18nManager, 'forceRTL').mockImplementation(() => undefined);
+    jest.spyOn(I18nManager, 'allowRTL').mockImplementation(() => undefined);
+    registerLanguageCommand(() => undefined);
+    await run('language', { language: 'ar' });
+    const again = await run('language', { language: 'ar-QA' });
+    expect(force).toHaveBeenCalledTimes(1);
+    expect(again.result?.restart).toBe('required');
+    expect(again.result?.say).toContain('restart');
   });
 
   test('no change of direction: no reload and no restart', async () => {

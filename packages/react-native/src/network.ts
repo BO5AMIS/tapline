@@ -69,6 +69,8 @@ let condition: NetworkMode = 'normal';
 let random: () => number = Math.random;
 /** Requests whose send is delayed (or doomed), so abort() can cancel them. */
 const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null }>();
+/** Finished 3g responses whose completion events are still held back; `cancel` drops them and says if any were held. */
+const responseHolds = new WeakMap<object, { cancel: () => boolean }>();
 
 /** scheme://host[:port]/path, query replaced by "?…", no fragment or credentials. */
 export function redactUrl(raw: string): string {
@@ -231,9 +233,23 @@ function patchedAbort(original: AnyFn): AnyFn {
       if (typeof this === 'object' && this !== null) {
         const entry = held.get(this);
         if (entry) {
+          // never really sent: cancel it here and end it the way React Native does on abort
           clearTimeout(entry.timer);
           held.delete(this);
           entry.settle?.();
+          abortHeld(this);
+          return undefined;
+        }
+        const hold = responseHolds.get(this);
+        if (hold?.cancel()) {
+          // the answer was complete but held back: the app cancelled, so it gets abort and loadend now
+          try {
+            original.apply(this, args);
+          } catch {
+            // the request is over either way
+          }
+          dispatchNow(this, ['abort', 'loadend']);
+          return undefined;
         }
       }
     } catch {
@@ -241,6 +257,33 @@ function patchedAbort(original: AnyFn): AnyFn {
     }
     return original.apply(this, args);
   };
+}
+
+/** Ends a request that was held (never sent) with readyState 4, status 0, then readystatechange, abort, loadend. */
+function abortHeld(xhr: object): void {
+  assign(xhr, 'readyState', 4);
+  assign(xhr, 'status', 0);
+  setTimeout(() => dispatchNow(xhr, ['readystatechange', 'abort', 'loadend']), 0);
+}
+
+function dispatchNow(xhr: object, types: readonly string[]): void {
+  try {
+    const target = xhr as { dispatchEvent?: unknown; onreadystatechange?: unknown };
+    if (isFn(target.dispatchEvent)) {
+      const dispatch = target.dispatchEvent as (event: unknown) => unknown;
+      for (const type of types) {
+        try {
+          dispatch.call(xhr, makeEvent(type));
+        } catch {
+          // a handler's error stays the app's
+        }
+      }
+    } else if (isFn(target.onreadystatechange)) {
+      (target.onreadystatechange as AnyFn).call(xhr);
+    }
+  } catch {
+    // never throw into the app
+  }
 }
 
 function between(range: readonly [number, number]): number {
@@ -328,39 +371,76 @@ function bodyBytes(body: unknown): number {
   return 0;
 }
 
-/** Holds back the events that deliver the finished response until the transfer would have taken. */
+function eventType(event: unknown): string {
+  const type = typeof event === 'object' && event !== null ? (event as { type?: unknown }).type : undefined;
+  return typeof type === 'string' ? type : '';
+}
+
+/**
+ * Holds back the events that deliver the finished response (load, loadend, the final readystatechange)
+ * until the transfer would have taken. abort, error and timeout are never held: they drop the held
+ * completion at once.
+ */
 function holdResponse(xhr: object): void {
   const target = xhr as { dispatchEvent?: unknown };
   if (!isFn(target.dispatchEvent)) return;
   const dispatch = target.dispatchEvent as (event: unknown) => unknown;
   let queue: unknown[] | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let released = false;
+  const drop = (): unknown[] => {
+    const dropped = queue ?? [];
+    queue = null;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    released = true;
+    responseHolds.delete(xhr);
+    return dropped;
+  };
+  responseHolds.set(xhr, { cancel: () => drop().length > 0 });
   assign(xhr, 'dispatchEvent', function dispatchEvent(this: unknown, event: unknown): unknown {
     if (released) return dispatch.call(xhr, event);
+    const type = eventType(event);
+    if (type === 'abort' || type === 'error' || type === 'timeout') {
+      // the app's cancel, or a failure: not part of the completion, so nothing waits. A held
+      // readystatechange still goes out first; the held load and loadend are dropped.
+      for (const queued of drop()) {
+        if (eventType(queued) !== 'readystatechange') continue;
+        try {
+          dispatch.call(xhr, queued);
+        } catch {
+          // a handler's error stays the app's
+        }
+      }
+      return dispatch.call(xhr, event);
+    }
+    const completion =
+      type === 'load' ||
+      type === 'loadend' ||
+      (type === 'readystatechange' && (xhr as { readyState?: unknown }).readyState === 4);
+    if (!completion) return dispatch.call(xhr, event);
     if (queue) {
       queue.push(event);
       return true;
     }
-    if ((xhr as { readyState?: unknown }).readyState === 4) {
-      const delay = Math.min(MAX_TRANSFER_MS, Math.ceil(sizeOf(xhr) / THREE_G_BYTES_PER_MS));
-      if (delay > 0) {
-        const events: unknown[] = [event];
-        queue = events;
-        setTimeout(() => {
-          queue = null;
-          released = true;
-          for (const queued of events) {
-            try {
-              dispatch.call(xhr, queued);
-            } catch {
-              // a handler's error stays the app's
-            }
+    const delay = Math.min(MAX_TRANSFER_MS, Math.ceil(sizeOf(xhr) / THREE_G_BYTES_PER_MS));
+    if (delay > 0) {
+      const events: unknown[] = [event];
+      queue = events;
+      timer = setTimeout(() => {
+        drop();
+        for (const queued of events) {
+          try {
+            dispatch.call(xhr, queued);
+          } catch {
+            // a handler's error stays the app's
           }
-        }, delay);
-        return true;
-      }
-      released = true;
+        }
+      }, delay);
+      return true;
     }
+    released = true;
+    responseHolds.delete(xhr);
     return dispatch.call(xhr, event);
   });
 }
