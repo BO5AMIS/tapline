@@ -1,4 +1,5 @@
-import { takeSnapshot, type Entry } from './inspect';
+import { measureScrollers, visiblePartOnGlass } from './glassclip';
+import { measureFiber, takeSnapshot, type Entry } from './inspect';
 import { TaplineError, isRecord } from './types';
 
 /**
@@ -24,6 +25,8 @@ interface Condition {
   testID?: string;
   label?: string;
   gone: boolean;
+  /** Only elements that show on the glass count (a journey in a user's eyes, AGENT-TOOLS 1.12 §17.1). */
+  glass: boolean;
   networkIdle: boolean;
   timeoutMs: number;
 }
@@ -50,6 +53,7 @@ function parse(raw: unknown): Condition {
     ...(testID !== undefined ? { testID } : {}),
     ...(label !== undefined ? { label } : {}),
     gone: raw.gone === true,
+    glass: raw.glass === true,
     networkIdle: wantsNetwork,
     timeoutMs: timeout * 1000,
   };
@@ -64,9 +68,33 @@ function matches(entry: Entry, condition: Condition): boolean {
   return true;
 }
 
-function satisfied(condition: Condition): boolean {
+/** Whether an element matching the condition is there now (and, with `glass`, shows on the glass). */
+async function presentNow(condition: Condition): Promise<boolean> {
+  const snapshot = takeSnapshot();
+  const found = snapshot.entries.filter((entry) => entry.info.interesting && matches(entry, condition));
+  if (!condition.glass) return found.length > 0;
+  // A container's text holds everything inside it, clipped or not: only the innermost matches say what shows.
+  const innermost = found.filter(
+    (entry) =>
+      !found.some((other) => {
+        if (other === entry) return false;
+        for (let p = other.node.parent; p >= 0; p = snapshot.nodes[p]?.parent ?? -1) if (p === entry.node.index) return true;
+        return false;
+      }),
+  );
+  // The scroll views are measured once for this poll, not once per candidate.
+  const scrollers = innermost.length > 0 ? await measureScrollers(snapshot) : new Map();
+  for (const entry of innermost) {
+    // A native tab has no frame to measure: it is on the glass.
+    const frame = entry.tab ? null : await measureFiber(entry.node.fiber);
+    if (visiblePartOnGlass(snapshot, entry, frame, scrollers) !== null) return true;
+  }
+  return false;
+}
+
+async function satisfied(condition: Condition): Promise<boolean> {
   if (condition.text !== undefined || condition.testID !== undefined || condition.label !== undefined) {
-    const present = takeSnapshot().entries.some((entry) => entry.info.interesting && matches(entry, condition));
+    const present = await presentNow(condition);
     if (present === condition.gone) return false;
   }
   if (condition.networkIdle) {
@@ -97,7 +125,7 @@ export async function waitFor(raw: unknown): Promise<{ met: true; waitedMs: numb
   const condition = parse(raw);
   const started = Date.now();
   for (;;) {
-    if (satisfied(condition)) return { met: true, waitedMs: Date.now() - started };
+    if (await satisfied(condition)) return { met: true, waitedMs: Date.now() - started };
     const waited = Date.now() - started;
     if (waited >= condition.timeoutMs) {
       throw new TaplineError('timeout', `Waited ${Math.round(waited / 100) / 10} s for ${describe(condition)}; it didn't happen.`);

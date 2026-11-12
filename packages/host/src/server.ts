@@ -247,6 +247,8 @@ interface HostEvents {
   frame: [session: SessionInfo, frame: AppFrame];
   /** The app went to the background or came back ("background", "active", "inactive"). */
   appState: [session: SessionInfo, state: string];
+  /** The app's photo picker handed over the armed test pictures (`media` with `picker`). */
+  pickerSkipped: [session: SessionInfo, count: number];
   /** A person touched the app's screen (the app saw a real touch; at most about two a second). */
   touch: [session: SessionInfo];
   /** A request to a connected app ended with `not_answering`. */
@@ -1008,6 +1010,14 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const where = state === "active" ? "came back to the front" : state === "background" ? "went to the background" : `is ${state}`;
       this.pushEntry(session, { level: "info", message: `[tapline] the app ${where}`, ts: at });
       this.safely(() => this.emit("appState", { ...session.info }, state));
+      return;
+    }
+    if (event === "pickerSkipped") {
+      // The app's photo picker returned the armed test pictures (`media` with `picker`): counted when used, not when armed.
+      const count = typeof data === "object" && data !== null ? (data as { count?: unknown }).count : undefined;
+      if (typeof count === "number" && Number.isInteger(count) && count > 0 && count <= 100) {
+        this.safely(() => this.emit("pickerSkipped", { ...session.info }, count));
+      }
       return;
     }
     if (event === "crash") {

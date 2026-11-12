@@ -15,9 +15,31 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
+import {
+  EYES,
+  IDS_HIDDEN,
+  Journey,
+  OPEN_URL,
+  conditionsSchema,
+  exportSchema,
+  summaryLine,
+  summaryNotes,
+  stressSchema,
+  survivesSchema,
+  withoutIds,
+  type ConditionRecord,
+  type Conditions,
+  type JourneyState,
+  type Stress,
+  type Survives,
+} from "./journey.js";
+import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourneys, screenSignature, writeReport, type FrameSource, type Touch } from "./journeyreport.js";
+import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
+import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -139,6 +161,7 @@ export const toolShapes = {
       .describe("Draw each actionable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
   },
   check_layout: {},
+  ux_check: {},
   audit: {
     types: z
       .array(z.enum(AUDIT_TYPES))
@@ -290,8 +313,30 @@ export const toolShapes = {
     tap: targetField.optional().describe("Tap this first, then measure what it sets off"),
   },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
+  media: mediaShape,
   session_report: {
     since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
+  },
+  journey: {
+    start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
+    goal: z.string().min(1).max(300).optional().describe('What the user wants to do, e.g. "log breakfast by scanning its barcode"'),
+    persona: z.string().max(500).optional().describe("Who is using the app: free text, or the name of an example persona"),
+    conditions: conditionsSchema
+      .optional()
+      .describe("language, region, text_size, network: applied at the start, undone at the stop"),
+    allow: z
+      .array(z.string().min(1).max(60))
+      .max(30)
+      .optional()
+      .describe('Shortcuts the journey may use: "open_url", and the names of app commands'),
+    eyes: z.enum(EYES).optional().describe('"user" (default): see the screen as a user does; "agent" turns that off for the rest of the journey'),
+    stop: z.boolean().optional().describe("End the journey (needs reached)"),
+    reached: z.boolean().optional().describe("With stop: whether the goal was reached"),
+    why: z.string().max(1000).optional().describe("With stop: why, in a line"),
+    export: exportSchema.optional().describe("With stop, only when your user asks: put the report in a GitHub PR or issue. Needs confirm: true; public: true for a public repository, fork: true for a PR from a fork"),
+    stress: stressSchema.optional().describe("A real-world moment during the journey: network (with mode), double_tap (with target), relaunch (a reload in development builds), background or rotate (a person does them, then call again with done)"),
+    survives: survivesSchema.optional().describe("With stress: what must still be there after, {text} or {goal_step}"),
+    done: z.boolean().optional().describe("With stress: the person has done the moment you asked them to (background or rotate)"),
   },
   run: {
     steps: z
@@ -439,6 +484,8 @@ export interface ToolsOptions {
   clientId?: () => string | undefined;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
   policy?: PolicyFile;
+  /** The user's UX house rules (`--ux-rules FILE`, AGENT-TOOLS 1.12 §17.3). Default: none. */
+  uxRules?: UxRules;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
@@ -488,6 +535,22 @@ export interface ToolsOptions {
   viewerLinkToAgent?: boolean;
   /** Whether the app's frames are on and at which quality, for the `viewer` tool's stats. */
   viewerFeed?: () => { on: boolean; quality: QualityPreset };
+  /** The clock a journey measures with, in ms (tests pass their own). Default: Date.now. */
+  clock?: () => number;
+  /**
+   * Called when a journey stops (AGENT-TOOLS 1.12 §17.5), with its state: the report writer's hook. The lines it
+   * returns follow the summary in the answer (`Findings: …`, `Report: <folder>`).
+   */
+  onJourneyStop?: (state: JourneyState) => string[] | Promise<string[]>;
+  /**
+   * Where journeys keep their report folders (e.g. ~/.tapline/journeys): each journey gets
+   * `<yyyy-mm-dd-hhmm>-<slug>/` with its frames, and `stop` writes the report there. Unset: no frames, no report.
+   */
+  journeysDir?: string;
+  /** Runs `gh` and `git` for `export` (AGENT-TOOLS 1.12 §17.5). Unset: export answers that it can't run. Tests pass a fake. */
+  exportRunner?: Runner;
+  /** Cap for the journey GIF in bytes (tests lower it; default 3 MB). */
+  gifMaxBytes?: number;
 }
 
 /**
@@ -533,6 +596,9 @@ type Script = z.infer<typeof scriptSchema>;
 function stableParams(params: unknown, result: unknown): { params: Record<string, unknown>; fragile: boolean } {
   const copy: Record<string, unknown> =
     typeof params === "object" && params !== null ? { ...(params as Record<string, unknown>) } : {};
+  // A journey's own flags are not part of a script.
+  delete copy["noScroll"];
+  delete copy["glass"];
   const target = copy["target"];
   if (typeof target !== "object" || target === null) return { params: copy, fragile: false };
   // A target the agent gave by testID, label, text or point already picked one element: keep it.
@@ -657,6 +723,7 @@ export const DEFAULT_SCREENSHOT_WIDTH = 600;
 /** The app methods whose result may say `closedKeyboard: true` (the app closed the keyboard before acting). */
 const KEYBOARD_METHODS: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "type"]);
 
+const SECURE_QUIET_NOTE = "Note: no screenshot: a password field was typed into a moment ago and iOS may still show its last character; look again in a second.";
 const NO_SCREENSHOT_NOTE ="Note: no screenshot: this app doesn't support it; add react-native-view-shot.";
 
 function sleep(ms: number): Promise<void> {
@@ -691,6 +758,16 @@ function toWireTarget(target: Target): WireTarget {
   if (target.label !== undefined) return withIndex({ label: target.label });
   if (target.text !== undefined) return withIndex({ text: target.text });
   return { x: target.x ?? 0, y: target.y ?? 0 };
+}
+
+/** The target of a call as the agent wrote it, in words (`"Save"`, `e3`, `120,300`); undefined when it gave none. */
+function journeyTargetWords(input: Record<string, unknown>): string | undefined {
+  const raw = input["target"] ?? input["tap"];
+  const parsed = typeof raw === "object" && raw !== null ? targetSchema.safeParse(raw) : null;
+  if (parsed?.success === true) return targetWords(parsed.data);
+  if (typeof input["url"] === "string") return input["url"];
+  if (typeof input["name"] === "string") return input["name"];
+  return undefined;
 }
 
 /** A target as the agent wrote it, in words: `id=save`, `"Save"`, `e3`, `120,300`. */
@@ -733,6 +810,8 @@ function candidateLines(details: unknown): string[] {
 
 /** At most this many candidates are listed in an `ambiguous` answer (AGENT-TOOLS §4). */
 const MAX_CANDIDATES = 5;
+
+const NO_JOURNEY = "Error bad_params: no journey is running; start one with start: true and a goal.";
 
 /**
  * The `ambiguous` block (AGENT-TOOLS §4): the message, `Candidates:` with up to 5 lines indented two
@@ -834,7 +913,7 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 
 /** Every tool whose answer can end with a crash note (all but `crash`, which tells it in full). */
 const CRASH_NOTED_TOOLS = [
-  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "checkLayout", "viewer", "compareScreen", "filmstrip",
+  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "uxCheck", "media", "checkLayout", "viewer", "compareScreen", "filmstrip",
   "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
   "openUrl", "logs", "reload", "performance", "wait",
 ] as const satisfies readonly (keyof TaplineTools)[];
@@ -842,14 +921,36 @@ const CRASH_NOTED_TOOLS = [
 /** Every tool the agent calls, by handler name (the call log numbers these). */
 const CALL_TOOLS: Readonly<Record<string, string>> = {
   apps: "apps", openApp: "open_app", pair: "pair", look: "look", run: "run", inspect: "inspect", audit: "audit",
-  checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
+  uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey",
 };
+/** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
+const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
+  "look", "run", "inspect", "audit", "ux_check", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll",
+  "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
+]);
+/** A stress moment a person was asked to do: what must survive, when it was asked, and (rotate) the screen's size then. */
+interface StressWaiting {
+  survives: Survives | undefined;
+  askedAt: number;
+  size: { width: number; height: number } | null;
+}
+/** A stress double tap's two taps, this many ms apart (AGENT-TOOLS 1.12 §17.4): the app makes the second. */
+const DOUBLE_TAP_GAP_MS = 80;
+/** What the app says of a double tap's second tap. */
+const pressSecondSchema = z.union([
+  z.object({ done: z.literal(true), afterMs: z.number() }),
+  z.object({ done: z.literal(false), reason: z.string().regex(/^[a-z_]{1,40}$/), afterMs: z.number() }),
+]);
+/** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
+const FRAME_TOOLS: ReadonlySet<string> = new Set([
+  "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait",
+]);
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
-  "apps", "open_app", "pair", "look", "inspect", "audit", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
+  "apps", "open_app", "pair", "look", "inspect", "audit", "ux_check", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
   "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
 ]);
 /** A look's picture arguments for the call log: booleans and numbers only; undefined when it gave none. */
@@ -905,6 +1006,12 @@ export class TaplineTools {
   private scrollBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   readonly confirmations: Confirmations;
   private readonly policy: PolicyFile;
+  private readonly uxRules: UxRules;
+  /**
+   * Hook for the journey (AGENT-TOOLS 1.12 §17): gives `ux_check` the action labels of earlier screens, and is told
+   * what each `ux_check` found. Null while no journey runs (naming is then not checked, and the answer says so).
+   */
+  uxJourney: UxJourneyHook | null = null;
   private readonly reloadSettleMs: number;
   private readonly stillGapMs: number;
   private readonly stillCapMs: number;
@@ -945,14 +1052,55 @@ export class TaplineTools {
   private readonly crashBaseline: number;
   /** Set inside a tool call (and everything it awaits), so a call within a call (`run`'s steps) adds no notes. */
   private readonly noteScope = new AsyncLocalStorage<true>();
+  /** The journey this agent has running (AGENT-TOOLS 1.12 §17.1); one at a time. */
+  private journeyRun: Journey | undefined;
+  /** The app the running journey started on (its identity and name): its clean-up goes to that app only. */
+  private journeyApp: { identity: string; name: string } | undefined;
+
+  /** The journey's own app if it is connected (the current one first), else undefined: never another app (Codex review of 1.5.0). */
+  private journeySession(): SessionInfo | undefined {
+    const app = this.journeyApp;
+    const current = this.host.current();
+    if (app === undefined) return current;
+    if (current !== undefined && identityOf(current) === app.identity) return current;
+    return this.host.sessions().find((s) => identityOf(s) === app.identity);
+  }
+
+  /** Why a journey's clean-up didn't reach its app. */
+  private journeyAppGone(): string {
+    return this.journeyApp === undefined ? "no app is connected" : `${this.journeyApp.name} isn't connected (Tapline changes no other app)`;
+  }
+  /** The state of the journey that stopped last, for the report writer and the stress moments. */
+  private journeyDone: JourneyState | undefined;
+  /** Inside `run`: "run" for the batch's own checks (not counted), "step" for a step (counted like a call of its own). */
+  private readonly journeyScope = new AsyncLocalStorage<"run" | "step">();
+  /** The running journey's frames and report pictures (AGENT-TOOLS 1.12 §17.5); undefined without a `journeysDir`. */
+  private recorder: JourneyRecorder | undefined;
+  /** The hook this journey gave `ux_check`, to take back at the stop. */
+  private journeyHook: UxJourneyHook | undefined;
+  private pickerOff: (() => void) | undefined;
+  /** Where the last touch of the call in flight was, for the frame's tap ring. */
+  private lastTouch: Touch | undefined;
+  /** Stress moments that wait for a person (§17.4), by kind: what must survive. */
+  private readonly stressWaiting = new Map<string, StressWaiting>();
+  /** When the app last left the front or its link dropped, and when an app last connected (real time, for stress done). */
+  private readonly appLeftAt = new Map<string, number>();
+  private readonly appConnectedAt = new Map<string, number>();
+  /** Which app's picker event is being counted right now (set around the media state's own count). */
+  private pickerFrom: string | undefined;
+  /** "starting" until a journey's set-up is done, "stopping" until its clean-up is done: no other start meanwhile. */
+  private journeyBusy: "starting" | "stopping" | undefined;
+  private readonly clock: () => number;
 
   constructor(
     private readonly host: TaplineHost,
     private readonly options: ToolsOptions,
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
+    this.clock = options.clock ?? Date.now;
     this.confirmations = options.confirmations ?? new Confirmations();
     this.policy = options.policy ?? DEFAULT_POLICY;
+    this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
@@ -962,6 +1110,26 @@ export class TaplineTools {
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
     host.on("touch", (session) => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
+    });
+    // What a stress moment a person does leaves behind, for `done` to check (AGENT-TOOLS 1.12 §17.4).
+    // Kept per app, so another connected app's events never count for the journey's app.
+    host.on("appState", (session, state) => {
+      if (state !== "active") this.appLeftAt.set(identityOf(session), Date.now());
+    });
+    host.on("disconnect", (session) => {
+      this.appLeftAt.set(identityOf(session), Date.now());
+    });
+    host.on("connect", (session) => {
+      this.appConnectedAt.set(identityOf(session), Date.now());
+    });
+    // The app's picker used the armed test pictures: that is when a pick was "skipped" (1.5 review, finding 5).
+    host.on("pickerSkipped", (session, count) => {
+      this.pickerFrom = identityOf(session);
+      try {
+        this.mediaState.recordPickerSkipped(session.app.id, count);
+      } finally {
+        this.pickerFrom = undefined;
+      }
     });
     // Crashes before this agent's session began are not its news.
     this.crashBaseline = host.crashMark();
@@ -978,6 +1146,140 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.loggedCall(tool, args[0], () => method.apply(this, args)));
     }
+    // A running journey measures the agent's looks and actions, and shows its answers as a user would see them.
+    for (const [name, tool] of Object.entries(CALL_TOOLS)) {
+      if (!JOURNEY_TOOLS.has(tool)) continue;
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.journeyCall(tool, args[0], () => method.apply(this, args)));
+    }
+  }
+
+  /** The journey running now, for the stress moments and the report writer (AGENT-TOOLS 1.12 §17). */
+  currentJourney(): Journey | undefined {
+    return this.journeyRun;
+  }
+
+  /** The state of the journey that stopped last. */
+  finishedJourney(): JourneyState | undefined {
+    return this.journeyDone;
+  }
+
+  /** Whether the agent sees the app as a user does: a journey is running and its eyes are the user's. */
+  private userEyes(): boolean {
+    return this.journeyRun?.userEyes === true;
+  }
+
+  /**
+   * Measures one call of a running journey and shows its answer as a user would see it. Calls inside `run` count
+   * as steps (the batch itself and its expectation checks do not); a dry run counts as nothing.
+   */
+  private journeyCall(tool: string, args: unknown, run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+    const journey = this.journeyRun;
+    if (journey === undefined) return run();
+    const input = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {};
+    const scope = this.journeyScope.getStore();
+    if (tool === "run") {
+      const answer = this.journeyScope.run("run", run);
+      return answer instanceof Promise ? answer.then((a) => this.shownToUser(a)) : this.shownToUser(answer);
+    }
+    if (scope === "run" || input["dry_run"] === true) return run();
+    const at = this.clock();
+    const pre = journey.pre();
+    this.lastTouch = undefined;
+    const done = (answer: CallToolResult): CallToolResult | Promise<CallToolResult> => {
+      // A step of `run` runs with no list, so the screen it ended on is read here (one cheap read), before the step is counted.
+      if (scope !== "step") return counted(answer);
+      return this.currentRoute().then((route) => {
+        if (route !== null) journey.noteFullList({ route, text: "", fromAction: false });
+        return counted(answer);
+      });
+    };
+    const counted = (answer: CallToolResult): CallToolResult | Promise<CallToolResult> => {
+      const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      const code = answer.isError === true ? /^Error (\w+):/.exec(said)?.[1] : undefined;
+      const target = journeyTargetWords(input);
+      journey.record(
+        { tool, ok: answer.isError !== true, ...(code !== undefined ? { code } : {}), ...(target !== undefined ? { target } : {}), text: said, at, ms: this.clock() - at },
+        pre,
+      );
+      const shown = this.shownToUser(answer);
+      const recorder = this.recorder;
+      if (recorder === undefined || !FRAME_TOOLS.has(tool)) return shown;
+      // The window itself is opened where the answer is made (typeText); here it only keeps the picture away.
+      if (this.secureWindow()) return shown;
+      // A small picture of the screen after the step, kept in the report's folder and never in the answer.
+      const touch = this.lastTouch;
+      this.lastTouch = undefined;
+      const animating = /^Note: the screen was still changing/m.test(said);
+      return recorder.frame(journey.state.steps.length, journey.state.currentScreen, touch, animating).then(() => shown);
+    };
+    const result = run();
+    return result instanceof Promise ? result.then(done) : done(result);
+  }
+
+  /** When a password field was last typed into, and whether that was within the second iOS still shows its last character. */
+  private secureTypedAt: number | undefined;
+  private secureWindow(): boolean {
+    return this.secureTypedAt !== undefined && this.clock() - this.secureTypedAt < 1500;
+  }
+
+  /** In a user's eyes no id reaches the agent, not even inside an error the app composed. */
+  private shownToUser(answer: CallToolResult): CallToolResult {
+    if (!this.userEyes()) return answer;
+    return { ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: withoutIds(block.text) } : block)) };
+  }
+
+  /** `id` and `label` answer `bad_params` in a journey's user's eyes (§17.1). */
+  private hiddenTarget(target: { id?: unknown; label?: unknown } | undefined): CallToolResult | null {
+    if (!this.userEyes() || target === undefined) return null;
+    return target.id !== undefined || target.label !== undefined ? fail(IDS_HIDDEN) : null;
+  }
+
+  /** Whether the journey's `allow` lets this shortcut through (always, outside a user's eyes). */
+  private shortcutAllowed(tool: "open_url" | "app_command", what: string): boolean {
+    const journey = this.journeyRun;
+    return journey === undefined || !journey.userEyes || journey.allows(tool === "open_url" ? OPEN_URL : what);
+  }
+
+  private shortcutWords(tool: "open_url" | "app_command", what: string): string {
+    return tool === "open_url"
+      ? "Error not_allowed: in a journey, open_url is a shortcut a user doesn't have, and this journey's allow doesn't name it; reach the screen the way a user would."
+      : `Error not_allowed: in a journey, app_command ${JSON.stringify(what)} is a shortcut a user doesn't have, and this journey's allow doesn't name it.`;
+  }
+
+  /** A shortcut in a user's eyes: refused unless `allow` names it, and noted for the report when it goes through. */
+  private shortcutRefusal(tool: "open_url" | "app_command", what: string): CallToolResult | null {
+    const journey = this.journeyRun;
+    if (journey === undefined || !journey.userEyes) return null;
+    if (!this.shortcutAllowed(tool, what)) return fail(this.shortcutWords(tool, what));
+    journey.noteShortcut({ tool, what });
+    return null;
+  }
+
+  private static readonly SCROLL_TO_TARGET_OFF =
+    'Error not_allowed: in a journey, scroll to: "target" is off: a person scrolls until they see it. Scroll down or up, then look.';
+
+  /** What a journey's user's eyes refuse in a step of `run`, before anything runs (a step number first); null when it is fine. */
+  private journeyStepRefusal(step: Step, index: number): string | null {
+    if (!this.userEyes()) return null;
+    const s = step as Record<string, unknown>;
+    const hidden = (value: unknown): boolean =>
+      typeof value === "object" && value !== null && ("id" in value || "label" in value);
+    const expect = s["expect"];
+    if (hidden(s["target"]) || hidden(s["tap"]) || hidden(expect) || (step.tool === "wait_for" && ("id" in s || "label" in s))) {
+      return IDS_HIDDEN.replace("Error bad_params: ", `Error bad_params: step ${index + 1}: `);
+    }
+    if (step.tool === "scroll" && s["to"] === "target") return TaplineTools.SCROLL_TO_TARGET_OFF.replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
+    if (step.tool === "open_url" && !this.shortcutAllowed("open_url", String(s["url"] ?? ""))) {
+      return this.shortcutWords("open_url", "").replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
+    }
+    const name = String(s["name"] ?? "");
+    if (step.tool === "app_command" && name !== "" && !this.shortcutAllowed("app_command", name)) {
+      return this.shortcutWords("app_command", name).replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
+    }
+    return null;
   }
 
   /** The agent's client id for the call log; the MCP server passes the client's name once it is known. */
@@ -1464,6 +1766,10 @@ export class TaplineTools {
         }
       }
     }
+    for (const [i, step] of steps.entries()) {
+      const refused = this.journeyStepRefusal(step, i);
+      if (refused !== null) return fail(refused);
+    }
     this.diffSaved = null;
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
@@ -1618,6 +1924,10 @@ export class TaplineTools {
 
   /** One step of `run`, as its own tool call without a list. */
   private runStep(step: Step): Promise<CallToolResult> {
+    return this.journeyScope.run("step", () => this.runStepNow(step));
+  }
+
+  private runStepNow(step: Step): Promise<CallToolResult> {
     const { tool, expect: _expect, route: _route, ...rest } = step as Step & { route?: unknown };
     const quiet = { ...rest, look: false, screenshot: false };
     switch (tool as RunTool) {
@@ -1698,6 +2008,8 @@ export class TaplineTools {
   // -- inspect (Tapline 1.1): from the screen to the code
 
   async inspect(args: Shape<"inspect">): Promise<CallToolResult> {
+    const hiddenInspect = this.hiddenTarget(args.target);
+    if (hiddenInspect !== null) return hiddenInspect;
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     let raw: unknown;
@@ -1729,6 +2041,83 @@ export class TaplineTools {
     if (!parsed.success) return fail("Error internal: the app returned an audit the host could not read.");
     const title = auditTitle(await this.currentRoute(), session.app.name);
     return text([formatAudit(title, parsed.data, args.types), ...this.takePersonNote()].join("\n"));
+  }
+
+  // -- ux_check (AGENT-TOOLS 1.12 §17.3)
+
+  /** The house rule `max_taps_to_goal`, for the journey to check at stop; undefined when the user set none. */
+  get maxTapsToGoal(): number | undefined {
+    return this.uxRules.maxTapsToGoal;
+  }
+
+  async uxCheck(_args: Shape<"ux_check"> = {}): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    if (!session.capabilities.includes("uxCheck")) {
+      return fail("Error unsupported: this app's Tapline is too old for ux_check; update react-native-tapline (audit and check_layout work meanwhile).");
+    }
+    const earlier = this.uxJourney?.earlier() ?? null;
+    let raw: unknown;
+    try {
+      raw = await this.host.request(
+        "uxCheck",
+        { ...(this.userEyes() ? { glass: true } : {}), ...(this.uxRules.wayBack ? { wayBack: true } : {}), ...(earlier !== null ? { earlier } : {}) },
+        { sessionId: session.id },
+      );
+    } catch (error) {
+      return fail(describeError(error));
+    }
+    const parsed = uxResultSchema.safeParse(raw);
+    if (!parsed.success) return fail("Error internal: the app returned a UX check the host could not read.");
+    const title = auditTitle(await this.currentRoute(), session.app.name);
+    this.uxJourney?.seen?.(
+      title,
+      parsed.data.actions,
+      parsed.data.issues.map((i) => {
+        const frame = i.element?.frame ?? i.where?.frame;
+        return {
+          kind: i.kind,
+          problem: i.problem,
+          basis: i.basis,
+          ...(i.element ? { ref: i.element.ref } : {}),
+          ...(frame ? { frame } : {}),
+        };
+      }),
+    );
+    const body = formatUxCheck(title, parsed.data, { textRules: this.uxRules.text, journeyRunning: this.uxJourney !== null, eyes: this.userEyes() });
+    return text([body, ...this.takePersonNote()].join("\n"));
+  }
+
+  // -- media (AGENT-TOOLS 1.12 §17.6): the logic is in media.ts
+
+  /** What `media` remembers per app: the asset ids it added, and the picker skips a journey report reads. */
+  readonly mediaState = new MediaState();
+
+  async media(args: Shape<"media"> = {}): Promise<CallToolResult> {
+    if (args.remove === true && (args.add !== undefined || args.picker === true)) {
+      return fail("Error bad_params: media with remove: true takes nothing else; add and picker are separate calls.");
+    }
+    if (args.remove !== true && args.add === undefined) {
+      return fail("Error bad_params: media needs add (picture paths), or remove: true.");
+    }
+    if (args.picker === true && args.add === undefined) return fail("Error bad_params: media with picker: true needs add (picture paths).");
+    // Adding needs the user's yes, and so does picker: true (its pictures go into the app as if the person picked them;
+    // AGENT-TOOLS 1.12 §17.6: media with add needs confirm; 1.5 review, finding 10).
+    if (args.remove !== true && args.confirm !== true) {
+      return fail(
+        args.picker === true
+          ? "Error bad_params: media with picker hands pictures to the app as if the person picked them; ask your user first, then pass confirm: true."
+          : CONFIRM_ERROR,
+      );
+    }
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    return runMedia(args, {
+      state: this.mediaState,
+      session,
+      request: (params) => this.host.request("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
+      describeError,
+    });
   }
 
   // -- check_layout
@@ -1783,11 +2172,15 @@ export class TaplineTools {
     labels = false,
   ): Promise<{ content: CallToolResult["content"]; isError: boolean }> {
     const sid = session.id;
+    // Right after typing into a password field iOS may still show its last character: no picture then, and the note says why.
+    const secureQuiet = wantScreenshot && this.secureWindow();
+    if (secureQuiet) wantScreenshot = false;
     // Changes only make sense against a list this agent has already been given in this session.
     const askChanges = onlyChanges && this.listed.has(sid);
     // `onlyChanges` is the after-an-action call. With `changes: true` the app keeps the refs and
     // counts on from the highest one; `look` (onlyChanges false) always restarts at e1.
-    const treeParams: Record<string, unknown> = askChanges ? { changes: true } : {};
+    const eyes = this.userEyes();
+    const treeParams: Record<string, unknown> = { ...(askChanges ? { changes: true } : {}), ...(eyes ? { glass: true } : {}) };
     const treePromise = this.host.request("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
@@ -1817,15 +2210,17 @@ export class TaplineTools {
     const alertGone = this.alertOpen.has(sid) && !alertsNow;
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
-    const changesText = askChanges ? formatChanges(tree, { alertGone }) : null;
+    const changesText = askChanges ? formatChanges(tree, { alertGone, eyes }) : null;
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
     if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
     else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
-    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
+    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes })];
+    // A journey keeps the first full list of each screen (and counts the screens entered) for its report.
+    if (changesText === null) this.journeyRun?.noteFullList({ route: tree.route?.names ?? [], text: lines[0] ?? "", fromAction: onlyChanges });
     // A full list in place of the changes (most of the screen changed) still says what changed out of view.
-    if (askChanges && changesText === null) lines.push(...formatOffScreenAfterList(tree));
+    if (askChanges && changesText === null && !eyes) lines.push(...formatOffScreenAfterList(tree));
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [...alertNotes(tree)];
@@ -1844,7 +2239,8 @@ export class TaplineTools {
     }
     const shot = await shotPromise;
     if (shot === undefined) {
-      if (wantScreenshot) notes.push(NO_SCREENSHOT_NOTE);
+      if (secureQuiet) notes.push(SECURE_QUIET_NOTE);
+      else if (wantScreenshot) notes.push(NO_SCREENSHOT_NOTE);
     } else if (shot.ok) {
       const parsed = screenshotResultSchema.safeParse(shot.value);
       if (!parsed.success) notes.push("Note: screenshot unavailable: unreadable response.");
@@ -1887,6 +2283,20 @@ export class TaplineTools {
   /** An action answered with no list and no changes: the call log can't say what is in the list any more. */
   private markListUnseen(): void {
     if (this.listBase !== undefined) this.listBase = { ...this.listBase, unseen: true };
+  }
+
+  /** Remembers where a touch landed (points, and the touched element's frame) for the journey's frame and GIF. */
+  private noteTouch(method: string, params: unknown, result: unknown): void {
+    if (this.recorder === undefined || (method !== "press" && method !== "longPress" && method !== "toggle")) return;
+    const element = typeof result === "object" && result !== null && "element" in result ? elementSchema.safeParse((result as { element: unknown }).element) : null;
+    const frame = element?.success ? element.data.frame : undefined;
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    const t = typeof target === "object" && target !== null ? (target as { x?: unknown; y?: unknown }) : undefined;
+    const point =
+      t !== undefined && typeof t.x === "number" && typeof t.y === "number"
+        ? { x: t.x, y: t.y }
+        : frame ? { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 } : undefined;
+    this.lastTouch = { ...(point !== undefined ? { point } : {}), ...(frame ? { frame } : {}) };
   }
 
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
@@ -1933,6 +2343,7 @@ export class TaplineTools {
       return fail(describeError(error));
     }
     const line = describe(result);
+    this.noteTouch(method, params, result);
     if (nothingDone?.(result) === true) {
       this.logExtra = undefined;
       return text([line, ...this.takePersonNote()].join("\n"));
@@ -2710,6 +3121,8 @@ export class TaplineTools {
   }
 
   async filmstrip(args: Shape<"filmstrip">): Promise<CallToolResult> {
+    const hiddenFilm = this.hiddenTarget(args.tap);
+    if (hiddenFilm !== null) return hiddenFilm;
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const count = args.frames ?? 6;
@@ -2722,7 +3135,7 @@ export class TaplineTools {
       if (args.tap !== undefined) {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
-        const pressParams = { target: toWireTarget(args.tap) };
+        const pressParams = { target: toWireTarget(args.tap), ...(this.userEyes() ? { noScroll: true } : {}) };
         // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
         // it, a person's input goes first, and the screen can't change between the check and the tap (PR #4 review).
         const turn = async (): Promise<CallToolResult | null> => {
@@ -2954,7 +3367,7 @@ export class TaplineTools {
       const element = elementSchema.safeParse((result as Record<string, unknown>)[key]);
       if (element.success) {
         const shown = withoutValue ? { ...element.data, value: null, placeholder: null } : element.data;
-        return formatElement(shown, { actions: false, frame: false });
+        return formatElement(shown, { actions: false, frame: false, eyes: this.userEyes() });
       }
     }
     return "element";
@@ -3221,7 +3634,7 @@ export class TaplineTools {
         text: element.text ?? null,
         textMore: element.textMore ?? null,
       },
-      { actions: false },
+      { actions: false, eyes: this.userEyes() },
     );
   }
 
@@ -3240,7 +3653,9 @@ export class TaplineTools {
   }
 
   tap(args: Shape<"tap">): Promise<CallToolResult> {
-    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
+    const hiddenTap = this.hiddenTarget(args.target);
+    if (hiddenTap !== null) return Promise.resolve(hiddenTap);
+    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
       this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
@@ -3248,17 +3663,22 @@ export class TaplineTools {
 
   /** `seconds` is accepted for the shared interface; Tapline calls the handler, so it doesn't hold. */
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
-    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
+    const hiddenPress = this.hiddenTarget(args.target);
+    if (hiddenPress !== null) return Promise.resolve(hiddenPress);
+    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
       this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
+    const hiddenField = this.hiddenTarget(args.target);
+    if (hiddenField !== null) return Promise.resolve(hiddenField);
     const params: Record<string, unknown> = {
       text: args.text,
       replace: args.replace ?? true,
       submit: args.submit ?? false,
+      ...(this.userEyes() ? { noScroll: true } : {}),
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
@@ -3271,6 +3691,8 @@ export class TaplineTools {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
+        // Journey or not, iOS shows the last character of a password for about a second: remember when (finding 4).
+        if (secure) this.secureTypedAt = this.clock();
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
         return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
@@ -3283,7 +3705,10 @@ export class TaplineTools {
     if (args.to !== undefined && (args.direction !== undefined || args.amount !== undefined)) {
       return Promise.resolve(fail("Error bad_params: use either `to` or `direction`/`amount`, not both."));
     }
+    const hiddenScroll = this.hiddenTarget(args.target);
+    if (hiddenScroll !== null) return Promise.resolve(hiddenScroll);
     const toTarget = args.to === "target";
+    if (toTarget && this.userEyes()) return Promise.resolve(fail(TaplineTools.SCROLL_TO_TARGET_OFF));
     if (toTarget && args.target === undefined) {
       return Promise.resolve(fail('Error bad_params: to: "target" needs a target: the element to bring onto the screen.'));
     }
@@ -3338,7 +3763,9 @@ export class TaplineTools {
   }
 
   toggle(args: Shape<"toggle">): Promise<CallToolResult> {
-    const params: Record<string, unknown> = { target: toWireTarget(withIndex(args.target, args.index)) };
+    const hiddenSwitch = this.hiddenTarget(args.target);
+    if (hiddenSwitch !== null) return Promise.resolve(hiddenSwitch);
+    const params: Record<string, unknown> = { target: toWireTarget(withIndex(args.target, args.index)), ...(this.userEyes() ? { noScroll: true } : {}) };
     if (args.value !== undefined) params["value"] = args.value;
     if (args.force === true) params["force"] = true;
     // The switch already had the asked value: the app touched nothing, and that line is the whole answer.
@@ -3381,17 +3808,10 @@ export class TaplineTools {
       );
     }
     const name = args.name.trim();
-    // AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes.
-    if (name === "network") {
-      const mode = (args.args as { mode?: unknown } | undefined)?.mode;
-      const app = this.host.current()?.app;
-      const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
-      const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
-      if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
-        const where = own?.block !== undefined && app !== undefined ? `for ${app.name}` : "here";
-        return fail(`Error not_allowed: blocked: the safety policy blocks network ${where}.`);
-      }
-    }
+    const shortcut = this.shortcutRefusal("app_command", name);
+    if (shortcut !== null) return shortcut;
+    const blocked = name === "network" ? this.networkRefusal((args.args as { mode?: unknown } | undefined)?.mode) : null;
+    if (blocked !== null) return blocked;
     return this.act(
       "command",
       { name, args: args.args ?? {} },
@@ -3412,8 +3832,22 @@ export class TaplineTools {
     );
   }
 
+  /** AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes. */
+  private networkRefusal(mode: unknown, app: SessionInfo["app"] | undefined = this.host.current()?.app): CallToolResult | null {
+    const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
+    const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
+    if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
+      const where = own?.block !== undefined && app !== undefined ? `for ${app.name}` : "here";
+      return fail(`Error not_allowed: blocked: the safety policy blocks network ${where}.`);
+    }
+    return null;
+  }
+
   waitFor(args: Shape<"wait_for">): Promise<CallToolResult> {
-    const params: Record<string, unknown> = {};
+    const hiddenWait = this.hiddenTarget(args);
+    if (hiddenWait !== null) return Promise.resolve(hiddenWait);
+    // In a user's eyes it matches what is on the glass only (§17.1).
+    const params: Record<string, unknown> = this.userEyes() ? { glass: true } : {};
     if (args.text !== undefined) params["text"] = args.text;
     if (args.id !== undefined) params["testID"] = args.id;
     if (args.label !== undefined) params["label"] = args.label;
@@ -3484,6 +3918,8 @@ export class TaplineTools {
   }
 
   async openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
+    const refused = this.shortcutRefusal("open_url", args.url);
+    if (refused !== null) return refused;
     const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
     // The app's own forget link unpairs it, so it drops the connection before answering: that is the link working.
     if (answer.isError === true && /(^|\/)tapline\/forget\/?$/.test(args.url.replace(/[?#].*$/, ""))) {
@@ -3649,6 +4085,8 @@ export class TaplineTools {
     if (args.launch === true && args.tap !== undefined) {
       return fail("Error bad_params: launch reloads the app and tap taps in it; give one of them.");
     }
+    const hiddenPerf = this.hiddenTarget(args.tap);
+    if (hiddenPerf !== null) return hiddenPerf;
     const seconds = args.seconds ?? 3;
     try {
       let measure: PerfMeasure;
@@ -3660,7 +4098,7 @@ export class TaplineTools {
         let press: Record<string, unknown> | undefined;
         if (args.tap !== undefined) {
           // The tap is a touch like any other: the safety policy decides first (as for filmstrip).
-          press = { target: toWireTarget(args.tap) };
+          press = { target: toWireTarget(args.tap), ...(this.userEyes() ? { noScroll: true } : {}) };
           const stale = this.staleRef(press);
           if (stale !== null) return stale;
         }
@@ -3694,6 +4132,630 @@ export class TaplineTools {
       return text([perfFirstLine(measure, tapWords), ...formatPerfLines(measure.result), ...this.takePersonNote()].join("\n"));
     } catch (error) {
       return fail(describeError(error));
+    }
+  }
+
+  // -- journey (AGENT-TOOLS 1.12 §17.1)
+
+  async journey(args: Shape<"journey"> = {}): Promise<CallToolResult> {
+    if (args.start === true && args.stop === true) return fail("Error bad_params: give start or stop, not both.");
+    if (args.start === true) return this.journeyStart(args);
+    const startOnly = ["goal", "persona", "conditions", "allow"].filter((key) => (args as Record<string, unknown>)[key] !== undefined);
+    if (startOnly.length > 0) return fail(`Error bad_params: ${startOnly.join(", ")} go with start: true.`);
+    if (args.stop === true) return this.journeyStop(args);
+    const stopOnly = ["reached", "why", "export"].filter((key) => (args as Record<string, unknown>)[key] !== undefined);
+    if (stopOnly.length > 0) return fail(`Error bad_params: ${stopOnly.join(", ")} go with stop: true.`);
+    const running = this.journeyRun;
+    if (args.stress !== undefined || args.survives !== undefined || args.done !== undefined) {
+      if (running === undefined) return fail(NO_JOURNEY);
+      return this.journeyStress(running, args);
+    }
+    if (args.eyes !== undefined) {
+      if (running === undefined) return fail(NO_JOURNEY);
+      if (args.eyes === "user") {
+        return running.userEyes
+          ? text("Already in a user's eyes.")
+          : fail("Error bad_params: eyes: \"agent\" can't be turned back to a user's during a journey; start a new one.");
+      }
+      if (!running.userEyes) return text("Already in the agent's eyes.");
+      running.switchEyes();
+      // The next list is a full one: what the agent can see just changed.
+      const session = this.host.current();
+      if (session !== undefined) this.listed.delete(session.id);
+      return text("Eyes: the agent's from now on (ids, labels, everything in the tree; jumps and shortcuts allowed). The report says so.");
+    }
+    if (running !== undefined) {
+      const m = running.state.measures;
+      return text(
+        `Journey running: ${JSON.stringify(running.state.goal)}, ${running.userEyes ? "in a user's eyes" : "in the agent's eyes"}; ${m.taps} taps, ${m.screensEntered} screens so far.`,
+      );
+    }
+    return fail("Error bad_params: give start: true with a goal, or stop: true with reached.");
+  }
+
+  private async journeyStart(args: Shape<"journey">): Promise<CallToolResult> {
+    const running = this.journeyRun;
+    if (running !== undefined) {
+      return fail(`Error bad_params: a journey is already running (${JSON.stringify(running.state.goal)}); stop it first with stop: true and reached.`);
+    }
+    if (this.journeyBusy !== undefined) {
+      return fail(`Error busy: a journey is still ${this.journeyBusy === "starting" ? "starting" : "stopping"}; try again in a moment.`);
+    }
+    const goal = args.goal?.trim() ?? "";
+    if (goal === "") return fail("Error bad_params: start needs a goal: what the user wants to do.");
+    if (args.reached !== undefined || args.why !== undefined || args.export !== undefined) {
+      return fail("Error bad_params: reached, why and export go with stop: true.");
+    }
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    // Taken before the first await: a second start (or one during a stop's clean-up) can't overlap this one.
+    this.journeyBusy = "starting";
+    try {
+      return await this.journeyStarted(args, goal, session);
+    } finally {
+      // Only the start releases its own hold (a stop never takes it over: it answers busy while this runs).
+      if (this.journeyBusy === "starting") this.journeyBusy = undefined;
+      if (this.journeyRun === undefined) this.journeyApp = undefined;
+    }
+  }
+
+  private async journeyStarted(args: Shape<"journey">, goal: string, session: SessionInfo): Promise<CallToolResult> {
+    this.journeyApp = { identity: identityOf(session), name: session.app.name };
+    const journey = new Journey(
+      {
+        goal,
+        ...(args.persona !== undefined && args.persona.trim() !== "" ? { persona: args.persona.trim() } : {}),
+        ...(args.conditions !== undefined ? { conditions: args.conditions } : {}),
+        ...(args.allow !== undefined ? { allow: args.allow } : {}),
+        ...(args.eyes !== undefined ? { eyes: args.eyes } : {}),
+      },
+      this.clock,
+    );
+    const notes: string[] = [];
+    const conditions: Conditions = args.conditions ?? {};
+    // Network first: the others then run under it. Each goes through the app's own commands (AGENT-TOOLS §16).
+    const order = ["network", "language", "region", "text_size"] as const;
+    for (const name of order) {
+      const value = conditions[name];
+      if (value === undefined) continue;
+      const record = await this.applyCondition(session, name, value);
+      journey.state.conditionRecords.push(record);
+      if (!record.applied) notes.push(`Note: condition ${name} ${value} was not applied: ${record.failure ?? "the app refused"}.`);
+    }
+    this.journeyRun = journey;
+    this.journeyDone = undefined;
+    this.stressWaiting.clear();
+    // The naming memory of an earlier journey (or a hook someone left) is not this journey's.
+    this.uxJourney = null;
+    this.journeyHook = undefined;
+    this.startRecorder(journey, session, notes);
+    const live = this.host.current();
+    const persona = journey.state.persona ?? "no persona";
+    const eyesWords = journey.userEyes ? "in a user's eyes" : "in the agent's eyes";
+    const first = `Journey started: "${goal}" as ${persona}, ${eyesWords}.`;
+    const applied = journey.state.conditionRecords.filter((r) => r.applied).map((r) => `${r.name.replace("_", " ")} ${r.value}`);
+    const head = [first, ...(applied.length > 0 ? [`Conditions: ${applied.join(", ")}.`] : []), ...notes];
+    if (live === undefined) {
+      return text([...head, "Note: the app is reconnecting, so there's no screen yet; look in a few seconds."].join("\n"));
+    }
+    const parts = await this.lookParts(live, false, DEFAULT_SCREENSHOT_WIDTH, false);
+    const [top, ...rest] = parts.content;
+    const list = top !== undefined && top.type === "text" ? top.text : "";
+    // The screen the journey starts on is the GIF's first frame.
+    await this.recorder?.frame(0, journey.state.currentScreen, undefined, false);
+    return this.shownToUser({ content: [{ type: "text", text: [...head, list].join("\n") }, ...rest], ...(parts.isError ? { isError: true } : {}) });
+  }
+
+  /** Opens the report folder for a journey that has somewhere to keep one, and hands `ux_check` the hook that feeds it. */
+  private startRecorder(journey: Journey, first: SessionInfo, notes: string[]): void {
+    const root = this.options.journeysDir;
+    if (root === undefined) return;
+    try {
+      mkdirSync(root, { recursive: true });
+      // The newest reports stay; older folders go, so a long-lived host doesn't fill the disk (1.5 review, finding 6).
+      pruneJourneys(root, JOURNEYS_KEPT - 1);
+      // Frames and naming memory belong to the journey's own app, and only while it is connected and in front.
+      const app = identityOf(first);
+      const recorder = new JourneyRecorder(freshFolder(root, journey.state.goal, this.clock()), this.frameSource(app), this.clock);
+      this.recorder = recorder;
+      const mine = (): boolean => {
+        const now = this.host.current();
+        return now !== undefined && identityOf(now) === app;
+      };
+      const hook: UxJourneyHook = {
+        earlier: () => (mine() ? recorder.earlier(journey.state.currentScreen) : null),
+        seen: (title, actions, findings) => {
+          if (mine()) void recorder.uxSeen(journey.state.currentScreen, title, actions, findings);
+        },
+      };
+      this.journeyHook = hook;
+      this.uxJourney = hook;
+      // Only this journey's app: another connected app using its armed pictures is not this journey's skip.
+      this.pickerOff = this.mediaState.onPickerSkipped((appId, count) => {
+        if (this.pickerFrom !== undefined ? this.pickerFrom !== app : appId !== first.app.id) return;
+        recorder.pickerSkips++;
+        recorder.pickerPictures += count;
+      });
+    } catch (error) {
+      notes.push(`Note: no report will be written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** The recorder's eyes: a read that touches nothing, and a small picture. */
+  private frameSource(app: string): FrameSource {
+    // Rechecked before each request: the journey's own app or nothing, whatever `open_app` chose meanwhile.
+    const bound = (): SessionInfo | undefined => {
+      const session = this.journeyApp === undefined ? undefined : this.journeySession();
+      return session !== undefined && identityOf(session) === app ? session : undefined;
+    };
+    return {
+      where: () => {
+        const now = this.host.current();
+        if (now === undefined) return "disconnected";
+        if (identityOf(now) !== app) return "other";
+        const state = now.appState?.state;
+        return state === "background" || state === "inactive" ? "background" : "front";
+      },
+      peek: async () => {
+        const session = bound();
+        if (session === undefined) return undefined;
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        if (!tree.success) return undefined;
+        const t = tree.data;
+        return {
+          signature: screenSignature(t.elements, t.route?.names ?? [], (t.alerts ?? []).length),
+          ...(t.screen ? { screen: { w: t.screen.width, h: t.screen.height } } : {}),
+          route: t.route?.names ?? [],
+        };
+      },
+      shot: async (width, quality) => {
+        const session = bound();
+        if (session === undefined || this.noScreenshot.has(session.id)) return undefined;
+        // Right after a password was typed iOS may still show its last character: no picture then, from any path (a ux_check's too).
+        if (this.secureWindow()) return undefined;
+        try {
+          return await this.takeShot(session.id, width, quality);
+        } catch {
+          return undefined;
+        }
+      },
+    };
+  }
+
+  private async journeyStop(args: Shape<"journey">): Promise<CallToolResult> {
+    // A stop while the start still reads its first screen would let the start's end clear the stop's hold.
+    if (this.journeyBusy === "starting") return fail("Error busy: the journey is still starting; stop it in a moment.");
+    const running = this.journeyRun;
+    if (running === undefined) return fail(NO_JOURNEY);
+    if (args.reached === undefined) return fail("Error bad_params: stop needs reached: true or false.");
+    // An export writes to the user's GitHub: the agent must say its user asked. Refused before the journey ends, so the call can be made again.
+    if (args.export !== undefined && args.export.confirm !== true) {
+      return fail("Error bad_params: export writes to your user's GitHub, so it needs confirm: true inside export (only when your user asked for it). The journey is still running.");
+    }
+    if (this.journeyBusy === "stopping") return fail("Error busy: this journey is already stopping.");
+    // Held until the clean-up is done, so a new journey can't start while the old one still changes the app.
+    this.journeyBusy = "stopping";
+    try {
+      // The public-repository check also runs before the journey ends, so a refusal can be answered with public: true on a second stop.
+      const run = this.options.exportRunner;
+      if (args.export !== undefined && run !== undefined) {
+        const refused = await exportRefusal(args.export, run);
+        if (refused !== null) return fail(`Error not_allowed: ${refused}. The journey is still running; stop again with the option, or without export.`);
+      }
+      return await this.journeyStopped(args, running, args.reached);
+    } finally {
+      if (this.journeyBusy === "stopping") this.journeyBusy = undefined;
+    }
+  }
+
+  private async journeyStopped(args: Shape<"journey">, running: Journey, reached: boolean): Promise<CallToolResult> {
+    const state = running.finish(reached, args.why);
+    this.journeyRun = undefined;
+    this.journeyDone = state;
+    const recorder = this.recorder;
+    this.recorder = undefined;
+    this.pickerOff?.();
+    this.pickerOff = undefined;
+    this.uxJourney = null;
+    this.journeyHook = undefined;
+    this.stressWaiting.clear();
+    // From here nothing fails the stop: what goes wrong is a Note line, and the local report stays.
+    const failures: string[] = [];
+    const attempt = async <T>(what: string, work: () => Promise<T> | T): Promise<T | undefined> => {
+      try {
+        return await work();
+      } catch (error) {
+        failures.push(`Note: ${what}: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      }
+    };
+    const lines = [summaryLine(state)];
+    const content: CallToolResult["content"] = [];
+    try {
+      await attempt("conditions could not be undone", () => this.undoConditions(state));
+      // A picker stub the journey armed and nobody used goes back, so a person's next pick is their own (finding 5).
+      await attempt("the photo picker could not be put back", async () => {
+        const live = this.journeySession();
+        if (live !== undefined && live.capabilities.includes("media")) await this.host.request("media", { op: "disarm" }, { sessionId: live.id });
+      });
+      const undoLines: string[] = [];
+      // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
+      if (state.networkStress && !state.conditionRecords.some((r) => r.name === "network" && r.applied)) {
+        const done = await attempt("the network condition a stress moment set was not undone", async () => {
+          const live = this.journeySession();
+          return live === undefined ? undefined : this.runCondition(live, "network", "normal");
+        });
+        undoLines.push(done?.ok === true ? "Undone: network is normal again." : "Note: the network condition a stress moment set was not undone; set it back with app_command network normal.");
+      }
+      this.journeyApp = undefined;
+      const session = this.host.current();
+      // The agent's next list is a full one: the journey's lists were of the glass only.
+      if (session !== undefined) this.listed.delete(session.id);
+      const report =
+        recorder === undefined
+          ? undefined
+          : await attempt("the report could not be written", () =>
+              writeReport({
+                state,
+                rec: recorder,
+                maxTaps: this.maxTapsToGoal,
+                textRules: this.uxRules.text,
+                ...(this.options.gifMaxBytes !== undefined ? { gifMaxBytes: this.options.gifMaxBytes } : {}),
+              }),
+            );
+      if (report !== undefined) lines.push(`${findingsLine(report.counts)} Report: ${report.folder}`);
+      lines.push(...summaryNotes(state), ...undoLines, ...(report?.notes ?? []));
+      if (report !== undefined) {
+        // At most two small key pictures: where the journey ended, and the worst finding's screen.
+        if (this.options.screenshots === "file") {
+          if (report.keys.length > 0) lines.push(`Pictures: ${report.keys.map((k) => join(report.folder, k)).join(", ")}`);
+        } else {
+          for (const key of report.keys.slice(0, 2)) {
+            const data = await attempt("a key picture could not be read", () => readFileSync(join(report.folder, key)).toString("base64"));
+            if (data !== undefined) content.push({ type: "image", data, mimeType: "image/jpeg" });
+          }
+        }
+      }
+      const target = args.export;
+      if (target !== undefined) {
+        if (recorder === undefined) lines.push("Export needs the report folder, which this host isn't set up with; nothing was exported.");
+        else if (report === undefined) lines.push("Export skipped: there is no report to export.");
+        else {
+          const exported = await attempt("the export failed", () => this.exportReport(target, state, report, recorder));
+          lines.push(...(exported ?? [`Export failed. The report stays local: ${report.folder}`]));
+        }
+      }
+    } catch (error) {
+      failures.push(`Note: the stop did not finish everything: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    lines.push(...failures);
+    if (this.options.onJourneyStop !== undefined) {
+      try {
+        lines.push(...(await this.options.onJourneyStop(state)));
+      } catch (error) {
+        lines.push(`Note: the report could not be written: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }, ...content] };
+  }
+
+  /** `export` of `stop`: the report to GitHub through the user's own gh and git; the report stays local when it fails. */
+  private async exportReport(
+    target: NonNullable<Shape<"journey">["export"]>,
+    state: JourneyState,
+    report: Awaited<ReturnType<typeof writeReport>>,
+    recorder: JourneyRecorder,
+  ): Promise<string[]> {
+    const run = this.options.exportRunner;
+    if (run === undefined) return [`Export isn't available here (this host has no gh runner); the report stays local: ${report.folder}`];
+    const outcome = await exportReport(
+      {
+        target,
+        folder: recorder.folder,
+        name: report.name,
+        goal: state.goal,
+        summary: summaryLine(state),
+        findingsLine: findingsLine(report.counts),
+        findings: report.findings,
+        files: report.exportFiles,
+        headline: report.gif !== null ? "journey.gif" : report.firstPicture,
+      },
+      run,
+    );
+    return outcome.ok ? outcome.lines : [`Export failed: ${outcome.message}. The report stays local: ${report.folder}`];
+  }
+
+  // -- stress moments (AGENT-TOOLS 1.12 §17.4)
+
+  private async journeyStress(running: Journey, args: Shape<"journey">): Promise<CallToolResult> {
+    const stress = args.stress;
+    if (stress === undefined) return fail("Error bad_params: survives and done go with stress.");
+    const kind = stress.kind;
+    if (stress.mode !== undefined && kind !== "network") return fail("Error bad_params: mode goes with stress network.");
+    if (stress.target !== undefined && kind !== "double_tap") return fail("Error bad_params: target goes with stress double_tap.");
+    const survives = args.survives;
+    if (args.done === true) {
+      const asked = this.stressWaiting.get(kind);
+      if (asked === undefined) {
+        return fail(`Error bad_params: no ${kind} moment is waiting for a person; ask for it first with journey { stress: { kind: "${kind}" } }.`);
+      }
+      await this.reconnected();
+      // Done is checked, not taken on the agent's word: the app must show that the moment happened.
+      // An app that is gone by then is judged by survives (it did not survive), not by what it left behind.
+      const unseen = this.host.current() === undefined ? null : await this.stressUnseen(kind, asked);
+      if (unseen !== null) return fail(`Error bad_params: ${unseen} Ask the person again, then say done.`);
+      this.stressWaiting.delete(kind);
+      return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked.survives));
+    }
+    if (this.host.current() === undefined) return this.notConnected();
+    switch (kind) {
+      case "network":
+        return this.stressNetwork(running, stress.mode, survives);
+      case "double_tap":
+        return this.stressDoubleTap(running, stress.target, survives);
+      case "relaunch": {
+        // A development build reloads; anything else needs a person. Said as what it is.
+        const before = this.host.current()?.id;
+        const answer = await this.reload({ look: true });
+        const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+        if (answer.isError === true && /^Error unsupported/.test(said)) return this.waitForPerson(kind, "close the app and open it again", survives);
+        if (answer.isError === true) return answer;
+        await this.reconnected();
+        // A reload that timed out leaves the old session: that is no relaunch to record.
+        const after = this.host.current();
+        if (after === undefined || after.id === before) {
+          return fail("Error not_allowed: the app has not come back as a new session after the reload, so the moment can't be counted.");
+        }
+        return this.stressDone(running, kind, " (reload, not a relaunch)", await this.survivalOf(running, survives));
+      }
+      case "background":
+        return this.waitForPerson(kind, "switch to another app and back", survives);
+      case "rotate":
+        return this.waitForPerson(kind, "turn the phone and keep it turned", survives);
+    }
+  }
+
+  private async waitForPerson(kind: string, what: string, survives: Survives | undefined): Promise<CallToolResult> {
+    this.stressWaiting.set(kind, { survives, askedAt: Date.now(), size: kind === "rotate" ? await this.freshScreenSize() : null });
+    return text(
+      [
+        `Stress: ${kind} needs a person: ${what}, then say done.`,
+        `When they have, call journey { stress: { kind: "${kind}" }, done: true }${survives !== undefined ? " (it checks what you asked to survive then)" : ", with survives to say what must still be there"}.`,
+      ].join("\n"),
+    );
+  }
+
+  /** The screen's size in points from a read that touches nothing; null when the app doesn't answer. */
+  private async freshScreenSize(): Promise<{ width: number; height: number } | null> {
+    const session = this.host.current();
+    if (session === undefined) return null;
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const screen = tree.success ? tree.data.screen : null;
+    return screen ? { width: screen.width, height: screen.height } : null;
+  }
+
+  /**
+   * Why a person's stress moment can't be taken as done, or null when the app shows it happened: background left the
+   * front (or the link dropped) since it was asked; relaunch connected anew; rotate flipped the screen's size.
+   */
+  private async stressUnseen(kind: string, asked: StressWaiting): Promise<string | null> {
+    const mine = this.journeyApp?.identity ?? "";
+    switch (kind) {
+      case "background":
+        return (this.appLeftAt.get(mine) ?? 0) > asked.askedAt ? null : "The app never left the front since the moment was asked, so it can't be counted.";
+      case "relaunch":
+        return (this.appConnectedAt.get(mine) ?? 0) > asked.askedAt ? null : "The app hasn't started again since the moment was asked (no new connection), so it can't be counted.";
+      case "rotate": {
+        const now = await this.freshScreenSize();
+        const was = asked.size;
+        if (now === null || was === null) return "The screen's size couldn't be read, so the turn can't be confirmed.";
+        const flipped = Math.round(now.width) === Math.round(was.height) && Math.round(now.height) === Math.round(was.width) && Math.round(now.width) !== Math.round(now.height);
+        return flipped ? null : `The screen is still ${Math.round(now.width)}x${Math.round(now.height)} pt, as when the moment was asked: say done while the phone is turned.`;
+      }
+      default:
+        return null;
+    }
+  }
+
+  /** Waits for an app after a reload or a person leaving it (a new session comes up), a few seconds at most. */
+  private async reconnected(): Promise<void> {
+    const deadline = Date.now() + Math.min(this.reloadWaitMs, 8000);
+    while (this.host.current() === undefined && Date.now() < deadline) await sleep(100);
+    if (this.host.current() !== undefined) await sleep(Math.min(this.reloadSettleMs, 500));
+  }
+
+  private async stressNetwork(running: Journey, mode: Stress["mode"], survives: Survives | undefined): Promise<CallToolResult> {
+    if (mode === undefined) return fail('Error bad_params: stress network needs mode: "offline", "3g", "lossy" or "normal".');
+    // On the journey's own app, the one the stop puts back to normal; never another app selected since.
+    const session = this.journeySession();
+    if (session === undefined) return fail(`Error not_connected: ${this.journeyAppGone()}.`);
+    const done = await this.runCondition(session, "network", mode);
+    if (!done.ok) return fail(`Error not_allowed: network ${mode} wasn't applied: ${done.failure}.`);
+    running.state.networkStress = mode !== "normal";
+    return this.stressDone(running, "network", ` ${mode}`, await this.survivalOf(running, survives));
+  }
+
+  /** The same touch twice, 80 ms apart, each through the usual checks and the policy. */
+  private async stressDoubleTap(running: Journey, raw: Stress["target"], survives: Survives | undefined): Promise<CallToolResult> {
+    const parsed = raw === undefined ? null : targetSchema.safeParse(raw);
+    if (parsed === null || !parsed.success) return fail("Error bad_params: stress double_tap needs a target: exactly one of ref, text or x and y.");
+    const target = parsed.data;
+    // One OK never covers two touches: a target the policy flags (a word that asks a person, or blocks) is refused whole.
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const lists = listsFor(this.policy, session.app);
+    // Resolved inside the agent's turn, right before the press, as a guarded tap does: a queued person's action can't change
+    // what is under the target between the check and the touch.
+    const refusal: { answer: CallToolResult | null } = { answer: null };
+    const preflight = async (): Promise<CallToolResult | null> => {
+      if (lists.confirm.length === 0 && lists.block.length === 0) return null;
+      const resolved = await this.resolveForPolicy(session, "press", { target: toWireTarget(target) });
+      if (resolved.kind === "error") refusal.answer = fail(resolved.text);
+      else {
+        const verdict = this.policyWords(lists, resolved.elements);
+        if (verdict.kind === "blocked") refusal.answer = fail(this.blockedLine(verdict.element, verdict.word));
+        else if (verdict.kind === "confirm") {
+          refusal.answer = fail(
+            `Error not_allowed: needs_confirmation: double_tap on ${this.shortName(verdict.element, false)} is refused: it needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and one OK never covers two touches. Tap it once instead (a person is asked), or choose another target.`,
+          );
+        }
+      }
+      return refusal.answer;
+    };
+    // Both taps go to the app in one request, in one turn of the agent: the app makes the second DOUBLE_TAP_GAP_MS after
+    // the first, so nothing (the control queue, the app's own request queue, a settle) can stretch the gap. The moment is
+    // one stress, not two taps of the journey.
+    const params = { target: toWireTarget(target), again: DOUBLE_TAP_GAP_MS, ...(this.userEyes() ? { noScroll: true } : {}) };
+    let pressed: unknown;
+    const answer = await this.act("press", params, (r) => {
+      pressed = r;
+      return `Tapped ${this.elementName(r)}.`;
+    }, false, undefined, undefined, undefined, preflight);
+    if (refusal.answer !== null) return refusal.answer;
+    const line =(r: CallToolResult): string => (r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n").split("\n")[0] ?? "");
+    if (answer.isError === true) {
+      return fail(`Stress: double_tap on ${targetWords(target)} didn't happen as asked: ${line(answer)}`);
+    }
+    const second = pressSecondSchema.safeParse(typeof pressed === "object" && pressed !== null && "second" in pressed ? (pressed as { second: unknown }).second : undefined);
+    if (!second.success) {
+      return fail(
+        `Stress: double_tap on ${targetWords(target)} didn't happen as asked: the app made only the first tap (a double tap in one request needs react-native-tapline 1.5 or later in the app).`,
+      );
+    }
+    const checked = await this.survivalOf(running, survives);
+    const done = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
+    const s = second.data;
+    const how = s.done
+      ? `Both taps went through, ${s.afterMs} ms apart.`
+      : `The first tap went through; the second, ${s.afterMs} ms later, didn't land (${s.reason}).`;
+    return text(`${line(done)}\n${how}`);
+  }
+
+  /** Records the moment and answers it: `Stress: <kind>; it survived: …` or `…; it didn't survive: …`. */
+  private stressDone(running: Journey, kind: Stress["kind"], via: string, check: { survived: boolean | null; why: string }): CallToolResult {
+    const verdict = check.survived === null ? `; ${check.why}` : check.survived ? `; it survived: ${check.why}` : `; it didn't survive: ${check.why}`;
+    const said = `Stress: ${kind}${via}${verdict}`;
+    running.state.stress.push({ kind, said, survived: check.survived, afterStep: running.state.steps.length, at: this.clock() });
+    return text(said);
+  }
+
+  /** Whether what had to survive is still there, from a read that touches nothing. */
+  private async survivalOf(running: Journey, survives: Survives | undefined): Promise<{ survived: boolean | null; why: string }> {
+    if (survives === undefined || (survives.text === undefined && survives.goal_step === undefined)) {
+      return { survived: null, why: "nothing was checked (no survives given)." };
+    }
+    // The journey's own app, the one the moment happened to; never another app selected since.
+    const session = this.journeySession();
+    if (session === undefined) return { survived: false, why: "the app isn't connected any more." };
+    // What a person sees (AGENT-TOOLS 1.12 §17.4): in a user's eyes the glass only; a label a screen reader hears is no proof.
+    const tree = treeResultSchema.safeParse(
+      await this.host.request("tree", { peek: true, ...(this.userEyes() ? { glass: true } : {}) }, { sessionId: session.id }).catch(() => null),
+    );
+    if (!tree.success) return { survived: false, why: "the app didn't answer when asked what is on screen." };
+    const parts: Array<{ ok: boolean | null; why: string }> = [];
+    if (survives.text !== undefined) {
+      const wanted = survives.text;
+      const holds = (value: unknown): boolean => (typeof value === "string" || typeof value === "number") && String(value).includes(wanted);
+      const found = tree.data.elements.find((e) => holds(e.text) || holds(e.value));
+      if (found === undefined) parts.push({ ok: false, why: `text ${JSON.stringify(wanted)} is not on screen any more.` });
+      else {
+        const field = found.role === "textfield" || found.role === "input" || (found.actions ?? []).includes("type");
+        parts.push({ ok: true, why: `text ${JSON.stringify(wanted)} is still ${field ? "in the field" : "on screen"}.` });
+      }
+    }
+    if (survives.goal_step !== undefined) parts.push(this.goalStepHolds(running, survives.goal_step, tree.data.route?.names ?? []));
+    // A check that couldn't be made (ok null) is no pass: survived only when every check held, null when one was unknown and none failed.
+    const survived = parts.some((p) => p.ok === false) ? false : parts.every((p) => p.ok === true) ? true : null;
+    return { survived, why: parts.map((p) => p.why).join(" ") };
+  }
+
+  /** `goal_step`: a step number (the screen that step ended on) or a screen's name (part of its route). */
+  private goalStepHolds(running: Journey, goalStep: string, route: string[]): { ok: boolean | null; why: string } {
+    const now = route.join(" › ");
+    if (/^\d+$/.test(goalStep.trim())) {
+      const n = Number(goalStep);
+      const step = running.state.steps[n - 1];
+      if (step === undefined) return { ok: false, why: `the journey has no step ${n}.` };
+      const screen = step.screen === undefined ? undefined : running.state.screens[step.screen - 1];
+      if (screen === undefined || screen.route.length === 0 || route.length === 0) {
+        return { ok: null, why: `step ${n}'s screen can't be told apart (the app has no routes); only text can be checked.` };
+      }
+      const same = screen.route.join(" › ") === now;
+      return same ? { ok: true, why: `the app is still on step ${n}'s screen (${now}).` } : { ok: false, why: `the app is on ${now}, not step ${n}'s screen (${screen.route.join(" › ")}).` };
+    }
+    const named = now.toLowerCase().includes(goalStep.trim().toLowerCase());
+    return named ? { ok: true, why: `the app is still on ${now}.` } : { ok: false, why: `the app is on ${now === "" ? "a screen with no route" : now}, not ${JSON.stringify(goalStep)}.` };
+  }
+
+  /** The command and arguments that set one of a journey's conditions. */
+  private conditionCall(name: keyof Conditions, value: string): { command: string; args: Record<string, unknown> } {
+    switch (name) {
+      case "network":
+        return { command: "network", args: { mode: value } };
+      case "language":
+        return { command: "language", args: { language: value } };
+      case "region":
+        return { command: "region", args: { region: value } };
+      case "text_size":
+        return { command: "text_size", args: { size: value } };
+    }
+  }
+
+  /** Runs one condition command straight on the app (a journey's own, not the agent's shortcut); the app's answer may say what it was before. */
+  private async runCondition(
+    session: SessionInfo,
+    name: keyof Conditions,
+    value: string,
+  ): Promise<{ ok: true; previous?: string } | { ok: false; failure: string }> {
+    const call = this.conditionCall(name, value);
+    if (name === "network") {
+      // The app that receives the condition (a journey's own, maybe not the selected one) is the one the policy is read for.
+      const refused = this.networkRefusal(value, session.app);
+      if (refused !== null) {
+        const said = refused.content.map((block) => (block.type === "text" ? block.text : "")).join(" ");
+        return { ok: false, failure: said.replace(/^Error \w+: /, "").replace(/\.$/, "") };
+      }
+    }
+    try {
+      const raw = await this.host.request("command", { name: call.command, args: call.args }, { sessionId: session.id });
+      const inner = typeof raw === "object" && raw !== null && "result" in raw ? (raw as { result: unknown }).result : undefined;
+      const previous = typeof inner === "object" && inner !== null && "previous" in inner ? (inner as { previous: unknown }).previous : undefined;
+      return { ok: true, ...(typeof previous === "string" && previous !== "" ? { previous } : {}) };
+    } catch (error) {
+      return { ok: false, failure: describeError(error).replace(/^Error \w+: /, "").replace(/\.$/, "") };
+    }
+  }
+
+  private async applyCondition(session: SessionInfo, name: keyof Conditions, value: string): Promise<ConditionRecord> {
+    const done = await this.runCondition(session, name, value);
+    if (!done.ok) return { name, value, applied: false, failure: done.failure };
+    return { name, value, applied: true, ...(done.previous !== undefined ? { previous: done.previous } : {}) };
+  }
+
+  /** At the stop: network goes back to normal, text size to the phone's own, language and region to what the app said they were. */
+  private async undoConditions(state: JourneyState): Promise<void> {
+    const session = this.journeySession();
+    for (const record of state.conditionRecords) {
+      if (!record.applied) continue;
+      const words = record.name.replace("_", " ");
+      if ((record.name === "language" || record.name === "region") && record.previous === undefined) {
+        record.undone = false;
+        record.undo = `Note: ${words} ${record.value} was not restored: the app doesn't report what it was before.`;
+        continue;
+      }
+      if (session === undefined) {
+        record.undone = false;
+        record.undo = `Note: ${words} ${record.value} was not undone: ${this.journeyAppGone()}.`;
+        continue;
+      }
+      const back = record.name === "network" ? "normal" : record.name === "text_size" ? "system" : (record.previous ?? "");
+      const done = await this.runCondition(session, record.name, back);
+      record.undone = done.ok;
+      record.undo = done.ok
+        ? record.name === "text_size"
+          ? "Undone: text size is the phone's own again."
+          : `Undone: ${words} is ${back} again.`
+        : `Note: ${words} ${record.value} was not undone: ${done.failure}.`;
     }
   }
 

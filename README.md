@@ -130,6 +130,9 @@ your agent at it.
 | `performance` | JS heap, frames, stalls and the slowest renders while you wait or after a tap; reload time in development builds; limits as a check in scripts |
 | `reload` | reload the JavaScript bundle (development builds) |
 | `wait` | let something load, then look |
+| `journey` | test as a real user: `start` with a goal and a persona, act seeing only what a person sees (no ids, nothing scrolls by itself), `stop` with whether the goal was reached; it measures taps, time, wrong turns and hesitations, adds stress moments (a bad network, a double tap, background, rotate) and writes a visual report with a GIF in `~/.tapline/journeys` (the newest 20 kept), which `export` can put on a pull request or issue through your own `gh` |
+| `ux_check` | the screen against usability basics: competing choices, one main action, thumb reach, icon-only buttons, cut-off text, contrast, target size, naming across screens, error and empty states; house rules from `--ux-rules FILE` |
+| `media` | test pictures for an app's photo picker: `add` puts them in the phone's library through the app's own `expo-media-library` (with `confirm: true`), `picker: true` hands them to the next `expo-image-picker` call instead, `remove: true` deletes only what was added |
 
 Every touch tool also takes `dry_run: true`: every check runs and nothing is touched, and the
 answer says what it would do and whether a person's OK is needed. Password fields never show their

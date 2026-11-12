@@ -33,7 +33,7 @@ export interface Finding {
 }
 
 /** Apple's and Google's minimum tap target, in points. */
-const MIN_TARGET = 44;
+export const MIN_TARGET = 44;
 /** How far past a screen edge an element may run before it counts as cut off, in points. */
 const EDGE_SLACK = 1;
 /** Fraction of the smaller frame that two elements may share before they count as overlapping. */
@@ -48,11 +48,11 @@ const AVERAGE_GLYPH_WIDTH = 0.5;
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function num(value: number): string {
+export function num(value: number): string {
   return String(Number(value.toFixed(1)));
 }
 
-function flatStyle(style: unknown): Record<string, unknown> {
+export function flatStyle(style: unknown): Record<string, unknown> {
   if (style === undefined || style === null || typeof style === 'function') return {};
   try {
     const flat: unknown = StyleSheet.flatten(style as StyleProp<ViewStyle>);
@@ -62,7 +62,7 @@ function flatStyle(style: unknown): Record<string, unknown> {
   }
 }
 
-function isTapTarget(entry: Entry): boolean {
+export function isTapTarget(entry: Entry): boolean {
   return entry.info.actions.some((action) => action === 'press' || action === 'longPress' || action === 'toggle');
 }
 
@@ -83,7 +83,7 @@ function hitSlopOf(node: HostNode): Slop {
   return { top: side('top'), bottom: side('bottom'), left: side('left'), right: side('right') };
 }
 
-function isAncestor(nodes: HostNode[], ancestor: HostNode, node: HostNode): boolean {
+export function isAncestor(nodes: HostNode[], ancestor: HostNode, node: HostNode): boolean {
   for (let p = node.parent; p >= 0; ) {
     if (p === ancestor.index) return true;
     const next = nodes[p];
@@ -151,7 +151,7 @@ function parseFunctional(body: string): Rgba | null {
 }
 
 /** A colour as RGBA, or null when it is not one this module understands (PlatformColor, hsl(), ...). */
-function parseColor(value: unknown): Rgba | null {
+export function parseColor(value: unknown): Rgba | null {
   if (typeof value === 'number') {
     if (!Number.isInteger(value) || value < -0x80000000 || value > 0xffffffff) return null;
     const argb = value >>> 0;
@@ -180,7 +180,7 @@ function luminance(color: Rgba): number {
 }
 
 /** WCAG 2.1 contrast ratio, 1 to 21. */
-function contrastRatio(a: Rgba, b: Rgba): number {
+export function contrastRatio(a: Rgba, b: Rgba): number {
   const [light, dark] = luminance(a) >= luminance(b) ? [luminance(a), luminance(b)] : [luminance(b), luminance(a)];
   return (light + 0.05) / (dark + 0.05);
 }
@@ -201,10 +201,10 @@ function inheritedTextStyle(nodes: HostNode[], node: HostNode, key: string): unk
   return undefined;
 }
 
-type Background = { found: true; color: Rgba } | { found: false };
+export type Background = { found: true; color: Rgba } | { found: false };
 
 /** The opaque background colour behind a node: nearest host (itself included) that sets one. */
-function backgroundBehind(nodes: HostNode[], node: HostNode): Background {
+export function backgroundBehind(nodes: HostNode[], node: HostNode): Background {
   for (let current: HostNode | undefined = node; current; ) {
     const raw = flatStyle(propsOf(current.fiber).style).backgroundColor;
     if (raw !== undefined && raw !== null) {
@@ -231,7 +231,7 @@ function isLargeText(fontSize: number, fontWeight: unknown): boolean {
 /* Checks                                                                      */
 /* -------------------------------------------------------------------------- */
 
-interface Measured {
+export interface Measured {
   entry: Entry;
   frame: Frame;
 }
@@ -241,7 +241,7 @@ interface Tagged {
   finding: Finding;
 }
 
-function smallTarget(item: Measured): string | null {
+export function smallTarget(item: Measured): string | null {
   if (!isTapTarget(item.entry)) return null;
   const { frame } = item;
   const slop = hitSlopOf(item.entry.node);
@@ -251,7 +251,7 @@ function smallTarget(item: Measured): string | null {
   return `tap area ${num(frame.width)}x${num(frame.height)} pt is smaller than ${MIN_TARGET}x${MIN_TARGET}`;
 }
 
-function cutOff(item: Measured, screenWidth: number): string | null {
+export function cutOff(item: Measured, screenWidth: number): string | null {
   const { frame } = item;
   const parts: string[] = [];
   if (frame.x < -EDGE_SLACK) parts.push(`${num(-frame.x)} pt past the left edge`);
@@ -260,7 +260,7 @@ function cutOff(item: Measured, screenWidth: number): string | null {
   return parts.length > 0 ? `runs ${parts.join(' and ')} of the screen` : null;
 }
 
-function noName(item: Measured): string | null {
+export function noName(item: Measured): string | null {
   const { info } = item.entry;
   if (!info.actions.includes('press') || info.actions.includes('type') || info.text !== '' || info.label !== null) return null;
   return 'button has no text or accessibility label; VoiceOver would read nothing';
@@ -274,7 +274,7 @@ interface Contrast {
   background: string;
 }
 
-function contrastOf(item: Measured, nodes: HostNode[]): Contrast | null {
+export function contrastOf(item: Measured, nodes: HostNode[]): Contrast | null {
   const { node } = item.entry;
   if (!node.isText) return null;
   const foreground = parseColor(inheritedTextStyle(nodes, node, 'color'));
@@ -296,7 +296,7 @@ function lowContrast(item: Measured, nodes: HostNode[]): string | null {
   return c === null ? null : `contrast ${num(c.ratio)}:1 is below ${num(c.required)}:1 (${c.foreground} on ${c.background})`;
 }
 
-function maybeTruncated(item: Measured, nodes: HostNode[]): string | null {
+export function maybeTruncated(item: Measured, nodes: HostNode[]): string | null {
   const { node, info } = item.entry;
   if (!node.isText || info.text === '') return null;
   const lines = findProp(node, 'numberOfLines');

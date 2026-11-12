@@ -130,6 +130,8 @@ export interface TreeResult {
   elements: TaplineElement[];
   /** How many elements lie wholly above and below the screen (scroll to reach them); absent when none. */
   offScreen?: { above: number; below: number };
+  /** Only with `glass: true` (a journey in a user's eyes): whether a scroll view can really go further. Replaces the counts. */
+  glass?: { moreAbove: boolean; moreBelow: boolean };
   /** Open alerts (Alert.alert / Alert.prompt) the app showed, oldest first. */
   alerts?: TreeAlert[];
   /** Network requests still running (fetch / XMLHttpRequest) and the condition Tapline put on them; absent when neither. */

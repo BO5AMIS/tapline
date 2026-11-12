@@ -355,3 +355,72 @@ export function composeFilmstrip(frames: ShotImage[], options: FilmstripOptions 
 
   return encodeJpeg(canvas);
 }
+
+// ---------------------------------------------------------------------------------------------
+// For the journey report (AGENT-TOOLS 1.12 §17.5): marked-up pictures and the GIF's frames
+// ---------------------------------------------------------------------------------------------
+
+/** A picture as pixels: RGBA, row by row. */
+export type Pixels = Decoded;
+
+/** A JPEG as pixels; throws when it can't be read. */
+export function readPixels(shot: ShotImage): Pixels {
+  return decodeJpeg(shot, "The picture");
+}
+
+/** The pixels as a JPEG. */
+export function jpegOf(canvas: Pixels): OutputImage {
+  return encodeJpeg(canvas);
+}
+
+/** A copy that can be drawn on without touching the original. */
+function copyPixels(source: Pixels): Pixels {
+  return { width: source.width, height: source.height, data: new Uint8Array(source.data) };
+}
+
+/** A rectangle given as shares of the picture (0..1). */
+export interface ShareBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** A red box at a share of the picture (an element's frame over the screen), drawn on a copy. */
+export function markBox(source: Pixels, box: ShareBox, thickness = 3): Pixels {
+  const canvas = copyPixels(source);
+  const x = Math.round(box.x * canvas.width);
+  const y = Math.round(box.y * canvas.height);
+  const w = Math.max(4, Math.round(box.w * canvas.width));
+  const h = Math.max(4, Math.round(box.h * canvas.height));
+  strokeRect(canvas, x, y, w, h, thickness, RED);
+  return canvas;
+}
+
+/** A ring (a tap) at a share of the picture, drawn on a copy: red with a white edge so it shows on any screen. */
+export function markRing(source: Pixels, at: { x: number; y: number }, radius = 16): Pixels {
+  const canvas = copyPixels(source);
+  const cx = Math.round(at.x * canvas.width);
+  const cy = Math.round(at.y * canvas.height);
+  const ring = (r: number, thick: number, colour: Rgb): void => {
+    const reach = Math.ceil(r + thick);
+    for (let y = -reach; y <= reach; y++) {
+      for (let x = -reach; x <= reach; x++) {
+        const d = Math.sqrt(x * x + y * y);
+        if (d >= r - thick / 2 && d <= r + thick / 2) setPixel(canvas, cx + x, cy + y, colour);
+      }
+    }
+  };
+  ring(radius, 5, WHITE);
+  ring(radius, 3, RED);
+  return canvas;
+}
+
+/** A picture scaled to `width` pixels wide (aspect kept); the same picture when it is that wide already. */
+export function scaleToWidth(source: Pixels, width: number): Pixels {
+  if (source.width === width) return source;
+  const height = Math.max(1, Math.round((source.height * width) / source.width));
+  const canvas: Pixels = { width, height, data: new Uint8Array(width * height * 4).fill(255) };
+  drawScaled(canvas, source, 0, 0, width, height);
+  return canvas;
+}

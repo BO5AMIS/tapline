@@ -591,8 +591,26 @@ function isOwned(init: unknown): boolean {
   return typeof init === 'object' && init !== null && (init as Record<symbol, unknown>)[FETCH_OWNED] === true;
 }
 
+/** The fetch options (RequestInit), read by property access: an init may carry them inherited or non-enumerable. */
+const REQUEST_INIT_KEYS = [
+  'method', 'headers', 'body', 'mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy', 'integrity',
+  'keepalive', 'signal', 'priority', 'window', 'duplex',
+] as const;
+
 function ownedInit(init: unknown): Record<string | symbol, unknown> {
-  const copy: Record<string | symbol, unknown> = typeof init === 'object' && init !== null ? { ...(init as Record<string, unknown>) } : {};
+  const copy: Record<string | symbol, unknown> = {};
+  if (typeof init === 'object' && init !== null) {
+    // Own enumerable keys as data properties (Object.assign would let an own `__proto__` key set the prototype).
+    const own = init as Record<string | symbol, unknown>;
+    for (const key of Reflect.ownKeys(init)) {
+      if (!Object.prototype.propertyIsEnumerable.call(init, key)) continue;
+      Object.defineProperty(copy, key, { value: own[key], enumerable: true, writable: true, configurable: true });
+    }
+    const source = init as Record<string, unknown>;
+    for (const key of REQUEST_INIT_KEYS) {
+      if (!(key in copy) && key in source) copy[key] = source[key];
+    }
+  }
   copy[FETCH_OWNED] = true;
   return copy;
 }

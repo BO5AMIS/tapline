@@ -61,6 +61,8 @@ Options:
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
   --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
   --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
+  --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
+                 {"max_taps_to_goal": N}, {"way_back": true})
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
                  default it opens the live view in a browser here and keeps the link (its key) from the agent
                  (or TAPLINE_VIEWER_LINK=1)
@@ -262,6 +264,7 @@ async function main(argv: string[]): Promise<number> {
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
+      "ux-rules": { type: "string" },
       "viewer-link": { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -290,6 +293,7 @@ async function main(argv: string[]): Promise<number> {
         ...(values["no-log"] === true ? { noLog: true } : {}),
         ...(values.policy !== undefined ? { policy: values.policy } : {}),
         ...(values["no-policy"] === true ? { noPolicy: true } : {}),
+        ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
         ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
       }))
         ? -1 // keep running

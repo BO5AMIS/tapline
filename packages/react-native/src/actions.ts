@@ -39,7 +39,9 @@ import {
 } from './inspect';
 import { sourcesOf, type ElementSource } from './source';
 import { closestMatches } from './closest';
+import { measureScrollers, visiblePartOnGlass } from './glassclip';
 import { AUDIT_TYPES, auditScreen, type AuditFinding, type AuditType } from './checks';
+import { uxScreen, type UxAction, type UxCheckName, type UxKind } from './uxcheck';
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
@@ -542,7 +544,7 @@ function inFrontLayer(matches: Entry[]): Entry[] {
 }
 
 /** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
-export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Resolved> {
+export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
   const target = parseTarget(raw);
   const snapshot = takeSnapshot();
 
@@ -588,7 +590,14 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
     return { snapshot, entry: hit };
   }
 
-  const matches = inFrontLayer(matchEntries(snapshot, target));
+  let matches = inFrontLayer(matchEntries(snapshot, target));
+  // A journey in a user's eyes (§17.1): visible text matches only what shows on the glass, not what a scroll view
+  // clips or the keyboard covers (1.5 review, finding 11).
+  if (glassOnly && target.kind === 'text' && matches.length > 0) {
+    const scrollers = await measureScrollers(snapshot);
+    const frames = await Promise.all(matches.map((entry) => measureFiber(entry.node.fiber)));
+    matches = matches.filter((entry, i) => visiblePartOnGlass(snapshot, entry, frames[i] ?? null, scrollers) !== null);
+  }
   if (matches.length === 0) await refuseBehindSheet(snapshot, target);
   if (target.index !== undefined) {
     const picked = matches[target.index];
@@ -1029,7 +1038,8 @@ async function pressLike(
   rawParams: unknown,
 ): Promise<PressResult> {
   const params = paramsOf(rawParams);
-  const { snapshot, entry } = await resolveTarget(params.target, kind);
+  const afterMs = kind === 'press' ? againAfter(params.again) : undefined;
+  const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
@@ -1067,7 +1077,7 @@ async function pressLike(
   if (params.force !== true) {
     // What doesn't depend on where the element is comes first: an open alert is answered before anything scrolls.
     assertNoBlockingAlert(planned.actor);
-    reach = await scrollIntoReach(snapshot, planned.actor, params.dryRun === true);
+    reach = await scrollIntoReach(snapshot, planned.actor, params.dryRun === true, params.noScroll === true);
     if (reach.scrolled) {
       const again = await reresolve(planned.actor, kind, params.target);
       current = again.snapshot;
@@ -1090,8 +1100,63 @@ async function pressLike(
     const own = appHandler(actor, 'onPress');
     if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
   }
-  return { element, ...(reach.scrolled ? { scrolled: true as const } : {}), ...keyboardNote(closedKeyboard), ...forced, ...(await settleOutcome()) };
+  const second = afterMs === undefined ? undefined : await pressAgain(actor, params, afterMs);
+  return {
+    element,
+    ...(reach.scrolled ? { scrolled: true as const } : {}),
+    ...keyboardNote(closedKeyboard),
+    ...forced,
+    ...(second !== undefined ? { second } : {}),
+    ...(await settleOutcome()),
+  };
 }
+
+/** `again`: a second tap this many milliseconds after the first (a stress double tap, AGENT-TOOLS 1.12 §17.4). */
+function againAfter(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 20 || raw > 1000) {
+    throw badParams('again must be milliseconds from 20 to 1000');
+  }
+  return Math.round(raw);
+}
+
+/**
+ * The second tap of a double tap, made `afterMs` after the first on whatever is there by then, as a finger would
+ * land: the app may have disabled or removed the control (that is the guard against a double submit working).
+ * It goes through the same checks as a tap; a refusal is the answer's `second`, never an error.
+ */
+async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs: number): Promise<PressSecond> {
+  const started = Date.now();
+  await new Promise<void>((resolve) => setTimeout(resolve, afterMs));
+  try {
+    const again = await reresolve(first, 'press', params.target, false);
+    const found = findActionable(again.snapshot, again.entry, 'press', false);
+    if (!found || found.info.disabled || again.entry.info.disabled) {
+      return { done: false, reason: found ? 'disabled' : 'no_action', afterMs: Date.now() - started };
+    }
+    // The second tap is refused as `changed` when the id, label or text is no longer what the first tap found: a
+    // control that renames itself ("Added 1") and a list row that was recycled are both another element now.
+    if (!sameTarget(first, again.entry)) return { done: false, reason: 'changed', afterMs: Date.now() - started };
+    const handler = findHandler(found.node, 'onPress');
+    if (!handler) return { done: false, reason: 'no_action', afterMs: Date.now() - started };
+    const { frame } = await elementFor(found);
+    if (params.force !== true) await assertReachable(again.snapshot, found, frame);
+    const at = Date.now() - started;
+    callHandler('onPress', handler, [pressEvent(found.node.fiber, frame)]);
+    return { done: true, afterMs: at };
+  } catch (error) {
+    const reason =
+      error instanceof TaplineError
+        ? error.code === 'not_actionable'
+          ? (error.message.split(':')[0] ?? error.code)
+          : error.code
+        : 'internal';
+    return { done: false, reason, afterMs: Date.now() - started };
+  }
+}
+
+/** What happened to a double tap's second tap, and how long after the first it came. */
+export type PressSecond = { done: true; afterMs: number } | { done: false; reason: string; afterMs: number };
 
 /**
  * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
@@ -1107,6 +1172,8 @@ export type PressResult = {
   scrolled?: true;
   scrolls?: true;
   point?: { x: number; y: number };
+  /** With `again`: the second tap of a double tap. */
+  second?: PressSecond;
 } & SettleOutcome;
 
 /** Where a finger would land: the middle of the element (points, rounded). */
@@ -1252,9 +1319,9 @@ function keyboardNote(closed: boolean): { closedKeyboard?: true } {
   return closed ? { closedKeyboard: true } : {};
 }
 
-async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Promise<Resolved> {
+async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown, glassOnly = false): Promise<Resolved> {
   if (rawTarget !== undefined && rawTarget !== null) {
-    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type');
+    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type', glassOnly);
     const input = findActionable(snap, entry, 'type', true);
     if (!input) throw notActionable('no_action', `${describe(entry)} is not an input`);
     return { snapshot: snap, entry: input };
@@ -1304,14 +1371,14 @@ export async function typeText(
   // Deleting from the end edits what is there, so it never replaces the whole text.
   const replace = params.replace !== false && !deleting;
 
-  let { snapshot, entry } = await resolveInput(null, params.target);
+  let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true);
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
   // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2; the policy ran before this
   // call). The input that already has focus is typed into without touching it, so it is not scrolled to.
   let reach: Reach = {};
   if (params.force !== true) assertNoBlockingAlert(entry);
   if (params.force !== true && !ownsInstance(entry, keyboard.focusedInput())) {
-    reach = await scrollIntoReach(snapshot, entry, params.dryRun === true);
+    reach = await scrollIntoReach(snapshot, entry, params.dryRun === true, params.noScroll === true);
     if (reach.scrolled) {
       let again: Awaited<ReturnType<typeof resolveInput>>;
       try {
@@ -1674,9 +1741,18 @@ function visiblePart(frame: Frame, screen: { width: number; height: number }): F
  * alert, under a bar) run afterwards, as for any element. Refused as `off_screen`, with the reason, when
  * no scroll can bring it on screen. `dry` predicts the point after the scroll and scrolls nothing.
  */
-async function scrollIntoReach(snapshot: Snapshot, entry: Entry, dry: boolean): Promise<Reach> {
+async function scrollIntoReach(snapshot: Snapshot, entry: Entry, dry: boolean, noScroll = false): Promise<Reach> {
   const frame = await measureFiber(entry.node.fiber);
   if (frame === null) return {};
+  // A journey in a user's eyes (`noScroll`, §17.1): nothing scrolls by itself. An element wholly off screen is refused.
+  if (noScroll) {
+    // On the glass, not just on screen: a scroll view clips it, the keyboard covers it (1.5 review, finding 11).
+    if (visiblePartOnGlass(snapshot, entry, frame, await measureScrollers(snapshot)) !== null) return {};
+    throw notActionable(
+      'off_screen',
+      `${describe(entry)} is off screen; in a journey nothing scrolls by itself: scroll the way a person would, then try again.`,
+    );
+  }
   // Partly on screen (over the edge, or under a bar): scrolled clear too, with one attempt; if that
   // can't be done the action goes on as before and the touch checks decide. Never refused for this.
   const partial = visiblePart(frame, snapshot.screen) !== null;
@@ -1771,7 +1847,7 @@ function refindTarget(entry: Entry, original: unknown): Record<string, unknown> 
  * The same element after a scroll, from a fresh snapshot (the list may have laid out other rows on the
  * way). When a list unmounted the row, the ref is gone: it is found again by the original target.
  */
-async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: unknown): Promise<Resolved> {
+async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: unknown, checkSame = true): Promise<Resolved> {
   let found: Resolved;
   try {
     found = await resolveTarget({ ref: refFor(entry.node.fiber) }, hint);
@@ -1781,8 +1857,13 @@ async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: 
     if (again === null) throw error;
     found = await resolveTarget(again, hint);
   }
-  assertSameTarget(entry, found.entry);
+  if (checkSame) assertSameTarget(entry, found.entry);
   return found;
+}
+
+/** The same element by id, label and text, each on its own (a row can keep its id and label while its text changes). */
+function sameTarget(before: Entry, after: Entry): boolean {
+  return before.info.testID === after.info.testID && before.info.label === after.info.label && before.info.text === after.info.text;
 }
 
 /**
@@ -1791,11 +1872,9 @@ async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: 
  * refused before anything is touched (Codex review of 1.4.0).
  */
 function assertSameTarget(before: Entry, after: Entry): void {
-  // id, label and text each on their own: a row can keep its id and accessibility label while its text changes
+  if (sameTarget(before, after)) return;
   const was = { id: before.info.testID, name: labelOf(before.info) };
   const now = { id: after.info.testID, name: labelOf(after.info) };
-  const same = was.id === now.id && before.info.label === after.info.label && before.info.text === after.info.text;
-  if (same) return;
   if (was.name === now.name) {
     was.name = before.info.text;
     now.name = after.info.text;
@@ -1985,7 +2064,7 @@ const round2 = (value: number): number => Math.round(value * 100) / 100;
  * architecture `measureInWindow` includes the content offset, so scroll frame minus content frame
  * is the offset. Null when either can't be measured (old architecture, nothing laid out).
  */
-async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
+export async function measureScrollState(entry: Entry): Promise<ScrollState | null> {
   const scrollFiber = entry.node.fiber;
   const horizontal = findProp(entry.node, 'horizontal') === true;
   const children = hostChildren(scrollFiber);
@@ -2031,7 +2110,7 @@ export async function toggle(
 ): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
-  const first = await resolveTarget(params.target, 'toggle');
+  const first = await resolveTarget(params.target, 'toggle', params.noScroll === true);
   const plan = (snap: Snapshot, picked: Entry): { control: Entry; handler: NonNullable<ReturnType<typeof findHandler>> } => {
     const found = findActionable(snap, picked, 'toggle', true);
     if (!found) throw notActionable('no_action', `${describe(picked)} is not a switch`);
@@ -2046,7 +2125,7 @@ export async function toggle(
   let reach: Reach = {};
   if (params.force !== true) {
     assertNoBlockingAlert(planned.control);
-    reach = await scrollIntoReach(snapshot, planned.control, params.dryRun === true);
+    reach = await scrollIntoReach(snapshot, planned.control, params.dryRun === true, params.noScroll === true);
     if (reach.scrolled) {
       const again = await reresolve(planned.control, 'toggle', params.target);
       snapshot = again.snapshot;
@@ -2197,6 +2276,75 @@ export async function audit(rawParams: unknown): Promise<{ issues: AuditIssue[];
     });
   }
   return { issues, checked: [...types] };
+}
+
+export interface UxIssue {
+  kind: UxKind;
+  element: TaplineElement | null;
+  where?: AuditWhere;
+  problem: string;
+  basis: string;
+  at?: { file: string; line: number; direct: boolean };
+}
+
+/** `ux_check {wayBack?, earlier?}` (AGENT-TOOLS 1.12 §17.3): the screen against the usability basics. */
+export async function uxCheck(
+  rawParams: unknown,
+): Promise<{ issues: UxIssue[]; checked: UxCheckName[]; choices: number; actions: UxAction[] }> {
+  const params = paramsOf(rawParams);
+  if (params.wayBack !== undefined && typeof params.wayBack !== 'boolean') throw badParams('wayBack must be true or false');
+  const earlierRaw = params.earlier;
+  let earlier: UxAction[] | undefined;
+  if (earlierRaw !== undefined && earlierRaw !== null) {
+    if (!Array.isArray(earlierRaw)) throw badParams('earlier must be a list of {label, id?}');
+    earlier = [];
+    for (const item of earlierRaw as unknown[]) {
+      if (!isRecord(item) || typeof item.label !== 'string') throw badParams('earlier must be a list of {label, id?}');
+      earlier.push({ label: item.label, ...(typeof item.id === 'string' && item.id !== '' ? { id: item.id } : {}) });
+    }
+  }
+  if (params.glass !== undefined && typeof params.glass !== 'boolean') throw badParams('glass must be true or false');
+  const result = await uxScreen({
+    ...(params.glass === true ? { glass: true } : {}),
+    ...(params.wayBack === true ? { wayBack: true } : {}),
+    ...(earlier !== undefined ? { earlier } : {}),
+  });
+  let sources: ElementSource[] = [];
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    const fibers = result.findings.flatMap((f) => (f.entry !== null ? [f.entry.node.fiber] : []));
+    try {
+      sources = fibers.length > 0 ? await sourcesOf(fibers) : [];
+    } catch {
+      sources = []; // Metro unreachable: the report still stands, without lines
+    }
+  }
+  let next = 0;
+  const issues: UxIssue[] = [];
+  for (const finding of result.findings) {
+    const source = finding.entry !== null ? sources[next++] : undefined;
+    let element: TaplineElement | null = null;
+    if (finding.entry !== null) {
+      try {
+        element = (await elementFor(finding.entry, finding.frame)).element;
+      } catch {
+        element = null;
+      }
+    }
+    const where =
+      element === null && finding.entry !== null
+        ? whereOf({ type: 'description', entry: finding.entry, frame: finding.frame, problem: '', fix: '' })
+        : null;
+    const location = source?.location ?? null;
+    issues.push({
+      kind: finding.kind,
+      element,
+      ...(where !== null ? { where } : {}),
+      problem: finding.problem,
+      basis: finding.basis,
+      ...(location !== null ? { at: { file: location.file, line: location.line, direct: location.direct } } : {}),
+    });
+  }
+  return { issues, checked: result.checked, choices: result.choices, actions: result.actions };
 }
 
 export async function getLogs(rawParams: unknown): Promise<{ entries: LogEntry[] }> {

@@ -233,6 +233,37 @@ Tapline on. Read its output, then go on with step 6. By hand:
 - `filmstrip` (optionally `tap` first) captures several frames in one image for
   animations, transitions and loading states.
 
+## As a real user (journeys)
+
+When the question is whether people can find, understand and finish a feature, not only whether it
+works, run a journey (AGENT-TOOLS 1.12 §17).
+- `journey { start: true, goal, persona }`. Build personas for this app's own users with the user
+  ([skills/tapline/references/personas.md](skills/tapline/references/personas.md) has the recipe). From
+  then on you see the app in a user's eyes: only what shows on the glass (cut to its scroll views and
+  above the keyboard), no ids or labels, and nothing scrolls by itself. Target by ref or visible text,
+  and scroll the way a person would. `open_url` and `app_command` are shortcuts a user doesn't have:
+  only what the start's `allow` names. `eyes: "agent"` switches back, and the report says so.
+- Act as that person would, then `journey { stop: true, reached }`. The answer gives the taps to the
+  goal, the time, wrong turns, hesitations and dead ends, the findings by severity, and the report
+  folder in `~/.tapline/journeys` (report.md, report.html, a GIF of the run, a picture per finding).
+  The newest 20 reports are kept. Typed text never goes into a report.
+- `ux_check` checks a screen against usability basics (competing choices, one main action, thumb
+  reach, icon-only buttons, cut-off text, contrast, target size, naming across screens, error and
+  empty states). `tapline mcp --ux-rules FILE` adds house rules: text ones for you to judge,
+  `{"max_taps_to_goal": N}` and `{"way_back": true}` checked by the tool.
+- Stress moments: `journey { stress: { kind }, survives }`. `network` (a `mode`) and `double_tap` (a
+  `target`; both taps in one request, 80 ms apart) happen at once. `background`, `rotate` and a
+  relaunch outside a development build need a person; say `done: true` when they have, and Tapline
+  checks that the app shows it happened before it counts the moment. `survives` names visible text,
+  or a step whose screen must still be there.
+- `stop` with `export: { to: "pr" | "issue", repo, pr?, confirm: true }` puts the report on GitHub
+  through the user's own `gh`, only when the user asked for that (`public: true` for a public
+  repository).
+- `media { add: [paths], confirm: true }` puts test pictures in the phone's photo library through the
+  app's own `expo-media-library`; `picker: true` (with `confirm: true` too) hands them to the next
+  image-picker call instead (the report marks it "picker skipped"). Ask the user first. `remove: true` deletes only what this
+  phone's session added. At most 10 pictures and 20 MB per call.
+
 ## Watching together
 
 - `viewer` opens the live view in a browser on the user's computer: the app's screen as

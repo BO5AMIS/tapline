@@ -19,12 +19,14 @@ import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
+import { NO_UX_RULES, loadUxRules, type UxRules } from "./uxcheck.js";
 import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
 import { VIEWER_HTML } from "./viewer-page.js";
 import { TaplineHost } from "./server.js";
 import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
 import { z } from "zod";
 import { TaplineTools, toolShapes, unknownArgumentError, type ToolArgs } from "./tools.js";
+import { realRunner } from "./journeyexport.js";
 
 type ToolName = keyof typeof toolShapes;
 type ToolAnswer = Awaited<ReturnType<TaplineTools["apps"]>>;
@@ -74,7 +76,7 @@ function publishPlainSchemas(server: McpServer): void {
 
 /** Registers every Tapline tool on an MCP server. */
 export function createMcpServer(tools: TaplineTools): McpServer {
-  const server = new McpServer({ name: "tapline", version: "1.4.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: "1.5.0" }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     "apps",
@@ -148,6 +150,27 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       annotations: { readOnlyHint: true },
     },
     guarded(tools, "audit", (args) => tools.audit(args)),
+  );
+
+  server.registerTool(
+    "ux_check",
+    {
+      title: "Check the screen's usability",
+      description: toolDescription("ux_check"),
+      inputSchema: looseInput("ux_check"),
+      annotations: { readOnlyHint: true },
+    },
+    guarded(tools, "ux_check", (args) => tools.uxCheck(args)),
+  );
+
+  server.registerTool(
+    "media",
+    {
+      title: "Add test pictures",
+      description: toolDescription("media"),
+      inputSchema: looseInput("media"),
+    },
+    guarded(tools, "media", (args) => tools.media(args)),
   );
 
   server.registerTool(
@@ -368,6 +391,16 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "journey",
+    {
+      title: "Journey",
+      description: toolDescription("journey"),
+      inputSchema: looseInput("journey"),
+    },
+    guarded(tools, "journey", (args) => tools.journey(args)),
+  );
+
+  server.registerTool(
     "session_report",
     {
       title: "Session report",
@@ -409,16 +442,19 @@ function openInBrowser(link: string): boolean {
 }
 
 export async function runMcp(
-  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean; viewerLink?: boolean } = {},
+  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean; viewerLink?: boolean; uxRules?: string } = {},
 ): Promise<boolean> {
   let screenshots: ScreenshotMode;
   let viewer: ViewerMode;
   let policy: PolicyFile;
+  let uxRules: UxRules = NO_UX_RULES;
   try {
     screenshots = screenshotMode(options.screenshots, options.env);
     viewer = viewerMode(options.viewer, options.env);
     // The safety policy (AGENT-TOOLS 1.8 §11): built in, from --policy FILE, or none with --no-policy.
     policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
+    // The user's UX house rules (AGENT-TOOLS 1.12 §17.3): --ux-rules FILE; a bad file stops the host with a plain message.
+    if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
   } catch (error) {
     log(error instanceof Error ? error.message : String(error));
     return false;
@@ -464,6 +500,7 @@ export async function runMcp(
   let hub: ViewerHub | undefined;
   const tools = new TaplineTools(host, {
     policy,
+    uxRules,
     confirmations,
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },
@@ -474,6 +511,9 @@ export async function runMcp(
     screenshotDir: join(configDir(), "shots"),
     scriptsDir: join(configDir(), "scripts"),
     baselinesDir: join(configDir(), "baselines"),
+    // Journey reports (AGENT-TOOLS 1.12 §17.5) and the user's own gh and git for `export`
+    journeysDir: join(configDir(), "journeys"),
+    exportRunner: realRunner,
     // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
     ...(options.noLog === true ? {} : { logDir: join(configDir(), "log") }),
     ...(viewer === "off"
