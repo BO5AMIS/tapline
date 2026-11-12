@@ -15,6 +15,7 @@ import {
   type Measured,
 } from './checks';
 import { propsOf } from './fiber';
+import { measureScrollers, visiblePartOnGlass } from './glassclip';
 import { isOnScreen, measureFiber, takeSnapshot, type Entry, type HostNode } from './inspect';
 import type { Frame } from './types';
 
@@ -80,6 +81,8 @@ export interface UxOptions {
   wayBack?: boolean;
   /** Actions on earlier screens of the running journey; undefined when there is no journey. */
   earlier?: readonly UxAction[];
+  /** A journey in a user's eyes (AGENT-TOOLS 1.12 §17.1): only what shows on the glass is checked. */
+  glass?: boolean;
 }
 
 export interface UxResult {
@@ -178,10 +181,14 @@ export async function uxScreen(options: UxOptions = {}): Promise<UxResult> {
   const { screen, nodes } = snapshot;
   const candidates = snapshot.entries.filter((entry) => entry.info.interesting && !entry.tab);
   const frames = await Promise.all(candidates.map((entry) => measureFiber(entry.node.fiber)));
+  const scrollers = options.glass === true ? await measureScrollers(snapshot) : null;
   const measured: Measured[] = [];
   candidates.forEach((entry, i) => {
     const frame = frames[i] ?? null;
-    if (frame !== null && isOnScreen(frame, screen)) measured.push({ entry, frame });
+    if (frame === null || !isOnScreen(frame, screen)) return;
+    // In a user's eyes, what a scroll view clips or the keyboard covers isn't there for the check either.
+    if (scrollers !== null && visiblePartOnGlass(snapshot, entry, frame, scrollers) === null) return;
+    measured.push({ entry, frame });
   });
 
   const findings: UxFinding[] = [];

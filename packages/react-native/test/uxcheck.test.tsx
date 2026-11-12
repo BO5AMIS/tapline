@@ -3,6 +3,7 @@ import React from 'react';
 import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
 import { uxCheck } from '../src/actions';
 import { resetRefs, setMeasurer } from '../src/inspect';
+import { setKeyboardReader } from '../src/keyboard';
 import { setSourceFetch } from '../src/source';
 import {
   BASIS_CHOICES,
@@ -167,6 +168,22 @@ describe('icon-only buttons', () => {
     const found = ofKind((await uxScreen()).findings, 'icon_only');
     expect(found).toHaveLength(1);
     expect(found[0]?.entry?.info.testID).toBe('bare');
+  });
+
+  test("in a user's eyes (glass), what the keyboard covers isn't checked", async () => {
+    await mount(
+      <View>
+        <Pressable testID="bare" accessibilityRole="button" onPress={noop} />
+      </View>,
+    );
+    useFrames({ bare: frame(10, 700, 48, 48) }, null);
+    setKeyboardReader(() => ({ shown: true, top: 500 }));
+    try {
+      expect(ofKind((await uxScreen()).findings, 'icon_only')).toHaveLength(1);
+      expect(ofKind((await uxScreen({ glass: true })).findings, 'icon_only')).toHaveLength(0);
+    } finally {
+      setKeyboardReader(null);
+    }
   });
 });
 

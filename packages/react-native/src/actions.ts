@@ -2263,7 +2263,9 @@ export async function uxCheck(
       earlier.push({ label: item.label, ...(typeof item.id === 'string' && item.id !== '' ? { id: item.id } : {}) });
     }
   }
+  if (params.glass !== undefined && typeof params.glass !== 'boolean') throw badParams('glass must be true or false');
   const result = await uxScreen({
+    ...(params.glass === true ? { glass: true } : {}),
     ...(params.wayBack === true ? { wayBack: true } : {}),
     ...(earlier !== undefined ? { earlier } : {}),
   });

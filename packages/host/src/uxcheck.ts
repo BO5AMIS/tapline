@@ -79,15 +79,17 @@ const CHECK_ORDER = Object.keys(CHECK_WORDS);
 export function formatUxCheck(
   title: string,
   result: UxResult,
-  options: { textRules?: readonly string[]; journeyRunning: boolean },
+  options: { textRules?: readonly string[]; journeyRunning: boolean; eyes?: boolean },
   pathOf: (file: string) => string = shownPath,
 ): string {
   const n = result.issues.length;
+  const eyes = options.eyes === true;
   const lines = [`UX check of ${JSON.stringify(title)}: ${n} finding${n === 1 ? "" : "s"}.`];
   result.issues.slice(0, MAX_UX_FINDINGS).forEach((issue, i) => {
-    const what = issue.element ? formatElement(issue.element, { actions: false }) : whereWords(issue.where);
+    const what = issue.element ? formatElement(issue.element, { actions: false, eyes }) : whereWords(issue.where);
     lines.push(`${i + 1}. ${issue.kind}: ${what}: ${issue.problem} (${issue.basis})`);
-    if (issue.at !== undefined) {
+    // In a user's eyes (AGENT-TOOLS 1.12 §17.1) the code behind the screen isn't shown: no file and line.
+    if (issue.at !== undefined && !eyes) {
       const library = issue.at.direct === false ? " (a library draws it; this is the app's line around it)" : "";
       lines.push(`   at ${pathOf(issue.at.file)}:${issue.at.line}${library}`);
     }

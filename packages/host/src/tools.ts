@@ -914,8 +914,8 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
-  "look", "run", "inspect", "audit", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll", "toggle",
-  "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
+  "look", "run", "inspect", "audit", "ux_check", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll",
+  "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
 ]);
 /** A stress double tap's two taps, this many ms apart (AGENT-TOOLS 1.12 §17.4): the app makes the second. */
 const DOUBLE_TAP_GAP_MS = 80;
@@ -1938,7 +1938,7 @@ export class TaplineTools {
     try {
       raw = await this.host.request(
         "uxCheck",
-        { ...(this.uxRules.wayBack ? { wayBack: true } : {}), ...(earlier !== null ? { earlier } : {}) },
+        { ...(this.userEyes() ? { glass: true } : {}), ...(this.uxRules.wayBack ? { wayBack: true } : {}), ...(earlier !== null ? { earlier } : {}) },
         { sessionId: session.id },
       );
     } catch (error) {
@@ -1961,7 +1961,7 @@ export class TaplineTools {
         };
       }),
     );
-    const body = formatUxCheck(title, parsed.data, { textRules: this.uxRules.text, journeyRunning: this.uxJourney !== null });
+    const body = formatUxCheck(title, parsed.data, { textRules: this.uxRules.text, journeyRunning: this.uxJourney !== null, eyes: this.userEyes() });
     return text([body, ...this.takePersonNote()].join("\n"));
   }
 
