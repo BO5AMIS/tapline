@@ -30,7 +30,11 @@ import {
   type ConditionRecord,
   type Conditions,
   type JourneyState,
+  type Stress,
+  type Survives,
 } from "./journey.js";
+import { JourneyRecorder, findingsLine, freshFolder, screenSignature, writeReport, type FrameSource, type Touch } from "./journeyreport.js";
+import { exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
@@ -527,6 +531,15 @@ export interface ToolsOptions {
    * returns follow the summary in the answer (`Findings: …`, `Report: <folder>`).
    */
   onJourneyStop?: (state: JourneyState) => string[] | Promise<string[]>;
+  /**
+   * Where journeys keep their report folders (e.g. ~/.tapline/journeys): each journey gets
+   * `<yyyy-mm-dd-hhmm>-<slug>/` with its frames, and `stop` writes the report there. Unset: no frames, no report.
+   */
+  journeysDir?: string;
+  /** Runs `gh` and `git` for `export` (AGENT-TOOLS 1.12 §17.5). Unset: export answers that it can't run. Tests pass a fake. */
+  exportRunner?: Runner;
+  /** Cap for the journey GIF in bytes (tests lower it; default 3 MB). */
+  gifMaxBytes?: number;
 }
 
 /**
@@ -904,6 +917,10 @@ const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
   "look", "run", "inspect", "audit", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll", "toggle",
   "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
 ]);
+/** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
+const FRAME_TOOLS: ReadonlySet<string> = new Set([
+  "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait",
+]);
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
   "apps", "open_app", "pair", "look", "inspect", "audit", "ux_check", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
@@ -1010,6 +1027,15 @@ export class TaplineTools {
   private journeyDone: JourneyState | undefined;
   /** Inside `run`: "run" for the batch's own checks (not counted), "step" for a step (counted like a call of its own). */
   private readonly journeyScope = new AsyncLocalStorage<"run" | "step">();
+  /** The running journey's frames and report pictures (AGENT-TOOLS 1.12 §17.5); undefined without a `journeysDir`. */
+  private recorder: JourneyRecorder | undefined;
+  /** The hook this journey gave `ux_check`, to take back at the stop. */
+  private journeyHook: UxJourneyHook | undefined;
+  private pickerOff: (() => void) | undefined;
+  /** Where the last touch of the call in flight was, for the frame's tap ring. */
+  private lastTouch: Touch | undefined;
+  /** Stress moments that wait for a person (§17.4), by kind: what must survive. */
+  private readonly stressWaiting = new Map<string, Survives | undefined>();
   private readonly clock: () => number;
 
   constructor(
@@ -1085,7 +1111,8 @@ export class TaplineTools {
     if (scope === "run" || input["dry_run"] === true) return run();
     const at = this.clock();
     const pre = journey.pre();
-    const done = (answer: CallToolResult): CallToolResult => {
+    this.lastTouch = undefined;
+    const done = (answer: CallToolResult): CallToolResult | Promise<CallToolResult> => {
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
       const code = answer.isError === true ? /^Error (\w+):/.exec(said)?.[1] : undefined;
       const target = journeyTargetWords(input);
@@ -1093,7 +1120,14 @@ export class TaplineTools {
         { tool, ok: answer.isError !== true, ...(code !== undefined ? { code } : {}), ...(target !== undefined ? { target } : {}), text: said, at, ms: this.clock() - at },
         pre,
       );
-      return this.shownToUser(answer);
+      const shown = this.shownToUser(answer);
+      const recorder = this.recorder;
+      if (recorder === undefined || !FRAME_TOOLS.has(tool)) return shown;
+      // A small picture of the screen after the step, kept in the report's folder and never in the answer.
+      const touch = this.lastTouch;
+      this.lastTouch = undefined;
+      const animating = /^Note: the screen was still changing/m.test(said);
+      return recorder.frame(journey.state.steps.length, journey.state.currentScreen, touch, animating).then(() => shown);
     };
     const result = run();
     return result instanceof Promise ? result.then(done) : done(result);
@@ -1909,7 +1943,16 @@ export class TaplineTools {
     this.uxJourney?.seen?.(
       title,
       parsed.data.actions,
-      parsed.data.issues.map((i) => ({ kind: i.kind, problem: i.problem, basis: i.basis, ...(i.element ? { ref: i.element.ref } : {}) })),
+      parsed.data.issues.map((i) => {
+        const frame = i.element?.frame ?? i.where?.frame;
+        return {
+          kind: i.kind,
+          problem: i.problem,
+          basis: i.basis,
+          ...(i.element ? { ref: i.element.ref } : {}),
+          ...(frame ? { frame } : {}),
+        };
+      }),
     );
     const body = formatUxCheck(title, parsed.data, { textRules: this.uxRules.text, journeyRunning: this.uxJourney !== null });
     return text([body, ...this.takePersonNote()].join("\n"));
@@ -2101,6 +2144,20 @@ export class TaplineTools {
     if (this.listBase !== undefined) this.listBase = { ...this.listBase, unseen: true };
   }
 
+  /** Remembers where a touch landed (points, and the touched element's frame) for the journey's frame and GIF. */
+  private noteTouch(method: string, params: unknown, result: unknown): void {
+    if (this.recorder === undefined || (method !== "press" && method !== "longPress" && method !== "toggle")) return;
+    const element = typeof result === "object" && result !== null && "element" in result ? elementSchema.safeParse((result as { element: unknown }).element) : null;
+    const frame = element?.success ? element.data.frame : undefined;
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    const t = typeof target === "object" && target !== null ? (target as { x?: unknown; y?: unknown }) : undefined;
+    const point =
+      t !== undefined && typeof t.x === "number" && typeof t.y === "number"
+        ? { x: t.x, y: t.y }
+        : frame ? { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 } : undefined;
+    this.lastTouch = { ...(point !== undefined ? { point } : {}), ...(frame ? { frame } : {}) };
+  }
+
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
   private async act(
     method: string,
@@ -2145,6 +2202,7 @@ export class TaplineTools {
       return fail(describeError(error));
     }
     const line = describe(result);
+    this.noteTouch(method, params, result);
     if (nothingDone?.(result) === true) {
       this.logExtra = undefined;
       return text([line, ...this.takePersonNote()].join("\n"));
@@ -3826,7 +3884,7 @@ export class TaplineTools {
     const running = this.journeyRun;
     if (args.stress !== undefined || args.survives !== undefined || args.done !== undefined) {
       if (running === undefined) return fail(NO_JOURNEY);
-      return fail("Error unsupported: stress moments are not in this build yet; test the flow without them.");
+      return this.journeyStress(running, args);
     }
     if (args.eyes !== undefined) {
       if (running === undefined) return fail(NO_JOURNEY);
@@ -3886,6 +3944,11 @@ export class TaplineTools {
     }
     this.journeyRun = journey;
     this.journeyDone = undefined;
+    this.stressWaiting.clear();
+    // The naming memory of an earlier journey (or a hook someone left) is not this journey's.
+    this.uxJourney = null;
+    this.journeyHook = undefined;
+    this.startRecorder(journey, session, notes);
     const live = this.host.current();
     const persona = journey.state.persona ?? "no persona";
     const eyesWords = journey.userEyes ? "in a user's eyes" : "in the agent's eyes";
@@ -3898,24 +3961,158 @@ export class TaplineTools {
     const parts = await this.lookParts(live, false, DEFAULT_SCREENSHOT_WIDTH, false);
     const [top, ...rest] = parts.content;
     const list = top !== undefined && top.type === "text" ? top.text : "";
+    // The screen the journey starts on is the GIF's first frame.
+    await this.recorder?.frame(0, journey.state.currentScreen, undefined, false);
     return this.shownToUser({ content: [{ type: "text", text: [...head, list].join("\n") }, ...rest], ...(parts.isError ? { isError: true } : {}) });
+  }
+
+  /** Opens the report folder for a journey that has somewhere to keep one, and hands `ux_check` the hook that feeds it. */
+  private startRecorder(journey: Journey, first: SessionInfo, notes: string[]): void {
+    const root = this.options.journeysDir;
+    if (root === undefined) return;
+    try {
+      mkdirSync(root, { recursive: true });
+      // Frames and naming memory belong to the journey's own app, and only while it is connected and in front.
+      const app = identityOf(first);
+      const recorder = new JourneyRecorder(freshFolder(root, journey.state.goal, this.clock()), this.frameSource(app), this.clock);
+      this.recorder = recorder;
+      const mine = (): boolean => {
+        const now = this.host.current();
+        return now !== undefined && identityOf(now) === app;
+      };
+      const hook: UxJourneyHook = {
+        earlier: () => (mine() ? recorder.earlier(journey.state.currentScreen) : null),
+        seen: (title, actions, findings) => {
+          if (mine()) void recorder.uxSeen(journey.state.currentScreen, title, actions, findings);
+        },
+      };
+      this.journeyHook = hook;
+      this.uxJourney = hook;
+      this.pickerOff = this.mediaState.onPickerSkipped((_app, count) => {
+        recorder.pickerSkips++;
+        recorder.pickerPictures += count;
+      });
+    } catch (error) {
+      notes.push(`Note: no report will be written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** The recorder's eyes: a read that touches nothing, and a small picture. */
+  private frameSource(app: string): FrameSource {
+    return {
+      where: () => {
+        const now = this.host.current();
+        if (now === undefined) return "disconnected";
+        if (identityOf(now) !== app) return "other";
+        const state = now.appState?.state;
+        return state === "background" || state === "inactive" ? "background" : "front";
+      },
+      peek: async () => {
+        const session = this.host.current();
+        if (session === undefined) return undefined;
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        if (!tree.success) return undefined;
+        const t = tree.data;
+        return {
+          signature: screenSignature(t.elements, t.route?.names ?? [], (t.alerts ?? []).length),
+          ...(t.screen ? { screen: { w: t.screen.width, h: t.screen.height } } : {}),
+          route: t.route?.names ?? [],
+        };
+      },
+      shot: async (width, quality) => {
+        const session = this.host.current();
+        if (session === undefined || this.noScreenshot.has(session.id)) return undefined;
+        try {
+          return await this.takeShot(session.id, width, quality);
+        } catch {
+          return undefined;
+        }
+      },
+    };
   }
 
   private async journeyStop(args: Shape<"journey">): Promise<CallToolResult> {
     const running = this.journeyRun;
     if (running === undefined) return fail(NO_JOURNEY);
     if (args.reached === undefined) return fail("Error bad_params: stop needs reached: true or false.");
+    // An export writes to the user's GitHub: the agent must say its user asked. Refused before the journey ends, so the call can be made again.
+    if (args.export !== undefined && args.export.confirm !== true) {
+      return fail("Error bad_params: export writes to your user's GitHub, so it needs confirm: true inside export (only when your user asked for it). The journey is still running.");
+    }
     const state = running.finish(args.reached, args.why);
     this.journeyRun = undefined;
     this.journeyDone = state;
-    await this.undoConditions(state);
-    const session = this.host.current();
-    // The agent's next list is a full one: the journey's lists were of the glass only.
-    if (session !== undefined) this.listed.delete(session.id);
-    const lines = [summaryLine(state), ...summaryNotes(state)];
-    if (args.export !== undefined) {
-      lines.push("Export comes later: the report folder isn't written in this build, so nothing was exported.");
+    const recorder = this.recorder;
+    this.recorder = undefined;
+    this.pickerOff?.();
+    this.pickerOff = undefined;
+    this.uxJourney = null;
+    this.journeyHook = undefined;
+    this.stressWaiting.clear();
+    // From here nothing fails the stop: what goes wrong is a Note line, and the local report stays.
+    const failures: string[] = [];
+    const attempt = async <T>(what: string, work: () => Promise<T> | T): Promise<T | undefined> => {
+      try {
+        return await work();
+      } catch (error) {
+        failures.push(`Note: ${what}: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      }
+    };
+    const lines = [summaryLine(state)];
+    const content: CallToolResult["content"] = [];
+    try {
+      await attempt("conditions could not be undone", () => this.undoConditions(state));
+      const undoLines: string[] = [];
+      // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
+      if (recorder?.networkStress === true && !state.conditionRecords.some((r) => r.name === "network" && r.applied)) {
+        const done = await attempt("the network condition a stress moment set was not undone", async () => {
+          const live = this.host.current();
+          return live === undefined ? undefined : this.runCondition(live, "network", "normal");
+        });
+        undoLines.push(done?.ok === true ? "Undone: network is normal again." : "Note: the network condition a stress moment set was not undone; set it back with app_command network normal.");
+      }
+      const session = this.host.current();
+      // The agent's next list is a full one: the journey's lists were of the glass only.
+      if (session !== undefined) this.listed.delete(session.id);
+      const report =
+        recorder === undefined
+          ? undefined
+          : await attempt("the report could not be written", () =>
+              writeReport({
+                state,
+                rec: recorder,
+                maxTaps: this.maxTapsToGoal,
+                textRules: this.uxRules.text,
+                ...(this.options.gifMaxBytes !== undefined ? { gifMaxBytes: this.options.gifMaxBytes } : {}),
+              }),
+            );
+      if (report !== undefined) lines.push(`${findingsLine(report.counts)} Report: ${report.folder}`);
+      lines.push(...summaryNotes(state), ...undoLines, ...(report?.notes ?? []));
+      if (report !== undefined) {
+        // At most two small key pictures: where the journey ended, and the worst finding's screen.
+        if (this.options.screenshots === "file") {
+          if (report.keys.length > 0) lines.push(`Pictures: ${report.keys.map((k) => join(report.folder, k)).join(", ")}`);
+        } else {
+          for (const key of report.keys.slice(0, 2)) {
+            const data = await attempt("a key picture could not be read", () => readFileSync(join(report.folder, key)).toString("base64"));
+            if (data !== undefined) content.push({ type: "image", data, mimeType: "image/jpeg" });
+          }
+        }
+      }
+      const target = args.export;
+      if (target !== undefined) {
+        if (recorder === undefined) lines.push("Export needs the report folder, which this host isn't set up with; nothing was exported.");
+        else if (report === undefined) lines.push("Export skipped: there is no report to export.");
+        else {
+          const exported = await attempt("the export failed", () => this.exportReport(target, state, report, recorder));
+          lines.push(...(exported ?? [`Export failed. The report stays local: ${report.folder}`]));
+        }
+      }
+    } catch (error) {
+      failures.push(`Note: the stop did not finish everything: ${error instanceof Error ? error.message : String(error)}`);
     }
+    lines.push(...failures);
     if (this.options.onJourneyStop !== undefined) {
       try {
         lines.push(...(await this.options.onJourneyStop(state)));
@@ -3923,7 +4120,187 @@ export class TaplineTools {
         lines.push(`Note: the report could not be written: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return text(lines.join("\n"));
+    return { content: [{ type: "text", text: lines.join("\n") }, ...content] };
+  }
+
+  /** `export` of `stop`: the report to GitHub through the user's own gh and git; the report stays local when it fails. */
+  private async exportReport(
+    target: NonNullable<Shape<"journey">["export"]>,
+    state: JourneyState,
+    report: Awaited<ReturnType<typeof writeReport>>,
+    recorder: JourneyRecorder,
+  ): Promise<string[]> {
+    const run = this.options.exportRunner;
+    if (run === undefined) return [`Export isn't available here (this host has no gh runner); the report stays local: ${report.folder}`];
+    const outcome = await exportReport(
+      {
+        target,
+        folder: recorder.folder,
+        name: report.name,
+        goal: state.goal,
+        summary: summaryLine(state),
+        findingsLine: findingsLine(report.counts),
+        findings: report.findings,
+        files: report.exportFiles,
+        headline: report.gif !== null ? "journey.gif" : report.firstPicture,
+      },
+      run,
+    );
+    return outcome.ok ? outcome.lines : [`Export failed: ${outcome.message}. The report stays local: ${report.folder}`];
+  }
+
+  // -- stress moments (AGENT-TOOLS 1.12 §17.4)
+
+  private async journeyStress(running: Journey, args: Shape<"journey">): Promise<CallToolResult> {
+    const stress = args.stress;
+    if (stress === undefined) return fail("Error bad_params: survives and done go with stress.");
+    const kind = stress.kind;
+    if (stress.mode !== undefined && kind !== "network") return fail("Error bad_params: mode goes with stress network.");
+    if (stress.target !== undefined && kind !== "double_tap") return fail("Error bad_params: target goes with stress double_tap.");
+    const survives = args.survives;
+    if (args.done === true) {
+      if (!this.stressWaiting.has(kind)) {
+        return fail(`Error bad_params: no ${kind} moment is waiting for a person; ask for it first with journey { stress: { kind: "${kind}" } }.`);
+      }
+      const asked = this.stressWaiting.get(kind);
+      this.stressWaiting.delete(kind);
+      await this.reconnected();
+      return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked));
+    }
+    if (this.host.current() === undefined) return this.notConnected();
+    switch (kind) {
+      case "network":
+        return this.stressNetwork(running, stress.mode, survives);
+      case "double_tap":
+        return this.stressDoubleTap(running, stress.target, survives);
+      case "relaunch": {
+        // A development build reloads; anything else needs a person. Said as what it is.
+        const answer = await this.reload({ look: true });
+        const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+        if (answer.isError === true && /^Error unsupported/.test(said)) return this.waitForPerson(kind, "close the app and open it again", survives);
+        if (answer.isError === true) return answer;
+        await this.reconnected();
+        return this.stressDone(running, kind, " (reload, not a relaunch)", await this.survivalOf(running, survives));
+      }
+      case "background":
+        return this.waitForPerson(kind, "switch to another app and back", survives);
+      case "rotate":
+        return this.waitForPerson(kind, "turn the phone", survives);
+    }
+  }
+
+  private waitForPerson(kind: string, what: string, survives: Survives | undefined): CallToolResult {
+    this.stressWaiting.set(kind, survives);
+    return text(
+      [
+        `Stress: ${kind} needs a person: ${what}, then say done.`,
+        `When they have, call journey { stress: { kind: "${kind}" }, done: true }${survives !== undefined ? " (it checks what you asked to survive then)" : ", with survives to say what must still be there"}.`,
+      ].join("\n"),
+    );
+  }
+
+  /** Waits for an app after a reload or a person leaving it (a new session comes up), a few seconds at most. */
+  private async reconnected(): Promise<void> {
+    const deadline = Date.now() + Math.min(this.reloadWaitMs, 8000);
+    while (this.host.current() === undefined && Date.now() < deadline) await sleep(100);
+    if (this.host.current() !== undefined) await sleep(Math.min(this.reloadSettleMs, 500));
+  }
+
+  private async stressNetwork(running: Journey, mode: Stress["mode"], survives: Survives | undefined): Promise<CallToolResult> {
+    if (mode === undefined) return fail('Error bad_params: stress network needs mode: "offline", "3g", "lossy" or "normal".');
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const done = await this.runCondition(session, "network", mode);
+    if (!done.ok) return fail(`Error not_allowed: network ${mode} wasn't applied: ${done.failure}.`);
+    if (this.recorder !== undefined) this.recorder.networkStress = mode !== "normal";
+    return this.stressDone(running, "network", ` ${mode}`, await this.survivalOf(running, survives));
+  }
+
+  /** The same touch twice, 80 ms apart, each through the usual checks and the policy. */
+  private async stressDoubleTap(running: Journey, raw: Stress["target"], survives: Survives | undefined): Promise<CallToolResult> {
+    const parsed = raw === undefined ? null : targetSchema.safeParse(raw);
+    if (parsed === null || !parsed.success) return fail("Error bad_params: stress double_tap needs a target: exactly one of ref, text or x and y.");
+    const target = parsed.data;
+    // One OK never covers two touches: a target the policy flags (a word that asks a person, or blocks) is refused whole.
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const lists = listsFor(this.policy, session.app);
+    if (lists.confirm.length > 0 || lists.block.length > 0) {
+      const resolved = await this.resolveForPolicy(session, "press", { target: toWireTarget(target) });
+      if (resolved.kind === "error") return fail(resolved.text);
+      const verdict = this.policyWords(lists, resolved.elements);
+      if (verdict.kind === "blocked") return fail(this.blockedLine(verdict.element, verdict.word));
+      if (verdict.kind === "confirm") {
+        return fail(
+          `Error not_allowed: needs_confirmation: double_tap on ${this.shortName(verdict.element, false)} is refused: it needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and one OK never covers two touches. Tap it once instead (a person is asked), or choose another target.`,
+        );
+      }
+    }
+    const first = this.tap({ target, look: false });
+    await sleep(80);
+    const second = this.tap({ target, look: false });
+    const [a, b] = await Promise.all([first, second]);
+    const line = (r: CallToolResult): string => (r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n").split("\n")[0] ?? "");
+    const refused = [a, b].find((r) => r.isError === true);
+    if (refused !== undefined) {
+      return fail(`Stress: double_tap on ${targetWords(target)} didn't happen as asked: ${line(refused)}`);
+    }
+    const checked = await this.survivalOf(running, survives);
+    const answer = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
+    const head = answer.content[0];
+    const said = head !== undefined && head.type === "text" ? head.text : "";
+    return text(`${said}\nBoth taps went through, 80 ms apart: ${line(a)} / ${line(b)}`);
+  }
+
+  /** Records the moment and answers it: `Stress: <kind>; it survived: …` or `…; it didn't survive: …`. */
+  private stressDone(running: Journey, kind: Stress["kind"], via: string, check: { survived: boolean | null; why: string }): CallToolResult {
+    const verdict = check.survived === null ? `; ${check.why}` : check.survived ? `; it survived: ${check.why}` : `; it didn't survive: ${check.why}`;
+    const said = `Stress: ${kind}${via}${verdict}`;
+    running.state.stress.push({ kind, said, survived: check.survived, afterStep: running.state.steps.length, at: this.clock() });
+    return text(said);
+  }
+
+  /** Whether what had to survive is still there, from a read that touches nothing. */
+  private async survivalOf(running: Journey, survives: Survives | undefined): Promise<{ survived: boolean | null; why: string }> {
+    if (survives === undefined || (survives.text === undefined && survives.goal_step === undefined)) {
+      return { survived: null, why: "nothing was checked (no survives given)." };
+    }
+    const session = this.host.current();
+    if (session === undefined) return { survived: false, why: "the app isn't connected any more." };
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    if (!tree.success) return { survived: false, why: "the app didn't answer when asked what is on screen." };
+    const parts: Array<{ ok: boolean; why: string }> = [];
+    if (survives.text !== undefined) {
+      const wanted = survives.text;
+      const holds = (value: unknown): boolean => (typeof value === "string" || typeof value === "number") && String(value).includes(wanted);
+      const found = tree.data.elements.find((e) => holds(e.text) || holds(e.value) || holds(e.label));
+      if (found === undefined) parts.push({ ok: false, why: `text ${JSON.stringify(wanted)} is not on screen any more.` });
+      else {
+        const field = found.role === "textfield" || found.role === "input" || (found.actions ?? []).includes("type");
+        parts.push({ ok: true, why: `text ${JSON.stringify(wanted)} is still ${field ? "in the field" : "on screen"}.` });
+      }
+    }
+    if (survives.goal_step !== undefined) parts.push(this.goalStepHolds(running, survives.goal_step, tree.data.route?.names ?? []));
+    const ok = parts.every((p) => p.ok);
+    return { survived: ok, why: parts.map((p) => p.why).join(" ") };
+  }
+
+  /** `goal_step`: a step number (the screen that step ended on) or a screen's name (part of its route). */
+  private goalStepHolds(running: Journey, goalStep: string, route: string[]): { ok: boolean; why: string } {
+    const now = route.join(" › ");
+    if (/^\d+$/.test(goalStep.trim())) {
+      const n = Number(goalStep);
+      const step = running.state.steps[n - 1];
+      if (step === undefined) return { ok: false, why: `the journey has no step ${n}.` };
+      const screen = step.screen === undefined ? undefined : running.state.screens[step.screen - 1];
+      if (screen === undefined || screen.route.length === 0 || route.length === 0) {
+        return { ok: true, why: `step ${n}'s screen can't be told apart (the app has no routes); only text can be checked.` };
+      }
+      const same = screen.route.join(" › ") === now;
+      return same ? { ok: true, why: `the app is still on step ${n}'s screen (${now}).` } : { ok: false, why: `the app is on ${now}, not step ${n}'s screen (${screen.route.join(" › ")}).` };
+    }
+    const named = now.toLowerCase().includes(goalStep.trim().toLowerCase());
+    return named ? { ok: true, why: `the app is still on ${now}.` } : { ok: false, why: `the app is on ${now === "" ? "a screen with no route" : now}, not ${JSON.stringify(goalStep)}.` };
   }
 
   /** The command and arguments that set one of a journey's conditions. */
