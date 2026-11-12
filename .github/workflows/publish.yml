@@ -1,6 +1,8 @@
 # Publishes tapline-host and react-native-tapline to npm with trusted publishing (no token stored anywhere).
 # npmjs.com → each package → Settings → Trusted Publisher: GitHub Actions, BO5AMIS / tapline, publish.yml.
 # Runs when a release is published; run it by hand (workflow_dispatch) with a tag to publish that release again.
+# A hand run started on the tag itself (gh workflow run publish.yml --ref v1.2.0 -f tag=v1.2.0) publishes with
+# provenance; one started on main for an older tag (v1.1.0, from before this workflow) publishes without it.
 #
 # Two jobs, so no dependency's install script ever runs where an npm publishing token can be had:
 # - build: installs, builds, tests, checks the tag and packs the two tarballs, with no OIDC permission;
@@ -28,11 +30,30 @@ jobs:
     env:
       # The tag travels as an environment variable, never pasted into a script.
       TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    outputs:
+      provenance: ${{ steps.source.outputs.provenance }}
     steps:
+      # Always the tag: an unqualified ref would take a branch of the same name first.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
+
+      # npm's provenance records this run's commit (GITHUB_SHA). It is true only when that commit is the one built:
+      # a release event, or a hand run started on the tag itself. A hand run from main for an older tag (one from
+      # before this workflow existed) publishes without provenance, and says so. A release run on another commit stops.
+      - name: The built commit and the run's commit
+        id: source
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo "provenance=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            echo "The tag $TAG is at $head, but this release run is for $GITHUB_SHA"; exit 1
+          else
+            echo "::warning::Publishing $TAG ($head) from a run on $GITHUB_SHA: without provenance, since npm would attest the wrong commit."
+            echo "provenance=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -80,6 +101,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      PROVENANCE: ${{ needs.build.outputs.provenance }}
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -95,7 +118,9 @@ jobs:
           name: packages
           path: packed
 
-      - name: Publish (each version once, the SDK first)
+      # Each version once, the SDK first, with an explicit dist-tag: `next` for a prerelease, `latest` for a version
+      # above the current latest, `backport` for an older one (npm refuses to guess for either of the last two).
+      - name: Publish
         run: |
           for tarball in packed/react-native-tapline-*.tgz packed/tapline-host-*.tgz; do
             [ -f "$tarball" ] || { echo "missing $tarball"; exit 1; }
@@ -104,7 +129,17 @@ jobs:
             version=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "$name@$version is already on npm"
-            else
-              npm publish "$tarball" --access public --ignore-scripts
+              continue
             fi
+            latest=$(npm view "$name" dist-tags.latest 2>/dev/null || true)
+            tag=$(VERSION="$version" LATEST="$latest" node -e '
+              const v = process.env.VERSION, l = process.env.LATEST;
+              if (v.includes("-")) { process.stdout.write("next"); process.exit(0); }
+              if (!l) { process.stdout.write("latest"); process.exit(0); }
+              const n = (s) => s.split("-")[0].split(".").map(Number);
+              const [a, b] = [n(v), n(l)];
+              for (let i = 0; i < 3; i++) if (a[i] !== b[i]) { process.stdout.write(a[i] > b[i] ? "latest" : "backport"); process.exit(0); }
+              process.stdout.write("latest");')
+            echo "Publishing $name@$version as $tag (provenance: $PROVENANCE)"
+            npm publish "$tarball" --access public --ignore-scripts --tag "$tag" --provenance="$PROVENANCE"
           done
