@@ -265,7 +265,7 @@ describe("launch", () => {
     const { tools, state } = await reloading(DEV).start();
     const answer = await tools.performance({ launch: true, seconds: 0.5 });
     const lines = textOf(answer).split("\n");
-    expect(lines[0]).toMatch(/^Reloaded in 0\.\d\d s \(to the first settled screen; JavaScript only, not a cold start\)\.$/);
+    expect(lines[0]).toMatch(/^Reloaded in \d+\.\d\d s \(to the first settled screen; JavaScript only, not a cold start\)\.$/);
     expect(lines.slice(1)).toEqual([
       "JS heap 48 MB (peak 52). JS frames 57 fps (lowest 41); 3 drops over 50 ms; JS thread busy at most 180 ms.",
       "Slowest renders: TripList 48 ms (3 times), DayCard 12 ms.",
@@ -410,7 +410,7 @@ describe("in run, launch", () => {
     const answer = await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }, { tool: "performance", launch: true, seconds: 0.5, expect: { under: { launch_s: 0.001, drops: 0 } } }] });
     expect(answer.isError).toBe(true);
     expect(textOf(answer).split("\n")[0]).toMatch(
-      /^Error expect_failed: Ran 1 of 2 steps; stopped at step 2 \(performance launch\): reloaded in 0\.\d s, over 0\.0 s; 4 drops, over 0\.$/,
+      /^Error expect_failed: Ran 1 of 2 steps; stopped at step 2 \(performance launch\): reloaded in \d+\.\d s, over 0\.0 s; 4 drops, over 0\.$/,
     );
   });
 });

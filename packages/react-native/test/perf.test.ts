@@ -127,6 +127,35 @@ describe('PerfSampler maths', () => {
     expect(r.busyMs).toBeLessThanOrEqual(16);
   });
 
+  test('a second in the background lowers neither fps nor the lowest second (CodeRabbit, PR #4)', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    for (let i = 0; i < 60; i++) t.frame(1000 / 60);
+    t.appState('background');
+    t.idle(1000);
+    t.appState('active');
+    for (let i = 0; i < 60; i++) t.frame(1000 / 60);
+    const r = s.stop();
+    expect(r.fps).toBeGreaterThanOrEqual(59);
+    expect(r.fpsLowest).toBeGreaterThanOrEqual(59);
+    expect(r.seconds).toBeLessThan(2.1);
+  });
+
+  test('a late first frame after coming back is a stall (CodeRabbit, PR #4)', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.frame(16);
+    t.appState('background');
+    t.idle(2000);
+    t.appState('active');
+    t.frame(500);
+    const r = s.stop();
+    expect(r.drops).toBe(1);
+    expect(r.busyMs).toBe(500);
+  });
+
   test('a real stall after coming back is still a drop', () => {
     const t = fakeTime();
     const s = new PerfSampler({ ...t.deps, dev: false });

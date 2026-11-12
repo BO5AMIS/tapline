@@ -31,12 +31,15 @@ let saving: Promise<void> = Promise.resolve();
  * can never remove a newer crash (Codex review of 1.3.0). A save still starts at once: the app may die right after.
  */
 let saves = 0;
+/** Writes not yet done: a new crash written while one is in flight waits for it, so an older one never lands last. */
+let writing = 0;
 
 /** Where the crash is kept (null: nowhere). */
 export function configureCrash(next: TaplineStorage | null): void {
   storage = next;
   saving = Promise.resolve();
   saves = 0;
+  writing = 0;
   delivery = Promise.resolve();
 }
 
@@ -90,7 +93,13 @@ export function saveCrash(record: CrashRecord): void {
   try {
     const json = fitRecord(record);
     saves += 1;
-    saving = target.setItem(CRASH_KEY, json).catch(() => undefined);
+    // At once when nothing is being written (the app may die right after); after the write in flight otherwise.
+    const write = (): Promise<void> => target.setItem(CRASH_KEY, json).catch(() => undefined);
+    writing += 1;
+    const done = (): void => {
+      writing -= 1;
+    };
+    saving = (writing === 1 ? write() : saving.then(write)).then(done, done);
   } catch {
     // the crash is also sent live; losing the copy must not hide the app's own error
   }

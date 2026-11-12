@@ -302,7 +302,9 @@ const GONE_LOGS_KEPT = 8;
 
 export function identityOf(info: AppIdentity): string {
   const device = info.device.id ?? info.device.name ?? info.device.model ?? "";
-  return `${info.app.id}\u0000${info.device.platform}\u0000${device}`;
+  // An app that sends no id (the default "unknown") is told apart by its name, so two such apps never share crashes.
+  const app = info.app.id === "unknown" || info.app.id === "" ? `name:${info.app.name}` : info.app.id;
+  return `${app}\u0000${info.device.platform}\u0000${device}`;
 }
 
 function errorCode(error: unknown): string | undefined {

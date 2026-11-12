@@ -183,6 +183,27 @@ describe('sending the saved crash', () => {
     expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
   });
 
+  test('a newer crash is never overwritten by an older write that finishes late (CodeRabbit, PR #4)', async () => {
+    const inner = memoryStorage();
+    const writes: Array<() => Promise<void>> = [];
+    configureCrash({
+      getItem: (key) => inner.getItem(key),
+      // every write waits until the test lets it finish
+      setItem: (key, value) => new Promise<void>((resolve) => writes.push(() => inner.setItem(key, value).then(resolve))),
+      removeItem: (key) => inner.removeItem(key),
+    });
+    installLogs();
+    currentHandler?.(new Error('A'), true);
+    currentHandler?.(new Error('B'), true);
+    expect(writes).toHaveLength(1); // B waits for A
+    await writes[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(writes).toHaveLength(2);
+    await writes[1]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
+  });
+
   test('keeps it while no computer is connected', async () => {
     recordError(fail(), true);
     await deliverSavedCrash();

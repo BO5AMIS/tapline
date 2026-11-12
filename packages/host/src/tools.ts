@@ -1192,6 +1192,10 @@ export class TaplineTools {
       if (step.tool === "performance") {
         delete params["look"];
         delete params["screenshot"];
+        // Checked before any step runs (and in a dry run), not when this step's turn comes.
+        if (params["launch"] === true && params["tap"] !== undefined) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch reloads the app and tap taps in it; give one of them.`);
+        }
       }
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
@@ -2423,10 +2427,17 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap) };
-        const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
-        if ("stop" in gate) return gate.stop;
-        frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-        await this.host.request("press", pressParams, { sessionId: session.id });
+        // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
+        // it, a person's input goes first, and the screen can't change between the check and the tap (PR #4 review).
+        const turn = async (): Promise<CallToolResult | null> => {
+          const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
+          if ("stop" in gate) return gate.stop;
+          frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+          await this.host.request("press", pressParams, { sessionId: session.id });
+          return null;
+        };
+        const stopped = this.options.control ? await this.options.control.runAgent(turn) : await turn();
+        if (stopped !== null) return stopped;
       }
       for (let i = frames.length; i < count; i++) {
         const at = Date.now();
@@ -3264,7 +3275,12 @@ export class TaplineTools {
       this.host.expectEnd(session.id, false);
     }
     // The first settled screen: the app waits until React hasn't committed for a moment (§6).
-    await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 }).catch(() => undefined);
+    // The first settled screen: a launch time is only reported when the app said it settled.
+    try {
+      await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
+    } catch (error) {
+      return { stop: fail(describeError(error)) };
+    }
     return { session: fresh, seconds: (Date.now() - started) / 1000 };
   }
 
@@ -3285,12 +3301,8 @@ export class TaplineTools {
     }
     const started = Date.now();
     try {
-      // The tap goes through the live view's queue like any agent touch: a person's input goes first, and a pause
-      // refuses it (Codex review of 1.3.0).
-      if (press !== undefined) {
-        const send = (): Promise<unknown> => this.host.request("press", press, id);
-        await (this.options.control ? this.options.control.runAgent(send) : send());
-      }
+      // The caller holds the live view's queue for the whole window when there is a tap (see performance).
+      if (press !== undefined) await this.host.request("press", press, id);
       const rest = seconds * 1000 - (Date.now() - started);
       if (rest > 0) await sleep(rest);
     } catch (error) {
@@ -3323,10 +3335,21 @@ export class TaplineTools {
           press = { target: toWireTarget(args.tap) };
           const stale = this.staleRef(press);
           if (stale !== null) return stale;
-          const gate = await this.policyGate(session, "tap", "press", press, listsFor(this.policy, session.app));
-          if ("stop" in gate) return gate.stop;
         }
-        measure = { result: await this.measureWindow(session, seconds, press) };
+        // With a tap, the policy check and the whole window are one turn of the live view's queue: a pause refuses
+        // it, a person's input goes first and waits for the window, and the screen can't change between the check
+        // and the tap (Codex and CodeRabbit reviews of 1.3.0).
+        const tapped = press;
+        const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
+          if (tapped !== undefined) {
+            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app));
+            if ("stop" in gate) return { stop: gate.stop };
+          }
+          return { result: await this.measureWindow(session, seconds, tapped) };
+        };
+        const outcome = tapped !== undefined && this.options.control ? await this.options.control.runAgent(window) : await window();
+        if ("stop" in outcome) return outcome.stop;
+        measure = { result: outcome.result };
       }
       this.lastPerf = measure;
       if (this.recording !== null && !this.replaying) {

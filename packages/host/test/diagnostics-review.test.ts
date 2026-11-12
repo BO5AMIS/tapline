@@ -108,3 +108,31 @@ describe("a performance tap goes through the live view's queue", () => {
     expect(app.requests.filter((r) => r.method === "perfStop").map((r) => r.params)).toEqual([{ id: 1 }]);
   });
 });
+
+describe("CodeRabbit's review of 1.3.0", () => {
+  it("never takes a bundle for a file of the app", async () => {
+    const { isAppFrame } = await import("../src/crash.js");
+    const frame = (file: string) => ({ text: "", fn: "render", file, line: 1, column: 1 });
+    expect(isAppFrame(frame("file:///app/index.bundle"))).toBe(false);
+    expect(isAppFrame(frame("/data/main.jsbundle"))).toBe(false);
+    expect(isAppFrame(frame("C:/work/app/src/Trip.tsx"))).toBe(true);
+  });
+
+  it("tells apart two apps that send no id, by their names", async () => {
+    const { identityOf } = await import("../src/server.js");
+    const device = { platform: "ios" };
+    expect(identityOf({ app: { name: "One", id: "unknown" }, device })).not.toBe(identityOf({ app: { name: "Two", id: "unknown" }, device }));
+    expect(identityOf({ app: { name: "One", id: "com.a" }, device })).toBe(identityOf({ app: { name: "Renamed", id: "com.a" }, device }));
+  });
+
+  it("refuses launch with tap in a batch before any step runs", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "press", "perf"] }, base);
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" } });
+    const out = await tools.run({ steps: [{ tool: "tap", target: { text: "Save" } }, { tool: "performance", launch: true, tap: { text: "Save" } }] });
+    expect(textOf(out)).toMatch(/^Error bad_params: step 2 .*launch reloads the app and tap taps in it/);
+    expect(app.requests.filter((r) => r.method === "press")).toEqual([]);
+  });
+});
