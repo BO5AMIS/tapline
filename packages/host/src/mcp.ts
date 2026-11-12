@@ -4,6 +4,8 @@ import { join } from "node:path";
 import {
   configDir,
   hostUrl,
+  markPaired,
+  pairedMarkerPath,
   reachableHost,
   resolveConfig,
   screenshotMode,
@@ -13,6 +15,7 @@ import {
   type ViewerMode,
 } from "./config.js";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
 import { Confirmations } from "./confirm.js";
@@ -405,6 +408,7 @@ export async function runMcp(
     portFallback: config.portFallback,
     hosts: config.hosts,
   });
+  host.on("connect", () => markPaired(options.env));
   host.on("connect", (s) => log(`app connected: ${s.app.name} (${s.id}) on ${s.device.name ?? s.device.platform}`));
   host.on("disconnect", (s, reason) => log(`app disconnected: ${s.app.name} (${s.id}): ${reason}`));
   host.on("warning", (message) => log(message));
@@ -441,6 +445,7 @@ export async function runMcp(
     confirmations,
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },
+    pairedBefore: () => existsSync(pairedMarkerPath(options.env)),
     pairImagePath: join(configDir(), `pair-${port}.png`),
     offerDir: join(configDir(), "offers"),
     screenshots,

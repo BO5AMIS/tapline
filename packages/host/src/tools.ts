@@ -415,6 +415,11 @@ export interface ConnectInfo {
 
 export interface ToolsOptions {
   connect: ConnectInfo;
+  /**
+   * Whether a phone has ever connected to this computer's host. When set, the first answer of the session says what
+   * only a person can do (open the app, pair) if an app isn't connected: `Note: needs a person: …`, once.
+   */
+  pairedBefore?: () => boolean;
   /** Where the action log goes (AGENT-TOOLS 1.8 §12); none: no log. */
   logDir?: string;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
@@ -889,9 +894,26 @@ export class TaplineTools {
     const startedWith: AppIdentity | undefined = this.host.current();
     return this.noteScope.run(true, () => {
       const result = run();
-      if (result instanceof Promise) return result.then((answer) => this.withCrashNotes(answer, mark, startedWith));
-      return this.withCrashNotes(result, mark, startedWith);
+      if (result instanceof Promise) return result.then((answer) => this.withPersonNote(this.withCrashNotes(answer, mark, startedWith)));
+      return this.withPersonNote(this.withCrashNotes(result, mark, startedWith));
     });
+  }
+
+  /** The first call has been answered, so the "needs a person" note has had its turn. */
+  private personNoteDone = false;
+
+  /**
+   * The first answer of the session says what only a person can do, once, when something is pending: the app isn't
+   * connected (open it on the phone, same Wi-Fi), and the phone has never paired. Nothing pending: never.
+   */
+  private withPersonNote(answer: CallToolResult): CallToolResult {
+    if (this.personNoteDone || this.options.pairedBefore === undefined) return answer;
+    this.personNoteDone = true;
+    if (this.host.current() !== undefined) return answer;
+    const items: string[] = [];
+    if (!this.options.pairedBefore()) items.push("the phone isn't paired yet (call `pair`, then the user scans the QR code or taps Connect)");
+    items.push("the app isn't connected (the user opens it on the phone, on the same Wi-Fi as this computer)");
+    return appendNote(answer, `Note: needs a person: ${items.join("; ")}.`);
   }
 
   /** What was told about this app's crashes so far: the crash events up to this number. */

@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
-import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, tokenFilePath } from "./config.js";
+import { dirname, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedMarkerPath, tokenFilePath } from "./config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -22,6 +24,10 @@ export interface DoctorDeps {
   env: NodeJS.ProcessEnv;
   /** This computer's Wi-Fi/LAN addresses (private IPv4 on real adapters). */
   lanIps: () => string[];
+  /** The folder this host runs from; null when unknown. */
+  hostDir: string | null;
+  /** `git status --porcelain` of a folder; null when it isn't a git work tree, git is missing or it took too long. */
+  gitStatus: (dir: string) => Promise<string | null>;
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -51,6 +57,22 @@ function defaultRun(command: string, args: string[]): Promise<{ code: number; st
   });
 }
 
+function defaultGitStatus(dir: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", dir, "status", "--porcelain"], { timeout: 3000, windowsHide: true, encoding: "utf8" }, (error, stdout) => {
+      resolve(error === null ? stdout : null);
+    });
+  });
+}
+
+function defaultHostDir(): string | null {
+  try {
+    return dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return null;
+  }
+}
+
 function defaultPortFree(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
@@ -70,6 +92,8 @@ function defaultDeps(): DoctorDeps {
     portFree: defaultPortFree,
     env: process.env,
     lanIps: () => lanAddresses(),
+    hostDir: defaultHostDir(),
+    gitStatus: defaultGitStatus,
   };
 }
 
@@ -266,6 +290,32 @@ async function checkFirewall(deps: DoctorDeps): Promise<CheckResult> {
   };
 }
 
+/**
+ * A host loaded from a git work tree (a development clone) runs whatever is in the tree: warn when it has
+ * uncommitted changes or conflicts. An installed copy (inside node_modules) or a folder that isn't a work tree
+ * says nothing, and so does any error or a slow git.
+ */
+async function checkWorkTree(deps: DoctorDeps): Promise<CheckResult | null> {
+  const dir = deps.hostDir;
+  if (dir === null || dir.split(sep).includes("node_modules") || dir.split("/").includes("node_modules")) return null;
+  let status: string | null;
+  try {
+    status = await deps.gitStatus(dir);
+  } catch {
+    return null;
+  }
+  if (status === null) return null;
+  const lines = status.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length === 0) return null;
+  const conflicts = lines.filter((line) => /^(UU|AA|DD|AU|UA|DU|UD) /.test(line)).length;
+  return {
+    name: "Host version",
+    status: "warn",
+    detail: `this host runs from a git work tree with ${lines.length} uncommitted ${lines.length === 1 ? "change" : "changes"}${conflicts > 0 ? ` (${conflicts} in conflict)` : ""}, so it runs whatever is in the tree`,
+    fix: "For QA or unattended runs, install a pinned release instead: npm install -g tapline-host@<version>",
+  };
+}
+
 /** The https URL that serves Metro, null when none does, undefined when the JSON isn't understood. */
 function findMetroUrl(stdout: string): string | null | undefined {
   let parsed: unknown;
@@ -345,14 +395,35 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
     results.push(await guard("Windows firewall", "warn", () => checkFirewall(deps)));
   }
   results.push(await guard("Metro over https", "warn", () => checkMetro(deps, lookup.binary)));
+  const tree = await guard("Host version", "warn", async () => (await checkWorkTree(deps)) ?? { name: "Host version", status: "pass", detail: "" });
+  if (tree.status !== "pass") results.push(tree);
   return results;
+}
+
+/**
+ * What only a person can do, from what doctor can see: the phone hasn't paired with this computer yet (and, until it
+ * has, the build must have Tapline turned on, which a computer can't see), and the firewall rule when it is missing.
+ * Whether the app is connected right now belongs to a running host, so it is not here.
+ */
+export function needsAPerson(results: CheckResult[], overrides: Partial<DoctorDeps> = {}): string[] {
+  const deps: DoctorDeps = { ...defaultDeps(), ...overrides };
+  const items: string[] = [];
+  if (!deps.fileExists(pairedMarkerPath(deps.env))) {
+    items.push(
+      "Pair the phone: have your agent call `pair`, then scan the QR code (or tap Connect) on the phone, on the same Wi-Fi as this computer. The app must be a build with Tapline turned on (EXPO_PUBLIC_TAPLINE_ENABLED=1); doctor can't see the phone's build.",
+    );
+  }
+  if (results.some((r) => r.name === "Windows firewall" && r.status !== "pass")) {
+    items.push("Allow the phone through the Windows firewall: run the fix above in PowerShell as administrator (it needs your approval).");
+  }
+  return items;
 }
 
 const ICONS: Record<CheckStatus, string> = { pass: "✓", warn: "!", fail: "✗" };
 const FIX_PREFIX = "  fix: ";
 
 /** One line per check, indented fix lines, then a summary. */
-export function formatDoctor(results: CheckResult[]): string {
+export function formatDoctor(results: CheckResult[], needs: string[] = []): string {
   const lines: string[] = [];
   for (const result of results) {
     lines.push(`${ICONS[result.status]} ${result.name}: ${result.detail}`);
@@ -368,6 +439,10 @@ export function formatDoctor(results: CheckResult[]): string {
     lines.push("All good.");
   } else {
     lines.push(`${problems} ${problems === 1 ? "problem" : "problems"}, ${warnings} ${warnings === 1 ? "warning" : "warnings"}.`);
+  }
+  if (needs.length > 0) {
+    lines.push("", "Needs a person:");
+    for (const item of needs) lines.push(`- ${item}`);
   }
   return lines.join("\n");
 }

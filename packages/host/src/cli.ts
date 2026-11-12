@@ -8,13 +8,14 @@ import {
   configDir,
   connectSnippet,
   hostUrl,
+  markPaired,
   nativeIntentSnippet,
   reachableHost,
   resolveConfig,
   type HostConfig,
 } from "./config.js";
 import { setUpDevServe } from "./dev.js";
-import { formatDoctor, runDoctor } from "./doctor.js";
+import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runInit } from "./init.js";
 import { runMcp } from "./mcp.js";
@@ -194,6 +195,7 @@ async function runReplay(
     return 2;
   }
   const host = new TaplineHost({ token: config.token, port: config.port, portFallback: config.portFallback, hosts: config.hosts });
+  host.on("connect", () => markPaired());
   const result = await host.listen();
   const port = host.boundPort() ?? config.port;
   const url = hostUrl({ advertisedHost: reachableHost(config, result.listening) }, port);
@@ -306,7 +308,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "doctor": {
       const results = await runDoctor();
-      process.stdout.write(`${formatDoctor(results)}\n`);
+      process.stdout.write(`${formatDoctor(results, needsAPerson(results))}\n`);
       let failed = results.some((r) => r.status === "fail");
       if (values.app === true) {
         // The app side, as `tapline init` sees it; nothing is changed.

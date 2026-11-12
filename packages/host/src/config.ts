@@ -122,6 +122,23 @@ export function tokenFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return join(configDir(env), "token");
 }
 
+/** `~/.tapline/paired`: written when a phone first connects to this computer's host (no secret in it). */
+export function pairedMarkerPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(configDir(env), "paired");
+}
+
+/** Notes that an app has connected to this computer's host. Never throws. */
+export function markPaired(env: NodeJS.ProcessEnv = process.env): void {
+  try {
+    const path = pairedMarkerPath(env);
+    if (existsSync(path)) return;
+    mkdirSync(configDir(env), { recursive: true });
+    writeFileSync(path, `${new Date().toISOString()}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // only a hint for "needs a person"
+  }
+}
+
 const MIN_TOKEN_LENGTH = 16;
 
 /** Reads the persisted token, generating a new 32-hex-char one on first use. */
