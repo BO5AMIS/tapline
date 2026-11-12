@@ -1,39 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { join } from "node:path";
-import {
-  configDir,
-  hostUrl,
-  markPaired,
-  pairedBefore,
-  reachableHost,
-  resolveConfig,
-  screenshotMode,
-  viewerMode,
-  type ResolveOptions,
-  type ScreenshotMode,
-  type ViewerMode,
-} from "./config.js";
-import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { ControlQueue } from "./control.js";
-import { Confirmations } from "./confirm.js";
-import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
-import { NO_UX_RULES, loadUxRules, type UxRules } from "./uxcheck.js";
-import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
-import { VIEWER_HTML } from "./viewer-page.js";
-import { TaplineHost } from "./server.js";
-import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
 import { z } from "zod";
-import { TaplineTools, toolShapes, unknownArgumentError, type ToolArgs } from "./tools.js";
-import { realRunner } from "./journeyexport.js";
-
-type ToolName = keyof typeof toolShapes;
-type ToolAnswer = Awaited<ReturnType<TaplineTools["apps"]>>;
+import { TOOL_META, runTool, type ToolName } from "./dispatch.js";
+import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
+import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
+import { TaplineTools, toolShapes } from "./tools.js";
 
 /**
  * A tool's input for the MCP server: its own keys, with unknown ones let through (the SDK would strip them
- * silently) so `guarded` can refuse them. The published JSON schema is cleaned of the resulting
+ * silently) so `runTool` can refuse them. The published JSON schema is cleaned of the resulting
  * `additionalProperties` in `createMcpServer`.
  */
 function looseInput(name: ToolName): z.ZodObject<z.ZodRawShape, z.core.$loose> {
@@ -41,22 +16,7 @@ function looseInput(name: ToolName): z.ZodObject<z.ZodRawShape, z.core.$loose> {
 }
 
 /**
- * Runs a tool's handler only when every argument is one the tool has; else answers bad_params, and that refusal
- * is numbered and logged like any call so the session report counts it.
- */
-function guarded<K extends ToolName>(
-  tools: TaplineTools,
-  name: K,
-  handler: (args: ToolArgs<K>) => ToolAnswer | Promise<ToolAnswer>,
-): (args: Record<string, unknown>) => ToolAnswer | Promise<ToolAnswer> {
-  return (args) => {
-    const refused = unknownArgumentError(name, args);
-    return refused === null ? handler(args as ToolArgs<K>) : tools.rejectedCall(name, args, refused);
-  };
-}
-
-/**
- * Drops `additionalProperties` from the tool list: it only came from letting unknown keys through to `guarded`.
+ * Drops `additionalProperties` from the tool list: it only came from letting unknown keys through to `runTool`.
  * Reaches the SDK's own list handler by its method name; when the SDK changes that, the schema simply keeps it.
  */
 function publishPlainSchemas(server: McpServer): void {
@@ -74,342 +34,23 @@ function publishPlainSchemas(server: McpServer): void {
   });
 }
 
-/** Registers every Tapline tool on an MCP server. */
+/** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. */
 export function createMcpServer(tools: TaplineTools): McpServer {
   const server = new McpServer({ name: "tapline", version: "1.5.0" }, { instructions: INSTRUCTIONS });
 
-  server.registerTool(
-    "apps",
-    {
-      title: "Connected apps",
-      description: toolDescription("apps"),
-      inputSchema: looseInput("apps"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "apps", () => tools.apps()),
-  );
-
-  server.registerTool(
-    "open_app",
-    {
-      title: "Open app",
-      description: toolDescription("open_app"),
-      inputSchema: looseInput("open_app"),
-    },
-    guarded(tools, "open_app", (args) => tools.openApp(args)),
-  );
-
-  server.registerTool(
-    "pair",
-    {
-      title: "Pair a phone",
-      description: toolDescription("pair"),
-      inputSchema: looseInput("pair"),
-    },
-    guarded(tools, "pair", (args) => tools.pair(args)),
-  );
-
-  server.registerTool(
-    "look",
-    {
-      title: "Look at the screen",
-      description: toolDescription("look"),
-      inputSchema: looseInput("look"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "look", (args) => tools.look(args)),
-  );
-
-  server.registerTool(
-    "check_layout",
-    {
-      title: "Check the layout",
-      description: toolDescription("check_layout"),
-      inputSchema: looseInput("check_layout"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "check_layout", (args) => tools.checkLayout(args)),
-  );
-
-  server.registerTool(
-    "run",
-    {
-      title: "Run several steps",
-      description: toolDescription("run"),
-      inputSchema: looseInput("run"),
-    },
-    guarded(tools, "run", (args) => tools.run(args)),
-  );
-
-  server.registerTool(
-    "audit",
-    {
-      title: "Audit the screen's accessibility",
-      description: toolDescription("audit"),
-      inputSchema: looseInput("audit"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "audit", (args) => tools.audit(args)),
-  );
-
-  server.registerTool(
-    "ux_check",
-    {
-      title: "Check the screen's usability",
-      description: toolDescription("ux_check"),
-      inputSchema: looseInput("ux_check"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "ux_check", (args) => tools.uxCheck(args)),
-  );
-
-  server.registerTool(
-    "media",
-    {
-      title: "Add test pictures",
-      description: toolDescription("media"),
-      inputSchema: looseInput("media"),
-    },
-    guarded(tools, "media", (args) => tools.media(args)),
-  );
-
-  server.registerTool(
-    "inspect",
-    {
-      title: "Find the code behind an element",
-      description: toolDescription("inspect"),
-      inputSchema: looseInput("inspect"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "inspect", (args) => tools.inspect(args)),
-  );
-
-  server.registerTool(
-    "tap",
-    {
-      title: "Tap",
-      description: toolDescription("tap"),
-      inputSchema: looseInput("tap"),
-    },
-    guarded(tools, "tap", (args) => tools.tap(args)),
-  );
-
-  server.registerTool(
-    "swipe",
-    {
-      title: "Swipe",
-      description: toolDescription("swipe"),
-      inputSchema: looseInput("swipe"),
-    },
-    guarded(tools, "swipe", (args) => tools.swipe(args)),
-  );
-
-  server.registerTool(
-    "long_press",
-    {
-      title: "Long press",
-      description: toolDescription("long_press"),
-      inputSchema: looseInput("long_press"),
-    },
-    guarded(tools, "long_press", (args) => tools.longPress(args)),
-  );
-
-  server.registerTool(
-    "type_text",
-    {
-      title: "Type text",
-      description: toolDescription("type_text"),
-      inputSchema: looseInput("type_text"),
-    },
-    guarded(tools, "type_text", (args) => tools.typeText(args)),
-  );
-
-  server.registerTool(
-    "scroll",
-    {
-      title: "Scroll",
-      description: toolDescription("scroll"),
-      inputSchema: looseInput("scroll"),
-    },
-    guarded(tools, "scroll", (args) => tools.scroll(args)),
-  );
-
-  server.registerTool(
-    "toggle",
-    {
-      title: "Toggle",
-      description: toolDescription("toggle"),
-      inputSchema: looseInput("toggle"),
-    },
-    guarded(tools, "toggle", (args) => tools.toggle(args)),
-  );
-
-  server.registerTool(
-    "open_url",
-    {
-      title: "Open URL",
-      description: toolDescription("open_url"),
-      inputSchema: looseInput("open_url"),
-    },
-    guarded(tools, "open_url", (args) => tools.openUrl(args)),
-  );
-
-  server.registerTool(
-    "back",
-    {
-      title: "Back",
-      description: toolDescription("back"),
-      inputSchema: looseInput("back"),
-    },
-    guarded(tools, "back", (args) => tools.back(args)),
-  );
-
-  server.registerTool(
-    "app_command",
-    {
-      title: "App command",
-      description: toolDescription("app_command"),
-      inputSchema: looseInput("app_command"),
-    },
-    guarded(tools, "app_command", (args) => tools.appCommand(args)),
-  );
-
-  server.registerTool(
-    "compare_screen",
-    {
-      title: "Compare with a reference",
-      description: toolDescription("compare_screen"),
-      inputSchema: looseInput("compare_screen"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "compare_screen", (args) => tools.compareScreen(args)),
-  );
-
-  server.registerTool(
-    "filmstrip",
-    {
-      title: "Filmstrip",
-      description: toolDescription("filmstrip"),
-      inputSchema: looseInput("filmstrip"),
-    },
-    guarded(tools, "filmstrip", (args) => tools.filmstrip(args)),
-  );
-
-  server.registerTool(
-    "viewer",
-    {
-      title: "Live viewer",
-      description: toolDescription("viewer"),
-      inputSchema: looseInput("viewer"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "viewer", (args) => tools.viewer(args)),
-  );
-
-  server.registerTool(
-    "record",
-    {
-      title: "Record a script",
-      description: toolDescription("record"),
-      inputSchema: looseInput("record"),
-    },
-    guarded(tools, "record", (args) => tools.record(args)),
-  );
-
-  server.registerTool(
-    "replay",
-    {
-      title: "Replay a script",
-      description: toolDescription("replay"),
-      inputSchema: looseInput("replay"),
-    },
-    guarded(tools, "replay", (args) => tools.replay(args)),
-  );
-
-  server.registerTool(
-    "wait_for",
-    {
-      title: "Wait for",
-      description: toolDescription("wait_for"),
-      inputSchema: looseInput("wait_for"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "wait_for", (args) => tools.waitFor(args)),
-  );
-
-  server.registerTool(
-    "logs",
-    {
-      title: "App logs",
-      description: toolDescription("logs"),
-      inputSchema: looseInput("logs"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "logs", (args) => tools.logs(args)),
-  );
-
-  server.registerTool(
-    "crash",
-    {
-      title: "App crash",
-      description: toolDescription("crash"),
-      inputSchema: looseInput("crash"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "crash", (args) => tools.crash(args)),
-  );
-
-  server.registerTool(
-    "reload",
-    {
-      title: "Reload app",
-      description: toolDescription("reload"),
-      inputSchema: looseInput("reload"),
-    },
-    guarded(tools, "reload", (args) => tools.reload(args)),
-  );
-
-  server.registerTool(
-    "performance",
-    {
-      title: "Performance",
-      description: toolDescription("performance"),
-      inputSchema: looseInput("performance"),
-    },
-    guarded(tools, "performance", (args) => tools.performance(args)),
-  );
-
-  server.registerTool(
-    "wait",
-    {
-      title: "Wait",
-      description: toolDescription("wait"),
-      inputSchema: looseInput("wait"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "wait", (args) => tools.wait(args)),
-  );
-
-  server.registerTool(
-    "journey",
-    {
-      title: "Journey",
-      description: toolDescription("journey"),
-      inputSchema: looseInput("journey"),
-    },
-    guarded(tools, "journey", (args) => tools.journey(args)),
-  );
-
-  server.registerTool(
-    "session_report",
-    {
-      title: "Session report",
-      description: toolDescription("session_report"),
-      inputSchema: looseInput("session_report"),
-      annotations: { readOnlyHint: true },
-    },
-    guarded(tools, "session_report", (args) => tools.sessionReport(args)),
-  );
+  for (const name of Object.keys(TOOL_META) as ToolName[]) {
+    const meta = TOOL_META[name];
+    server.registerTool(
+      name,
+      {
+        title: meta.title,
+        description: toolDescription(name),
+        inputSchema: looseInput(name),
+        ...(meta.readOnly ? { annotations: { readOnlyHint: true } } : {}),
+      },
+      (args: Record<string, unknown>) => runTool(tools, name, args),
+    );
+  }
 
   // The call log names the agent by the MCP client's name, known once the client has said hello.
   tools.setClientId(() => server.server.getClientVersion()?.name);
@@ -423,148 +64,17 @@ function log(message: string): void {
 }
 
 /** Runs the host and serves MCP over stdio. stdout is reserved for the protocol; everything else goes to stderr. */
-/** Opens a link in the default browser of this computer; false when that couldn't start. */
-function openInBrowser(link: string): boolean {
+export async function runMcp(options: Omit<RuntimeOptions, "api" | "log"> = {}): Promise<boolean> {
+  let runtime: Runtime;
   try {
-    const [command, args] =
-      process.platform === "win32"
-        ? ["cmd", ["/c", "start", "", link.replace(/&/g, "^&")]]
-        : process.platform === "darwin"
-          ? ["open", [link]]
-          : ["xdg-open", [link]];
-    const child = spawn(command as string, args as string[], { detached: true, stdio: "ignore", windowsHide: true });
-    child.on("error", () => undefined);
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function runMcp(
-  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean; viewerLink?: boolean; uxRules?: string } = {},
-): Promise<boolean> {
-  let screenshots: ScreenshotMode;
-  let viewer: ViewerMode;
-  let policy: PolicyFile;
-  let uxRules: UxRules = NO_UX_RULES;
-  try {
-    screenshots = screenshotMode(options.screenshots, options.env);
-    viewer = viewerMode(options.viewer, options.env);
-    // The safety policy (AGENT-TOOLS 1.8 §11): built in, from --policy FILE, or none with --no-policy.
-    policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
-    // The user's UX house rules (AGENT-TOOLS 1.12 §17.3): --ux-rules FILE; a bad file stops the host with a plain message.
-    if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
+    // A host inside an agent's MCP server never serves the thin call (AGENT-TOOLS 1.13 §18.10).
+    runtime = await createRuntime({ ...options, api: false });
   } catch (error) {
-    log(error instanceof Error ? error.message : String(error));
+    for (const line of (error instanceof Error ? error.message : String(error)).split("\n")) log(line);
     return false;
   }
-  const config = await resolveConfig(options);
-  const host = new TaplineHost({
-    token: config.token,
-    port: config.port,
-    portFallback: config.portFallback,
-    hosts: config.hosts,
-  });
-  host.on("connect", () => markPaired(options.env));
-  host.on("connect", (s) => log(`app connected: ${s.app.name} (${s.id}) on ${s.device.name ?? s.device.platform}`));
-  host.on("disconnect", (s, reason) => log(`app disconnected: ${s.app.name} (${s.id}): ${reason}`));
-  host.on("warning", (message) => log(message));
-
-  for (const note of config.notes) log(note);
-  let advertised = config.advertisedHost;
-  try {
-    const result = await host.listen();
-    for (const { host: h, port } of result.listening) log(`listening on ws://${h}:${port}/`);
-    for (const { host: h, error } of result.failed) log(`could not listen on ${h}: ${error}`);
-    advertised = reachableHost(config, result.listening);
-  } catch (error) {
-    log(`failed to start: ${error instanceof Error ? error.message : String(error)}`);
-    log("Every port tried is taken (other Tapline hosts?). Pick a free one with --port or TAPLINE_PORT.");
-    return false;
-  }
-  const port = host.boundPort() ?? config.port;
-  const url = hostUrl({ advertisedHost: advertised }, port);
-  log(`apps connect to ${url}; use the pair tool to connect a phone`);
-
-  // The live viewer rides on this host's port: local by default, the tailnet with --viewer remote.
-  const viewerToken = randomBytes(24).toString("base64url");
-  const remoteViewer = viewer === "remote" && config.tailscaleIp !== null;
-  const viewerHosts = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, ...(remoteViewer ? [`${config.tailscaleIp}:${port}`] : [])];
-  const viewerLinks = [
-    `http://127.0.0.1:${port}/viewer?token=${viewerToken}`,
-    ...(remoteViewer ? [`http://${config.tailscaleIp}:${port}/viewer?token=${viewerToken} (from your own devices on Tailscale)`] : []),
-  ];
-  const control = new ControlQueue();
-  const confirmations = new Confirmations();
-  let hub: ViewerHub | undefined;
-  const tools = new TaplineTools(host, {
-    policy,
-    uxRules,
-    confirmations,
-    canConfirm: viewer !== "off",
-    connect: { url, name: config.name },
-    pairedBefore: () => pairedBefore(options.env),
-    pairImagePath: join(configDir(), `pair-${port}.png`),
-    offerDir: join(configDir(), "offers"),
-    screenshots,
-    screenshotDir: join(configDir(), "shots"),
-    scriptsDir: join(configDir(), "scripts"),
-    baselinesDir: join(configDir(), "baselines"),
-    // Journey reports (AGENT-TOOLS 1.12 §17.5) and the user's own gh and git for `export`
-    journeysDir: join(configDir(), "journeys"),
-    exportRunner: realRunner,
-    // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
-    ...(options.noLog === true ? {} : { logDir: join(configDir(), "log") }),
-    ...(viewer === "off"
-      ? {}
-      : {
-          control,
-          onAction: (action) => hub?.pushAction(action),
-          viewerLinks: () => viewerLinks,
-          openViewer: (link: string) => openInBrowser(link),
-          viewerLinkToAgent: options.viewerLink === true || process.env["TAPLINE_VIEWER_LINK"] === "1",
-          viewerFeed: () => hub?.feed() ?? { on: false, quality: "balanced" },
-        }),
-  });
-  if (viewer !== "off") {
-    const live = new ViewerHub({
-      token: viewerToken,
-      html: VIEWER_HTML,
-      allowedHosts: () => viewerHosts,
-      allowRemote: remoteViewer,
-      accepts: [...VIEWER_ACCEPTS],
-      control,
-      setFeed: (on, quality) => {
-        void tools.setFeed(on, quality).then((outcome) => {
-          // Without an app, or in the background, the status already says so (appStatus below).
-          if (!outcome.ok && on && host.current() !== undefined && outcome.code !== "in_background") {
-            live.setStatus({ detail: `The app can't stream its screen: ${outcome.message ?? ""}` });
-          }
-        });
-      },
-      readOverlay: () => tools.readOverlay(),
-      runInput: (input) => tools.personInput(input),
-      confirmations,
-    });
-    hub = live;
-    host.setHttpExtension(live);
-    host.on("frame", (session, frame) => {
-      if (host.current()?.id === session.id) live.pushFrame(frame);
-    });
-    const appStatus = (): void => live.setStatus(viewerStatusForHost(host));
-    host.on("connect", appStatus);
-    host.on("disconnect", appStatus);
-    host.on("appState", appStatus);
-    host.on("notAnswering", appStatus);
-    host.on("answering", appStatus);
-    appStatus();
-    log(`live viewer: ${remoteViewer ? "this computer and your Tailscale devices" : "this computer only"} (the viewer tool opens it in a browser here)`);
-    // The link for the user's own devices: here in the log, never in an answer to the agent.
-    if (remoteViewer) for (const link of viewerLinks.slice(1)) log(`live viewer for your devices: ${link}`);
-  }
-  if (screenshots === "file") log(`screenshots are saved in ${join(configDir(), "shots")} (newest 50 kept)`);
-  const server = createMcpServer(tools);
+  const { host } = runtime;
+  const server = createMcpServer(runtime.toolsFor(undefined));
   const shutdown = (): void => {
     void host.close().finally(() => process.exit(0));
   };

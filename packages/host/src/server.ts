@@ -2,7 +2,8 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { handleApi, safeEqual, type ApiHandler } from "./api.js";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { createPairCode, pairCodeExpiry, verifyPairCode } from "./pairing.js";
 import {
@@ -152,6 +153,8 @@ export interface TaplineHostOptions {
    * (the report crosses the network, and the app passes on at most one touch per 500 ms). Default 1500 ms.
    */
   agentTouchSlackMs?: number;
+  /** Serves `POST /api/<tool>` (the thin call, AGENT-TOOLS 1.13 §18.10). Only a standalone `tapline host` sets it. */
+  api?: ApiHandler;
 }
 
 /** The longest touch another tool may announce (`POST /agent-touch`), in milliseconds. */
@@ -280,13 +283,6 @@ interface Session {
   expectedEnd?: boolean;
 }
 
-function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, "utf8");
-  const right = Buffer.from(b, "utf8");
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
-}
-
 function rawToString(data: RawData): string {
   if (typeof data === "string") return data;
   if (Array.isArray(data)) return Buffer.concat(data).toString("utf8");
@@ -345,6 +341,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly crashLog: CrashEvent[] = [];
   private crashSeq = 0;
   private httpExtension: HttpExtension | undefined;
+  private readonly api: ApiHandler | undefined;
   /** Open after `pair`: development builds on the local network may fetch this code (one use, 10 minutes). */
   private devOffer: DevOffer | undefined;
   private sweeper: NodeJS.Timeout | undefined;
@@ -363,6 +360,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     this.helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
     this.logBufferSize = options.logBufferSize ?? 500;
     this.agentTouchSlackMs = options.agentTouchSlackMs ?? 1500;
+    this.api = options.api;
   }
 
   /**
@@ -558,6 +556,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const http = createServer((req, res) => {
         try {
           if (this.handleAgentTouch(req, res)) return;
+          if (handleApi(req, res, { token: this.token, loopback: isLoopback(req.socket.remoteAddress), handler: this.api })) return;
           if (this.handleDevOffer(req, res)) return;
           if (this.httpExtension?.onRequest(req, res) === true) return;
         } catch {
