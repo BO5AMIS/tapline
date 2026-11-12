@@ -4317,6 +4317,8 @@ export class TaplineTools {
   }
 
   private async journeyStop(args: Shape<"journey">): Promise<CallToolResult> {
+    // A stop while the start still reads its first screen would let the start's end clear the stop's hold.
+    if (this.journeyBusy === "starting") return fail("Error busy: the journey is still starting; stop it in a moment.");
     const running = this.journeyRun;
     if (running === undefined) return fail(NO_JOURNEY);
     if (args.reached === undefined) return fail("Error bad_params: stop needs reached: true or false.");
@@ -4558,8 +4560,9 @@ export class TaplineTools {
 
   private async stressNetwork(running: Journey, mode: Stress["mode"], survives: Survives | undefined): Promise<CallToolResult> {
     if (mode === undefined) return fail('Error bad_params: stress network needs mode: "offline", "3g", "lossy" or "normal".');
-    const session = this.host.current();
-    if (session === undefined) return this.notConnected();
+    // On the journey's own app, the one the stop puts back to normal; never another app selected since.
+    const session = this.journeySession();
+    if (session === undefined) return fail(`Error not_connected: ${this.journeyAppGone()}.`);
     const done = await this.runCondition(session, "network", mode);
     if (!done.ok) return fail(`Error not_allowed: network ${mode} wasn't applied: ${done.failure}.`);
     running.state.networkStress = mode !== "normal";

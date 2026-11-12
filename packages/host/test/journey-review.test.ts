@@ -74,6 +74,35 @@ describe("journey start and stop lifecycle (finding 3)", () => {
     expect(r.app.requests.filter((q) => q.method === "command")).toHaveLength(1);
   });
 
+  it("a stop while the start still runs answers busy, and the journey stops normally after", async () => {
+    const r = await make();
+    const starting = begin(r, { conditions: { network: "3g" } });
+    const early = await r.tools.journey({ stop: true, reached: true });
+    expect(early.isError).toBe(true);
+    expect(textOf(early)).toMatch(/^Error busy: the journey is still starting/);
+    expect((await starting).isError).not.toBe(true);
+    expect((await r.tools.journey({ stop: true, reached: true })).isError).not.toBe(true);
+    expect((await begin(r)).isError).not.toBe(true);
+  });
+
+  it("network stress goes to the journey's app, never to another app selected since", async () => {
+    const r = await make();
+    await begin(r);
+    const other = await FakeApp.connect(r.host.boundPort() ?? 0, { app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } }, () => ({ ok: true, result: {} }));
+    try {
+      r.host.select(other.session);
+      await r.tools.journey({ stress: { kind: "network", mode: "offline" } });
+      const commands = (app: FakeApp): unknown[] => app.requests.filter((q) => q.method === "command").map((q) => q.params);
+      expect(commands(other.app)).toEqual([]);
+      expect(commands(r.app)).toContainEqual({ name: "network", args: { mode: "offline" } });
+      await r.tools.journey({ stop: true, reached: true });
+      expect(commands(other.app)).toEqual([]);
+      expect(commands(r.app).at(-1)).toEqual({ name: "network", args: { mode: "normal" } });
+    } finally {
+      other.app.ws.terminate();
+    }
+  });
+
   it("no new start while a stop is still cleaning up", async () => {
     const r = await make();
     await begin(r, { conditions: { network: "3g" } });
