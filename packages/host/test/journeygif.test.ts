@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { markRing, readPixels } from "../src/images.js";
-import { GIF_MAX_BYTES, GIF_WIDTH, encodeJourneyGif, fitted, gifInfo, slidePlan, type GifFrame } from "../src/journeygif.js";
+import { GIF_MAX_BYTES, GIF_WIDTH, encodeJourneyGif, fitted, gifInfo, slidePlan, slidesOf, type GifFrame } from "../src/journeygif.js";
 import { shot } from "./journeyhelpers.js";
 
 // AGENT-TOOLS 1.12 §17.5: the journey's GIF.
@@ -127,5 +127,32 @@ describe("the journey GIF", () => {
   it("refuses a GIF with no frames, and gifInfo refuses what is not a GIF", () => {
     expect(() => encodeJourneyGif([])).toThrow(/no frames/);
     expect(() => gifInfo(new TextEncoder().encode("not a gif at all"))).toThrow(/not a GIF/);
+  });
+});
+
+describe("tap rings on letterboxed frames (Codex follow-up, item 7)", () => {
+  it("follow the displayed frame's scale and offset", () => {
+    const portrait = pixels([40, 90, 200], 360, 780);
+    const landscape = pixels([200, 30, 30], 780, 360); // fitted to 360 x 166, from y 307
+    const frames: GifFrame[] = [
+      { pixels: portrait, at: 0 },
+      { pixels: landscape, at: 100 },
+      { pixels: portrait, at: 200, tap: { x: 0.1, y: 0.25 } }, // the tap was made on the landscape screen
+    ];
+    const out = slidesOf(fitted(frames, 360)).find((s) => s.ring)?.pixels;
+    expect(out).toBeDefined();
+    if (out === undefined) return;
+    const redNear = (cx: number, cy: number): boolean => {
+      for (let y = cy - 20; y <= cy + 20; y++) {
+        for (let x = cx - 20; x <= cx + 20; x++) {
+          const i = (y * out.width + x) * 4;
+          if (out.data[i] === 255 && out.data[i + 1] === 0 && out.data[i + 2] === 0) return true;
+        }
+      }
+      return false;
+    };
+    // 0.1 of 360 = 36 across; 307 + 0.25 of 166 = about 349 down (not 0.25 of 780 = 195)
+    expect(redNear(36 + 16, 349)).toBe(true);
+    expect(redNear(36, 195)).toBe(false);
   });
 });

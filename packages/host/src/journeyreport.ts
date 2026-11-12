@@ -544,7 +544,9 @@ export function scrubFolder(text: string, folder: string): string {
   if (base === "") return text;
   const slashes = base.replace(/\\/g, "/");
   const forms = [base, slashes, slashes.replace(/\//g, "\\"), slashes.replace(/\//g, "\\\\")];
-  const unique = [...new Set(forms)].sort((a, b) => b.length - a.length);
+  // The folder also as it sits after HTML or Markdown escaping, so it goes from report.html and report.md alike.
+  const escaped = forms.flatMap((f) => [escapeHtml(f), escapeMarkdown(f)]);
+  const unique = [...new Set([...forms, ...escaped])].sort((a, b) => b.length - a.length);
   const pattern = new RegExp(unique.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
   return text.replace(pattern, "<report>");
 }
@@ -570,8 +572,9 @@ function pathScreens(ctx: Ctx): Array<{ n: number; title: string; picture?: stri
   }));
 }
 
-function stepLine(step: JourneyStep): string {
-  return `${step.n}. ${stepWords(step)}${step.ok ? "" : ` (failed${step.code !== undefined ? `: ${step.code}` : ""})`} — ${step.said}`;
+/** One step as a line; `esc` makes the app's words safe for the format (Markdown escaping, none for HTML that escapes later). */
+function stepLine(step: JourneyStep, esc: (value: string) => string = (v) => v): string {
+  return `${step.n}. ${esc(stepWords(step))}${step.ok ? "" : ` (failed${step.code !== undefined ? `: ${esc(step.code)}` : ""})`} — ${esc(step.said)}`;
 }
 
 function rulesLines(ctx: Ctx): string[] {
@@ -594,7 +597,7 @@ export function renderMarkdown(ctx: Ctx): string {
     lines.push(`### ${escapeMarkdown(s.title)}`, "");
     if (s.picture !== undefined) lines.push(`![${escapeMarkdown(s.title)}](${s.picture})`, "");
     else lines.push("(no picture was kept for this screen)", "");
-    for (const step of s.steps) lines.push(`- ${stepLine(step)}`);
+    for (const step of s.steps) lines.push(`- ${stepLine(step, escapeMarkdown)}`);
     if (s.steps.length > 0) lines.push("");
   }
   lines.push("## Findings", "");

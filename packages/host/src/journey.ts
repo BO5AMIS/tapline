@@ -452,6 +452,8 @@ const SECRET_SEGMENT = /^(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{16,}$/;
  */
 export function withoutUrlSecrets(text: string): string {
   return text.replace(URL_IN_TEXT, (url) => {
+    // A drive path (`C:\…` or `C:/…`) is a file, not a link.
+    if (/^[A-Za-z]:[\\/]/.test(url)) return url;
     const trail = /[.,;:!?)\]]+$/.exec(url)?.[0] ?? "";
     const bare = trail === "" ? url : url.slice(0, -trail.length);
     const colon = bare.indexOf(":");

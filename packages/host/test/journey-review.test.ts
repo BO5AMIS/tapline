@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlQueue } from "../src/control.js";
 import { formatTree } from "../src/format.js";
 import { Journey, withoutUrlSecrets } from "../src/journey.js";
+import type { PolicyFile } from "../src/policy.js";
 import { treeResultSchema } from "../src/protocol.js";
 import { FakeApp, type IncomingRequest } from "./helpers.js";
 import { HOME, SCREEN, rig, textOf, type Rig, type RigOptions } from "./journeyhelpers.js";
@@ -280,5 +281,102 @@ describe("a stopped journey's report folder still exists after the stop (sanity)
     const folder = folderOf(textOf(await r.tools.journey({ stop: true, reached: true })));
     expect(existsSync(join(folder, "report.md"))).toBe(true);
     expect(readdirSync(folder).length).toBeGreaterThan(0);
+  });
+});
+
+describe("Codex follow-ups on f533e29 (items 2 and 4)", () => {
+  it("never takes a drive path for a link, in either slash style, with legal # characters", () => {
+    for (const path of [
+      String.raw`saved C:\Users\Sam#1\.tapline\journeys\2026-goal`,
+      "saved C:/Users/Sam#1/.tapline/journeys/20261113T153000123456789/frames",
+      String.raw`d:\work#2\a?b\c`,
+    ]) {
+      expect(withoutUrlSecrets(path)).toBe(path);
+    }
+    // real links beside a path are still cut
+    expect(withoutUrlSecrets("C:/a/b opened myapp:/cb?code=X and https://example.com/p?token=Y")).toBe("C:/a/b opened myapp:/cb?… and https://example.com/p?…");
+    expect(withoutUrlSecrets("myapp:login?token=X")).toBe("myapp:login?…");
+  });
+
+  const secureRig = (): Promise<Rig> => make({ onRequest: (req) => (req.method === "type" ? { ok: true, result: { element: HOME[3], value: "", secure: true, settledMs: 50 } } : undefined) });
+  const shotsOf = (r: Rig): number => r.app.requests.filter((q) => q.method === "screenshot").length;
+
+  it("secure typing before the journey starts keeps the start's first frame out of the report", async () => {
+    const r = await secureRig();
+    await r.tools.typeText({ target: { text: "Your name" }, text: "hunter2", look: false });
+    await begin(r);
+    expect(shotsOf(r)).toBe(0);
+    r.advance(2000);
+    await r.tools.tap({ target: { text: "Settings" }, look: false });
+    expect(shotsOf(r)).toBeGreaterThan(0);
+  });
+
+  it("a default look in the window leaves the picture out and says why; a second later it has one", async () => {
+    for (const inJourney of [false, true]) {
+      const r = await secureRig();
+      if (inJourney) await begin(r);
+      await r.tools.typeText({ target: { text: "Your name" }, text: "hunter2", look: false });
+      const before = shotsOf(r);
+      const quiet = await r.tools.look();
+      expect(quiet.content.some((block) => block.type === "image")).toBe(false);
+      expect(textOf(quiet)).toMatch(/^Note: no screenshot: a password field was typed into a moment ago/m);
+      expect(shotsOf(r)).toBe(before);
+      r.advance(2000);
+      const later = await r.tools.look();
+      expect(later.content.some((block) => block.type === "image")).toBe(true);
+      expect(textOf(later)).not.toContain("a password field was typed");
+    }
+  });
+});
+
+describe("CodeRabbit follow-ups on PR #7", () => {
+  const otherApp = { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" };
+  const stressNetwork = async (policy: PolicyFile) => {
+    const r = await make({ tools: { policy } });
+    await begin(r);
+    const other = await FakeApp.connect(r.host.boundPort() ?? 0, { app: otherApp }, () => ({ ok: true, result: {} }));
+    r.apps.push(other.app);
+    r.host.select(other.session);
+    return { r, answer: await r.tools.journey({ stress: { kind: "network", mode: "offline" } }) };
+  };
+
+  it("network stress is checked against the journey's app, not the selected one", async () => {
+    const { r, answer } = await stressNetwork({ version: 1, confirm: [], block: [], apps: { "com.example.demo": { confirm: [], block: ["network"] } } });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/blocks network for Demo/);
+    expect(r.app.requests.filter((q) => q.method === "command")).toEqual([]);
+  });
+
+  it("and a block on the selected app alone does not stop the journey's app", async () => {
+    const { r, answer } = await stressNetwork({ version: 1, confirm: [], block: [], apps: { "com.example.other": { confirm: [], block: ["network"] } } });
+    expect(answer.isError).not.toBe(true);
+    expect(r.app.requests.filter((q) => q.method === "command").map((q) => q.params)).toContainEqual({ name: "network", args: { mode: "offline" } });
+  });
+
+  it("a stop while the start reads its first screen answers busy; the start then finishes and a later stop works", async () => {
+    let held: number | undefined;
+    let arm = false;
+    const r = await make({
+      onRequest: (req) => {
+        const peek = (req.params as { peek?: boolean } | undefined)?.peek === true;
+        if (req.method === "tree" && !peek && arm) {
+          arm = false;
+          held = req.id;
+          return "ignore";
+        }
+        return undefined;
+      },
+    });
+    arm = true;
+    const starting = begin(r);
+    await vi.waitFor(() => expect(held).toBeDefined());
+    // journeyRun is set by now: only the busy hold keeps the stop out
+    expect(r.tools.currentJourney()).toBeDefined();
+    const early = await r.tools.journey({ stop: true, reached: true });
+    expect(early.isError).toBe(true);
+    expect(textOf(early)).toMatch(/^Error busy: the journey is still starting/);
+    r.app.send({ type: "response", id: held, ok: true, result: { screen: SCREEN, elements: HOME, route: { names: ["home"] } } });
+    expect((await starting).isError).not.toBe(true);
+    expect((await r.tools.journey({ stop: true, reached: true })).isError).not.toBe(true);
   });
 });

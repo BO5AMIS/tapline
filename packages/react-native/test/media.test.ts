@@ -254,6 +254,27 @@ describe('add with @react-native-camera-roll/camera-roll', () => {
     // collected: the same name saves a new picture now, and nothing is reported late
     expect(await media({ op: 'add', ...PICTURE })).toEqual({ id: 'ph://camera-1' });
   });
+
+  test('after needsPerson, a finished save that was removed is saved again under the same owner and name', async () => {
+    const cameraRoll = roll();
+    let allow: () => void = () => undefined;
+    cameraRoll.save.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          allow = () => resolve('ph://late');
+        }),
+    );
+    setMediaModules(modules({ cameraRoll }));
+    expect(await media({ op: 'add', ...PICTURE, owner: 'host-a' })).toEqual({ needsPerson: true });
+    allow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await media({ op: 'remove', ids: [], owner: 'host-a' })).toEqual({ removed: 1 });
+    expect(cameraRoll.deletePhotos).toHaveBeenCalledWith(['ph://late']);
+    // the removed picture is no finished save: a new one is made, and nothing is reported late
+    expect(await media({ op: 'add', ...PICTURE, owner: 'host-a' })).toEqual({ id: 'ph://camera-1' });
+    expect(cameraRoll.save).toHaveBeenCalledTimes(2);
+    expect(addedAssetIds()).toEqual(['ph://camera-1']);
+  });
 });
 
 describe('add without a library', () => {

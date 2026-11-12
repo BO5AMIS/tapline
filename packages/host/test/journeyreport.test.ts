@@ -216,6 +216,45 @@ describe("the report folder", () => {
     expect(out.match(/<report>/g)).toHaveLength(3);
   });
 
+  it("scrubFolder also takes out a folder that sits HTML-escaped (A&B becomes A&amp;B)", () => {
+    const folder = String.raw`C:\Users\A&B\journeys\2026-goal`;
+    const out = scrubFolder(String.raw`x C:\Users\A&amp;B\journeys\2026-goal\frames y`, folder);
+    expect(out).not.toContain("A&amp;B");
+    expect(out).toContain("<report>");
+  });
+
+  it("a report folder with & in its path is scrubbed from report.html too", async () => {
+    const r = await make({ tools: { journeysDir: join(tmpdir(), `tapline-a&b-${process.pid}`, "journeys") } });
+    rmSync(join(tmpdir(), `tapline-a&b-${process.pid}`), { recursive: true, force: true });
+    try {
+      await start(r);
+      const where = join(tmpdir(), `tapline-a&b-${process.pid}`, "journeys", "2026-11-12-1530-change-the-settings");
+      await r.tools.tap({ target: { text: where } });
+      const folder = folderOf(textOf(await r.tools.journey({ stop: true, reached: false })));
+      expect(folder).toBe(where);
+      for (const file of ["report.md", "report.html"]) {
+        const text = readFileSync(join(folder, file), "utf8");
+        expect(text).toMatch(/&lt;report&gt;|<report>/);
+        expect(text.toLowerCase()).not.toContain("a&amp;b");
+        expect(text.toLowerCase()).not.toContain("tapline-a&b");
+      }
+    } finally {
+      rmSync(join(tmpdir(), `tapline-a&b-${process.pid}`), { recursive: true, force: true });
+    }
+  });
+
+  it("escapes what the app wrote in a step's target in report.md, so it cannot add an image", async () => {
+    const r = await make();
+    await start(r);
+    await r.tools.tap({ target: { text: "![app](https://example.invalid/tracker.png)" } });
+    const folder = folderOf(textOf(await r.tools.journey({ stop: true, reached: false })));
+    const md = readFileSync(join(folder, "report.md"), "utf8");
+    expect(md).not.toContain("![app]");
+    expect(md).toContain("\\!\\[app\\]");
+    // the report's own pictures stay
+    expect(md).toMatch(/!\[The journey\]\(journey\.gif\)|!\[screen 1[^\]]*\]\(frames\//);
+  });
+
   it("names shortcuts used, a skipped photo picker, and eyes: agent", async () => {
     const r = await make();
     await start(r, { allow: ["open_url"] });

@@ -37,6 +37,8 @@ export interface GifFrame {
   pixels: Pixels;
   at: number;
   tap?: { x: number; y: number };
+  /** Set by `fitted` when the picture was letterboxed: its place in the canvas, as shares of it. */
+  fit?: { x: number; y: number; w: number; h: number };
 }
 
 export interface GifResult {
@@ -51,7 +53,7 @@ export interface GifResult {
   shrunk: boolean;
 }
 
-interface Slide {
+export interface Slide {
   pixels: Pixels;
   delay: number;
   /** A frame of a still stretch: the first to go when the file is too big. */
@@ -85,17 +87,25 @@ export function fitted(frames: GifFrame[], width: number): GifFrame[] {
     for (let y = 0; y < rows; y++) {
       data.set(inner.data.subarray(y * inner.width * 4, (y * inner.width + columns) * 4), ((top + y) * width + left) * 4);
     }
-    return { ...frame, pixels: { width, height, data } };
+    // Where the picture sits in the canvas (shares of it), so a tap's share of the screen can be moved to match.
+    return { ...frame, pixels: { width, height, data }, fit: { x: left / width, y: top / height, w: inner.width / width, h: inner.height / height } };
   });
 }
 
-function slidesOf(frames: GifFrame[]): Slide[] {
+/** A tap (a share of the screen) as a share of the canvas the screen was fitted in. */
+function tapOnCanvas(tap: { x: number; y: number }, fit: GifFrame["fit"]): { x: number; y: number } {
+  return fit === undefined ? tap : { x: fit.x + tap.x * fit.w, y: fit.y + tap.y * fit.h };
+}
+
+export function slidesOf(frames: GifFrame[]): Slide[] {
   const slides: Slide[] = [];
   frames.forEach((frame, i) => {
     const previous = frames[i - 1];
     if (frame.tap !== undefined) {
       // The tap was made on the screen before it: the ring goes there, a moment before the result.
-      slides.push({ pixels: markRing(previous?.pixels ?? frame.pixels, frame.tap), delay: RING_MS, still: false, ring: true });
+      // The ring sits on the picture it is drawn on, so it follows that picture's scale and offset in the canvas.
+      const shown = previous ?? frame;
+      slides.push({ pixels: markRing(shown.pixels, tapOnCanvas(frame.tap, shown.fit)), delay: RING_MS, still: false, ring: true });
     }
     const next = frames[i + 1];
     const gap = next === undefined ? LAST_MS : Math.max(0, next.at - frame.at);

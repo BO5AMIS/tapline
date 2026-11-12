@@ -386,6 +386,9 @@ function forget(ids: readonly string[]): void {
   for (const id of ids) {
     const at = addedIds.findIndex((added) => added.id === id);
     if (at >= 0) addedIds.splice(at, 1);
+    // A removed picture is no longer a finished save: adding the same name again must save a new one.
+    for (const [key, saved] of completedSaves) if (saved === id) completedSaves.delete(key);
+    for (let i = lateSaved.length - 1; i >= 0; i--) if (lateSaved[i]?.id === id) lateSaved.splice(i, 1);
   }
 }
 

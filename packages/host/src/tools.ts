@@ -723,6 +723,7 @@ export const DEFAULT_SCREENSHOT_WIDTH = 600;
 /** The app methods whose result may say `closedKeyboard: true` (the app closed the keyboard before acting). */
 const KEYBOARD_METHODS: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "type"]);
 
+const SECURE_QUIET_NOTE = "Note: no screenshot: a password field was typed into a moment ago and iOS may still show its last character; look again in a second.";
 const NO_SCREENSHOT_NOTE ="Note: no screenshot: this app doesn't support it; add react-native-view-shot.";
 
 function sleep(ms: number): Promise<void> {
@@ -1206,8 +1207,7 @@ export class TaplineTools {
       const shown = this.shownToUser(answer);
       const recorder = this.recorder;
       if (recorder === undefined || !FRAME_TOOLS.has(tool)) return shown;
-      // Right after typing into a password field iOS shows its last character for about a second: no picture then (finding 8).
-      if (tool === "type_text" && /The value is hidden \(secure field\)/.test(said)) this.secureTypedAt = Date.now();
+      // The window itself is opened where the answer is made (typeText); here it only keeps the picture away.
       if (this.secureWindow()) return shown;
       // A small picture of the screen after the step, kept in the report's folder and never in the answer.
       const touch = this.lastTouch;
@@ -1220,9 +1220,9 @@ export class TaplineTools {
   }
 
   /** When a password field was last typed into, and whether that was within the second iOS still shows its last character. */
-  private secureTypedAt = 0;
+  private secureTypedAt: number | undefined;
   private secureWindow(): boolean {
-    return Date.now() - this.secureTypedAt < 1500;
+    return this.secureTypedAt !== undefined && this.clock() - this.secureTypedAt < 1500;
   }
 
   /** In a user's eyes no id reaches the agent, not even inside an error the app composed. */
@@ -2172,6 +2172,9 @@ export class TaplineTools {
     labels = false,
   ): Promise<{ content: CallToolResult["content"]; isError: boolean }> {
     const sid = session.id;
+    // Right after typing into a password field iOS may still show its last character: no picture then, and the note says why.
+    const secureQuiet = wantScreenshot && this.secureWindow();
+    if (secureQuiet) wantScreenshot = false;
     // Changes only make sense against a list this agent has already been given in this session.
     const askChanges = onlyChanges && this.listed.has(sid);
     // `onlyChanges` is the after-an-action call. With `changes: true` the app keeps the refs and
@@ -2236,7 +2239,8 @@ export class TaplineTools {
     }
     const shot = await shotPromise;
     if (shot === undefined) {
-      if (wantScreenshot) notes.push(NO_SCREENSHOT_NOTE);
+      if (secureQuiet) notes.push(SECURE_QUIET_NOTE);
+      else if (wantScreenshot) notes.push(NO_SCREENSHOT_NOTE);
     } else if (shot.ok) {
       const parsed = screenshotResultSchema.safeParse(shot.value);
       if (!parsed.success) notes.push("Note: screenshot unavailable: unreadable response.");
@@ -3687,6 +3691,8 @@ export class TaplineTools {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
+        // Journey or not, iOS shows the last character of a password for about a second: remember when (finding 4).
+        if (secure) this.secureTypedAt = this.clock();
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
         return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
@@ -3827,8 +3833,7 @@ export class TaplineTools {
   }
 
   /** AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes. */
-  private networkRefusal(mode: unknown): CallToolResult | null {
-    const app = this.host.current()?.app;
+  private networkRefusal(mode: unknown, app: SessionInfo["app"] | undefined = this.host.current()?.app): CallToolResult | null {
     const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
     const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
     if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
@@ -4703,7 +4708,8 @@ export class TaplineTools {
   ): Promise<{ ok: true; previous?: string } | { ok: false; failure: string }> {
     const call = this.conditionCall(name, value);
     if (name === "network") {
-      const refused = this.networkRefusal(value);
+      // The app that receives the condition (a journey's own, maybe not the selected one) is the one the policy is read for.
+      const refused = this.networkRefusal(value, session.app);
       if (refused !== null) {
         const said = refused.content.map((block) => (block.type === "text" ? block.text : "")).join(" ");
         return { ok: false, failure: said.replace(/^Error \w+: /, "").replace(/\.$/, "") };
