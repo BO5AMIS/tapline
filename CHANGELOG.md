@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.1 (unreleased)
+
+Fixes only, from a tester's feedback on the sibling tool.
+
+- Every tool refuses an argument it doesn't have: `Error bad_params: unknown argument "labels"; audit takes: types.`
+  Before, the extra key was dropped silently and the call ran without it. The published tool schemas are unchanged.
+- A "needs a person" list: `tapline doctor` ends with a `Needs a person:` block (the phone has not paired yet, the
+  firewall rule is missing), and the first answer of an MCP session adds `Note: needs a person: …` once when no app
+  is connected.
+- QA and unattended runs are told to use a pinned release (`tapline-host@<version>`), not a development clone;
+  `tapline doctor` warns when the host runs from a git work tree with uncommitted changes.
+- An audit finding no longer names "the screen" when it knows more: it says `an element at @x,y wxh "text"` from the
+  frame, text or label the app could still give.
+
 ## 1.3.0, "the Diagnostics Update" (unreleased)
 
 When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.10, shared with Tapwright.
