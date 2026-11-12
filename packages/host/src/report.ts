@@ -72,14 +72,16 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     const first = group[0];
     if (first === undefined) continue;
     const failedEntry = group.find((e) => !e.ok);
+    // A call whose actions went through but which failed as a whole (an expectation): failed, with its code.
+    const callFailed = failedEntry === undefined ? group.find((e) => e.call_failed !== undefined)?.call_failed : undefined;
     const tool = first.of ?? (group.some((e) => e.batch !== undefined) ? "run" : first.tool);
     const single = group.length === 1 && first.batch === undefined && tool !== "run";
     calls.push({
       n: 0,
       session: first.session ?? "legacy",
       tool,
-      ok: failedEntry === undefined,
-      ...(failedEntry?.code !== undefined ? { code: failedEntry.code } : {}),
+      ok: failedEntry === undefined && callFailed === undefined,
+      ...(failedEntry?.code !== undefined ? { code: failedEntry.code } : callFailed !== undefined ? { code: callFailed } : {}),
       t: Date.parse(first.t),
       listed: group.some((e) => e.listed === true),
       dryRun: group.some((e) => e.dry_run === true),

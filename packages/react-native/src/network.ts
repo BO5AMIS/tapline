@@ -239,7 +239,7 @@ function patchedAbort(original: AnyFn): AnyFn {
           clearTimeout(entry.timer);
           held.delete(this);
           entry.settle?.();
-          abortHeld(this);
+          abortHeld(this, original, args);
           return undefined;
         }
         const hold = responseHolds.get(this);
@@ -261,11 +261,32 @@ function patchedAbort(original: AnyFn): AnyFn {
   };
 }
 
-/** Ends a request that was held (never sent) with readyState 4, status 0, then readystatechange, abort, loadend. */
-function abortHeld(xhr: object): void {
+/**
+ * Ends a request that was held (never really sent) as React Native ends an aborted one: readyState 4 and status 0,
+ * then readystatechange, abort and loadend, at once; then the XHR's own abort, which resets it to UNSENT so the app
+ * can open it again (Codex review of 1.4.0: before, a reused XHR threw "Cannot open, already sending").
+ */
+function abortHeld(xhr: object, original: AnyFn, args: unknown[]): void {
+  // React Native's XHR (it has `_sent`) ends an aborted request itself: marked as sent, its abort fires
+  // readystatechange, abort and loadend through its own event path and resets to UNSENT.
+  if ('_sent' in xhr) {
+    assign(xhr, '_sent', true);
+    try {
+      original.apply(xhr, args);
+      return;
+    } catch {
+      // fall back to ending it here
+    }
+  }
   assign(xhr, 'readyState', 4);
   assign(xhr, 'status', 0);
-  setTimeout(() => dispatchNow(xhr, ['readystatechange', 'abort', 'loadend']), 0);
+  dispatchNow(xhr, ['readystatechange', 'abort', 'loadend']);
+  try {
+    // readyState is DONE now, so React Native's abort sends no second set of events; it only resets.
+    original.apply(xhr, args);
+  } catch {
+    // the request is over either way
+  }
 }
 
 function dispatchNow(xhr: object, types: readonly string[]): void {
@@ -384,6 +405,28 @@ function eventType(event: unknown): string {
  * completion at once.
  */
 function holdResponse(xhr: object): void {
+  // React Native's own XMLHttpRequest finishes through __didCompleteResponse and fires its events through an inner
+  // path, not dispatchEvent (0.8x), so the transfer time is held there: the completion comes that much later. An
+  // abort meanwhile ends the request as usual, and the late completion finds no request to finish (Codex review).
+  const native = xhr as { __didCompleteResponse?: unknown };
+  if (isFn(native.__didCompleteResponse)) {
+    const complete = native.__didCompleteResponse as (...args: unknown[]) => unknown;
+    assign(xhr, '__didCompleteResponse', function __didCompleteResponse(this: unknown, ...args: unknown[]): unknown {
+      assign(xhr, '__didCompleteResponse', complete);
+      const error = args[1];
+      const delay = typeof error === 'string' && error !== '' ? 0 : Math.min(MAX_TRANSFER_MS, Math.ceil(sizeOf(xhr) / THREE_G_BYTES_PER_MS));
+      if (delay <= 0) return complete.apply(xhr, args);
+      setTimeout(() => {
+        try {
+          complete.apply(xhr, args);
+        } catch {
+          // a handler's error stays the app's
+        }
+      }, delay);
+      return undefined;
+    });
+    return;
+  }
   const target = xhr as { dispatchEvent?: unknown };
   if (!isFn(target.dispatchEvent)) return;
   const dispatch = target.dispatchEvent as (event: unknown) => unknown;
@@ -495,8 +538,52 @@ let fetchInstalled: { target: Record<string, unknown>; original: AnyFn } | null 
 /** Where the global fetch lives: the install target (globalThis in an app). */
 let fetchTarget: Record<string, unknown> | null = null;
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+interface SignalLike {
+  aborted?: unknown;
+  reason?: unknown;
+  addEventListener?: unknown;
+  removeEventListener?: unknown;
+}
+
+/** The request's abort signal: init.signal, else the Request's own. */
+function signalOf(input: unknown, init: unknown): SignalLike | null {
+  const fromInit = typeof init === 'object' && init !== null ? (init as { signal?: unknown }).signal : undefined;
+  const fromInput = typeof input === 'object' && input !== null ? (input as { signal?: unknown }).signal : undefined;
+  const signal = fromInit ?? fromInput;
+  return typeof signal === 'object' && signal !== null ? (signal as SignalLike) : null;
+}
+
+/** What an aborted fetch rejects with: the signal's reason, else an AbortError. */
+function abortError(signal: SignalLike): unknown {
+  if (signal.reason !== undefined) return signal.reason;
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+/**
+ * Waits `ms`, or rejects at once when the request is aborted (also when it already was): a held request never
+ * outlives its cancel, and a response held back is not delivered after it (Codex review of 1.4.0).
+ */
+function wait(ms: number, signal: SignalLike | null = null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal !== null && signal.aborted === true) {
+      reject(abortError(signal));
+      return;
+    }
+    let onAbort: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      if (onAbort !== null && signal !== null && isFn(signal.removeEventListener)) (signal.removeEventListener as AnyFn).call(signal, 'abort', onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    if (signal !== null && isFn(signal.addEventListener)) {
+      onAbort = () => {
+        clearTimeout(timer);
+        reject(abortError(signal));
+      };
+      (signal.addEventListener as AnyFn).call(signal, 'abort', onAbort);
+    }
+  });
 }
 
 function fetchUrl(input: unknown): string {
@@ -555,6 +642,7 @@ function wrapFetch(original: AnyFn): AnyFn {
     };
     if (rawUrl === '' || isIgnored(rawUrl)) return call();
     const devServer = defaultIgnore(rawUrl);
+    const signal = signalOf(input, init);
     const method = fetchMethod(input, init);
     const url = redactUrl(rawUrl);
     const startedAt = Date.now();
@@ -573,15 +661,15 @@ function wrapFetch(original: AnyFn): AnyFn {
     try {
       const mode = devServer ? 'normal' : condition;
       if (mode === 'offline' || (mode === 'lossy' && random() < LOSSY_FAIL_SHARE)) {
-        await wait(mode === 'offline' ? 0 : between(LOSSY_FAIL_DELAY_MS));
+        await wait(mode === 'offline' ? 0 : between(LOSSY_FAIL_DELAY_MS), signal);
         failed(null, 'network error');
         throw new TypeError('Network request failed');
       }
       if (mode === '3g') {
         const body = typeof init === 'object' && init !== null ? (init as { body?: unknown }).body : undefined;
-        await wait(Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + bodyBytes(body) / THREE_G_BYTES_PER_MS));
+        await wait(Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + bodyBytes(body) / THREE_G_BYTES_PER_MS), signal);
       } else if (mode === 'lossy') {
-        await wait(between(LOSSY_SLOW_DELAY_MS));
+        await wait(between(LOSSY_SLOW_DELAY_MS), signal);
       }
       let response: unknown;
       try {
@@ -590,7 +678,7 @@ function wrapFetch(original: AnyFn): AnyFn {
         if (!isAbort(error)) failed(null, 'network error');
         throw error;
       }
-      if (mode === '3g') await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS));
+      if (mode === '3g') await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS), signal);
       const status = responseStatus(response);
       if (status !== null && status >= 400) failed(status, null);
       return response;

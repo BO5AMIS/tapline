@@ -1035,12 +1035,15 @@ export class TaplineTools {
       ...(client !== undefined && client !== "" ? { client } : {}),
       size,
     };
+    const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     if (state.entries.length > 0) {
-      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...(listed ? { listed: true } : {}) }, at);
+      // Actions that went through, in a call that failed after them (an expectation that didn't hold): the call's
+      // own outcome goes with them, so the report doesn't count it as a success (Codex review of 1.4.0).
+      const callFailed = failed && state.entries.every(({ entry }) => entry.ok) ? { call_failed: code ?? "internal" } : {};
+      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, at);
       return;
     }
     // A call that logged no action: a read, or an action refused before it began (then without `kind`).
-    const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     const session = this.host.current();
     const lookArgs = state.tool === "look" ? pictureArgs(input) : undefined;
     this.actionLog.write(

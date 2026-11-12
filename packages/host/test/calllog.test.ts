@@ -316,3 +316,23 @@ describe("tapline report", () => {
     expect(parseSince("soon", now)).toBeNull();
   });
 });
+
+describe("a call that fails after its actions went through (Codex review of 1.4.0)", () => {
+  it("is logged and reported as failed when a run's expectation doesn't hold", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-calls-"));
+    dirs.push(dir);
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, handler);
+    apps.push(app);
+    // a picture check logs no action of its own: with no reference saved, the expectation fails after the tap
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, logDir: dir, baselinesDir: join(dir, "baselines") });
+    const answer = await tools.run({ steps: [{ tool: "tap", target: { id: "save" }, expect: { matches: "never-saved" } }] });
+    expect(answer.isError).toBe(true);
+    const logged = lines(dir).filter((l) => l["tool"] === "tap");
+    expect(logged[0]).toMatchObject({ ok: true, call_failed: "expect_failed" });
+    const calls = buildCalls(lines(dir) as unknown as ActionLogEntry[]);
+    expect(calls.find((c) => c.tool === "run")).toMatchObject({ ok: false, code: "expect_failed" });
+    expect(formatReport(analyze(calls))).toMatch(/Failed: 1/);
+  });
+});

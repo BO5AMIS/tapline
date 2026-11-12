@@ -207,7 +207,9 @@ describe('network conditions', () => {
     xhr.abort();
     jest.advanceTimersByTime(1000);
     expect(sentCount(xhr)).toBe(0);
-    expect(xhr.aborted).toBe(false);
+    // the XHR's own abort runs too, after the abort events: it resets the request, so the app can open it again
+    expect(xhr.aborted).toBe(true);
+    expect(xhr.seen).toEqual(['readystatechange', 'abort', 'loadend']);
     expect(inFlight()).toBe(0);
   });
 
