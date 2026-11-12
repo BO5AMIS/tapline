@@ -62,6 +62,22 @@ describe("the audit report", () => {
     expect(out).toContain("(+3 more issues; pass types to narrow it.)");
   });
 
+  it("names what is known of an issue without an element, and says the screen only when nothing is", () => {
+    const issue = (where?: NonNullable<AuditResult["issues"][number]["where"]>): AuditResult => ({
+      checked: ALL,
+      issues: [{ type: "hit_region", element: null, ...(where !== undefined ? { where } : {}), problem: "p", fix: "f" }],
+    });
+    const line = (r: AuditResult): string => formatAudit("X", r, undefined).split("\n")[1] ?? "";
+    expect(line(issue({ frame: { x: 350.4, y: 40.2, width: 20, height: 19.6 }, label: "Close", text: "x" }))).toBe(
+      '1. hit_region: an element at @350,40 20x20 "Close": p. Fix: f.',
+    );
+    expect(line(issue({ frame: { x: 1, y: 2, width: 3, height: 4 }, text: "Hi" }))).toBe('1. hit_region: an element at @1,2 3x4 "Hi": p. Fix: f.');
+    expect(line(issue({ frame: { x: 1, y: 2, width: 3, height: 4 } }))).toBe("1. hit_region: an element at @1,2 3x4: p. Fix: f.");
+    expect(line(issue({ label: "Close" }))).toBe('1. hit_region: an element "Close": p. Fix: f.');
+    expect(line(issue({}))).toBe("1. hit_region: the screen: p. Fix: f.");
+    expect(line(issue())).toBe("1. hit_region: the screen: p. Fix: f.");
+  });
+
   it("names the screen by its route, else the app", () => {
     expect(auditTitle(["Root", "Explore"], "Wayfare")).toBe("Explore");
     expect(auditTitle(["__root", "(tabs)", "index"], "Wayfare")).toBe("Wayfare");

@@ -25,6 +25,14 @@ export const auditResultSchema = z.object({
     z.object({
       type: z.string(),
       element: elementSchema.nullish(),
+      /** Set when `element` is missing but something is known: its frame in points, its text or label. */
+      where: z
+        .object({
+          frame: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }).optional(),
+          text: z.string().optional(),
+          label: z.string().optional(),
+        })
+        .optional(),
       problem: z.string(),
       fix: z.string(),
       at: z.object({ file: z.string(), line: z.number(), direct: z.boolean().optional() }).optional(),
@@ -33,6 +41,16 @@ export const auditResultSchema = z.object({
   checked: z.array(z.string()),
 });
 export type AuditResult = z.infer<typeof auditResultSchema>;
+
+/** An issue without an element: what is known of it, else "the screen" (only when nothing at all is). */
+function whereWords(where: AuditResult["issues"][number]["where"]): string {
+  if (where === undefined) return "the screen";
+  const name = where.label ?? where.text;
+  const f = where.frame;
+  const at = f !== undefined ? ` at @${Math.round(f.x)},${Math.round(f.y)} ${Math.round(f.width)}x${Math.round(f.height)}` : "";
+  const called = name !== undefined && name !== "" ? ` ${JSON.stringify(name)}` : "";
+  return at === "" && called === "" ? "the screen" : `an element${at}${called}`;
+}
 
 /** The report: header, numbered issues (each `at` on its own line when known), then what was checked. */
 export function formatAudit(
@@ -52,7 +70,7 @@ export function formatAudit(
   const summary = [...counts].map(([type, n]) => `${type} ${n}`).join(", ");
   const lines = [`Audit of ${JSON.stringify(title)}: ${issues.length} issue${issues.length === 1 ? "" : "s"} (${summary}).`];
   issues.slice(0, MAX_ISSUES).forEach((issue, i) => {
-    const what = issue.element ? formatElement(issue.element, { actions: false }) : "the screen";
+    const what = issue.element ? formatElement(issue.element, { actions: false }) : whereWords(issue.where);
     lines.push(`${i + 1}. ${issue.type}: ${what}: ${issue.problem}. Fix: ${issue.fix}.`);
     if (issue.at !== undefined) {
       const library = issue.at.direct === false ? " (a library draws it; this is the app's line around it)" : "";

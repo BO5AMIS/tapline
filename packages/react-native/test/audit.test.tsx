@@ -3,6 +3,7 @@ import React from 'react';
 import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
 import { act } from 'react-test-renderer';
 import { audit } from '../src/actions';
+import * as inspect from '../src/inspect';
 import { resetRefs, setMeasurer } from '../src/inspect';
 import { setSourceFetch } from '../src/source';
 
@@ -82,4 +83,24 @@ test('a switch-like role without a state is a trait problem', async () => {
   useFrames({ wifi: frame(10, 100, 300, 48) }, null);
   const { issues } = await run({ types: ['trait'] });
   expect(issues[0]).toMatchObject({ type: 'trait', problem: "it's a switch without a state, so VoiceOver can't say whether it's on", fix: 'set accessibilityState={{ checked }}' });
+});
+
+test('an issue whose element cannot be built still says where it is and what it says', async () => {
+  await mount(<Pressable testID="close" accessibilityRole="button" accessibilityLabel="Close" onPress={noop} />);
+  useFrames({ close: frame(350.4, 40.2, 20, 20) }, null);
+  jest.spyOn(inspect, 'toElement').mockImplementation(() => {
+    throw new Error('no element');
+  });
+  const { issues } = await run({ types: ['hit_region'] });
+  expect(issues).toHaveLength(1);
+  expect(issues[0]?.element).toBeNull();
+  expect(issues[0]?.where).toEqual({ frame: { x: 350.4, y: 40.2, width: 20, height: 20 }, label: 'Close' });
+});
+
+test('an issue with its element has no where', async () => {
+  await mount(<Pressable testID="close" accessibilityRole="button" accessibilityLabel="Close" onPress={noop} />);
+  useFrames({ close: frame(350, 40, 20, 20) }, null);
+  const { issues } = await run({ types: ['hit_region'] });
+  expect(issues[0]?.element).not.toBeNull();
+  expect(issues[0]?.where).toBeUndefined();
 });
