@@ -644,3 +644,12 @@ describe("conditions", () => {
     expect(commands(app).at(-1)).toEqual({ name: "network", args: { mode: "normal" } });
   });
 });
+
+describe("what a field holds stays out of a step's sentence (1.5 review, finding 8)", () => {
+  it("strips value= and placeholder=, quoted with escapes or bare", async () => {
+    const { withoutFieldText } = await import("../src/journey.js");
+    expect(withoutFieldText('Tapped e4 input "Email" value="alex@example.com" placeholder="you@example.com".')).toBe('Tapped e4 input "Email".');
+    expect(withoutFieldText('Toggled e2 input value="say \\"hi\\"" @1,2 3x4.')).toBe("Toggled e2 input @1,2 3x4.");
+    expect(withoutFieldText("Tapped e5 slider value=42.")).toBe("Tapped e5 slider");
+  });
+});

@@ -1153,6 +1153,8 @@ export class TaplineTools {
       const shown = this.shownToUser(answer);
       const recorder = this.recorder;
       if (recorder === undefined || !FRAME_TOOLS.has(tool)) return shown;
+      // Right after typing into a password field iOS shows its last character for about a second: no picture then (finding 8).
+      if (tool === "type_text" && /The value is hidden \(secure field\)/.test(said)) return shown;
       // A small picture of the screen after the step, kept in the report's folder and never in the answer.
       const touch = this.lastTouch;
       this.lastTouch = undefined;

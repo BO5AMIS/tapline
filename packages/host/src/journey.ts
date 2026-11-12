@@ -323,7 +323,8 @@ export class Journey {
     }
 
     // What the agent typed is its own business (it may be a password the app hides): the step keeps the sentence without it.
-    const first = (outcome.text.split("\n")[0] ?? "").replace(tool === "type_text" ? / Value is now .*$/ : /(?!)/, "");
+    // The same for what a field holds: a tap or toggle on a filled input prints its value and placeholder too (finding 8).
+    const first = withoutFieldText((outcome.text.split("\n")[0] ?? "").replace(tool === "type_text" ? / Value is now .*$/ : /(?!)/, ""));
     const step: JourneyStep = {
       n: this.state.steps.length + 1,
       tool,
@@ -407,6 +408,14 @@ export function summaryNotes(state: JourneyState): string[] {
 /** Strips the ids a user's eyes must not show (` id=save`) from text the SDK composed (error messages, `Closest:` lists). */
 export function withoutIds(text: string): string {
   return text.replace(/ id=[^\s,)]*[^\s,).]/g, "");
+}
+
+/**
+ * Strips what a field holds (` value="…"`, ` placeholder="…"`, a quoted string with its escapes, or a bare number or
+ * word) from a step's sentence: what was typed may be private, and the sentence goes into the report and the export.
+ */
+export function withoutFieldText(text: string): string {
+  return text.replace(/ (?:value|placeholder)=(?:"(?:[^"\\]|\\.)*"(?:…\(\+\d+\))?|[^\s"]+)/g, "");
 }
 
 /** The answer to `id` or `label` as a target in a journey (§17.1). */
