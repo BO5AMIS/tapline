@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0, "the Autopilot Update" (unreleased)
+## 1.1.0, "the Autopilot Update" (2026-11-12)
 
 From the screen to the code: Tapline now names the file and line of your app that drew any element on
 screen. Agents also get more done per call, a session becomes a test you keep, and every touch that
