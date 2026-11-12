@@ -1508,4 +1508,76 @@ describe("mcp server", () => {
       await server.close();
     }
   });
+
+  async function connected(): Promise<{ client: Client; close: () => Promise<void> }> {
+    const { tools } = await setup(defaultHandler)();
+    const server = createMcpServer(tools);
+    const client = new Client({ name: "test", version: "0" });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    return {
+      client,
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+  const answerText = (r: unknown): string => JSON.stringify(r);
+
+  it("refuses an argument the tool doesn't have, naming the tool's own keys", async () => {
+    const { client, close } = await connected();
+    try {
+      const r = await client.callTool({ name: "audit", arguments: { labels: true } });
+      expect(r.isError).toBe(true);
+      expect(answerText(r)).toContain('Error bad_params: unknown argument \\"labels\\"; audit takes: types.');
+      const two = await client.callTool({ name: "look", arguments: { screenshot: false, foo: 1, bar: 2 } });
+      expect(two.isError).toBe(true);
+      expect(answerText(two)).toContain('unknown arguments \\"foo\\", \\"bar\\"; look takes: screenshot, width, labels.');
+      const none = await client.callTool({ name: "apps", arguments: { x: 1 } });
+      expect(none.isError).toBe(true);
+      expect(answerText(none)).toContain("apps takes no arguments");
+      const withRequired = await client.callTool({ name: "open_app", arguments: { app: "x", nme: "y" } });
+      expect(answerText(withRequired)).toContain('unknown argument \\"nme\\"; open_app takes: app.');
+      const fine = await client.callTool({ name: "look", arguments: { screenshot: false } });
+      expect(fine.isError).not.toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("checks every tool the same way, and publishes the schema of its shape only", async () => {
+    const { client, close } = await connected();
+    try {
+      const listed = await client.listTools();
+      expect(listed.tools).toHaveLength(Object.keys(toolShapes).length);
+      for (const tool of listed.tools) {
+        const keys = Object.keys(toolShapes[tool.name as keyof typeof toolShapes]);
+        expect(Object.keys(tool.inputSchema.properties ?? {}), tool.name).toEqual(keys);
+        expect(tool.inputSchema, tool.name).not.toHaveProperty("additionalProperties");
+        const r = await client.callTool({ name: tool.name, arguments: { not_a_real_key: 1 } });
+        expect(r.isError, tool.name).toBe(true);
+        // A missing required argument is reported first (the SDK's own validation runs before the check).
+        if ((tool.inputSchema.required ?? []).length === 0) {
+          expect(answerText(r), tool.name).toContain('unknown argument \\"not_a_real_key\\"');
+        }
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("names the step for an unknown key inside a run step", async () => {
+    const { client, close } = await connected();
+    try {
+      const r = await client.callTool({
+        name: "run",
+        arguments: { steps: [{ tool: "wait", seconds: 0.1 }, { tool: "tap", target: { id: "login-button" }, labels: true }] },
+      });
+      expect(r.isError).toBe(true);
+      expect(answerText(r)).toMatch(/Error bad_params: step 2 \(tap[^)]*\): params: Unrecognized key/);
+    } finally {
+      await close();
+    }
+  });
 });

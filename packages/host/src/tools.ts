@@ -308,6 +308,23 @@ export const toolShapes = {
 
 type Shape<K extends keyof typeof toolShapes> = z.infer<z.ZodObject<(typeof toolShapes)[K]>>;
 
+/** The arguments of one tool, as its schema describes them. */
+export type ToolArgs<K extends keyof typeof toolShapes> = Shape<K>;
+
+/**
+ * The answer for a call that carries arguments the tool doesn't have (null when all are known). Zod strips unknown
+ * keys silently, so `audit {labels: true}` would run and ignore `labels`; this says so instead. Every way in to a
+ * tool (the MCP server, and through it the bench) goes through here; script steps are checked by `run` itself.
+ */
+export function unknownArgumentError(name: keyof typeof toolShapes, args: Record<string, unknown>): CallToolResult | null {
+  const known = Object.keys(toolShapes[name]);
+  const unknown = Object.keys(args).filter((key) => !known.includes(key));
+  if (unknown.length === 0) return null;
+  const quoted = unknown.map((key) => JSON.stringify(key)).join(", ");
+  const takes = known.length === 0 ? `${name} takes no arguments` : `${name} takes: ${known.join(", ")}`;
+  return fail(`Error bad_params: unknown argument${unknown.length === 1 ? "" : "s"} ${quoted}; ${takes}.`);
+}
+
 // ---- compare_screen ---------------------------------------------------------
 
 const DEFAULT_MATCH_THRESHOLD = 0.5;
