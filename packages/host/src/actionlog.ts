@@ -26,6 +26,8 @@ export interface ActionLogEntry {
   batch?: { id: string; step: number };
   dry_run?: boolean;
   confirmed?: boolean;
+  /** Where a person's OK came from: the host's dialog or the live view (AGENT-TOOLS 1.13 §11.3). */
+  confirmed_by?: "chat" | "live view";
   /** For typing: how many characters, never the text. */
   chars?: number;
   /** AGENT-TOOLS 1.11 §16.1: `"read"` for a call that isn't an action (look, wait_for, logs, ...). */

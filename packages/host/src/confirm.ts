@@ -19,16 +19,29 @@ export interface ConfirmRequest {
   /** When the request lapses, ms since the epoch. */
   expires: number;
 }
+/** Where a person's OK was given: the host's dialog, or the live view (AGENT-TOOLS 1.13 §11.3). */
+export type OkVia = "chat" | "live view";
+
 export interface ConfirmClosed {
   type: "confirm_closed";
   id: string;
   allow: boolean;
+  /** Set when the host's dialog answered, so the live view can say so. Absent for an answer in the live view. */
+  by?: "chat";
 }
 export type ConfirmEvent = ConfirmRequest | ConfirmClosed;
 
+/** How a request ended, for a call that waited on it. */
+export interface Settled {
+  allow: boolean;
+  via: OkVia;
+  /** Nobody answered in time (or the server stopped). */
+  expired: boolean;
+}
+
 /** What a guarded call may do now. */
 export type ConfirmCheck =
-  | { granted: true }
+  | { granted: true; via: OkVia }
   /** A person said no a moment ago: nobody is asked again yet. */
   | { granted: false; held: true }
   | { granted: false; request: ConfirmRequest; /** " They declined." or " Nobody answered." after a first ask. */ suffix: string };
@@ -42,7 +55,9 @@ interface Pending {
 export class Confirmations {
   private readonly pending = new Map<string, Pending>();
   /** key → when the allow lapses */
-  private readonly grants = new Map<string, number>();
+  private readonly grants = new Map<string, { until: number; via: OkVia }>();
+  /** request id → calls waiting for its end */
+  private readonly waiters = new Map<string, Array<(settled: Settled) => void>>();
   /** key → how the last ask ended without an allow */
   private readonly endings = new Map<string, "declined" | "expired">();
   /** key → when a person last declined it */
@@ -74,7 +89,7 @@ export class Confirmations {
     const grant = this.grants.get(key);
     if (grant !== undefined) {
       this.grants.delete(key);
-      if (grant > this.now()) return { granted: true };
+      if (grant.until > this.now()) return { granted: true, via: grant.via };
     }
     // A person said no a moment ago: asking again at once would only wear them down.
     const declined = this.declinedAt.get(key);
@@ -103,8 +118,19 @@ export class Confirmations {
     return { granted: false, request, suffix };
   }
 
-  /** A viewer's answer. The first answer wins; later ones and unknown ids are ignored. */
-  answer(id: string, allow: boolean): boolean {
+  /** Resolves when the request ends: an answer from either place, its expiry, or the server stopping. */
+  wait(id: string): Promise<Settled> {
+    return new Promise((resolve) => {
+      if (!this.pending.has(id)) {
+        resolve({ allow: false, via: "live view", expired: true });
+        return;
+      }
+      this.waiters.set(id, [...(this.waiters.get(id) ?? []), resolve]);
+    });
+  }
+
+  /** The first answer wins; later ones and unknown ids are ignored. `via` is the host's dialog or a viewer. */
+  answer(id: string, allow: boolean, via: OkVia = "live view"): boolean {
     const p = this.pending.get(id);
     if (p === undefined) return false;
     clearTimeout(p.timer);
@@ -112,20 +138,23 @@ export class Confirmations {
     if (p.request.expires <= this.now()) {
       this.endings.set(p.key, "expired");
       this.emit({ type: "confirm_closed", id, allow: false });
+      this.settle(id, { allow: false, via, expired: true });
       return false;
     }
-    if (allow) this.grants.set(p.key, this.now() + this.ttlMs);
+    if (allow) this.grants.set(p.key, { until: this.now() + this.ttlMs, via });
     else {
       this.endings.set(p.key, "declined");
       this.declinedAt.set(p.key, this.now());
     }
-    this.emit({ type: "confirm_closed", id, allow });
+    this.emit({ type: "confirm_closed", id, allow, ...(via === "chat" ? { by: "chat" as const } : {}) });
+    this.settle(id, { allow, via, expired: false });
     return true;
   }
 
   /** Closes everything (the server stops). */
   close(): void {
     for (const p of this.pending.values()) clearTimeout(p.timer);
+    for (const id of this.pending.keys()) this.settle(id, { allow: false, via: "live view", expired: true });
     this.pending.clear();
     this.grants.clear();
   }
@@ -136,6 +165,13 @@ export class Confirmations {
     this.pending.delete(id);
     this.endings.set(p.key, "expired");
     this.emit({ type: "confirm_closed", id, allow: false });
+    this.settle(id, { allow: false, via: "live view", expired: true });
+  }
+
+  private settle(id: string, settled: Settled): void {
+    const list = this.waiters.get(id);
+    this.waiters.delete(id);
+    for (const resolve of list ?? []) resolve(settled);
   }
 
   private emit(event: ConfirmEvent): void {

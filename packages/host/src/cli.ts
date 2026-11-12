@@ -68,6 +68,8 @@ Options:
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
   --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
   --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
+  --no-dialog    For mcp: don't ask a person's OK in the host's dialog, only in the live view (for a host that
+                 passes dialogs to the model instead of showing them to a person)
   --brief        For mcp and host: actions answer briefly (a call's brief: false overrides it); look is never brief
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
@@ -271,6 +273,7 @@ export function parseCli(argv: string[]) {
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
+      "no-dialog": { type: "boolean" },
       brief: { type: "boolean" },
       "ux-rules": { type: "string" },
       accounts: { type: "string" },
@@ -293,6 +296,7 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
     ...(values["no-log"] === true ? { noLog: true } : {}),
     ...(values.policy !== undefined ? { policy: values.policy } : {}),
     ...(values["no-policy"] === true ? { noPolicy: true } : {}),
+    ...(values["no-dialog"] === true ? { noDialog: true } : {}),
     ...(values.brief === true ? { brief: true } : {}),
     ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
     ...(values.accounts !== undefined ? { accounts: values.accounts } : {}),

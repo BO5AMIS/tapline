@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { TOOL_META, runTool, type ToolName } from "./dispatch.js";
+import { DIALOG_TTL_MS, Dialogs, type ElicitClient } from "./elicit.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
 import { TaplineTools, toolShapes } from "./tools.js";
@@ -34,8 +36,31 @@ function publishPlainSchemas(server: McpServer): void {
   });
 }
 
-/** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. */
-export function createMcpServer(tools: TaplineTools): McpServer {
+/**
+ * The host's dialog (AGENT-TOOLS 1.13 §11.3): MCP elicitation, form mode, to the client that started this server.
+ * The request goes out by hand, not through the SDK's elicitInput: that refuses a client whose capability is an empty
+ * `elicitation: {}` (older clients mean form mode by it), and its 60 s default would cut a 120 s wait short.
+ */
+export function elicitClientFor(server: McpServer): ElicitClient {
+  return {
+    canShowForm: () => {
+      const elicitation = server.server.getClientCapabilities()?.elicitation;
+      // A client that lists only `url` can't show a form; an empty object is form mode.
+      return elicitation !== undefined && (elicitation.form !== undefined || elicitation.url === undefined);
+    },
+    elicit: async (message, schema, signal) => {
+      const result = await server.server.request(
+        { method: "elicitation/create", params: { mode: "form", message, requestedSchema: schema } },
+        ElicitResultSchema,
+        { signal, timeout: DIALOG_TTL_MS + 5000 },
+      );
+      return { action: result.action, ...(result.content !== undefined ? { content: result.content } : {}) };
+    },
+  };
+}
+
+/** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. `noDialog` is `--no-dialog`. */
+export function createMcpServer(tools: TaplineTools, options: { noDialog?: boolean } = {}): McpServer {
   const server = new McpServer({ name: "tapline", version: "1.5.0" }, { instructions: INSTRUCTIONS });
 
   for (const name of Object.keys(TOOL_META) as ToolName[]) {
@@ -54,6 +79,8 @@ export function createMcpServer(tools: TaplineTools): McpServer {
 
   // The call log names the agent by the MCP client's name, known once the client has said hello.
   tools.setClientId(() => server.server.getClientVersion()?.name);
+  // A person's OK is asked in the host's dialog when the client can show one; the live view answers either way.
+  tools.setDialogs(new Dialogs(elicitClientFor(server), { disabled: options.noDialog === true }));
 
   publishPlainSchemas(server);
   return server;
@@ -74,7 +101,7 @@ export async function runMcp(options: Omit<RuntimeOptions, "api" | "log"> = {}):
     return false;
   }
   const { host } = runtime;
-  const server = createMcpServer(runtime.toolsFor(undefined));
+  const server = createMcpServer(runtime.toolsFor(undefined), { noDialog: options.noDialog === true });
   const shutdown = (): void => {
     void host.close().finally(() => process.exit(0));
   };

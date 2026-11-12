@@ -36,6 +36,8 @@ export interface RuntimeOptions extends ResolveOptions {
   noLog?: boolean;
   policy?: string;
   noPolicy?: boolean;
+  /** `--no-dialog`: a person's OK is asked in the live view only, never in the host's dialog (AGENT-TOOLS 1.13 §11.3). */
+  noDialog?: boolean;
   viewerLink?: boolean;
   uxRules?: string;
   /** `--accounts FILE`: test accounts (AGENT-TOOLS 1.13 §18.6). A file inside a git work tree that doesn't ignore it loads nothing. */

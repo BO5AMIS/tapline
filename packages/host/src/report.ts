@@ -35,6 +35,8 @@ export interface CallRecord {
   inList?: boolean;
   /** A compare_screen that matched with named changes (1.13.1 item 2). */
   matchedWithChanges?: boolean;
+  /** Where each person's OK this call used came from (§11.3). */
+  approvals?: Array<"chat" | "live view">;
   /** For a look: it asked for a screenshot, a width or labels, which the answer of the action before it could not give. */
   askedPicture?: boolean;
   /** The agent's client id, so thinking time is measured within one client. */
@@ -61,6 +63,8 @@ export interface Report {
   flags: Flag[];
   /** The `Time:` line; absent when no call has a time (older logs). */
   time?: string;
+  /** Person's OKs used, by where they were given; absent when none (§11.3). */
+  approvals?: { chat: number; liveView: number };
 }
 
 /** Groups the log's agent entries into calls, in order. Entries from before the call log have no call number: each is a call, a batch is one. */
@@ -93,6 +97,7 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     const start = Math.min(...group.map((e) => Date.parse(e.t)));
     const end = timed.length > 0 ? Math.max(...timed.map((e) => Date.parse(e.t) + (e.ms as number))) : undefined;
     const client = group.find((e) => e.client !== undefined)?.client;
+    const approvals = group.flatMap((e) => (e.confirmed_by !== undefined ? [e.confirmed_by] : []));
     calls.push({
       n: 0,
       session: first.session ?? "legacy",
@@ -110,6 +115,7 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
       ...(single && first.in_list !== undefined ? { inList: first.in_list } : {}),
       ...(single && askedPicture(first) ? { askedPicture: true } : {}),
       ...(first.matched_with_changes === true ? { matchedWithChanges: true } : {}),
+      ...(approvals.length > 0 ? { approvals } : {}),
     });
   }
   // Sessions in the order they began; inside one, the call numbers (legacy: the order read).
@@ -289,6 +295,7 @@ export function analyze(calls: readonly CallRecord[]): Report {
     flags.push({ text: `${thin.length} calls each from a new process (calls ${numbers(ranges.map(range))}): load the MCP server once; each call paid about 2 s` });
   }
   const time = timeLine(calls);
+  const given = calls.flatMap((c) => c.approvals ?? []);
   return {
     calls: calls.length,
     minutes,
@@ -297,6 +304,7 @@ export function analyze(calls: readonly CallRecord[]): Report {
     failedCodes: [...codes].sort(byCount),
     flags,
     ...(time !== undefined ? { time } : {}),
+    ...(given.length > 0 ? { approvals: { chat: given.filter((v) => v === "chat").length, liveView: given.filter((v) => v === "live view").length } } : {}),
   };
 }
 
@@ -359,7 +367,10 @@ export function formatReport(report: Report, accounts: readonly string[] = []): 
   const failed =
     report.failed === 0 ? "Failed: 0." : `Failed: ${report.failed} (${report.failedCodes.map(([code, n]) => `${code} ${n}`).join(", ")}).`;
   const head = `Session: ${report.calls} ${report.calls === 1 ? "call" : "calls"} in ${report.minutes} min (${shown.join(", ")}). ${failed}`;
-  const top = [head, ...(report.time !== undefined ? [report.time] : []), ...(accountsLine !== undefined ? [accountsLine] : [])];
+  const a = report.approvals;
+  const approvalsLine =
+    a === undefined ? undefined : `Approvals: ${[...(a.chat > 0 ? [`${a.chat} in chat`] : []), ...(a.liveView > 0 ? [`${a.liveView} in the live view`] : [])].join(", ")}.`;
+  const top = [head, ...(report.time !== undefined ? [report.time] : []), ...(approvalsLine !== undefined ? [approvalsLine] : []), ...(accountsLine !== undefined ? [accountsLine] : [])];
   if (report.flags.length === 0) return [...top, "Waste: none."].join("\n");
   return [...top, "Waste:", ...report.flags.map((f) => `- ${f.text}`)].join("\n");
 }

@@ -167,6 +167,8 @@ export interface JourneyState {
   screens: JourneyScreen[];
   steps: JourneyStep[];
   shortcuts: UsedShortcut[];
+  /** Each person's OK a touch used, with where it was given. */
+  oks: Array<"chat" | "live view">;
   conditionRecords: ConditionRecord[];
   /** The stress moments (§17.4) and how the app took them. */
   stress: StressResult[];
@@ -228,6 +230,7 @@ export class Journey {
       screens: [],
       steps: [],
       shortcuts: [],
+      oks: [],
       conditionRecords: [],
       stress: [],
       networkStress: false,
@@ -247,6 +250,11 @@ export class Journey {
   /** `allow` names this shortcut (`open_url`, or an app command's name). */
   allows(name: string): boolean {
     return this.state.allow.includes(name);
+  }
+
+  /** A person's OK was used during the journey; the report says where it came from (§11.3). */
+  noteOk(via: "chat" | "live view"): void {
+    this.state.oks.push(via);
   }
 
   noteShortcut(shortcut: UsedShortcut): void {
@@ -402,8 +410,17 @@ export function summaryNotes(state: JourneyState): string[] {
   if (state.shortcuts.length > 0) {
     lines.push(`Shortcuts used (a person doesn't have these): ${state.shortcuts.map((s) => `${s.tool} ${JSON.stringify(s.what)}`).join(", ")}.`);
   }
+  if (state.oks.length > 0) lines.push(okLine(state.oks));
   for (const record of state.conditionRecords) if (record.undo !== undefined) lines.push(record.undo);
   return lines;
+}
+
+/** `A person's OK was used 2 times: 1 in chat, 1 in the live view.` */
+export function okLine(oks: ReadonlyArray<"chat" | "live view">): string {
+  const chat = oks.filter((v) => v === "chat").length;
+  const live = oks.length - chat;
+  const parts = [...(chat > 0 ? [`${chat} in chat`] : []), ...(live > 0 ? [`${live} in the live view`] : [])];
+  return `A person's OK was used ${oks.length === 1 ? "once" : `${oks.length} times`}: ${parts.join(", ")}.`;
 }
 
 /** Strips the ids a user's eyes must not show (` id=save`) from text the SDK composed (error messages, `Closest:` lists). */

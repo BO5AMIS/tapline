@@ -39,7 +39,8 @@ import {
 import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourneys, screenSignature, writeReport, type FrameSource, type Touch } from "./journeyreport.js";
 import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
-import { Confirmations } from "./confirm.js";
+import { Confirmations, type OkVia } from "./confirm.js";
+import { Dialogs, okCaption } from "./elicit.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
@@ -541,6 +542,8 @@ export interface ToolsOptions {
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
   canConfirm?: boolean;
+  /** The host's dialog for a person's OK (AGENT-TOOLS 1.13 §11.3). Default: none, as when the client can't show one. */
+  dialogs?: Dialogs;
   /**
    * Where `pair` writes the development offer for the Metro helper (`~/.tapline/offers`), so a phone that can
    * only reach Metro (a firewall in the way of 7210-7219) still finds it. None: only the host's own endpoint.
@@ -1069,6 +1072,15 @@ interface CallState {
   entries: Array<{ entry: Omit<ActionLogEntry, "t" | "source">; at: Date }>;
 }
 
+/** What a call answers when the screen is not what the person was asked about (§11.3). */
+const CHANGED_WHILE_WAITING = "Error not_allowed: needs_confirmation: the screen changed while waiting for the OK; ask again.";
+
+/** A person's OK given while the call waited: what the screen showed then, and where it was given. */
+interface Waited {
+  fp: string;
+  via: OkVia;
+}
+
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
   private readonly reloadWaitMs: number;
@@ -1106,6 +1118,9 @@ export class TaplineTools {
   /** The list as it was before the current run of scrolls began. */
   private scrollBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   readonly confirmations: Confirmations;
+  private dialogs: Dialogs | undefined;
+  /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
+  private heldMs = 0;
   private readonly policy: PolicyFile;
   private readonly uxRules: UxRules;
   /**
@@ -1202,6 +1217,7 @@ export class TaplineTools {
     this.clock = options.clock ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.confirmations = options.confirmations ?? new Confirmations();
+    this.dialogs = options.dialogs;
     this.policy = options.policy ?? DEFAULT_POLICY;
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
@@ -1383,6 +1399,11 @@ export class TaplineTools {
       return this.shortcutWords("app_command", name).replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
     }
     return null;
+  }
+
+  /** The MCP server gives the dialog once it can ask its client (the client's capabilities are known after initialize). */
+  setDialogs(dialogs: Dialogs | undefined): void {
+    this.dialogs = dialogs;
   }
 
   /** The agent's client id for the call log; the MCP server passes the client's name once it is known. */
@@ -1930,6 +1951,7 @@ export class TaplineTools {
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
     const started = Date.now();
+    const heldAtStart = this.heldMs;
     const batchId = `b${started.toString(36)}`;
     const notes: string[] = [];
     const trace: string[] = [];
@@ -1938,7 +1960,8 @@ export class TaplineTools {
     // The newest log time when the current step began: a failed step shows the app's warnings since then (§15.4).
     let stepMark: number | undefined;
     for (const [i, step] of steps.entries()) {
-      if (Date.now() - started > RUN_TIMEOUT_MS) {
+      // Time spent waiting for a person's OK isn't counted (§9.3).
+      if (Date.now() - started - (this.heldMs - heldAtStart) > RUN_TIMEOUT_MS) {
         stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
         break;
       }
@@ -3481,10 +3504,13 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap), ...(this.userEyes() ? { noScroll: true } : {}) };
+        const tapLists = listsFor(this.policy, session.app);
+        const ready = await this.awaitOk(session, "tap", "press", pressParams, tapLists);
+        if ("stop" in ready) return ready.stop;
         // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
         // it, a person's input goes first, and the screen can't change between the check and the tap (PR #4 review).
         const turn = async (): Promise<CallToolResult | null> => {
-          const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
+          const gate = await this.policyGate(session, "tap", "press", pressParams, tapLists, ready.waited);
           if ("stop" in gate) return gate.stop;
           frames.push(await this.takeShot(session.id, frameWidth, 0.8));
           await this.host.request("press", pressParams, { sessionId: session.id });
@@ -3795,15 +3821,85 @@ export class TaplineTools {
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
     }
-    let granted = false;
+    // With a dialog the wait for a person's OK happens here, outside the live view's queue, so their own taps aren't held up.
+    const ready = await this.awaitOk(session, tool, method, params, lists);
+    if ("stop" in ready) return ready.stop;
+    let granted: OkVia | undefined;
     const answer = await perform(async () => {
-      const gate = await this.policyGate(session, tool, method, params, lists);
+      const gate = await this.policyGate(session, tool, method, params, lists, ready.waited);
       if ("stop" in gate) return gate.stop;
-      granted = gate.granted;
-      if (granted) this.logExtra = { confirmed: true };
+      granted = gate.via;
+      if (granted !== undefined) this.logExtra = { confirmed: true, confirmed_by: granted };
       return null;
     });
-    return granted && answer.isError !== true ? appendNote(answer, "Note: a person allowed this.") : answer;
+    if (granted === undefined || answer.isError === true) return answer;
+    this.journeyRun?.noteOk(granted);
+    return appendNote(answer, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
+  }
+
+  /** What the person was asked for and what the screen showed then; the touch is checked against it right before it happens. */
+  private fingerprint(element: TreeElement): string {
+    return `${elementKey(element)}|${element.label ?? ""}|${element.text ?? ""}`;
+  }
+
+  /**
+   * AGENT-TOOLS 1.13 §11.3: when the policy flags this touch and the host can show a dialog, ask there and wait for
+   * the first answer, from the dialog or the live view, up to the request's 120 s. Runs before the touch's turn in
+   * the live view's queue. `waited` carries the OK, used up, to the check right before the touch. Without a dialog,
+   * or when nothing needs an OK, `waited` is null and the touch goes the old way.
+   */
+  private async awaitOk(
+    session: SessionInfo,
+    tool: string,
+    method: string,
+    params: Record<string, unknown>,
+    lists: { confirm: string[]; block: string[] },
+  ): Promise<{ stop: CallToolResult } | { waited: Waited | null }> {
+    const dialogs = this.dialogs;
+    if (dialogs === undefined || !dialogs.available() || lists.confirm.length === 0) return { waited: null };
+    const resolved = await this.resolveForPolicy(session, method, params);
+    // A target that can't be checked is answered by the check right before the touch.
+    if (resolved.kind === "error") return { waited: null };
+    const verdict = this.policyWords(lists, resolved.elements);
+    if (verdict.kind !== "confirm") return { waited: null };
+    const label = verdict.element.label ?? verdict.element.text ?? undefined;
+    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
+    const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
+    const key = `${client}|${session.app.id}|${tool}|${elementKey(verdict.element)}`;
+    const ask = { kind: tool, caption, word: verdict.word };
+    const fp = this.fingerprint(verdict.element);
+    const name = this.shortName(verdict.element, false);
+    const refuse = (tail: string): { stop: CallToolResult } => {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return { stop: fail(`Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${tail}`) };
+    };
+    const check = this.confirmations.check(key, ask);
+    if (check.granted) return { waited: { fp, via: check.via } };
+    if ("held" in check) {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return {
+        stop: fail(
+          `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
+        ),
+      };
+    }
+    const abort = new AbortController();
+    const waitStarted = Date.now();
+    // The dialog's answer goes through the same request the live view answers: the first one wins, the other is closed.
+    void dialogs
+      .askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
+      .then((answer) => {
+        if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
+      });
+    const settled = await this.confirmations.wait(check.request.id);
+    abort.abort();
+    // Time spent waiting for a person isn't the batch's time (§9.3).
+    this.heldMs += Date.now() - waitStarted;
+    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
+    if (!settled.allow) return refuse("They declined. Don't ask again by repeating the call: ask your user what they want.");
+    const used = this.confirmations.check(key, ask);
+    if (!used.granted) return { stop: fail(CHANGED_WHILE_WAITING) };
+    return { waited: { fp, via: used.via } };
   }
 
   /**
@@ -3816,7 +3912,9 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
     lists: { confirm: string[]; block: string[] },
-  ): Promise<{ stop: CallToolResult } | { granted: boolean }> {
+    /** An OK the person gave while the call waited (`awaitOk`): used up, and checked against the screen as it is now. */
+    waited?: Waited | null,
+  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
     const resolved = await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
@@ -3829,6 +3927,15 @@ export class TaplineTools {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
       return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
     }
+    if (waited !== undefined && waited !== null) {
+      // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
+      const same = verdict.kind === "confirm" && this.fingerprint(verdict.element) === waited.fp && this.host.current()?.id === session.id;
+      if (!same) {
+        this.showAction("agent", method, undefined, params, "not_allowed", "needs_confirmation");
+        return { stop: fail(CHANGED_WHILE_WAITING) };
+      }
+      return { granted: true, via: waited.via };
+    }
     if (verdict.kind === "none") return { granted: false };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
@@ -3836,7 +3943,7 @@ export class TaplineTools {
     // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
     const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
     const check = this.confirmations.check(`${client}|${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
-    if (check.granted) return { granted: true };
+    if (check.granted) return { granted: true, via: check.via };
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
@@ -4562,13 +4669,19 @@ export class TaplineTools {
           const stale = this.staleRef(press);
           if (stale !== null) return stale;
         }
+        let ready: { waited: Waited | null } = { waited: null };
+        if (press !== undefined) {
+          const waitedFor = await this.awaitOk(session, "tap", "press", press, listsFor(this.policy, session.app));
+          if ("stop" in waitedFor) return waitedFor.stop;
+          ready = waitedFor;
+        }
         // With a tap, the policy check and the whole window are one turn of the live view's queue: a pause refuses
         // it, a person's input goes first and waits for the window, and the screen can't change between the check
         // and the tap (Codex and CodeRabbit reviews of 1.3.0).
         const tapped = press;
         const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
           if (tapped !== undefined) {
-            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app));
+            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app), ready.waited);
             if ("stop" in gate) return { stop: gate.stop };
           }
           return { result: await this.measureWindow(session, seconds, tapped) };
