@@ -191,13 +191,20 @@ Tapline on. Read its output, then go on with step 6. By hand:
 - `record { action: "start", name }` before a flow worth keeping (sign-up, checkout,
   settings), then act as usual; `record { action: "stop" }` saves it. Targets are saved by
   id, else label, else text, so give key controls `testID`s. Add `wait_for` steps as the
-  checks ("Thanks for your order" appears).
+  checks ("Thanks for your order" appears), and `compare_screen` where how the screen looks
+  matters: right after an action it becomes that step's `expect: {"matches": name}`, and its
+  reference picture is copied next to the script.
 - `replay { name }` runs it again and stops at the first step that fails or lands on a
   different screen. Use it after a change to check nothing broke; the user can run
-  `tapline replay <name>` without an agent. Scripts keep typed text: no real passwords.
-- `compare_screen { name }` saves a reference picture of a screen the first time and later
-  shows what changed (how much, where, which elements, marked in red). Use the same `width`
-  each time, and `update: true` when the change is intended.
+  `tapline replay <name>` without an agent (`--update-references` saves new pictures when a
+  change is intended). Scripts keep typed text, but never a password field's: no real passwords.
+- `compare_screen { name }` saves a reference picture of a screen the first time; later it
+  answers `Matches` or `Differs` against `threshold` (the percent that may change, default
+  0.5), with the regions that changed and the elements there, and on a difference a picture
+  with the changes in red. `ignore` paints out what always changes (a clock: `{id}` or a rect).
+  Use the same `width` each time, and `update: true` when the change is intended. In `run` a
+  `compare_screen` step, or `expect: {"matches": name}` on a step, is a check that stops the
+  batch with `expect_failed` when the screen differs.
 - `filmstrip` (optionally `tap` first) captures several frames in one image for
   animations, transitions and loading states.
 

@@ -136,7 +136,7 @@ and `y` only for things with no element.
 | start from a fresh state | `reload` (development builds) |
 | answer an alert | the app's alert shows as an `Alert:` line in the header (in a build with Tapline's native module, also an alert iOS draws, and the share sheet as `Alert: "Share sheet"`). With Tapline's stand-in its buttons are also in the list: tap them. When the note says it is an OS alert, Tapline can't tap it: ask the user to tap the button you name |
 | keep a flow to run again after a change | `record` with `start`, act, `record` with `stop`; later `replay` |
-| compare a screen with how it looked before | `compare_screen` with a name |
+| compare a screen with how it looked before | `compare_screen` with a name: `Matches` or `Differs` (within `threshold`, default 0.5%); `ignore` for a clock or an ad. In `run` and scripts, `expect: {"matches": name}` makes it a check |
 | close a sheet by swiping it down, or drag a pan view | `swipe` from a point on it to where the finger lifts. A gesture built on react-native-gesture-handler, a slider or a map answers `no_action`: say you couldn't test it. Lists move with `scroll` |
 | see an animation or a loading state | `filmstrip`: several frames in one picture |
 | let the user watch, or do a step themselves (their own password) | `viewer`, and give them the link |
