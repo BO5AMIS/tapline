@@ -18,7 +18,8 @@ import {
 import { loadAccounts, type GitProbe } from "./accounts.js";
 import { Confirmations } from "./confirm.js";
 import { ControlQueue } from "./control.js";
-import { isToolName, callTool } from "./dispatch.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { isToolName, callTool, type ToolName } from "./dispatch.js";
 import { realRunner } from "./journeyexport.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
 import { TaplineHost, type ListenResult } from "./server.js";
@@ -130,8 +131,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     ...(options.api === true
       ? {
           api: async (tool: string, args: Record<string, unknown>, clientId: string | undefined) =>
-            // Every call here is a thin call: the log says so, and the report flags a run of them (§16.1).
-            isToolName(tool) ? (() => { const tools = toolsFor(clientId); return tools.asThinCall(() => callTool(tools, tool, args)); })() : undefined,
+            isToolName(tool) ? thinCall(tool, args, clientId) : undefined,
         }
       : {}),
   });
@@ -204,6 +204,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   };
   // The connection's own tools: what an MCP server uses, and what the live viewer's person input goes through.
   const primary = new TaplineTools(host, toolsOptions);
+
+  /** Every call through `/api` is a thin call: the log says so, and the report flags a run of them (§16.1). */
+  function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined): Promise<CallToolResult> {
+    const tools = toolsFor(clientId);
+    return tools.asThinCall(() => callTool(tools, tool, args));
+  }
 
   function toolsFor(clientId: string | undefined): TaplineTools {
     if (clientId === undefined) return primary;

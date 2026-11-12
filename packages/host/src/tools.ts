@@ -1466,6 +1466,7 @@ export class TaplineTools {
       call: state.call,
       ...(client !== undefined && client !== "" ? { client } : {}),
       size,
+      v: 2 as const,
       ...(state.thin ? { via: "call" as const } : {}),
     };
     const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;

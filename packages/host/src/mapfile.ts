@@ -130,7 +130,9 @@ export function nodeMapIo(): MapIo {
       try {
         handle = await open(path, "wx");
       } catch (error) {
-        if (errorCode(error) === "EEXIST") return false;
+        // Windows says EPERM (or EBUSY) while a rival's rename or delete of the lock is under way: it is held.
+        const code = errorCode(error);
+        if (code === "EEXIST" || code === "EPERM" || code === "EBUSY") return false;
         throw error;
       }
       try {
@@ -444,7 +446,11 @@ async function withLock<T>(io: MapIo, lockPath: string, body: () => Promise<T>):
     if (await io.createExclusive(lockPath, token)) break;
     const madeAt = await io.statMtimeMs(lockPath);
     // It vanished between the two calls: try again at once.
-    if (madeAt === null) continue;
+    if (madeAt === null) {
+      // A real permission error looks the same as a busy lock; never spin past the deadline.
+      if (io.now() > deadline) throw new Error(`the map file is locked (${lockPath}); try again`);
+      continue;
+    }
     if (io.now() - madeAt > LOCK_STALE_MS) {
       await reclaim(io, lockPath, token);
       continue;

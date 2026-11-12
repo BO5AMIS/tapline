@@ -32,6 +32,7 @@ function at(call: number, tool: string, atMs: number, ms: number | undefined, ex
     ok: true,
     session,
     call,
+    v: 2,
     ...(ms !== undefined ? { ms } : {}),
     ...extra,
   };
@@ -123,6 +124,31 @@ describe("the report's seconds", () => {
     expect(timeLine(report(entries)) ?? "").toContain("thinking between calls 0 s");
   });
 
+  it("two sessions under one client name are not mixed", () => {
+    const entries = [
+      at(1, "tap", 0, 1000, { client: "x" }, "s1"),
+      at(1, "tap", 2000, 1000, { client: "x" }, "s2"),
+      at(2, "tap", 11_000, 1000, { client: "x" }, "s1"),
+      at(2, "tap", 13_000, 1000, { client: "x" }, "s2"),
+    ];
+    // s1: 11000 - 1000 = 10 s; s2: 13000 - 3000 = 10 s. Mixed in one list the gaps would be 1 s, 8 s, 1 s.
+    expect(timeLine(report(entries)) ?? "").toContain("thinking between calls 20 s (median 10.0 s)");
+  });
+
+  it("a log spanning the upgrade: only v 2 entries make the Time line", () => {
+    const old = (call: number, atMs: number): ActionLogEntry => {
+      const e = at(call, "tap", atMs, 1000);
+      delete e.v;
+      return e;
+    };
+    // old entries stamped the end of the action: left out, like entries without ms
+    const entries = [old(1, 0), old(2, 5000), at(3, "tap", 20_000, 1000), at(4, "tap", 25_000, 1000)];
+    const line = timeLine(report(entries)) ?? "";
+    expect(line).toContain("thinking between calls 4 s (median 4.0 s)");
+    expect(line).toContain("in the tool 2 s (median 1.0 s; tap 1.0 s)");
+    expect(timeLine(report([old(1, 0), old(2, 5000)]))).toBeUndefined();
+  });
+
   it("entries carry ms through a real call, reads too", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tapline-seconds-"));
     dirs.push(dir);
@@ -142,7 +168,10 @@ describe("the report's seconds", () => {
     await tools.tap({ target: { id: "save" } });
     const log = readdirSync(dir).flatMap((f) => readFileSync(join(dir, f), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>));
     expect(log.length).toBeGreaterThanOrEqual(2);
-    for (const l of log) expect(typeof l["ms"]).toBe("number");
+    for (const l of log) {
+      expect(typeof l["ms"]).toBe("number");
+      expect(l["v"]).toBe(2);
+    }
     expect(log.some((l) => l["via"] !== undefined)).toBe(false);
   });
 

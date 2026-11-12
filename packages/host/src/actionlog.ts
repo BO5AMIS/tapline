@@ -20,6 +20,8 @@ export interface ActionLogEntry {
   reason?: string;
   /** The time in the tool, in ms: an action's own, a read's whole call (AGENT-TOOLS 1.13 §16.1). `t` is when it began. */
   ms?: number;
+  /** 2: `t` is when the call began and `ms` its time. Older entries stamped the end, so the Time line leaves them out. */
+  v?: 2;
   /** `"call"` when the call came through the thin call, a new process each time (§18.10). */
   via?: "call";
   app?: string;

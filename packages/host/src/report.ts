@@ -93,7 +93,8 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     const tool = first.of ?? (group.some((e) => e.batch !== undefined) ? "run" : first.tool);
     const single = group.length === 1 && first.batch === undefined && tool !== "run";
     // Every entry's `t` is when it began and `ms` how long it took; the call ends when its last entry does.
-    const timed = group.filter((e) => typeof e.ms === "number" && Number.isFinite(e.ms) && e.ms >= 0);
+    // Only v 2 entries stamp the start; older ones stamped the end of an action, so they give no time.
+    const timed = group.filter((e) => e.v === 2 && typeof e.ms === "number" && Number.isFinite(e.ms) && e.ms >= 0);
     const start = Math.min(...group.map((e) => Date.parse(e.t)));
     const end = timed.length > 0 ? Math.max(...timed.map((e) => Date.parse(e.t) + (e.ms as number))) : undefined;
     const client = group.find((e) => e.client !== undefined)?.client;
@@ -331,7 +332,8 @@ function timeLine(calls: readonly CallRecord[]): string | undefined {
   const gaps: number[] = [];
   const byClient = new Map<string, CallRecord[]>();
   for (const c of timed) {
-    const key = c.client ?? "";
+    // A client name can repeat across sessions; their calls never follow one another.
+    const key = `${c.session}\0${c.client ?? ""}`;
     const list = byClient.get(key);
     if (list === undefined) byClient.set(key, [c]);
     else list.push(c);
