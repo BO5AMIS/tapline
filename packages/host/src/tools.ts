@@ -790,6 +790,8 @@ export class TaplineTools {
   private replayContext: { referencesDir: string; diffDir: string; update: boolean } | null = null;
   /** Where the latest failed check of the running batch saved its picture. */
   private diffSaved: string | null = null;
+  /** The elements the latest comparison painted its ignore list from: a recording saves its mask from the same list. */
+  private lastMaskElements: TreeResult["elements"] | undefined;
   /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
@@ -1878,6 +1880,7 @@ export class TaplineTools {
     } catch (error) {
       return { kind: "error", line: describeError(error) };
     }
+    this.lastMaskElements = undefined;
     if (!SCRIPT_NAME.test(name)) return { kind: "error", line: BAD_REFERENCE_NAME };
     const path = options.referencesDirs.map((dir) => join(dir, `${name}.jpg`)).find((candidate) => existsSync(candidate));
     if (path === undefined) return { kind: "missing", shot };
@@ -1908,6 +1911,7 @@ export class TaplineTools {
     const mask: DiffBox[] = [];
     if (options.ignore.length > 0) {
       seen = await this.peekElements(session.id);
+      this.lastMaskElements = seen.elements;
       if (seen.scaleBase === undefined) {
         return { kind: "error", line: "Error internal: couldn't read the screen's elements to paint out what ignore names." };
       }
@@ -2085,7 +2089,7 @@ export class TaplineTools {
     const session = this.host.current();
     let kept = check.ignore;
     if (session !== undefined && kept !== undefined && kept.length > 0) {
-      const stable = await this.stableIgnore(session.id, kept);
+      const stable = await this.stableIgnore(session.id, kept, this.lastMaskElements);
       if (typeof stable === "string") return stable;
       kept = stable;
     }
@@ -2106,9 +2110,10 @@ export class TaplineTools {
    * `ignore` as a script keeps it (AGENT-TOOLS 1.9 §14.2): a ref becomes the element's id, else label, else text,
    * read from the list now. A string is the error answer when a ref can't be kept.
    */
-  private async stableIgnore(sessionId: string, ignore: IgnoreItem[]): Promise<IgnoreItem[] | string> {
+  private async stableIgnore(sessionId: string, ignore: IgnoreItem[], known?: TreeResult["elements"]): Promise<IgnoreItem[] | string> {
     if (!ignore.some((item) => !("width" in item) && item.ref !== undefined)) return ignore;
-    const seen = await this.peekElements(sessionId);
+    // The elements the comparison painted out when it had them, so the script keeps exactly that mask.
+    const seen = known !== undefined ? { elements: known } : await this.peekElements(sessionId);
     const kept: IgnoreItem[] = [];
     for (const item of ignore) {
       if ("width" in item || item.ref === undefined) {
