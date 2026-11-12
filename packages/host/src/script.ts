@@ -50,6 +50,7 @@ const TOOL_OF: Record<string, string> = {
   back: "back",
   swipe: "swipe",
   openURL: "open_url",
+  compareScreen: "compare_screen",
   command: "app_command",
   waitFor: "wait_for",
   sleep: "wait",
@@ -85,6 +86,22 @@ export function scriptSteps(calls: MethodStep[]): Step[] {
     const step = toToolStep(call);
     if (step === null) continue;
     const previous = steps[steps.length - 1];
+    // AGENT-TOOLS 1.9 §14.2: a compare_screen right after an action is that step's `matches` (a width other than the default stays a step).
+    if (
+      step.tool === "compare_screen" &&
+      previous !== undefined &&
+      !["wait_for", "wait", "compare_screen"].includes(previous.tool) &&
+      previous.expect === undefined &&
+      (step as Record<string, unknown>)["width"] === undefined
+    ) {
+      const c = step as Record<string, unknown>;
+      previous.expect = {
+        matches: c["name"] as string,
+        ...(typeof c["threshold"] === "number" ? { threshold: c["threshold"] } : {}),
+        ...(Array.isArray(c["ignore"]) ? { ignore: c["ignore"] as Array<Record<string, unknown>> } : {}),
+      };
+      continue;
+    }
     if (step.tool === "wait_for" && previous !== undefined && previous.tool !== "wait_for" && previous.tool !== "wait" && previous.expect === undefined) {
       const w = step as Record<string, unknown>;
       const which = ["text", "id", "label"].find((key) => typeof w[key] === "string");
@@ -134,6 +151,18 @@ export function refStep(steps: Step[]): number | null {
     return typeof target === "object" && target !== null && "ref" in target;
   });
   return at >= 0 ? at : null;
+}
+
+/**
+ * A replay's failure text for JUnit (AGENT-TOOLS 1.9 §14.3): when a picture check wrote its difference, the first
+ * line (the failure message) ends with ` (diff: <path>)`.
+ */
+export function failureWithDiff(failure: string): string {
+  const lines = failure.split("\n");
+  const note = lines.map((line) => /^Note: the difference is saved at (.+)\.$/.exec(line)).find((m) => m !== null && m !== undefined);
+  if (note === null || note === undefined) return failure;
+  lines[0] = `${lines[0] ?? ""} (diff: ${note[1] ?? ""})`;
+  return lines.join("\n");
 }
 
 /** JUnit XML for `tapline replay --junit`: one test case per script, the stop message as the failure. */

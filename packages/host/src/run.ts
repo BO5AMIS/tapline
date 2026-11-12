@@ -22,12 +22,15 @@ export const expectSchema = z
     value: z.string().optional(),
     matches: z.string().optional(),
     threshold: z.number().min(0).max(100).optional(),
+    /** Targets or rects painted out before the picture check (the shape of compare_screen's ignore); checked by the executor. */
+    ignore: z.array(z.record(z.string(), z.unknown())).optional(),
     timeout: z.number().min(0.5).max(30).optional(),
   })
   .refine((e) => [e.text, e.id, e.label].filter((v) => v !== undefined).length === 1 || (e.matches !== undefined && [e.text, e.id, e.label].every((v) => v === undefined)), {
     message: "expect needs exactly one of text, id or label, or matches (alone, or with one of them)",
   })
   .refine((e) => e.threshold === undefined || e.matches !== undefined, { message: "expect.threshold goes with matches" })
+  .refine((e) => e.ignore === undefined || e.matches !== undefined, { message: "expect.ignore goes with matches" })
   .refine((e) => e.value === undefined || e.text === undefined, { message: "expect.value goes with id or label" });
 export type Expect = z.infer<typeof expectSchema>;
 

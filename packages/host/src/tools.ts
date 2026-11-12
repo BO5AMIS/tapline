@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
@@ -84,6 +84,7 @@ const rectSchema = z
     height: z.number().positive().describe("Points"),
   })
   .strict();
+const ignoreListSchema = z.array(z.union([rectSchema, targetSchema]));
 
 const targetField = targetSchema.describe("Exactly one of ref, id, label, text or x and y");
 const lookField = z
@@ -780,6 +781,13 @@ export class TaplineTools {
   private personNotePending = false;
   private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
   private replaying = false;
+  /**
+   * While a script replays (AGENT-TOOLS 1.9 §14.3): the references folder next to it (looked in first), where a
+   * failed check puts its red picture, and whether the checks save instead of compare (`--update-references`).
+   */
+  private replayContext: { referencesDir: string; diffDir: string; update: boolean } | null = null;
+  /** Where the latest failed check of the running batch saved its picture. */
+  private diffSaved: string | null = null;
   /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
@@ -1042,7 +1050,14 @@ export class TaplineTools {
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
       }
+      if (step.expect?.ignore !== undefined) {
+        const ignored = ignoreListSchema.safeParse(step.expect.ignore);
+        if (!ignored.success) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): expect.ignore: ${ignored.error.issues.map((issue) => issue.message).join("; ")}`);
+        }
+      }
     }
+    this.diffSaved = null;
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
     const started = Date.now();
@@ -1093,7 +1108,8 @@ export class TaplineTools {
     const head = stop === null
       ? `Ran ${total} of ${total} steps in ${((Date.now() - started) / 1000).toFixed(1)} s.`
       : `Error ${stop.code}: Ran ${ran} of ${total} steps; stopped at step ${stop.index + 1} (${describeRunStep(steps[stop.index] as Step)}): ${stop.message}`;
-    const first = [head, ...trace, ...(stop?.rest ?? [])].join("\n");
+    const diffNote = stop !== null && this.diffSaved !== null ? [`Note: the difference is saved at ${this.diffSaved}.`] : [];
+    const first = [head, ...trace, ...(stop?.rest ?? []), ...diffNote].join("\n");
     let response: CallToolResult;
     const live = this.host.current();
     if (args.look === false || live === undefined) {
@@ -1174,7 +1190,7 @@ export class TaplineTools {
       if (missed !== null) return missed;
     }
     // A picture check comes last, once the rest held.
-    return e.matches === undefined ? null : this.matchMissed(e.matches, e.threshold ?? DEFAULT_MATCH_THRESHOLD);
+    return e.matches === undefined ? null : this.matchMissed(e.matches, e.threshold ?? DEFAULT_MATCH_THRESHOLD, ignoreListSchema.parse(e.ignore ?? []));
   }
 
   private async textExpectMissed(e: Expect): Promise<string | null> {
@@ -1930,13 +1946,69 @@ export class TaplineTools {
   }
 
   /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
-  private async matchMissed(name: string, threshold: number): Promise<string | null> {
+  private async matchMissed(name: string, threshold: number, ignore: IgnoreItem[]): Promise<string | null> {
     const session = this.host.current();
     if (session === undefined) return "the app isn't connected";
     const folder = this.referenceFolder(session);
     if (typeof folder !== "string") return parseError(folder.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")).message;
-    const check = await this.checkAgainstReference(session, name, { threshold, ignore: [], width: DEFAULT_SCREENSHOT_WIDTH, referencesDirs: [folder] });
+    if (this.replayContext?.update === true) {
+      // --update-references: the check saves the screen into the script's folder, and holds.
+      const saved = await this.saveReferenceHere(session, name, DEFAULT_SCREENSHOT_WIDTH, this.replayContext.referencesDir);
+      return saved.isError === true ? parseError(saved.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")).message : null;
+    }
+    const check = await this.checkAgainstReference(session, name, {
+      threshold,
+      ignore,
+      width: DEFAULT_SCREENSHOT_WIDTH,
+      referencesDirs: this.referencesDirs(folder),
+    });
+    this.keepDiff(check, name);
     return this.referenceReason(check, name)?.message ?? null;
+  }
+
+  /** Where a check looks for `<name>.jpg`: the folder next to a replayed script first, then the app's own store. */
+  private referencesDirs(folder: string): string[] {
+    return this.replayContext !== null ? [this.replayContext.referencesDir, folder] : [folder];
+  }
+
+  /** In a replay, a failed check leaves its red picture at `<script>.diff/<name>.jpg`. */
+  private keepDiff(check: ReferenceCheck, name: string): void {
+    if (this.replayContext === null || check.kind !== "differs") return;
+    const path = join(this.replayContext.diffDir, `${name}.jpg`);
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, Buffer.from(check.image.data, "base64"));
+      this.diffSaved = path;
+    } catch {
+      // the failure still reads without the picture
+    }
+  }
+
+  /** Takes the screen and saves it as the reference `name` in `dir`. */
+  private async saveReferenceHere(session: SessionInfo, name: string, width: number, dir: string): Promise<CallToolResult> {
+    try {
+      return this.writeReference(dir, name, await this.takeShot(session.id, width, 0.9));
+    } catch (error) {
+      return fail(describeError(error));
+    }
+  }
+
+  private writeReference(folder: string, name: string, shot: ShotImage): CallToolResult {
+    const path = join(folder, `${name}.jpg`);
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      writeFileSync(path, Buffer.from(shot.data, "base64"), { mode: 0o600 });
+    } catch (error) {
+      return fail(`Error internal: couldn't save the reference: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let size = `${shot.width ?? "?"}x${shot.height ?? "?"}`;
+    try {
+      const real = imageSize(shot);
+      size = `${real.width}x${real.height}`;
+    } catch {
+      // the app's own size stays
+    }
+    return text(`Saved the reference "${name}" (${size} px).`);
   }
 
   /** A `compare_screen` step of `run`: it never saves; it holds on a match and stops the batch otherwise. */
@@ -1947,19 +2019,73 @@ export class TaplineTools {
     if (!SCRIPT_NAME.test(name)) return fail("Error bad_params: name the reference with letters, digits, '.', '_' and '-'.");
     const folder = this.referenceFolder(session);
     if (typeof folder !== "string") return folder;
+    if (this.replayContext?.update === true) {
+      return this.saveReferenceHere(session, name, args.width ?? DEFAULT_SCREENSHOT_WIDTH, this.replayContext.referencesDir);
+    }
     const check = await this.checkAgainstReference(session, name, {
       threshold: args.threshold ?? DEFAULT_MATCH_THRESHOLD,
       ignore: args.ignore ?? [],
       width: args.width ?? DEFAULT_SCREENSHOT_WIDTH,
-      referencesDirs: [folder],
+      referencesDirs: this.referencesDirs(folder),
     });
+    this.keepDiff(check, name);
     const why = this.referenceReason(check, name);
     if (why !== null) return fail(`Error ${why.code}: ${why.message}`);
     if (check.kind !== "match") return fail("Error internal: the comparison gave no answer.");
     return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
   }
 
+  /**
+   * `ignore` as a script keeps it (AGENT-TOOLS 1.9 §14.2): a ref becomes the element's id, else label, else text,
+   * read from the list now. A string is the error answer when a ref can't be kept.
+   */
+  private async stableIgnore(sessionId: string, ignore: IgnoreItem[]): Promise<IgnoreItem[] | string> {
+    if (!ignore.some((item) => !("width" in item) && item.ref !== undefined)) return ignore;
+    const seen = await this.peekElements(sessionId);
+    const kept: IgnoreItem[] = [];
+    for (const item of ignore) {
+      if ("width" in item || item.ref === undefined) {
+        kept.push(item);
+        continue;
+      }
+      const element = seen.elements.find((e) => e.ref === item.ref);
+      if (element === undefined) return `Error bad_params: ignore ${item.ref} isn't on the screen, so it can't be saved in a script.`;
+      if (typeof element.testID === "string" && element.testID !== "") kept.push({ id: element.testID });
+      else if (typeof element.label === "string" && element.label !== "") kept.push({ label: element.label });
+      else if (typeof element.text === "string" && element.text !== "") kept.push({ text: element.text });
+      else {
+        return `Error bad_params: ignore ${describeElement(element)} has no id, label or text, so a script couldn't find it again; give it a testID, or ignore a rect {x, y, width, height}.`;
+      }
+    }
+    return kept;
+  }
+
   async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    const recording = this.recording !== null && !this.replaying;
+    const session = this.host.current();
+    let kept: IgnoreItem[] | undefined = args.ignore;
+    if (recording && session !== undefined && kept !== undefined && kept.length > 0) {
+      const stable = await this.stableIgnore(session.id, kept);
+      if (typeof stable === "string") return fail(stable);
+      kept = stable;
+    }
+    const answer = await this.compareScreenNow(args);
+    if (recording && this.recording !== null && answer.isError !== true) {
+      // `update` is never written: the script checks against the reference it carries.
+      this.recording.steps.push({
+        method: "compareScreen",
+        params: {
+          name: args.name.trim(),
+          ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+          ...(kept !== undefined && kept.length > 0 ? { ignore: kept } : {}),
+          ...(args.width !== undefined ? { width: args.width } : {}),
+        },
+      });
+    }
+    return answer;
+  }
+
+  private async compareScreenNow(args: Shape<"compare_screen">): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const name = args.name.trim();
@@ -1967,23 +2093,7 @@ export class TaplineTools {
     const folder = this.referenceFolder(session);
     if (typeof folder !== "string") return folder;
     const width = args.width ?? DEFAULT_SCREENSHOT_WIDTH;
-    const save = (shot: ShotImage): CallToolResult => {
-      const path = join(folder, `${name}.jpg`);
-      try {
-        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-        writeFileSync(path, Buffer.from(shot.data, "base64"), { mode: 0o600 });
-      } catch (error) {
-        return fail(`Error internal: couldn't save the reference: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      let size = `${shot.width ?? "?"}x${shot.height ?? "?"}`;
-      try {
-        const real = imageSize(shot);
-        size = `${real.width}x${real.height}`;
-      } catch {
-        // the app's own size stays
-      }
-      return text(`Saved the reference "${name}" (${size} px).`);
-    };
+    const save = (shot: ShotImage): CallToolResult => this.writeReference(folder, name, shot);
     if (args.update === true) {
       try {
         return save(await this.takeShot(session.id, width, 0.9));
@@ -2108,7 +2218,10 @@ export class TaplineTools {
         }
         this.recording = null;
         const count = script.steps.length;
-        const lines = [`Saved ${count} step${count === 1 ? "" : "s"} to ${path}.`];
+        // AGENT-TOOLS 1.9 §14.3: the references the steps use travel with the script.
+        const copied = this.copyReferences(script.steps, recording.app, path);
+        const withPictures = copied === null ? "" : `, and ${copied.count} reference picture${copied.count === 1 ? "" : "s"} to ${copied.folder}`;
+        const lines = [`Saved ${count} step${count === 1 ? "" : "s"} to ${path}${withPictures}.`];
         const ref = refStep(script.steps);
         if (ref !== null) {
           lines.push(
@@ -2129,6 +2242,38 @@ export class TaplineTools {
     }
   }
 
+  /** `<script dir>/<script name>.references` and `.diff` for a script file. */
+  private scriptSideFolder(path: string, kind: "references" | "diff"): string {
+    return join(dirname(path), `${basename(path).replace(/\.json$/i, "")}.${kind}`);
+  }
+
+  /** Copies each reference the steps use from the app's store next to the script; null when there are none. */
+  private copyReferences(steps: Step[], app: { name: string; id?: string }, scriptPath: string): { count: number; folder: string } | null {
+    const dir = this.options.baselinesDir;
+    if (dir === undefined) return null;
+    const names = new Set<string>();
+    for (const step of steps) {
+      const p = step as Record<string, unknown>;
+      if (step.tool === "compare_screen" && typeof p["name"] === "string") names.add(p["name"]);
+      if (step.expect?.matches !== undefined) names.add(step.expect.matches);
+    }
+    const store = join(dir, (app.id ?? app.name).replace(/[^\w.-]/g, "_"));
+    const folder = this.scriptSideFolder(scriptPath, "references");
+    let count = 0;
+    for (const name of names) {
+      const from = join(store, `${name}.jpg`);
+      if (!existsSync(from)) continue;
+      try {
+        mkdirSync(folder, { recursive: true });
+        copyFileSync(from, join(folder, `${name}.jpg`));
+        count++;
+      } catch {
+        // the script still saved; the picture stays in the store
+      }
+    }
+    return count === 0 ? null : { count, folder };
+  }
+
   private scriptList(): string {
     const dir = this.options.scriptsDir;
     if (dir === undefined || !existsSync(dir)) return "No saved scripts.";
@@ -2145,7 +2290,7 @@ export class TaplineTools {
     return lines.length === 0 ? "No saved scripts." : ["Saved scripts:", ...lines].join("\n");
   }
 
-  async replay(args: Shape<"replay">): Promise<CallToolResult> {
+  async replay(args: Shape<"replay">, options: { updateReferences?: boolean } = {}): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
@@ -2179,6 +2324,11 @@ export class TaplineTools {
       else if (said.startsWith("Reload requested, but")) notes.push("Note: the app hadn't reconnected after starting fresh when the steps began.");
     }
     this.replaying = true;
+    this.replayContext = {
+      referencesDir: this.scriptSideFolder(path, "references"),
+      diffDir: this.scriptSideFolder(path, "diff"),
+      update: options.updateReferences === true,
+    };
     try {
       const answer = await this.run({ steps: script.steps, look: args.look, screenshot: args.screenshot });
       if (notes.length === 0) return answer;
@@ -2188,6 +2338,7 @@ export class TaplineTools {
         : answer;
     } finally {
       this.replaying = false;
+      this.replayContext = null;
     }
   }
 

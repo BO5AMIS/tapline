@@ -19,7 +19,7 @@ import { formatLogs } from "./format.js";
 import { runInit } from "./init.js";
 import { runMcp } from "./mcp.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
-import { junitXml } from "./script.js";
+import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
@@ -39,7 +39,7 @@ Commands:
            (run it in the app's folder; --dry-run shows the plan, --no-install skips the install)
   dev      Serve Metro over https in your tailnet (iOS needs it); \`tapline dev -- <command>\`
            also runs your Metro command with EXPO_PACKAGER_PROXY_URL set
-  replay   Replay scripts without an agent: tapline replay <file.json | name>… [--junit out.xml]
+  replay   Replay scripts without an agent: tapline replay <file.json | name>… [--junit out.xml] [--update-references]
            (exit 0: all held, 1: one stopped, 2: one couldn't start)
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
@@ -67,6 +67,8 @@ Options:
   --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
   --stop             For dev: stop serving Metro
   --wait <s>         For replay: how long to wait for the app to connect (default 60)
+  --update-references  For replay: compare_screen steps and matches checks save the screen into the
+                     script's .references folder instead of comparing (exit 0 when every step ran)
   --project <dir>    For skill install: install into that project's .claude/skills and
                      .agents/skills instead of your home folder. For init: the app's folder
                      (default: this folder)
@@ -179,7 +181,13 @@ async function runDev(
  * script's name. Exit 0 when every script held, 1 when one stopped, 2 when one couldn't start (no app, a bad
  * file). `--junit out.xml` writes one test case per script.
  */
-async function runReplay(config: HostConfig, scripts: string[], waitRaw: string | undefined, junitPath: string | undefined): Promise<number> {
+async function runReplay(
+  config: HostConfig,
+  scripts: string[],
+  waitRaw: string | undefined,
+  junitPath: string | undefined,
+  updateReferences = false,
+): Promise<number> {
   const waitSeconds = waitRaw === undefined ? 60 : Number(waitRaw);
   if (!(waitSeconds > 0)) {
     process.stderr.write("--wait is in seconds, above 0\n");
@@ -212,13 +220,13 @@ async function runReplay(config: HostConfig, scripts: string[], waitRaw: string 
     for (const script of scripts) {
       const isFile = /[\\/]|\.json$/i.test(script);
       const started = Date.now();
-      const outcome = await tools.replay(isFile ? { path: script } : { name: script });
+      const outcome = await tools.replay(isFile ? { path: script } : { name: script }, { updateReferences });
       const textOut = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
       process.stdout.write(`${script}\n${textOut}\n\n`);
       const couldntStart = outcome.isError === true && /^Error (not_found|bad_params|not_connected|internal):/.test(textOut) && !/^Error \w+: Ran \d+ of/.test(textOut);
       if (couldntStart) code = 2;
       else if (outcome.isError === true && code === 0) code = 1;
-      results.push({ name: script, seconds: (Date.now() - started) / 1000, failure: outcome.isError === true ? textOut : null });
+      results.push({ name: script, seconds: (Date.now() - started) / 1000, failure: outcome.isError === true ? failureWithDiff(textOut) : null });
     }
     if (junitPath !== undefined) writeFileSync(junitPath, junitXml(results));
     return code;
@@ -242,6 +250,7 @@ async function main(argv: string[]): Promise<number> {
       stop: { type: "boolean" },
       wait: { type: "string" },
       junit: { type: "string" },
+      "update-references": { type: "boolean" },
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
@@ -318,7 +327,7 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write("replay needs scripts: tapline replay <file.json | name>… [--junit out.xml]\n");
         return 2;
       }
-      return runReplay(await resolveConfig(options), scripts, values.wait, values.junit);
+      return runReplay(await resolveConfig(options), scripts, values.wait, values.junit, values["update-references"] === true);
     }
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);
