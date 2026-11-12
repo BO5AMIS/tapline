@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -133,6 +134,8 @@ export const pickerResultSchema = z.object({ pictures: z.number() });
 
 /** What the host remembers per app (by app id), in memory only. */
 export class MediaState {
+  /** This host's token on every add and remove: the app deletes only the pictures this host added (one per process). */
+  readonly owner = randomBytes(8).toString("hex");
   private readonly added = new Map<string, string[]>();
   private readonly skips = new Map<string, number>();
   private readonly listeners = new Set<(app: string, count: number) => void>();
@@ -207,7 +210,7 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
     const ids = app === null ? [] : ctx.state.addedIds(app);
     let raw: unknown;
     try {
-      raw = await ctx.request({ op: "remove", ids });
+      raw = await ctx.request({ op: "remove", ids, owner: ctx.state.owner });
     } catch (error) {
       return fail(ctx.describeError(error));
     }
@@ -247,7 +250,7 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
   for (const [i, file] of files.entries()) {
     let raw: unknown;
     try {
-      raw = await ctx.request({ op: "add", name: file.name, mime: file.mime, data: file.data });
+      raw = await ctx.request({ op: "add", name: file.name, mime: file.mime, data: file.data, owner: ctx.state.owner });
     } catch (error) {
       if (app !== null) ctx.state.remember(app, added);
       const done = added.length > 0 ? ` ${plural(added.length, "picture")} were added before it.` : "";

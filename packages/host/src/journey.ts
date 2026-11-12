@@ -250,7 +250,7 @@ export class Journey {
   }
 
   noteShortcut(shortcut: UsedShortcut): void {
-    this.state.shortcuts.push(shortcut);
+    this.state.shortcuts.push({ ...shortcut, what: withoutUrlSecrets(shortcut.what) });
   }
 
   pre(): Pre {
@@ -324,11 +324,12 @@ export class Journey {
 
     // What the agent typed is its own business (it may be a password the app hides): the step keeps the sentence without it.
     // The same for what a field holds: a tap or toggle on a filled input prints its value and placeholder too (finding 8).
-    const first = withoutFieldText((outcome.text.split("\n")[0] ?? "").replace(tool === "type_text" ? / Value is now .*$/ : /(?!)/, ""));
+    // A link may carry a sign-in token (`myapp://login?token=…`): only its scheme, host and path stay.
+    const first = withoutUrlSecrets(withoutFieldText((outcome.text.split("\n")[0] ?? "").replace(tool === "type_text" ? / Value is now .*$/ : /(?!)/, "")));
     const step: JourneyStep = {
       n: this.state.steps.length + 1,
       tool,
-      ...(outcome.target !== undefined ? { target: outcome.target } : {}),
+      ...(outcome.target !== undefined ? { target: withoutUrlSecrets(outcome.target) } : {}),
       ok,
       ...(code !== undefined ? { code } : {}),
       said: first.length > 200 ? `${first.slice(0, 200)}…` : first,
@@ -416,6 +417,40 @@ export function withoutIds(text: string): string {
  */
 export function withoutFieldText(text: string): string {
   return text.replace(/ (?:value|placeholder)=(?:"(?:[^"\\]|\\.)*"(?:…\(\+\d+\))?|[^\s"]+)/g, "");
+}
+
+const URL_IN_TEXT = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>]+/g;
+/** A path segment that looks like a token or an id worth hiding: 16 or more of letters, digits, - and _, with a digit. */
+const SECRET_SEGMENT = /^(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{16,}$/;
+
+/**
+ * Cuts what a link may carry that isn't the place it leads (a sign-in token, a reset code, a session): the query and
+ * the fragment become `?…` and `#…`, a user and password before the host go, and a token-like path segment becomes
+ * `…`. The scheme, host and the rest of the path stay, so the report still says where the link went.
+ */
+export function withoutUrlSecrets(text: string): string {
+  return text.replace(URL_IN_TEXT, (url) => {
+    const trail = /[.,;:!?)\]]+$/.exec(url)?.[0] ?? "";
+    const bare = trail === "" ? url : url.slice(0, -trail.length);
+    const scheme = bare.slice(0, bare.indexOf("://") + 3);
+    let rest = bare.slice(scheme.length);
+    const hashAt = rest.indexOf("#");
+    const fragment = hashAt >= 0 ? "#…" : "";
+    if (hashAt >= 0) rest = rest.slice(0, hashAt);
+    const queryAt = rest.indexOf("?");
+    const query = queryAt >= 0 ? "?…" : "";
+    if (queryAt >= 0) rest = rest.slice(0, queryAt);
+    const slash = rest.indexOf("/");
+    let authority = slash >= 0 ? rest.slice(0, slash) : rest;
+    const path = slash >= 0 ? rest.slice(slash) : "";
+    const at = authority.lastIndexOf("@");
+    if (at >= 0) authority = authority.slice(at + 1);
+    const cleanPath = path
+      .split("/")
+      .map((segment) => (SECRET_SEGMENT.test(segment) ? "…" : segment))
+      .join("/");
+    return `${scheme}${authority}${cleanPath}${query}${fragment}${trail}`;
+  });
 }
 
 /** The answer to `id` or `label` as a target in a journey (§17.1). */

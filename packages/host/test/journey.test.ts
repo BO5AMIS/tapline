@@ -348,6 +348,33 @@ describe("a user's eyes", () => {
     expect(said).toContain('Shortcuts used (a person doesn\'t have these): open_url "myapp://settings", app_command "sample_data".');
   });
 
+  it("keeps a link's token out of the journey: steps, shortcuts and the stop answer keep only where it led", async () => {
+    const { tools } = await setup();
+    await start(tools, { allow: ["open_url"] });
+    await tools.openUrl({ url: "myapp://login?token=SECRET123", look: false });
+    await tools.openUrl({ url: "myapp://reset/9f8e7d6c5b4a3210ffee#code=SECRET456", look: false });
+    const state = tools.currentJourney()?.state;
+    const kept = JSON.stringify({ steps: state?.steps, shortcuts: state?.shortcuts });
+    expect(kept).not.toContain("SECRET");
+    expect(kept).not.toContain("9f8e7d6c5b4a3210ffee");
+    expect(state?.shortcuts).toEqual([
+      { tool: "open_url", what: "myapp://login?…" },
+      { tool: "open_url", what: "myapp://reset/…#…" },
+    ]);
+    const said = textOf(await tools.journey({ stop: true, reached: true }));
+    expect(said).not.toContain("SECRET");
+  });
+
+  it("keeps a refused link's token out of the journey too", async () => {
+    const { tools } = await setup();
+    await start(tools);
+    await tools.openUrl({ url: "https://user:pw@example.com/magic?token=SECRET789" });
+    const kept = JSON.stringify(tools.currentJourney()?.state.steps);
+    expect(kept).not.toContain("SECRET");
+    expect(kept).not.toContain("user:pw");
+    expect(kept).toContain("https://example.com/magic?…");
+  });
+
   it("refuses open_url without allow, and lets the app's command list be read", async () => {
     const { app, tools } = await setup({ onRequest: (req) => (req.method === "commands" ? { ok: true, result: { commands: [{ name: "x", description: "y" }] } } : undefined) });
     await start(tools);

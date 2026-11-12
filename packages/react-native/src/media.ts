@@ -172,15 +172,23 @@ export function setMediaPatience(ms: number): void {
 
 // ---- state kept in memory for this session ----------------------------------
 
-/** Asset ids this session added, in order. Never written anywhere. */
-const addedIds: string[] = [];
+/**
+ * Asset ids added, in order, each with the host that added it (its `owner`, one per host process): `remove` only
+ * deletes its own host's pictures, never an earlier host's that the app still remembers. Never written anywhere.
+ */
+const addedIds: Array<{ id: string; owner: string }> = [];
 let permissionPending: Promise<unknown> | null = null;
 /** A camera-roll save the person has not answered yet, by picture name, so a retry waits for it instead of saving twice. */
 const pendingSaves = new Map<string, Promise<string>>();
 
 /** The asset ids this session has added and not yet removed. */
 export function addedAssetIds(): readonly string[] {
-  return addedIds;
+  return addedIds.map((added) => added.id);
+}
+
+/** The host that asks: its `owner` token, or '' from a host that sends none. */
+function ownerOf(params: Record<string, unknown>): string {
+  return typeof params.owner === 'string' ? params.owner : '';
 }
 
 type Waited<T> = { done: true; value: T } | { done: false };
@@ -274,7 +282,7 @@ async function addPicture(params: Record<string, unknown>): Promise<AddOutcome> 
     const uri = await writeTemp(fileSystem, mime, data);
     try {
       const id = assetIdOf(await expo.createAssetAsync(uri));
-      addedIds.push(id);
+      addedIds.push({ id, owner: ownerOf(params) });
       return { id };
     } finally {
       await fileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
@@ -301,7 +309,7 @@ async function addPicture(params: Record<string, unknown>): Promise<AddOutcome> 
     saving.then(
       (id) => {
         cleanup();
-        addedIds.push(id);
+        addedIds.push({ id, owner: ownerOf(params) });
       },
       cleanup,
     );
@@ -323,7 +331,7 @@ export interface RemoveOutcome {
 
 function forget(ids: readonly string[]): void {
   for (const id of ids) {
-    const at = addedIds.indexOf(id);
+    const at = addedIds.findIndex((added) => added.id === id);
     if (at >= 0) addedIds.splice(at, 1);
   }
 }
@@ -331,9 +339,12 @@ function forget(ids: readonly string[]): void {
 async function removePictures(params: Record<string, unknown>): Promise<RemoveOutcome> {
   const { expo, cameraRoll } = modules();
   if (expo === null && cameraRoll === null) throw new TaplineError('unsupported', UNSUPPORTED_LIBRARY);
-  // This session's list in the phone's memory, plus the ids the host kept from the same session (after a JS reload).
+  // This host's pictures in the phone's memory, plus the ids the host kept itself (after a JS reload). An earlier
+  // host's pictures stay: a restarted host is another session (1.5 review).
+  const owner = ownerOf(params);
+  const mine = addedIds.filter((added) => added.owner === owner).map((added) => added.id);
   const fromHost = Array.isArray(params.ids) ? params.ids.filter((id): id is string => typeof id === 'string' && id !== '') : [];
-  const ids = [...new Set([...addedIds, ...fromHost])];
+  const ids = [...new Set([...mine, ...fromHost])];
   if (ids.length === 0) return { removed: 0 };
   const deleting: Promise<unknown> = expo !== null ? expo.deleteAssetsAsync(ids) : (cameraRoll as CameraRollModule).deletePhotos(ids);
   const settle = (outcome: unknown): boolean => {

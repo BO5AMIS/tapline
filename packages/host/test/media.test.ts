@@ -205,7 +205,7 @@ describe("the media tool", () => {
     const { app, tools } = await connect((p) => (p.op === "add" ? { ok: true, result: { id: "asset-9" } } : { ok: true, result: { removed: 1 } }));
     await tools.media({ add: [a], confirm: true });
     const out = textOf(await tools.media({ remove: true }));
-    expect(mediaRequests(app).at(-1)).toEqual({ op: "remove", ids: ["asset-9"] });
+    expect(mediaRequests(app).at(-1)).toEqual({ op: "remove", ids: ["asset-9"], owner: tools.mediaState.owner });
     expect(out).toBe("Removed 1 picture this session added. iOS asks the person to confirm the delete on the phone: ask your user to tap Delete.");
     expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual([]);
   });
@@ -289,7 +289,7 @@ describe("remembered ids stay with their phone (1.5 review, finding 9)", () => {
     const shared = second.tools.mediaState;
     shared.remember("com.example.demo@install-A", ["asset-9"]);
     await second.tools.media({ remove: true });
-    expect(mediaRequests(second.app).at(-1)).toEqual({ op: "remove", ids: [] });
+    expect(mediaRequests(second.app).at(-1)).toEqual({ op: "remove", ids: [], owner: second.tools.mediaState.owner });
   });
 
   it("an app that sends no install id gets only what it remembers itself", async () => {
@@ -297,6 +297,6 @@ describe("remembered ids stay with their phone (1.5 review, finding 9)", () => {
     const { app, tools } = await connect((p) => (p.op === "add" ? { ok: true, result: { id: "asset-9" } } : { ok: true, result: { removed: 1 } }), ["tree", "media"], null);
     await tools.media({ add: [a], confirm: true });
     await tools.media({ remove: true });
-    expect(mediaRequests(app).at(-1)).toEqual({ op: "remove", ids: [] });
+    expect(mediaRequests(app).at(-1)).toEqual({ op: "remove", ids: [], owner: tools.mediaState.owner });
   });
 });

@@ -199,6 +199,17 @@ describe('add without a library', () => {
 });
 
 describe('remove', () => {
+  test('a restarted host removes only its own pictures, never the earlier host\'s', async () => {
+    const lib = expoLibrary();
+    setMediaModules(modules({ expo: lib }));
+    await media({ op: 'add', ...PICTURE, owner: 'host-a' });
+    await media({ op: 'add', ...PICTURE, owner: 'host-b' });
+    expect(await media({ op: 'remove', ids: [], owner: 'host-b' })).toEqual({ removed: 1 });
+    expect(lib.deleteAssetsAsync).toHaveBeenCalledWith(['asset-2']);
+    expect(addedAssetIds()).toEqual(['asset-1']);
+    expect(await media({ op: 'remove', ids: [], owner: 'host-c' })).toEqual({ removed: 0 });
+  });
+
   test('deletes only what this session added, then forgets them', async () => {
     const lib = expoLibrary();
     setMediaModules(modules({ expo: lib }));
