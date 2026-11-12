@@ -1221,6 +1221,12 @@ export class TaplineTools {
         delete params["look"];
         delete params["screenshot"];
       }
+      // AGENT-TOOLS 1.11 §4: the shared wording, with the step first.
+      const known = Object.keys(shape);
+      const stray = Object.keys(params).filter((key) => !known.includes(key));
+      if (stray.length > 0) {
+        return fail(`Error bad_params: step ${i + 1}: ${step.tool} doesn't take ${stray.join(", ")}; ${known.length === 0 ? "it takes no arguments" : `it takes ${known.join(", ")}`}.`);
+      }
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);

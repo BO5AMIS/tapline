@@ -1575,7 +1575,7 @@ describe("mcp server", () => {
         arguments: { steps: [{ tool: "wait", seconds: 0.1 }, { tool: "tap", target: { id: "login-button" }, labels: true }] },
       });
       expect(r.isError).toBe(true);
-      expect(answerText(r)).toMatch(/Error bad_params: step 2 \(tap[^)]*\): params: Unrecognized key/);
+      expect(answerText(r)).toMatch(/Error bad_params: step 2: tap doesn't take labels; it takes target, /);
     } finally {
       await close();
     }

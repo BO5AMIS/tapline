@@ -357,7 +357,7 @@ describe("in run", () => {
     const fine = await tools.run({ steps: [{ tool: "performance", seconds: 0.5, look: true, screenshot: true }] });
     expect(fine.isError).toBeUndefined();
     const bad = await tools.run({ steps: [{ tool: "performance", frames: 3 }] });
-    expect(textOf(bad)).toMatch(/^Error bad_params: step 1 \(performance 3 s\)/);
+    expect(textOf(bad)).toMatch(/^Error bad_params: step 1: performance doesn't take frames; it takes /);
   });
 
   it("dry_run: a performance step with a tap resolves the tap and measures nothing", async () => {
