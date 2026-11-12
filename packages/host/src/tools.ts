@@ -778,7 +778,19 @@ const dryRunResultSchema = z.object({
   dryRun: z.literal(true),
   point: z.object({ x: z.number(), y: z.number() }).optional(),
   value: z.unknown().optional(),
+  /** The element is off screen and the action would scroll it into view first (§16.2); `point` is where it expects to touch after. */
+  scrolls: z.boolean().optional(),
 });
+
+/** Whether an app's answer says the action scrolled the element into view first (AGENT-TOOLS 1.12 §16.2). */
+function scrolledFirst(result: unknown): boolean {
+  return typeof result === "object" && result !== null && "scrolled" in result && result.scrolled === true;
+}
+
+/** `Scrolled to it, then tapped …` when the action scrolled first: the sentence goes on after a lead-in. */
+function afterScroll(result: unknown, sentence: string): string {
+  return scrolledFirst(result) ? `Scrolled to it, then ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}` : sentence;
+}
 
 /** For an app without dry runs: every element on its list the target could mean. */
 function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] {
@@ -2809,7 +2821,7 @@ export class TaplineTools {
         this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
         return fail(this.blockedLine(verdict.element, verdict.word));
       }
-      const would = this.wouldLine(tool, shown, resolved.point, resolved.value);
+      const would = this.wouldLine(tool, shown, resolved.point, resolved.value, resolved.scrolls);
       const needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
@@ -2934,7 +2946,7 @@ export class TaplineTools {
       return fail(resolved.text);
     }
     this.showAction("agent", method, resolved.elements[0] !== undefined ? { element: resolved.elements[0] } : undefined, params);
-    return text([this.wouldLine(tool, resolved.elements[0], resolved.point, resolved.value), ...this.takePersonNote()].join("\n"));
+    return text([this.wouldLine(tool, resolved.elements[0], resolved.point, resolved.value, resolved.scrolls), ...this.takePersonNote()].join("\n"));
   }
 
   /**
@@ -2946,7 +2958,7 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
   ): Promise<
-    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown }
+    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown; scrolls?: true }
     | { kind: "error"; text: string; code: string; reason?: string }
   > {
     if (session.capabilities.includes("dryRun")) {
@@ -2969,6 +2981,7 @@ export class TaplineTools {
         elements: parsed.data.element ? [parsed.data.element] : [],
         ...(parsed.data.point !== undefined ? { point: parsed.data.point } : {}),
         ...(parsed.data.value !== undefined ? { value: parsed.data.value } : {}),
+        ...(parsed.data.scrolls === true ? { scrolls: true } : {}),
       };
     }
     // An app without dry runs: a swipe is checked by what lies under its start.
@@ -2998,26 +3011,35 @@ export class TaplineTools {
   }
 
   /** `Would tap e12 button "Delete trip" at 215,640.` */
-  private wouldLine(tool: string, element: TreeElement | undefined, point: { x: number; y: number } | undefined, value: unknown): string {
-    const name = element !== undefined ? this.shortName(element, true) : "the element";
+  private wouldLine(
+    tool: string,
+    element: TreeElement | undefined,
+    point: { x: number; y: number } | undefined,
+    value: unknown,
+    scrolls?: boolean,
+  ): string {
+    const name = element !== undefined ? this.shortName(element, true, scrolls === true) : "the element";
+    // Off screen (§16.2): `Would scroll to it, then tap e41 button "Save" id=save at 215,640.` The point is the one expected after the scroll.
+    const lead = scrolls === true ? "Would scroll to it, then" : "Would";
     const at = point !== undefined ? ` at ${point.x},${point.y}` : "";
     switch (tool) {
       case "long_press":
-        return `Would long-press ${name}${at}.`;
+        return `${lead} long-press ${name}${at}.`;
       case "toggle":
-        return `Would toggle ${name}${typeof value === "boolean" ? ` to ${String(value)}` : ""}${at}.`;
+        return `${lead} toggle ${name}${typeof value === "boolean" ? ` to ${String(value)}` : ""}${at}.`;
       case "type_text":
-        return `Would type into ${name}.`;
+        return `${lead} type into ${name}${scrolls === true ? at : ""}.`;
       default:
-        return `Would tap ${name}${at}.`;
+        return `${lead} tap ${name}${at}.`;
     }
   }
 
   /** `e12 button "Delete trip"`: ref (when asked), role and name, nothing else. */
-  private shortName(element: TreeElement, withRef: boolean): string {
+  private shortName(element: TreeElement, withRef: boolean, withId = false): string {
     return formatElement(
       {
         ref: withRef ? element.ref : "",
+        ...(withId ? { testID: element.testID ?? null } : {}),
         role: element.role ?? null,
         type: element.type ?? null,
         label: element.label ?? null,
@@ -3045,7 +3067,7 @@ export class TaplineTools {
   tap(args: Shape<"tap">): Promise<CallToolResult> {
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
-      this.act("press", params, (r) => `Tapped ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
@@ -3053,7 +3075,7 @@ export class TaplineTools {
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
-      this.act("longPress", params, (r) => `Long-pressed ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
     );
   }
 
@@ -3075,7 +3097,7 @@ export class TaplineTools {
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
-        return `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`;
+        return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
       args.look,
       args.screenshot,
@@ -3152,8 +3174,8 @@ export class TaplineTools {
         params,
         (r) => {
           const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
-          if (unchanged(r)) return `${this.elementName(r)} is already ${JSON.stringify(value)}.`;
-          return `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`;
+          if (unchanged(r)) return `${scrolledFirst(r) ? "Scrolled to it; " : ""}${this.elementName(r)} is already ${JSON.stringify(value)}.`;
+          return afterScroll(r, `Toggled ${this.elementName(r)}${value !== undefined ? ` to ${JSON.stringify(value)}` : ""}.`);
         },
         args.look,
         args.screenshot,
