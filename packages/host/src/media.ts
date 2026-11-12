@@ -185,7 +185,12 @@ export interface MediaContext {
   /** Sends one `media` request to the app; throws what the app answered. */
   request: (params: Record<string, unknown>) => Promise<unknown>;
   describeError: (error: unknown) => string;
+  /** The host's needs-a-person dialog (§11.5): true when the person did it and the add may be tried again. Absent: no dialog. */
+  askPerson?: (message: string) => Promise<boolean>;
 }
+
+/** What the dialog says when the photo-access prompt is up (AGENT-TOOLS 1.13 §11.5). */
+const PERSON_ASK = "Needs a person: allow photo access on the phone.";
 
 const PERSON_NOTE = "Note: needs a person: allow photo access on the phone (an OS alert Tapline can't tap).";
 
@@ -248,7 +253,11 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
   }
 
   const added: string[] = [];
-  for (const [i, file] of files.entries()) {
+  // §11.5: the photo-access prompt asked once through the dialog, then the same picture is tried again.
+  let asked = false;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (file === undefined) break;
     let raw: unknown;
     try {
       raw = await ctx.request({ op: "add", name: file.name, mime: file.mime, data: file.data, owner: ctx.state.owner });
@@ -258,6 +267,14 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
       return fail(`${ctx.describeError(error)}${done}`);
     }
     const result = parseOr(addResultSchema, raw);
+    if (result !== null && result.late !== undefined && app !== null) ctx.state.remember(app, result.late);
+    if (result !== null && (result.needsPerson === true || result.id === undefined) && !asked && ctx.askPerson !== undefined) {
+      asked = true;
+      if (await ctx.askPerson(PERSON_ASK)) {
+        i--;
+        continue;
+      }
+    }
     if (result === null) {
       if (app !== null) ctx.state.remember(app, added);
       return fail("Error internal: the app returned a media answer the host could not read.");

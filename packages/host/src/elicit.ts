@@ -23,6 +23,17 @@ export const OK_SCHEMA: ElicitSchema = {
   required: [OK_FIELD],
 };
 
+/** AGENT-TOOLS 1.13 §11.5: the one field of a needs-a-person dialog. Can't now is first, as Don't allow is for an OK. */
+export const DONE_FIELD = "answer";
+export const DONE = "Done";
+export const CANT_NOW = "Can't now";
+
+export const DONE_SCHEMA: ElicitSchema = {
+  type: "object",
+  properties: { [DONE_FIELD]: { type: "string", title: "Has it been done?", enum: [CANT_NOW, DONE] } },
+  required: [DONE_FIELD],
+};
+
 export interface ElicitAnswer {
   action: "accept" | "decline" | "cancel";
   content?: Record<string, unknown>;
@@ -63,13 +74,32 @@ export class Dialogs {
    * fired (the live view answered first) or the time ran out; only an accepted "Allow once" is `allow`.
    */
   askOk(caption: string, signal?: AbortSignal): Promise<OkAnswer> {
-    const run = (): Promise<OkAnswer> => this.ask(caption, signal);
+    return this.queued(async () => {
+      const answer = await this.ask(caption, OK_SCHEMA, signal);
+      if (answer === "aborted" || answer === "unavailable") return answer;
+      return answer.action === "accept" && answer.content?.[OK_FIELD] === OK_ALLOW ? "allow" : "deny";
+    });
+  }
+
+  /**
+   * §11.5: tells the person what to do and waits for Done. Only an accepted "Done" is `done`; Can't now, a decline and
+   * a cancel are `cant`. `aborted` and `unavailable` are as for `askOk`.
+   */
+  askDone(message: string, signal?: AbortSignal): Promise<DoneAnswer> {
+    return this.queued(async () => {
+      const answer = await this.ask(message, DONE_SCHEMA, signal);
+      if (answer === "aborted" || answer === "unavailable") return answer;
+      return answer.action === "accept" && answer.content?.[DONE_FIELD] === DONE ? "done" : "cant";
+    });
+  }
+
+  private queued<T>(run: () => Promise<T>): Promise<T> {
     const result = this.tail.then(run, run);
     this.tail = result;
     return result;
   }
 
-  private async ask(caption: string, signal: AbortSignal | undefined): Promise<OkAnswer> {
+  private async ask(message: string, schema: ElicitSchema, signal: AbortSignal | undefined): Promise<ElicitAnswer | "aborted" | "unavailable"> {
     const client = this.client;
     if (client === undefined || !this.available() || signal?.aborted === true) return "aborted";
     const own = new AbortController();
@@ -80,9 +110,8 @@ export class Dialogs {
     // A client that ignores the abort must not hold the queue: the race ends the wait itself.
     const gone = new Promise<"aborted">((resolve) => own.signal.addEventListener("abort", () => resolve("aborted"), { once: true }));
     try {
-      const answer = await Promise.race([client.elicit(caption, OK_SCHEMA, own.signal), gone]);
-      if (answer === "aborted" || own.signal.aborted) return "aborted";
-      return answer.action === "accept" && answer.content?.[OK_FIELD] === OK_ALLOW ? "allow" : "deny";
+      const answer = await Promise.race([client.elicit(message, schema, own.signal), gone]);
+      return answer === "aborted" || own.signal.aborted ? "aborted" : answer;
     } catch {
       // An error before any answer means this client has no dialog; a real decline or cancel is a result, not an error.
       return own.signal.aborted ? "aborted" : "unavailable";
@@ -91,6 +120,71 @@ export class Dialogs {
       signal?.removeEventListener("abort", stop);
     }
   }
+}
+
+/** Read again later: the signal may have fired since the first look. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+export type DoneAnswer ="done" | "cant" | "aborted" | "unavailable";
+
+/** What `askDone` (the helper) tells its caller. `cleared` also covers the person saying Done: the caller checks again. */
+export type MomentOutcome = "cleared" | "cant" | "expired" | "cancelled" | "no_dialog";
+
+/**
+ * AGENT-TOOLS 1.13 §11.5: one needs-a-person moment. Tells the person through the dialog and waits until `cleared()`
+ * is true (then closes its own dialog), the person says Done (`cleared`: the caller checks the screen again) or
+ * Can't now, or the time runs out. Nothing a model writes can answer it. No dialog at all: `no_dialog`, at once.
+ */
+export async function askDone(
+  dialogs: Dialogs,
+  message: string,
+  cleared: () => Promise<boolean> | boolean,
+  options: { ttlMs?: number; pollMs?: number; signal?: AbortSignal } = {},
+): Promise<MomentOutcome> {
+  if (!dialogs.available()) return "no_dialog";
+  const signal = options.signal;
+  if (signal?.aborted === true) return "cancelled";
+  const check = async (): Promise<boolean> => {
+    try {
+      return await cleared();
+    } catch {
+      return false;
+    }
+  };
+  if (await check()) return "cleared";
+  const own = new AbortController();
+  const stopOwn = (): void => own.abort();
+  signal?.addEventListener("abort", stopOwn, { once: true });
+  let outcome: MomentOutcome | undefined;
+  const finish = (value: MomentOutcome): void => {
+    if (outcome === undefined) outcome = value;
+    own.abort();
+  };
+  const ended = new Promise<void>((resolve) => own.signal.addEventListener("abort", () => resolve(), { once: true }));
+  const timer = setTimeout(() => finish("expired"), options.ttlMs ?? DIALOG_TTL_MS);
+  timer.unref?.();
+  let polling = false;
+  const poll = setInterval(() => {
+    if (polling || outcome !== undefined) return;
+    polling = true;
+    void check().then((now) => {
+      polling = false;
+      if (now) finish("cleared");
+    });
+  }, options.pollMs ?? 500);
+  poll.unref?.();
+  void dialogs.askDone(message, own.signal).then((answer) => {
+    if (answer === "done") finish("cleared");
+    else if (answer === "cant") finish("cant");
+    else if (answer === "unavailable") finish("no_dialog");
+  });
+  await ended;
+  clearTimeout(timer);
+  clearInterval(poll);
+  signal?.removeEventListener("abort", stopOwn);
+  return outcome ?? (isAborted(signal) ? "cancelled" : "expired");
 }
 
 const NOT_SHOWN = new RegExp("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]", "g");

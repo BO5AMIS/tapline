@@ -40,7 +40,7 @@ import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourney
 import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
-import { Dialogs, okCaption } from "./elicit.js";
+import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
@@ -544,6 +544,12 @@ export interface ToolsOptions {
   canConfirm?: boolean;
   /** The host's dialog for a person's OK (AGENT-TOOLS 1.13 §11.3). Default: none, as when the client can't show one. */
   dialogs?: Dialogs;
+  /** How long a needs-a-person moment waits for a person (AGENT-TOOLS 1.13 §11.5). Default 120 000 ms; tests set it low. */
+  personWaitMs?: number;
+  /** How often a moment checks whether it has cleared. Default 500 ms. */
+  personPollMs?: number;
+  /** After a person says Done, how long the app gets to show it (it connects within about 2 s). Default 4000 ms. */
+  personDoneGraceMs?: number;
   /** Part of every OK's key: `mcp` for the agent's own MCP server (the default), `api` for thin calls, so the two never share an OK. */
   confirmScope?: string;
   /**
@@ -953,6 +959,20 @@ function appendNote(answer: CallToolResult, note: string): CallToolResult {
   const [top, ...rest] = answer.content;
   if (top === undefined || top.type !== "text") return answer;
   return { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), note].join("\n") }, ...rest] };
+}
+
+/**
+ * The error code of an answer that may be a needs-a-person moment (§11.5): the app isn't there, is in the background,
+ * stopped answering, or an alert is in the way. `busy` and `paused` are a person already at work, never such a moment.
+ */
+function momentCode(answer: CallToolResult): "not_connected" | "in_background" | "not_answering" | "not_actionable" | undefined {
+  const top = answer.content[0];
+  if (answer.isError !== true || top === undefined || top.type !== "text") return undefined;
+  const code = /^Error (not_connected|in_background|not_answering|not_actionable):/.exec(top.text)?.[1];
+  if (code === "not_actionable") return top.text.startsWith("Error not_actionable: behind_alert: ") ? code : undefined;
+  // Only "no app is connected": an `app` argument naming an app that isn't there is the agent's mistake, not a moment.
+  if (code === "not_connected") return top.text.startsWith("Error not_connected: No app is connected to Tapline.") ? code : undefined;
+  return code === "not_connected" || code === "in_background" || code === "not_answering" ? code : undefined;
 }
 
 /** An app's dry-run answer (AGENT-TOOLS 1.8 §11.4). */
@@ -1542,10 +1562,161 @@ export class TaplineTools {
     const mark = this.host.crashMark();
     const startedWith: AppIdentity | undefined = this.host.current();
     return this.noteScope.run(true, () => {
-      const result = run();
+      const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run));
       if (result instanceof Promise) return result.then((answer) => this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))));
       return this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith)));
     });
+  }
+
+  /** The needs-a-person moments already asked about in this call: one dialog per moment per call (§11.5). */
+  private readonly personScope = new AsyncLocalStorage<Set<string>>();
+
+  /**
+   * AGENT-TOOLS 1.13 §11.5: a call that ended because only a person can go on (the app isn't there, an alert, an app that
+   * stopped answering) tells the person in the host's dialog and waits. When the moment clears, the call runs again, so it
+   * checks the screen afresh; nothing was done, as the call failed before it began. Without a dialog: today's answer, with a Note.
+   */
+  private afterMoments(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+    const wasNotAnswering = this.host.current() !== undefined && this.host.isNotAnswering(this.host.current()?.id ?? "");
+    const failedFor = this.host.current()?.id;
+    const first = run();
+    // A tool that answers at once (apps, open_app) never waits for a person.
+    if (!(first instanceof Promise)) return first;
+    return first.then((answer) => (momentCode(answer) === undefined ? answer : this.settleMoments(answer, run, wasNotAnswering ? failedFor : undefined)));
+  }
+
+  private async settleMoments(first: CallToolResult, run: () => CallToolResult | Promise<CallToolResult>, notAnsweringBefore: string | undefined): Promise<CallToolResult> {
+    let answer = first;
+    for (let round = 0; round < 4; round++) {
+      const moment = await this.momentOf(answer, notAnsweringBefore);
+      if (moment === null) return answer;
+      const dialogs = this.dialogs;
+      const asked = this.personScope.getStore();
+      if (dialogs === undefined || !dialogs.available()) return this.withMomentNote(answer, moment.message);
+      if (asked === undefined || asked.has(moment.key)) return answer;
+      asked.add(moment.key);
+      const outcome = await this.askPerson(dialogs, moment.message, moment.cleared);
+      if (outcome === "cant") return appendNote(answer, "They can't now. Ask your user what to do.");
+      if (outcome === "no_dialog") return this.withMomentNote(answer, moment.message);
+      if (outcome !== "cleared") return answer;
+      // The person may have said Done before the app shows it: give it a moment, then run the call again, which is the re-check.
+      await this.untilTrue(moment.cleared, this.options.personDoneGraceMs ?? 4000);
+      answer = await run();
+      if (momentCode(answer) === undefined) return answer;
+    }
+    return answer;
+  }
+
+  /** Waits for a person in the dialog; the time spent is not the batch's (§9.3). */
+  private async askPerson(dialogs: Dialogs, message: string, cleared: () => Promise<boolean> | boolean): Promise<MomentOutcome> {
+    const hold = this.holdScope.getStore();
+    const started = Date.now();
+    try {
+      return await askDone(dialogs, message, cleared, {
+        ttlMs: this.options.personWaitMs ?? 120_000,
+        ...(this.options.personPollMs !== undefined ? { pollMs: this.options.personPollMs } : {}),
+        ...(hold?.signal !== undefined ? { signal: hold.signal } : {}),
+      });
+    } finally {
+      if (hold !== undefined) hold.ms += Date.now() - started;
+    }
+  }
+
+  private async untilTrue(check: () => Promise<boolean> | boolean, forMs: number): Promise<boolean> {
+    const until = Date.now() + forMs;
+    for (;;) {
+      if (await check()) return true;
+      if (Date.now() >= until) return false;
+      await this.sleep(Math.min(this.options.personPollMs ?? 500, 100));
+    }
+  }
+
+  /**
+   * A host with no dialog keeps today's answer; it ends with what the person has to do. Not for not_connected and
+   * not_answering: their text already says it (and the first answer has its own `Note: needs a person`).
+   */
+  private withMomentNote(answer: CallToolResult, message: string): CallToolResult {
+    const code = momentCode(answer);
+    if (code === "not_connected" || code === "not_answering") return answer;
+    return appendNote(answer, `Note: ${message.charAt(0).toLowerCase()}${message.slice(1)}`);
+  }
+
+  private appName(): string {
+    return this.host.current()?.app.name ?? this.host.lastDisconnect()?.session.app.name ?? "the app";
+  }
+
+  /** What a person has to do to let this answer's call go on, and how to see it is done; null when it is no such moment. */
+  private async momentOf(answer: CallToolResult, notAnsweringBefore: string | undefined): Promise<{ key: string; message: string; cleared: () => Promise<boolean> | boolean } | null> {
+    const code = momentCode(answer);
+    const said = answer.content[0]?.type === "text" ? answer.content[0].text : "";
+    const connected = (): boolean => this.host.current() !== undefined;
+    const app = plainText(this.appName(), 40);
+    const open = `Needs a person: open ${app} on the phone (unlock it first if it's locked).`;
+    const restart = { key: "restart", message: `Needs a person: close ${app} and open it again.` };
+    if (code === "not_connected") {
+      if (this.options.pairedBefore !== undefined && !this.options.pairedBefore()) {
+        return { key: "pair", message: "Needs a person: pair the phone (scan the QR code, or open the app and tap Connect).", cleared: connected };
+      }
+      const last = this.host.lastDisconnect();
+      const crashed = last !== undefined && this.host.crashEventsAfter(this.notedSeqOf(last.session), last.session).some((event) => event.kind === "disconnect");
+      return crashed ? { ...restart, cleared: connected } : { key: "app", message: open, cleared: connected };
+    }
+    if (code === "in_background") {
+      return { key: "app", message: open, cleared: () => this.host.current()?.appState?.state !== undefined && this.host.current()?.appState?.state !== "background" };
+    }
+    if (code === "not_answering") {
+      // One that stopped answering twice, or dropped after going silent: the person closes it and opens it again.
+      const session = this.host.current();
+      if (session === undefined) return { ...restart, cleared: connected };
+      if (notAnsweringBefore !== session.id) return null;
+      return { ...restart, cleared: () => this.host.current() !== undefined && this.host.current()?.id !== session.id };
+    }
+    if (code === "not_actionable" && /^Error not_actionable: behind_alert: (An alert is open|Tapline's own prompt is open)/.test(said)) {
+      const alert = await this.openOsAlert();
+      const seen = alert !== null;
+      const only = alert !== null && alert.buttons.length === 1 ? alert.buttons[0] : undefined;
+      const message =
+        only !== undefined
+          ? `Needs a person: tap "${plainText(only.text, 40)}" on the alert.`
+          : alert !== null && alert.title !== ""
+            ? `Needs a person: answer the alert "${plainText(alert.title, 60)}" on the phone.`
+            : "Needs a person: answer the alert on the phone.";
+      return { key: "alert", message, cleared: this.alertGone(seen) };
+    }
+    return null;
+  }
+
+  /** The first alert over the app that the tool can't tap (an OS alert), or null. */
+  private async openOsAlert(): Promise<NonNullable<TreeResult["alerts"]>[number] | null> {
+    const session = this.host.current();
+    if (session === undefined) return null;
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    return tree.success ? (tree.data.alerts ?? []).find((alert) => !alert.standIn) ?? null : null;
+  }
+
+  /**
+   * Whether the alert is gone: seen only when the app reports it (a JavaScript alert, or a build with Tapline's native
+   * module). An alert never seen is cleared by the person's Done alone.
+   */
+  private alertGone(seenAtStart: boolean): () => Promise<boolean> {
+    let seen = seenAtStart;
+    return async () => {
+      if ((await this.openOsAlert()) !== null) {
+        seen = true;
+        return false;
+      }
+      return seen;
+    };
+  }
+
+  /** `media`'s own needs-a-person moment, through the same dialog (a photo-access prompt): true when it cleared or was answered Done. */
+  private async personForMedia(message: string): Promise<boolean> {
+    const dialogs = this.dialogs;
+    const asked = this.personScope.getStore();
+    if (dialogs === undefined || !dialogs.available() || asked === undefined || asked.has("media")) return false;
+    asked.add("media");
+    const outcome = await this.askPerson(dialogs, message, this.alertGone(false));
+    return outcome === "cleared";
   }
 
   private accountsNoteDone = false;
@@ -2351,6 +2522,7 @@ export class TaplineTools {
       session,
       request: (params) => this.host.request("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
       describeError,
+      askPerson: (message) => this.personForMedia(message),
     });
   }
 
@@ -5095,13 +5267,7 @@ export class TaplineTools {
       if (asked === undefined) {
         return fail(`Error bad_params: no ${kind} moment is waiting for a person; ask for it first with journey { stress: { kind: "${kind}" } }.`);
       }
-      await this.reconnected();
-      // Done is checked, not taken on the agent's word: the app must show that the moment happened.
-      // An app that is gone by then is judged by survives (it did not survive), not by what it left behind.
-      const unseen = this.host.current() === undefined ? null : await this.stressUnseen(kind, asked);
-      if (unseen !== null) return fail(`Error bad_params: ${unseen} Ask the person again, then say done.`);
-      this.stressWaiting.delete(kind);
-      return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked.survives));
+      return this.confirmStress(running, kind, asked, survives);
     }
     if (this.host.current() === undefined) return this.notConnected();
     switch (kind) {
@@ -5114,7 +5280,7 @@ export class TaplineTools {
         const before = this.host.current()?.id;
         const answer = await this.reload({ look: true });
         const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
-        if (answer.isError === true && /^Error unsupported/.test(said)) return this.waitForPerson(kind, "close the app and open it again", survives);
+        if (answer.isError === true && /^Error unsupported/.test(said)) return this.waitForPerson(running, kind, "close the app and open it again", survives);
         if (answer.isError === true) return answer;
         await this.reconnected();
         // A reload that timed out leaves the old session: that is no relaunch to record.
@@ -5125,14 +5291,41 @@ export class TaplineTools {
         return this.stressDone(running, kind, " (reload, not a relaunch)", await this.survivalOf(running, survives));
       }
       case "background":
-        return this.waitForPerson(kind, "switch to another app and back", survives);
+        return this.waitForPerson(running, kind, "switch to another app and back", survives);
       case "rotate":
-        return this.waitForPerson(kind, "turn the phone and keep it turned", survives);
+        return this.waitForPerson(running, kind, "turn the phone and keep it turned", survives);
     }
   }
 
-  private async waitForPerson(kind: string, what: string, survives: Survives | undefined): Promise<CallToolResult> {
-    this.stressWaiting.set(kind, { survives, askedAt: Date.now(), size: kind === "rotate" ? await this.freshScreenSize() : null });
+  /** `done: true`, or the person's Done in the dialog: counted only when the app shows the moment happened. */
+  private async confirmStress(running: Journey, kind: Stress["kind"], asked: StressWaiting, survives: Survives | undefined): Promise<CallToolResult> {
+    await this.reconnected();
+    // Done is checked, not taken on the agent's word: the app must show that the moment happened.
+    // An app that is gone by then is judged by survives (it did not survive), not by what it left behind.
+    const unseen = this.host.current() === undefined ? null : await this.stressUnseen(kind, asked);
+    if (unseen !== null) return fail(`Error bad_params: ${unseen} Ask the person again, then say done.`);
+    this.stressWaiting.delete(kind);
+    return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked.survives));
+  }
+
+  private async waitForPerson(running: Journey, kind: Stress["kind"], what: string, survives: Survives | undefined): Promise<CallToolResult> {
+    const asked: StressWaiting = { survives, askedAt: Date.now(), size: kind === "rotate" ? await this.freshScreenSize() : null };
+    this.stressWaiting.set(kind, asked);
+    // §11.5: with a dialog the person is told there, and the call waits until the app shows the moment (or they say Done).
+    const dialogs = this.dialogs;
+    if (dialogs !== undefined && dialogs.available()) {
+      const cleared = async (): Promise<boolean> => {
+        if ((await this.stressUnseen(kind, asked)) !== null) return false;
+        // Left the front is not enough for `background`: the person comes back, so the app can be read again.
+        return kind !== "background" || this.host.current()?.appState?.state === "active";
+      };
+      const outcome = await this.askPerson(dialogs, `Needs a person: ${what}.`, cleared);
+      if (outcome === "cleared") return this.confirmStress(running, kind, asked, survives);
+      if (outcome === "cant") {
+        this.stressWaiting.delete(kind);
+        return fail(`Error not_allowed: stress ${kind} needs a person: ${what}. They can't now. Ask your user what to do.`);
+      }
+    }
     return text(
       [
         `Stress: ${kind} needs a person: ${what}, then say done.`,
