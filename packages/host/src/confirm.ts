@@ -6,6 +6,8 @@ import { randomBytes } from "node:crypto";
  */
 
 export const CONFIRM_TTL_MS = 120_000;
+/** After a person says no, the same touch asks no one for this long (AGENT-TOOLS 1.8 §11.3). */
+export const DECLINE_HOLD_MS = 60_000;
 
 export interface ConfirmRequest {
   type: "confirm";
@@ -27,6 +29,8 @@ export type ConfirmEvent = ConfirmRequest | ConfirmClosed;
 /** What a guarded call may do now. */
 export type ConfirmCheck =
   | { granted: true }
+  /** A person said no a moment ago: nobody is asked again yet. */
+  | { granted: false; held: true }
   | { granted: false; request: ConfirmRequest; /** " They declined." or " Nobody answered." after a first ask. */ suffix: string };
 
 interface Pending {
@@ -41,6 +45,8 @@ export class Confirmations {
   private readonly grants = new Map<string, number>();
   /** key → how the last ask ended without an allow */
   private readonly endings = new Map<string, "declined" | "expired">();
+  /** key → when a person last declined it */
+  private readonly declinedAt = new Map<string, number>();
   private readonly listeners = new Set<(event: ConfirmEvent) => void>();
   private next = 1;
 
@@ -70,6 +76,10 @@ export class Confirmations {
       this.grants.delete(key);
       if (grant > this.now()) return { granted: true };
     }
+    // A person said no a moment ago: asking again at once would only wear them down.
+    const declined = this.declinedAt.get(key);
+    if (declined !== undefined && this.now() - declined < DECLINE_HOLD_MS) return { granted: false, held: true };
+    this.declinedAt.delete(key);
     const ending = this.endings.get(key);
     this.endings.delete(key);
     const suffix = ending === "declined" ? " They declined." : ending === "expired" ? " Nobody answered." : "";
@@ -105,7 +115,10 @@ export class Confirmations {
       return false;
     }
     if (allow) this.grants.set(p.key, this.now() + this.ttlMs);
-    else this.endings.set(p.key, "declined");
+    else {
+      this.endings.set(p.key, "declined");
+      this.declinedAt.set(p.key, this.now());
+    }
     this.emit({ type: "confirm_closed", id, allow });
     return true;
   }

@@ -2048,6 +2048,15 @@ export class TaplineTools {
     // An OK is for this app, this tool and this element only (Tapwright's review, M1).
     const check = this.confirmations.check(`${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
     if (check.granted) return { granted: true };
+    const name = this.shortName(verdict.element, false);
+    if ("held" in check) {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return {
+        stop: fail(
+          `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
+        ),
+      };
+    }
     const where =
       this.options.canConfirm === false
         ? "The live view is off, so nobody can allow it here; ask your user."
@@ -2411,7 +2420,9 @@ export class TaplineTools {
         return `Would swipe from (${args.x0}, ${args.y0}) to (${args.x1}, ${args.y1})${on === "element" ? "" : ` starting on ${on}`}.`;
       });
     }
-    return this.guarded("swipe", "swipe", params, false, (preflight) => this.act(
+    // A swipe that moves less than 10 pt is a touch where it starts: the policy checks it (AGENT-TOOLS 1.8 §11.1).
+    const short = Math.hypot(args.x1 - args.x0, args.y1 - args.y0) < 10;
+    const perform = (preflight?: () => Promise<CallToolResult | null>): Promise<CallToolResult> => this.act(
       "swipe",
       params,
       (r) => {
@@ -2423,7 +2434,8 @@ export class TaplineTools {
       undefined,
       undefined,
       preflight,
-    ));
+    );
+    return short ? this.guarded("swipe", "swipe", params, false, perform) : perform();
   }
 
   back(args: Shape<"back">): Promise<CallToolResult> {

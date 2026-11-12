@@ -35,6 +35,7 @@ async function setup(options: { policy?: PolicyFile; capabilities?: string[]; ca
   hosts.push(host);
   const handler = (req: IncomingRequest): Reply => {
     if (req.method === "tree") return { ok: true, result: TREE };
+    if (req.method === "swipe") return { ok: true, result: { element: DELETE, from: { x: 200, y: 640 }, to: { x: 205, y: 640 } } };
     if (req.method === "press" || req.method === "longPress" || req.method === "toggle") {
       const element = byTarget(req.params);
       if (element === undefined) return { ok: false, error: { code: "not_found", message: "No element matches" } };
@@ -104,11 +105,11 @@ describe("a person's OK (Confirmations)", () => {
     const ask = { kind: "tap", caption: 'Tap "Delete trip"', word: "Delete" };
     const first = c.check("tap|id:d", ask);
     expect(first.granted).toBe(false);
-    if (first.granted) return;
+    if (first.granted || "held" in first) return;
     expect(events[0]).toEqual({ type: "confirm", id: first.request.id, by: "agent", kind: "tap", caption: 'Tap "Delete trip"', word: "Delete", expires: 121_000 });
     // asked again while open: the same request, no second prompt
     const again = c.check("tap|id:d", ask);
-    expect(again.granted === false && again.request.id).toBe(first.request.id);
+    expect(again.granted === false && "request" in again && again.request.id).toBe(first.request.id);
     expect(events).toHaveLength(1);
     expect(c.answer(first.request.id, true)).toBe(true);
     expect(c.answer(first.request.id, false)).toBe(false); // the first answer wins
@@ -117,15 +118,19 @@ describe("a person's OK (Confirmations)", () => {
     // used up
     const next = c.check("tap|id:d", ask);
     expect(next.granted).toBe(false);
-    if (next.granted) return;
+    if (next.granted || "held" in next) return;
     c.answer(next.request.id, false);
+    // a person said no a moment ago: for 60 s nobody is asked again
+    expect(c.check("tap|id:d", ask)).toEqual({ granted: false, held: true });
+    expect(events.filter((e) => e.type === "confirm")).toHaveLength(2);
+    now += 61_000;
     const declined = c.check("tap|id:d", ask);
-    expect(declined.granted === false && declined.suffix).toBe(" They declined.");
-    if (declined.granted) return;
+    expect(declined.granted === false && "suffix" in declined && declined.suffix).toBe(" They declined.");
+    if (declined.granted || "held" in declined) return;
     now += 121_000;
     expect(c.answer(declined.request.id, true)).toBe(false); // too late
     const lapsed = c.check("tap|id:d", ask);
-    expect(lapsed.granted === false && lapsed.suffix).toBe(" Nobody answered.");
+    expect(lapsed.granted === false && "suffix" in lapsed && lapsed.suffix).toBe(" Nobody answered.");
     c.close();
   });
 
@@ -134,7 +139,7 @@ describe("a person's OK (Confirmations)", () => {
     const c = new Confirmations(() => now, 120_000);
     const ask = { kind: "tap", caption: "Tap", word: "Delete" };
     const r = c.check("tap|id:d", ask);
-    if (r.granted) throw new Error("granted without asking");
+    if (r.granted || "held" in r) throw new Error("granted without asking");
     c.answer(r.request.id, true);
     expect(c.check("long_press|id:d", ask).granted).toBe(false);
     expect(c.check("tap|id:other", ask).granted).toBe(false);
@@ -167,14 +172,29 @@ describe("guarded touches (§11.2)", () => {
     expect(textOf(third)).toMatch(/^Error not_allowed: needs_confirmation: /);
   });
 
-  it("adds They declined. on the retry after a person said no", async () => {
-    const { tools, confirmations, events } = await setup();
+  it("after a person said no, asks no one for 60 s and tells the agent to ask its user; then asks again, saying they declined", async () => {
+    let now = 1_000_000;
+    const { tools, confirmations, events } = await setup({ now: () => now });
     await tools.tap({ target: { id: "delete-trip" }, look: false });
     const asked = events[0];
     if (asked?.type !== "confirm") throw new Error("no prompt");
     confirmations.answer(asked.id, false);
-    const retry = await tools.tap({ target: { id: "delete-trip" }, look: false });
-    expect(textOf(retry)).toMatch(/If nobody is watching, ask your user\. They declined\.$/);
+    const soon = await tools.tap({ target: { id: "delete-trip" }, look: false });
+    expect(textOf(soon)).toBe(
+      `Error not_allowed: needs_confirmation: button "Delete trip" needs a person's OK (policy word "Delete"), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
+    );
+    expect(events.filter((e) => e.type === "confirm")).toHaveLength(1);
+    now += 61_000;
+    const later = await tools.tap({ target: { id: "delete-trip" }, look: false });
+    expect(textOf(later)).toMatch(/If nobody is watching, ask your user\. They declined\.$/);
+  });
+
+  it("checks a swipe that moves less than 10 pt, not a longer one", async () => {
+    const { app, tools } = await setup();
+    const short = await tools.swipe({ x0: 200, y0: 640, x1: 205, y1: 640, look: false });
+    expect(textOf(short)).toMatch(/^Error not_allowed: needs_confirmation: /);
+    await tools.swipe({ x0: 200, y0: 640, x1: 40, y1: 640, look: false });
+    expect(app.requests.filter((r) => r.method === "swipe")).toHaveLength(1);
   });
 
   it("blocks a block word outright, whatever the person says", async () => {

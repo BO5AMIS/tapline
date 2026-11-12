@@ -454,7 +454,7 @@ describe("a person's OK in the live view (VIEWER-PROTOCOL 1.5)", () => {
     const { port } = await startHub({ confirmations });
     const first = await openWs(port);
     const check = confirmations.check("tap|id:d", { kind: "tap", caption: 'Tap "Delete trip"', word: "Delete" });
-    if (check.granted) throw new Error("granted without asking");
+    if (check.granted || "held" in check) throw new Error("granted without asking");
     await until(() => first.messages.some((m) => m["type"] === "confirm"));
     expect(first.messages.find((m) => m["type"] === "confirm")).toMatchObject({ id: check.request.id, by: "agent", kind: "tap", caption: 'Tap "Delete trip"', word: "Delete" });
     // A bare socket that only holds the key (a script, an agent) can watch but not answer.
