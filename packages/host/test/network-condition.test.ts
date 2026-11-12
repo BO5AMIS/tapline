@@ -4,6 +4,7 @@ import { TaplineHost } from "../src/server.js";
 import { TaplineTools } from "../src/tools.js";
 import { formatChanges, formatTree, networkLine } from "../src/format.js";
 import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
+import type { PolicyFile } from "../src/policy.js";
 
 // AGENT-TOOLS 1.11 §16.4: the `network` app command, and the header line while a condition is on.
 
@@ -22,7 +23,7 @@ function textOf(result: CallToolResult): string {
 }
 
 /** A fake app that keeps the mode `network` was last set to and reports it in its tree, as the SDK does. */
-async function setup() {
+async function setup(policy?: PolicyFile) {
   let mode = "normal";
   const handler = (req: IncomingRequest): Reply => {
     switch (req.method) {
@@ -45,7 +46,7 @@ async function setup() {
   hosts.push(host);
   const { app } = await FakeApp.connect(port, {}, handler);
   apps.push(app);
-  return { app, tools: new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" } }) };
+  return { app, host, tools: new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, ...(policy !== undefined ? { policy } : {}) }) };
 }
 
 describe("network line", () => {
@@ -108,5 +109,28 @@ describe("network app command", () => {
     const { tools } = await setup();
     const answer = textOf(await tools.run({ steps: [{ tool: "app_command", name: "network", args: { mode: "lossy" } }] }));
     expect(answer).toContain("Network: lossy (Tapline).");
+  });
+});
+
+describe("a policy that blocks network (AGENT-TOOLS 1.11 §16.4)", () => {
+  it("refuses a condition, names where, and always lets normal through", async () => {
+    const { tools } = await setup({ version: 1, confirm: [], block: ["Network"] });
+    const refused = await tools.appCommand({ name: "network", args: { mode: "offline" } });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toBe("Error not_allowed: blocked: the safety policy blocks network here.");
+    const normal = await tools.appCommand({ name: "network", args: { mode: "normal" }, look: false });
+    expect(normal.isError).not.toBe(true);
+  });
+
+  it("names the app when its own list blocks it", async () => {
+    const probe = await setup();
+    const name = probe.host.current()?.app.name ?? "";
+    const { tools } = await setup({ version: 1, confirm: [], block: [], apps: { [name]: { block: ["network"] } } });
+    expect(textOf(await tools.appCommand({ name: "network", args: { mode: "3g" } }))).toBe(`Error not_allowed: blocked: the safety policy blocks network for ${name}.`);
+  });
+
+  it("leaves other commands alone", async () => {
+    const { tools } = await setup({ version: 1, confirm: [], block: ["network"] });
+    expect((await tools.appCommand({ name: "appearance", args: { scheme: "dark" }, look: false })).isError).not.toBe(true);
   });
 });

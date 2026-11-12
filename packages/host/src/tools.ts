@@ -3229,6 +3229,17 @@ export class TaplineTools {
       );
     }
     const name = args.name.trim();
+    // AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes.
+    if (name === "network") {
+      const mode = (args.args as { mode?: unknown } | undefined)?.mode;
+      const app = this.host.current()?.app;
+      const names = (words: string[] | undefined): boolean => (words ?? []).some((word) => word.trim().toLowerCase() === "network");
+      const own = app === undefined ? undefined : (this.policy.apps?.[app.id ?? ""] ?? this.policy.apps?.[app.name]);
+      if (mode !== "normal" && names(listsFor(this.policy, app).block)) {
+        const where = own?.block !== undefined && app !== undefined ? `for ${app.name}` : "here";
+        return fail(`Error not_allowed: blocked: the safety policy blocks network ${where}.`);
+      }
+    }
     return this.act(
       "command",
       { name, args: args.args ?? {} },
