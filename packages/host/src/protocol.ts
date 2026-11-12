@@ -234,4 +234,6 @@ export type Method =
   | "reload"
   | "perfStart"
   | "perfStop"
-  | "perfSettle";
+  | "perfSettle"
+  /** Tells the app the host has its saved crash (`{ ts }`), so it can forget it. */
+  | "crashAck";

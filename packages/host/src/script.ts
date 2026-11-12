@@ -188,7 +188,9 @@ export function failureDiagnostics(failure: string): string | null {
 
 /** JUnit XML for `tapline replay --junit`: one test case per script, the stop message as the failure. */
 export function junitXml(results: Array<{ name: string; seconds: number; failure: string | null }>): string {
-  const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  // XML 1.0 forbids control characters other than tab, newline and carriage return (an ANSI colour code's ESC too).
+  // eslint-disable-next-line no-control-regex
+  const esc = (s: string): string => s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const diagnosticsOut = (failure: string): string[] => {
     const said = failureDiagnostics(failure);
     return said === null ? [] : [`      <system-out>${esc(said)}</system-out>`];

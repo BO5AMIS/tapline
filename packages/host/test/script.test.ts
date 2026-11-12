@@ -81,4 +81,15 @@ describe("scripts", () => {
     expect(xml).toContain('name="checkout &lt;b&gt;"');
     expect(xml).toContain('<failure message="Error expect_failed: Ran 1 of 2 steps; stopped at step 2 (tap &quot;Pay&quot;)');
   });
+
+  it("strips characters XML 1.0 forbids (ANSI colour codes, other control characters) and keeps tab, newline and return", () => {
+    const xml = junitXml([
+      { name: "a\u0000b", seconds: 1, failure: "Error not_found: \u001b[31mred\u001b[0m\u0007 x\ty\r\nz\nLogs (since step 1):\n\u001b[33mwarn\u001b[0m" },
+    ]);
+    // eslint-disable-next-line no-control-regex
+    expect(xml).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/);
+    expect(xml).toContain('name="ab"');
+    expect(xml).toContain("[31mred[0m x\ty");
+    expect(xml).toContain("[33mwarn[0m");
+  });
 });

@@ -1383,6 +1383,12 @@ describe("other tools", () => {
     expect(text).toContain("Latest: 5000");
   });
 
+  it("logs with nothing to show falls back to `since`, else 0, never this computer's clock", async () => {
+    const { tools } = await setup(defaultHandler)();
+    expect(textOf(await tools.logs({}))).toMatch(/\nLatest: 0$/);
+    expect(textOf(await tools.logs({ since: 7000 }))).toMatch(/\nLatest: 7000$/);
+  });
+
   it("logs filters by level, grep and limit (AGENT-TOOLS 1.10 §15.1)", async () => {
     const { host, app, tools } = await setup(defaultHandler)();
     app.send({ type: "event", event: "log", data: { level: "log", message: "loaded trips", ts: 1000 } });

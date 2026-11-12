@@ -85,10 +85,21 @@ export interface CrashRecord {
   source: "live" | "saved";
 }
 
-/** Something that stopped an app, in the order the host learned of it. `seq` counts up from 1. */
+/** Which app on which phone an event belongs to (what `identityOf` is made from). */
+export type AppIdentity = Pick<SessionInfo, "app" | "device">;
+
+/**
+ * Something that stopped an app, in the order the host learned of it. `seq` counts up from 1. `of` says which app
+ * it was, so another app's answers don't carry it.
+ */
 export type CrashEvent =
-  | { seq: number; at: number; kind: "crash"; app: string; crash: CrashRecord }
-  | { seq: number; at: number; kind: "disconnect"; app: string };
+  | { seq: number; at: number; kind: "crash"; app: string; of: AppIdentity; crash: CrashRecord }
+  | { seq: number; at: number; kind: "disconnect"; app: string; of: AppIdentity };
+
+/** Whether two messages are the same one, when the phone may have cut the longer to fit its storage (`fitRecord`). */
+function sameMessage(a: string, b: string): boolean {
+  return a === b || a.startsWith(b) || b.startsWith(a) || (a.length >= 200 && b.length >= 200 && a.slice(0, 200) === b.slice(0, 200));
+}
 
 /** How many crashes are kept per app. */
 const MAX_CRASHES = 20;
@@ -286,7 +297,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Identity of "the same app on the same phone", used to replace stale sessions. */
-function identityOf(info: Pick<SessionInfo, "app" | "device">): string {
+export function identityOf(info: AppIdentity): string {
   const device = info.device.id ?? info.device.name ?? info.device.model ?? "";
   return `${info.app.id}\u0000${info.device.platform}\u0000${device}`;
 }
@@ -318,6 +329,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly sessionMap = new Map<string, Session>();
   private selectedId: string | undefined;
   private lastDrop: LastDisconnect | undefined;
+  /** When this host process started (this computer's clock), to tell a crash from an earlier run. */
+  readonly startedAt = Date.now();
   /** Fatal JS errors per app (by `identityOf`), newest last. */
   private readonly crashMap = new Map<string, CrashRecord[]>();
   private readonly crashLog: CrashEvent[] = [];
@@ -663,9 +676,15 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return this.crashSeq;
   }
 
-  /** Crash events after `seq`, oldest first. */
-  crashEventsAfter(seq: number): CrashEvent[] {
-    return this.crashLog.filter((event) => event.seq > seq);
+  /** Crash events after `seq`, oldest first; only those of the app `of` when it is given. */
+  crashEventsAfter(seq: number, of?: AppIdentity): CrashEvent[] {
+    const key = of !== undefined ? identityOf(of) : undefined;
+    return this.crashLog.filter((event) => event.seq > seq && (key === undefined || identityOf(event.of) === key));
+  }
+
+  /** The newest crash event of any app, if any is still kept. */
+  lastCrashEvent(): CrashEvent | undefined {
+    return this.crashLog[this.crashLog.length - 1];
   }
 
   /**
@@ -681,7 +700,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     const key = identityOf(session.info);
     const list = this.crashMap.get(key) ?? [];
     // The same crash arrives twice: live, and again from the phone's storage on the next connection.
-    const known = list.find((c) => c.ts === crash.ts && c.message === crash.message);
+    // The phone cuts a saved message to fit its storage, so one may be the start of the other.
+    const known = list.find((c) => c.ts === crash.ts && sameMessage(c.message, crash.message));
     if (known !== undefined) {
       if (crash.stack !== "" && crash.source === "saved") known.stack = crash.stack;
       if (known.componentStack === undefined && crash.componentStack !== undefined) known.componentStack = crash.componentStack;
@@ -690,12 +710,13 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     list.push(crash);
     if (list.length > MAX_CRASHES) list.splice(0, list.length - MAX_CRASHES);
     this.crashMap.set(key, list);
-    this.pushCrashEvent({ kind: "crash", app: session.info.app.name, crash });
+    this.pushCrashEvent(session, { kind: "crash", crash });
   }
 
-  private pushCrashEvent(event: { kind: "crash"; app: string; crash: CrashRecord } | { kind: "disconnect"; app: string }): void {
+  private pushCrashEvent(session: Session, event: { kind: "crash"; crash: CrashRecord } | { kind: "disconnect" }): void {
     this.crashSeq += 1;
-    this.crashLog.push({ ...event, seq: this.crashSeq, at: Date.now() });
+    const of: AppIdentity = { app: { ...session.info.app }, device: { ...session.info.device } };
+    this.crashLog.push({ ...event, app: session.info.app.name, of, seq: this.crashSeq, at: Date.now() });
     if (this.crashLog.length > 50) this.crashLog.splice(0, this.crashLog.length - 50);
   }
 
@@ -964,6 +985,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       if (typeof state !== "string" || state === "") return;
       const at = Date.now();
       session.info.appState = { state, at };
+      // Back in front: an earlier fatal error no longer explains a later end.
+      if (state === "active") session.fatalSeen = false;
       const where = state === "active" ? "came back to the front" : state === "background" ? "went to the background" : `is ${state}`;
       this.pushEntry(session, { level: "info", message: `[tapline] the app ${where}`, ts: at });
       this.safely(() => this.emit("appState", { ...session.info }, state));
@@ -972,7 +995,14 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     if (event === "crash") {
       // A fatal error the app kept on the phone and sends after it connects again.
       const saved = crashEventSchema.safeParse(data);
-      if (saved.success) this.recordCrash(session, crashRecordOf(saved.data, "saved"));
+      if (saved.success) {
+        this.recordCrash(session, crashRecordOf(saved.data, "saved"));
+        // The phone keeps its copy until told it arrived (also when this host already had it).
+        const ts = saved.data.ts;
+        if (ts !== undefined) {
+          this.safely(() => session.socket.send(JSON.stringify({ type: "request", id: session.nextId++, method: "crashAck", params: { ts } })));
+        }
+      }
       return;
     }
     if (event !== "log" && event !== "error") return;
@@ -1019,8 +1049,10 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       silentForMs !== undefined ||
       appState === "background" ||
       appState === "inactive";
+    // Known gap, left as it is: Fast Refresh and dev-menu reloads close the socket with 1006 in the middle of a
+    // call, so a request in flight then is noted as a possible crash. Only `reload` (expectEnd) is told apart.
     if (!orderly && session.fatalSeen !== true && session.pending.size > 0) {
-      this.pushCrashEvent({ kind: "disconnect", app: session.info.app.name });
+      this.pushCrashEvent(session, { kind: "disconnect" });
     }
     for (const [id, pending] of session.pending) {
       clearTimeout(pending.timer);

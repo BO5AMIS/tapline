@@ -1,4 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
@@ -43,7 +44,7 @@ import {
   type TreeResult,
   type WireTarget,
 } from "./protocol.js";
-import { TaplineError, type SessionInfo, type TaplineHost } from "./server.js";
+import { TaplineError, identityOf, type AppIdentity, type SessionInfo, type TaplineHost } from "./server.js";
 
 // ---- input schemas ----------------------------------------------------------
 
@@ -827,9 +828,12 @@ export class TaplineTools {
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
   private pairWrites = 0;
-  /** Crash events up to this one have been told to the agent. */
-  private notedCrashSeq = 0;
-  private noteDepth = 0;
+  /** Per app (by identity): crash events up to this one have been told to the agent. */
+  private readonly notedCrashSeqs = new Map<string, number>();
+  /** Crash events up to this one happened before this agent's session: an app with no entry above starts here. */
+  private readonly crashBaseline: number;
+  /** Set inside a tool call (and everything it awaits), so a call within a call (`run`'s steps) adds no notes. */
+  private readonly noteScope = new AsyncLocalStorage<true>();
 
   constructor(
     private readonly host: TaplineHost,
@@ -847,7 +851,7 @@ export class TaplineTools {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
     });
     // Crashes before this agent's session began are not its news.
-    this.notedCrashSeq = host.crashMark();
+    this.crashBaseline = host.crashMark();
     for (const name of CRASH_NOTED_TOOLS) {
       const original: unknown = Reflect.get(this, name);
       if (typeof original !== "function") continue;
@@ -861,44 +865,47 @@ export class TaplineTools {
    * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
    */
   private noting(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
-    if (this.noteDepth > 0) return run();
+    // Nesting belongs to the call and what it awaits (not to this object), so calls running side by side each
+    // count as outermost, and only a step inside a call is skipped.
+    if (this.noteScope.getStore() === true) return run();
     const mark = this.host.crashMark();
-    this.noteDepth += 1;
-    let result: CallToolResult | Promise<CallToolResult>;
-    try {
-      result = run();
-    } catch (error) {
-      this.noteDepth -= 1;
-      throw error;
-    }
-    if (result instanceof Promise) {
-      return result.then(
-        (answer) => {
-          this.noteDepth -= 1;
-          return this.withCrashNotes(answer, mark);
-        },
-        (error: unknown) => {
-          this.noteDepth -= 1;
-          throw error;
-        },
-      );
-    }
-    this.noteDepth -= 1;
-    return this.withCrashNotes(result, mark);
+    const startedWith: AppIdentity | undefined = this.host.current();
+    return this.noteScope.run(true, () => {
+      const result = run();
+      if (result instanceof Promise) return result.then((answer) => this.withCrashNotes(answer, mark, startedWith));
+      return this.withCrashNotes(result, mark, startedWith);
+    });
   }
 
-  private withCrashNotes(answer: CallToolResult, mark: number): CallToolResult {
-    const events = this.host.crashEventsAfter(this.notedCrashSeq);
+  /** What was told about this app's crashes so far: the crash events up to this number. */
+  private notedSeqOf(app: AppIdentity): number {
+    return this.notedCrashSeqs.get(identityOf(app)) ?? this.crashBaseline;
+  }
+
+  /**
+   * The notes for the app this call used (the one at its start, the one at its end, or, with none connected, the
+   * one that dropped last). Other apps' events stay pending until that app is the one being driven.
+   */
+  private withCrashNotes(answer: CallToolResult, mark: number, startedWith: AppIdentity | undefined): CallToolResult {
+    const apps = new Map<string, AppIdentity>();
+    const endedWith: AppIdentity | undefined = this.host.current() ?? (startedWith === undefined ? this.host.lastDisconnect()?.session : undefined);
+    for (const app of [startedWith, endedWith]) if (app !== undefined) apps.set(identityOf(app), app);
+    const events = [...apps.values()]
+      .flatMap((app) => this.host.crashEventsAfter(this.notedSeqOf(app), app))
+      .sort((a, b) => a.seq - b.seq);
     if (events.length === 0) return answer;
-    this.notedCrashSeq = this.host.crashMark();
+    const told = this.host.crashMark();
+    for (const key of apps.keys()) this.notedCrashSeqs.set(key, told);
     let noted = answer;
     for (const event of events) {
       // During this call: no time. A crash the phone had kept and sent later says when it happened.
       const during = event.seq > mark;
+      // A crash kept by an earlier run of the app (this host had not started yet) says so, with its date.
+      const earlier = event.kind === "crash" && event.crash.source === "saved" && event.crash.ts < this.host.startedAt;
       noted = appendNote(
         noted,
         event.kind === "crash"
-          ? crashNote(event.crash, !(during && event.crash.source === "live"))
+          ? crashNote(event.crash, !(during && event.crash.source === "live"), earlier)
           : disconnectNote(during ? undefined : event.at),
       );
     }
@@ -1152,6 +1159,18 @@ export class TaplineTools {
             `Error bad_params: step ${i + 1} (${describeRunStep(step)}): under has ${unknown.map((key) => JSON.stringify(key)).join(", ")}; the limits are ${UNDER_KEYS.join(", ")}.`,
           );
         }
+        if (Object.keys(under).length === 0) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): under is empty; give at least one limit (${UNDER_KEYS.join(", ")}).`);
+        }
+        const negative = Object.entries(under).filter(([, limit]) => limit < 0 || !Number.isFinite(limit));
+        if (negative.length > 0) {
+          return fail(
+            `Error bad_params: step ${i + 1} (${describeRunStep(step)}): under limits can't be negative (${negative.map(([key]) => key).join(", ")}).`,
+          );
+        }
+        if (under["launch_s"] !== undefined && (step as { launch?: unknown }).launch !== true) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch_s goes only on a launch step (performance with launch: true).`);
+        }
       }
       // A step's own look and screenshot are ignored (§9.1).
       if (step.tool === "performance") {
@@ -1200,13 +1219,16 @@ export class TaplineTools {
       if (step.expect?.under !== undefined) {
         // AGENT-TOOLS §15.3: the limits a performance step must keep; every broken one is listed.
         const measured = this.lastPerf;
-        if (measured !== undefined) {
-          const checked = checkUnder(step.expect.under, measured);
-          notes.push(...checked.notes.map((note) => `Note (step ${i + 1}): ${note}`));
-          if (checked.missed.length > 0) {
-            stop = { index: i, code: "expect_failed", message: `${checked.missed.join("; ")}.`, rest: [] };
-            break;
-          }
+        if (measured === undefined) {
+          // A limit nobody measured must not pass.
+          stop = { index: i, code: "expect_failed", message: "no measurement to check.", rest: [] };
+          break;
+        }
+        const checked = checkUnder(step.expect.under, measured);
+        notes.push(...checked.notes.map((note) => `Note (step ${i + 1}): ${note}`));
+        if (checked.missed.length > 0) {
+          stop = { index: i, code: "expect_failed", message: `${checked.missed.join("; ")}.`, rest: [] };
+          break;
         }
       } else if (step.expect !== undefined) {
         const missed = await this.expectMissed(step.expect);
@@ -3051,13 +3073,16 @@ export class TaplineTools {
     }
     const newest = entries.reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
     const query = { since: args.since, level: args.level, grep: args.grep, limit: args.limit };
-    return text(formatLogAnswer(filterLogs(entries, query), query, newest ?? args.since ?? Date.now()));
+    return text(formatLogAnswer(filterLogs(entries, query), query, newest ?? args.since ?? 0));
   }
 
   /** The newest fatal JS error of the app (`all`: the last 5). Reading them tells the agent what the notes did. */
   crash(args: Shape<"crash"> = {}): CallToolResult {
-    this.notedCrashSeq = this.host.crashMark();
-    const known = this.host.current() ?? this.host.lastDisconnect()?.session;
+    // The app being driven, else the one that stopped last. Never every app's crashes at once.
+    const known: AppIdentity | undefined = this.host.current() ?? this.host.lastCrashEvent()?.of;
+    if (known === undefined) return text(NO_CRASH_TEXT);
+    // Reading them tells the agent what the notes of this app said; other apps' stay pending.
+    this.notedCrashSeqs.set(identityOf(known), this.host.crashMark());
     const crashes = this.host.crashes(known);
     if (crashes.length === 0) return text(NO_CRASH_TEXT);
     return text(crashes.slice(0, args.all === true ? 5 : 1).map(formatCrash).join("\n\n"));
@@ -3067,24 +3092,27 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     try {
-      // The app goes away on purpose: that is no crash.
-      this.host.expectEnd(session.id);
-      await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
-    } catch (error) {
-      // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
-      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
-      if (!worked) {
-        this.host.expectEnd(session.id, false);
-        return fail(describeError(error));
+      try {
+        // The app goes away on purpose: that is no crash.
+        this.host.expectEnd(session.id);
+        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+      } catch (error) {
+        // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
+        const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
+        if (!worked) return fail(describeError(error));
       }
-    }
-    if (args.look === false) return text("Reload requested.");
-    const deadline = Date.now() + this.reloadWaitMs;
-    for (;;) {
-      const now = this.host.current();
-      if (now !== undefined && now.id !== session.id) break;
-      if (Date.now() > deadline) return text("Reload requested, but the app has not reconnected yet. Try look in a few seconds.");
-      await sleep(100);
+      if (args.look === false) return text("Reload requested.");
+      const deadline = Date.now() + this.reloadWaitMs;
+      for (;;) {
+        const now = this.host.current();
+        if (now !== undefined && now.id !== session.id) break;
+        if (Date.now() > deadline) return text("Reload requested, but the app has not reconnected yet. Try look in a few seconds.");
+        await sleep(100);
+      }
+    } finally {
+      // Whatever happened, the wait is over: a reload that "worked" without the app going away must not
+      // leave a later, real crash of this session explained.
+      this.host.expectEnd(session.id, false);
     }
     await sleep(this.reloadSettleMs);
     return this.withLook(this.host.current() ?? session, "Reloaded; the app reconnected.");
@@ -3098,29 +3126,34 @@ export class TaplineTools {
    */
   private async timedReload(session: SessionInfo): Promise<{ stop: CallToolResult } | { session: SessionInfo; seconds: number }> {
     const started = Date.now();
-    try {
-      // The app goes away on purpose: that is no crash.
-      this.host.expectEnd(session.id);
-      await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
-    } catch (error) {
-      // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
-      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
-      if (!worked) {
-        this.host.expectEnd(session.id, false);
-        if (error instanceof TaplineError && error.code === "unsupported") {
-          return { stop: fail(`Error unsupported: launch is a JavaScript reload, and only development builds can do one (${error.message}).`) };
-        }
-        return { stop: fail(describeError(error)) };
-      }
-    }
-    const deadline = Date.now() + this.reloadWaitMs;
     let fresh: SessionInfo | undefined;
-    while (fresh === undefined) {
-      const now = this.host.current();
-      if (now !== undefined && now.id !== session.id) fresh = now;
-      else if (Date.now() > deadline) {
-        return { stop: fail(`Error timeout: the app hadn't reconnected ${Number((this.reloadWaitMs / 1000).toFixed(1))} s after the reload; try look in a few seconds.`) };
-      } else await sleep(100);
+    try {
+      try {
+        // The app goes away on purpose: that is no crash.
+        this.host.expectEnd(session.id);
+        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+      } catch (error) {
+        // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
+        const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
+        if (!worked) {
+          if (error instanceof TaplineError && error.code === "unsupported") {
+            return { stop: fail(`Error unsupported: launch is a JavaScript reload, and only development builds can do one (${error.message}).`) };
+          }
+          return { stop: fail(describeError(error)) };
+        }
+      }
+      const deadline = Date.now() + this.reloadWaitMs;
+      while (fresh === undefined) {
+        const now = this.host.current();
+        if (now !== undefined && now.id !== session.id) fresh = now;
+        else if (Date.now() > deadline) {
+          return { stop: fail(`Error timeout: the app hadn't reconnected ${Number((this.reloadWaitMs / 1000).toFixed(1))} s after the reload; try look in a few seconds.`) };
+        } else await sleep(100);
+      }
+    } finally {
+      // The wait is over, whatever happened: a reload that "worked" without the app going away must not leave
+      // a later crash of this session explained away.
+      this.host.expectEnd(session.id, false);
     }
     // The first settled screen: the app waits until React hasn't committed for a moment (§6).
     await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 }).catch(() => undefined);

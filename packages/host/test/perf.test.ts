@@ -333,6 +333,25 @@ describe("in run", () => {
     expect(methodsOf(app)).toEqual([]);
   });
 
+  it("launch_s on a step that isn't a launch, a negative limit and an empty under are bad_params, and nothing runs", async () => {
+    const { app, tools } = await setup(appFor(RELEASE));
+    const notLaunch = await tools.run({ steps: [{ tool: "performance", seconds: 0.5, expect: { under: { launch_s: 2 } } }] });
+    expect(textOf(notLaunch)).toMatch(/^Error bad_params: step 1 \(performance 0\.5 s\): launch_s goes only on a launch step/);
+    const negative = await tools.run({ steps: [{ tool: "performance", seconds: 0.5, expect: { under: { drops: -1 } } }] });
+    expect(textOf(negative)).toMatch(/^Error bad_params: step 1 \(performance 0\.5 s\): under limits can't be negative \(drops\)/);
+    const empty = await tools.run({ steps: [{ tool: "performance", seconds: 0.5, expect: { under: {} } }] });
+    expect(textOf(empty)).toMatch(/^Error bad_params: step 1 \(performance 0\.5 s\): under is empty/);
+    expect(methodsOf(app)).toEqual([]);
+  });
+
+  it("a performance step that produced no measurement fails with expect_failed instead of passing", async () => {
+    const { tools } = await setup(appFor(RELEASE));
+    tools.performance = async () => ({ content: [{ type: "text", text: "Measured nothing." }] });
+    const answer = await tools.run({ steps: [{ tool: "performance", seconds: 0.5, expect: { under: { drops: 0 } } }] });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer).split("\n")[0]).toBe("Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (performance 0.5 s): no measurement to check.");
+  });
+
   it("a step's own look and screenshot are ignored; other unknown parameters are bad_params", async () => {
     const { tools } = await setup(appFor(RELEASE));
     const fine = await tools.run({ steps: [{ tool: "performance", seconds: 0.5, look: true, screenshot: true }] });

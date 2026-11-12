@@ -100,14 +100,24 @@ describe("the note when the app crashes during a call", () => {
 });
 
 describe("a crash that reaches the host later", () => {
-  const AT = new Date(2026, 10, 12, 10, 42, 7).getTime();
+  // Saved by this run of the app (after the host started): the note gives the time only.
+  const AT = Date.now() + 1000;
+  const two = (n: number): string => String(n).padStart(2, "0");
+  const clock = (ts: number): string => {
+    const d = new Date(ts);
+    return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  };
+  const day = (ts: number): string => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+  };
 
   it("is told on the next answer with its time, once", async () => {
     const { host, app, tools } = await setup();
     app.send({ type: "event", event: "crash", data: { name: "RangeError", message: "kept from last run", stack: "", ts: AT } });
     await until(() => host.crashMark() === 1);
     const first = textOf(await tools.look({ screenshot: false }));
-    expect(first.trimEnd().split("\n").at(-1)).toBe("Note: the app crashed at 10:42:07: RangeError: kept from last run. logs and crash show more.");
+    expect(first.trimEnd().split("\n").at(-1)).toBe(`Note: the app crashed at ${clock(AT)}: RangeError: kept from last run. logs and crash show more.`);
     expect(textOf(await tools.look({ screenshot: false }))).not.toContain("the app crashed");
   });
 
@@ -120,6 +130,42 @@ describe("a crash that reaches the host later", () => {
     expect(host.crashMark()).toBe(1);
     expect(textOf(await tools.crash({ all: true })).match(/TypeError/g)?.length).toBeGreaterThan(0);
     expect(host.crashes()).toHaveLength(1);
+  });
+
+  it("says so, with the date, when the saved crash is from before this host started", async () => {
+    const { host, app, tools } = await setup();
+    const OLD = new Date(2026, 0, 5, 9, 3, 4).getTime();
+    expect(OLD).toBeLessThan(host.startedAt);
+    app.send({ type: "event", event: "crash", data: { name: "RangeError", message: "kept from last run", stack: "", ts: OLD } });
+    await until(() => host.crashMark() === 1);
+    const said = textOf(await tools.look({ screenshot: false }));
+    expect(said.trimEnd().split("\n").at(-1)).toBe(
+      `Note: the app crashed in an earlier run, at ${day(OLD)} ${clock(OLD)}: RangeError: kept from last run. logs and crash show more.`,
+    );
+  });
+
+  it("tells the app it has the crash (crashAck with the same ts), also when it already had it", async () => {
+    const { host, app } = await setup();
+    app.send({ type: "event", event: "crash", data: { message: "kept", ts: 4321 } });
+    await until(() => app.requests.some((r) => r.method === "crashAck"));
+    expect(app.requests.filter((r) => r.method === "crashAck").map((r) => r.params)).toEqual([{ ts: 4321 }]);
+    app.send({ type: "event", event: "crash", data: { message: "kept", ts: 4321 } });
+    await until(() => app.requests.filter((r) => r.method === "crashAck").length === 2);
+    expect(host.crashes()).toHaveLength(1);
+  });
+
+  it("counts a saved crash once when the phone cut its long message", async () => {
+    const { host, app } = await setup();
+    const long = `boom ${"x".repeat(900)}`;
+    app.send({ type: "event", event: "error", data: { ...FATAL, message: long, ts: 77 } });
+    await until(() => host.crashMark() === 1);
+    app.send({ type: "event", event: "crash", data: { name: "TypeError", message: long.slice(0, 400), stack: "", ts: 77 } });
+    await until(() => app.requests.some((r) => r.method === "crashAck"));
+    expect(host.crashMark()).toBe(1);
+    expect(host.crashes()).toHaveLength(1);
+    // another crash at the same time with another message is another crash
+    app.send({ type: "event", event: "crash", data: { message: "something else", ts: 77 } });
+    await until(() => host.crashMark() === 2);
   });
 
   it("survives the app connecting again with a new session", async () => {
@@ -222,6 +268,96 @@ describe("the crash tool", () => {
     await until(() => host.crashMark() === 1);
     tools.crash({});
     expect(textOf(await tools.apps())).not.toContain("the app crashed");
+  });
+});
+
+describe("which calls carry a note", () => {
+  it("a call that runs beside another one still carries the note (nesting is per call)", async () => {
+    const { host, app, tools } = await setup();
+    app.handler = (req) => {
+      if (req.method === "tree") return { ok: true, result: TREE };
+      return defaultHandler(req);
+    };
+    const slow = tools.wait({ seconds: 0.3 });
+    app.send({ type: "event", event: "crash", data: { message: "late", ts: Date.now() + 1000 } });
+    await until(() => host.crashMark() === 1);
+    const quick = textOf(await tools.apps());
+    expect(quick).toContain("the app crashed");
+    await slow;
+  });
+});
+
+describe("crashes of another app", () => {
+  async function twoApps() {
+    const { host, port, app: a, tools } = await setup();
+    const { app: b, session: bSession } = await FakeApp.connect(port, { app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } }, defaultHandler);
+    apps.push(b);
+    const aSession = host.sessions().find((s) => s.app.id === "com.example.demo")?.id ?? "";
+    host.select(aSession);
+    return { host, port, a, b, bSession, aSession, tools };
+  }
+
+  it("shows on the answers of that app, not of the one being driven", async () => {
+    const { host, b, bSession, tools } = await twoApps();
+    b.send({ type: "event", event: "error", data: FATAL });
+    await until(() => host.crashMark() === 1);
+    expect(textOf(await tools.look({ screenshot: false }))).not.toContain("the app crashed");
+    host.select(bSession);
+    expect(textOf(await tools.look({ screenshot: false }))).toContain("the app crashed");
+    expect(textOf(await tools.look({ screenshot: false }))).not.toContain("the app crashed");
+  });
+
+  it("crash reads the app being driven and marks only its events as told", async () => {
+    const { host, a, b, bSession, aSession, tools } = await twoApps();
+    a.send({ type: "event", event: "error", data: { ...FATAL, message: "in demo" } });
+    b.send({ type: "event", event: "error", data: { ...FATAL, message: "in other" } });
+    await until(() => host.crashMark() === 2);
+    const said = textOf(tools.crash({}));
+    expect(said).toContain("in demo");
+    expect(said).not.toContain("in other");
+    host.select(bSession);
+    const note = textOf(await tools.look({ screenshot: false }));
+    expect(note).toContain("the app crashed");
+    expect(note).toContain("in other");
+    host.select(aSession);
+    expect(textOf(await tools.look({ screenshot: false }))).not.toContain("the app crashed");
+  });
+
+  it("with no app connected, crash reads the app of the most recent crash event, not every app", async () => {
+    const { host, port, a, tools } = await twoApps();
+    a.send({ type: "event", event: "error", data: { ...FATAL, message: "in demo" } });
+    await until(() => host.crashMark() === 1);
+    // the other app drops last, without a crash
+    for (const app of apps) app.ws.terminate();
+    await until(() => host.sessions().length === 0);
+    const { app: c } = await FakeApp.connect(port, { app: { name: "Third", id: "com.example.third", version: "1.0.0", build: "1" } }, defaultHandler);
+    apps.push(c);
+    c.ws.terminate();
+    await until(() => host.sessions().length === 0);
+    const said = textOf(tools.crash({ all: true }));
+    expect(said).toContain("in demo");
+  });
+});
+
+describe("when the end of a session is explained", () => {
+  it("a fatal error no longer explains a later end once the app is back in front", async () => {
+    const { app, tools } = await setup();
+    dieDuring(app, () => {
+      app.send({ type: "event", event: "error", data: FATAL });
+      app.send({ type: "event", event: "appState", data: { state: "active" } });
+    });
+    const said = textOf(await tools.tap({ target: { id: "go" } }));
+    expect(said).toContain("the app crashed");
+    expect(said).toContain("the app disconnected");
+  });
+
+  it("a reload that 'worked' without the app going away does not leave the next real crash explained away", async () => {
+    const { app, tools } = await setup();
+    // the reload is answered and the app stays
+    expect(textOf(await tools.reload({ look: false }))).toBe("Reload requested.");
+    dieDuring(app, () => undefined);
+    const said = textOf(await tools.tap({ target: { id: "go" } }));
+    expect(said.trimEnd().split("\n").at(-1)).toContain("the app disconnected during this call");
   });
 });
 

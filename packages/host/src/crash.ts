@@ -63,9 +63,20 @@ export function crashSummary(crash: CrashRecord): string {
   return `${type}${message}${where}`;
 }
 
-/** The note that goes on an answer. `withTime` is for a crash that reached the host after the call it ended. */
-export function crashNote(crash: CrashRecord, withTime: boolean): string {
-  return `Note: the app crashed${withTime ? ` at ${clockTime(crash.ts, false)}` : ""}: ${crashSummary(crash)}. logs and crash show more.`;
+/**
+ * The note that goes on an answer. `withTime` is for a crash that reached the host after the call it ended;
+ * `earlierRun` for one the phone kept from before this host started (it says the date too).
+ */
+export function crashNote(crash: CrashRecord, withTime: boolean, earlierRun = false): string {
+  const when = earlierRun ? ` in an earlier run, at ${dateTime(crash.ts)}` : withTime ? ` at ${clockTime(crash.ts, false)}` : "";
+  return `Note: the app crashed${when}: ${crashSummary(crash)}. logs and crash show more.`;
+}
+
+/** `2026-11-12 10:42:07`, in this computer's time zone. */
+function dateTime(ts: number): string {
+  const d = new Date(ts);
+  const two = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${clockTime(ts, false)}`;
 }
 
 export function disconnectNote(at: number | undefined): string {
