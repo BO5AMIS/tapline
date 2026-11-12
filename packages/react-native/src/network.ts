@@ -72,6 +72,8 @@ let random: () => number = Math.random;
 const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null }>();
 /** Finished 3g responses whose completion events are still held back; `cancel` drops them and says if any were held. */
 const responseHolds = new WeakMap<object, { cancel: () => boolean }>();
+/** Each response hold still open, as the function that lets it finish now: uninstalling releases them all. */
+const openHolds = new Set<() => void>();
 
 /** scheme://host[:port]/path, query replaced by "?…", no fragment or credentials. */
 export function redactUrl(raw: string): string {
@@ -414,12 +416,27 @@ function holdResponse(xhr: object): void {
   if (isFn(native.__didCompleteResponse)) {
     const complete = native.__didCompleteResponse as (...args: unknown[]) => unknown;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let waiting: unknown[] | null = null;
     const restore = (): void => {
       if (timer !== null) clearTimeout(timer);
       timer = null;
+      waiting = null;
       assign(xhr, '__didCompleteResponse', complete);
       responseHolds.delete(xhr);
+      openHolds.delete(release);
     };
+    // Tapline stopping: the method goes back, and a completion it was holding is delivered now.
+    const release = (): void => {
+      const args = waiting;
+      restore();
+      if (!args) return;
+      try {
+        complete.apply(xhr, args);
+      } catch {
+        // a handler's error stays the app's
+      }
+    };
+    openHolds.add(release);
     // false: nothing was dropped, so React Native's own abort ends the request and fires its events
     responseHolds.set(xhr, {
       cancel: () => {
@@ -436,14 +453,8 @@ function holdResponse(xhr: object): void {
         restore();
         return complete.apply(xhr, args);
       }
-      timer = setTimeout(() => {
-        restore();
-        try {
-          complete.apply(xhr, args);
-        } catch {
-          // a handler's error stays the app's
-        }
-      }, delay);
+      waiting = args;
+      timer = setTimeout(release, delay);
       return undefined;
     });
     return;
@@ -461,8 +472,19 @@ function holdResponse(xhr: object): void {
     timer = null;
     released = true;
     responseHolds.delete(xhr);
+    openHolds.delete(release);
     return dropped;
   };
+  const release = (): void => {
+    for (const queued of drop()) {
+      try {
+        dispatch.call(xhr, queued);
+      } catch {
+        // a handler's error stays the app's
+      }
+    }
+  };
+  openHolds.add(release);
   responseHolds.set(xhr, { cancel: () => drop().length > 0 });
   assign(xhr, 'dispatchEvent', function dispatchEvent(this: unknown, event: unknown): unknown {
     if (released) return dispatch.call(xhr, event);
@@ -493,20 +515,12 @@ function holdResponse(xhr: object): void {
     if (delay > 0) {
       const events: unknown[] = [event];
       queue = events;
-      timer = setTimeout(() => {
-        drop();
-        for (const queued of events) {
-          try {
-            dispatch.call(xhr, queued);
-          } catch {
-            // a handler's error stays the app's
-          }
-        }
-      }, delay);
+      timer = setTimeout(release, delay);
       return true;
     }
     released = true;
     responseHolds.delete(xhr);
+    openHolds.delete(release);
     return dispatch.call(xhr, event);
   });
 }
@@ -805,6 +819,16 @@ export function uninstallNetworkTracking(): void {
   pending = 0;
   generation += 1;
   condition = 'normal';
+  // Held responses finish now and their wrappers come off: once the patched abort is gone, nothing else would clean
+  // them up, and a reused XHR would stay held (Codex review of 1.4.0).
+  for (const release of [...openHolds]) {
+    try {
+      release();
+    } catch {
+      // ignore
+    }
+  }
+  openHolds.clear();
   const wrappedFetch = fetchInstalled;
   fetchInstalled = null;
   fetchTarget = null;

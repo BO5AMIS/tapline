@@ -48,6 +48,8 @@ describe('language and region validation', () => {
   });
 
   test.each(['ar', 'en', 'en-GB', 'zh-Hant-TW', 'fil'])('language %p reaches the handler', async (language) => {
+    // a change of direction reloads a development build: never for real in a test (it outlives the test run)
+    jest.spyOn(actions, 'reload').mockResolvedValue({});
     const handler = jest.fn();
     registerLanguageCommand(handler);
     const answer = await run('language', { language });
