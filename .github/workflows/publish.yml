@@ -1,0 +1,70 @@
+# Publishes tapline-host and react-native-tapline to npm with trusted publishing (no token stored anywhere).
+# npmjs.com → each package → Settings → Trusted Publisher: GitHub Actions, BO5AMIS / tapline, publish.yml.
+# Runs when a release is published; run it by hand (workflow_dispatch) with a tag to publish that release again.
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag to publish, e.g. v1.1.0"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    env:
+      # The tag travels as an environment variable, never pasted into a script.
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: npm 11.5.1 or newer (trusted publishing)
+        run: npm install -g npm@latest
+
+      - run: npm ci
+      - run: npm run build
+      - name: Test
+        run: |
+          npm test --workspace packages/host
+          npm test --workspace packages/react-native
+
+      - name: The tag matches both versions
+        run: |
+          tag="$TAG"
+          for pkg in packages/host packages/react-native; do
+            v="v$(node -p "require('./$pkg/package.json').version")"
+            [ "$v" = "$tag" ] || { echo "$pkg is $v, the tag is $tag"; exit 1; }
+          done
+
+      # npm's provenance check compares repository.url with this repository's exact name.
+      - name: Repository URL as GitHub names it
+        run: |
+          for pkg in packages/host packages/react-native; do
+            npm pkg set repository.url="git+https://github.com/$GITHUB_REPOSITORY.git" --workspace "$pkg"
+          done
+
+      - name: Publish (each version once)
+        run: |
+          for pkg in packages/react-native packages/host; do
+            name=$(node -p "require('./$pkg/package.json').name")
+            version=$(node -p "require('./$pkg/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on npm"
+            else
+              npm publish --workspace "$pkg" --access public
+            fi
+          done
