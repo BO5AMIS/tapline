@@ -33,6 +33,8 @@ let saving: Promise<void> = Promise.resolve();
 let saves = 0;
 /** Writes not yet done: a new crash written while one is in flight waits for it, so an older one never lands last. */
 let writing = 0;
+/** The newest crash written, so one saved while an acknowledgement was removing the older one can be put back. */
+let lastJson: string | null = null;
 
 /** Where the crash is kept (null: nowhere). */
 export function configureCrash(next: TaplineStorage | null): void {
@@ -40,6 +42,7 @@ export function configureCrash(next: TaplineStorage | null): void {
   saving = Promise.resolve();
   saves = 0;
   writing = 0;
+  lastJson = null;
   delivery = Promise.resolve();
 }
 
@@ -93,6 +96,7 @@ export function saveCrash(record: CrashRecord): void {
   try {
     const json = fitRecord(record);
     saves += 1;
+    lastJson = json;
     // At once when nothing is being written (the app may die right after); after the write in flight otherwise.
     const write = (): Promise<void> => target.setItem(CRASH_KEY, json).catch(() => undefined);
     writing += 1;
@@ -153,7 +157,14 @@ export async function ackSavedCrash(ts: number): Promise<void> {
     const record = parseSaved(await target.getItem(CRASH_KEY));
     // A crash saved while this was reading is newer than the one acknowledged: it stays.
     if (saves !== before) return;
-    if (record !== null && record.ts === ts) await target.removeItem(CRASH_KEY);
+    if (record !== null && record.ts === ts) {
+      await target.removeItem(CRASH_KEY);
+      // A crash saved while the removal was on its way may have been erased by it: it is written again.
+      if (saves !== before && lastJson !== null) {
+        await saving;
+        await target.setItem(CRASH_KEY, lastJson);
+      }
+    }
   } catch {
     // never reaches the app
   }
