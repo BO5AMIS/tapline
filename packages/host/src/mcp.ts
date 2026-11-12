@@ -19,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
+import { NO_UX_RULES, loadUxRules, type UxRules } from "./uxcheck.js";
 import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
 import { VIEWER_HTML } from "./viewer-page.js";
 import { TaplineHost } from "./server.js";
@@ -141,6 +142,17 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       annotations: { readOnlyHint: true },
     },
     guarded("audit", (args) => tools.audit(args)),
+  );
+
+  server.registerTool(
+    "ux_check",
+    {
+      title: "Check the screen's usability",
+      description: toolDescription("ux_check"),
+      inputSchema: looseInput("ux_check"),
+      annotations: { readOnlyHint: true },
+    },
+    guarded("ux_check", (args) => tools.uxCheck(args)),
   );
 
   server.registerTool(
@@ -402,16 +414,19 @@ function openInBrowser(link: string): boolean {
 }
 
 export async function runMcp(
-  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean; viewerLink?: boolean } = {},
+  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean; viewerLink?: boolean; uxRules?: string } = {},
 ): Promise<boolean> {
   let screenshots: ScreenshotMode;
   let viewer: ViewerMode;
   let policy: PolicyFile;
+  let uxRules: UxRules = NO_UX_RULES;
   try {
     screenshots = screenshotMode(options.screenshots, options.env);
     viewer = viewerMode(options.viewer, options.env);
     // The safety policy (AGENT-TOOLS 1.8 §11): built in, from --policy FILE, or none with --no-policy.
     policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
+    // The user's UX house rules (AGENT-TOOLS 1.12 §17.3): --ux-rules FILE; a bad file stops the host with a plain message.
+    if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
   } catch (error) {
     log(error instanceof Error ? error.message : String(error));
     return false;
@@ -457,6 +472,7 @@ export async function runMcp(
   let hub: ViewerHub | undefined;
   const tools = new TaplineTools(host, {
     policy,
+    uxRules,
     confirmations,
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },

@@ -43,7 +43,7 @@ export const auditResultSchema = z.object({
 export type AuditResult = z.infer<typeof auditResultSchema>;
 
 /** An issue without an element: what is known of it, else "the screen" (only when nothing at all is). */
-function whereWords(where: AuditResult["issues"][number]["where"]): string {
+export function whereWords(where: AuditResult["issues"][number]["where"]): string {
   if (where === undefined) return "the screen";
   const name = where.label ?? where.text;
   const f = where.frame;

@@ -18,6 +18,7 @@ import { reportFor } from "./report.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -139,6 +140,7 @@ export const toolShapes = {
       .describe("Draw each actionable element's box and ref (e12) on the screenshot, so whoever views it can name elements by ref"),
   },
   check_layout: {},
+  ux_check: {},
   audit: {
     types: z
       .array(z.enum(AUDIT_TYPES))
@@ -431,6 +433,8 @@ export interface ToolsOptions {
   clientId?: () => string | undefined;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
   policy?: PolicyFile;
+  /** The user's UX house rules (`--ux-rules FILE`, AGENT-TOOLS 1.12 §17.3). Default: none. */
+  uxRules?: UxRules;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
@@ -821,7 +825,7 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 
 /** Every tool whose answer can end with a crash note (all but `crash`, which tells it in full). */
 const CRASH_NOTED_TOOLS = [
-  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "checkLayout", "viewer", "compareScreen", "filmstrip",
+  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "uxCheck", "checkLayout", "viewer", "compareScreen", "filmstrip",
   "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
   "openUrl", "logs", "reload", "performance", "wait",
 ] as const satisfies readonly (keyof TaplineTools)[];
@@ -829,14 +833,14 @@ const CRASH_NOTED_TOOLS = [
 /** Every tool the agent calls, by handler name (the call log numbers these). */
 const CALL_TOOLS: Readonly<Record<string, string>> = {
   apps: "apps", openApp: "open_app", pair: "pair", look: "look", run: "run", inspect: "inspect", audit: "audit",
-  checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
+  uxCheck: "ux_check", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
   crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report",
 };
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
-  "apps", "open_app", "pair", "look", "inspect", "audit", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
+  "apps", "open_app", "pair", "look", "inspect", "audit", "ux_check", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
   "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
 ]);
 /** A look's picture arguments for the call log: booleans and numbers only; undefined when it gave none. */
@@ -892,6 +896,12 @@ export class TaplineTools {
   private scrollBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   readonly confirmations: Confirmations;
   private readonly policy: PolicyFile;
+  private readonly uxRules: UxRules;
+  /**
+   * Hook for the journey (AGENT-TOOLS 1.12 §17): gives `ux_check` the action labels of earlier screens, and is told
+   * what each `ux_check` found. Null while no journey runs (naming is then not checked, and the answer says so).
+   */
+  uxJourney: UxJourneyHook | null = null;
   private readonly reloadSettleMs: number;
   private readonly noScreenshot = new Set<string>();
   private readonly shotFiles: string[] = [];
@@ -936,6 +946,7 @@ export class TaplineTools {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.confirmations = options.confirmations ?? new Confirmations();
     this.policy = options.policy ?? DEFAULT_POLICY;
+    this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
@@ -1672,6 +1683,42 @@ export class TaplineTools {
     if (!parsed.success) return fail("Error internal: the app returned an audit the host could not read.");
     const title = auditTitle(await this.currentRoute(), session.app.name);
     return text([formatAudit(title, parsed.data, args.types), ...this.takePersonNote()].join("\n"));
+  }
+
+  // -- ux_check (AGENT-TOOLS 1.12 §17.3)
+
+  /** The house rule `max_taps_to_goal`, for the journey to check at stop; undefined when the user set none. */
+  get maxTapsToGoal(): number | undefined {
+    return this.uxRules.maxTapsToGoal;
+  }
+
+  async uxCheck(_args: Shape<"ux_check"> = {}): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    if (!session.capabilities.includes("uxCheck")) {
+      return fail("Error unsupported: this app's Tapline is too old for ux_check; update react-native-tapline (audit and check_layout work meanwhile).");
+    }
+    const earlier = this.uxJourney?.earlier() ?? null;
+    let raw: unknown;
+    try {
+      raw = await this.host.request(
+        "uxCheck",
+        { ...(this.uxRules.wayBack ? { wayBack: true } : {}), ...(earlier !== null ? { earlier } : {}) },
+        { sessionId: session.id },
+      );
+    } catch (error) {
+      return fail(describeError(error));
+    }
+    const parsed = uxResultSchema.safeParse(raw);
+    if (!parsed.success) return fail("Error internal: the app returned a UX check the host could not read.");
+    const title = auditTitle(await this.currentRoute(), session.app.name);
+    this.uxJourney?.seen?.(
+      title,
+      parsed.data.actions,
+      parsed.data.issues.map((i) => ({ kind: i.kind, problem: i.problem, basis: i.basis, ...(i.element ? { ref: i.element.ref } : {}) })),
+    );
+    const body = formatUxCheck(title, parsed.data, { textRules: this.uxRules.text, journeyRunning: this.uxJourney !== null });
+    return text([body, ...this.takePersonNote()].join("\n"));
   }
 
   // -- check_layout
