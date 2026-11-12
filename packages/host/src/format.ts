@@ -351,9 +351,17 @@ export function formatStatus(tree: TreeResult, keyboard: "shown" | "hidden" | nu
     lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons}`);
   }
   if (keyboard !== null) lines.push(`Keyboard: ${keyboard}`);
+  // A condition Tapline put on the requests stays in every header until `normal` (AGENT-TOOLS §16.4).
+  const condition = tree.network?.condition;
+  if (condition !== undefined) lines.push(networkLine(condition));
   const busy = tree.network?.inFlight ?? 0;
   if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);
   return lines;
+}
+
+/** `Network: 3g (Tapline).` — the same line the `network` command answers with and every header carries. */
+export function networkLine(mode: string): string {
+  return `Network: ${mode} (Tapline).`;
 }
 
 /** What an open alert means for the agent, as `Note:` lines for the end of the answer (§3.6). */

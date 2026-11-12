@@ -11,6 +11,7 @@ import {
   type ClientDeps,
   type WebSocketLike,
 } from '../src/client';
+import { installNetworkTracking, networkCondition, setNetworkCondition, uninstallNetworkTracking } from '../src/network';
 import { addLog, clearLogs, getLogEntries, uninstallLogs } from '../src/logs';
 import type { MethodFn } from '../src/methods';
 import { TaplineError, type DeviceInfo } from '../src/types';
@@ -322,6 +323,38 @@ describe('keepalive', () => {
     expect(harness.lines).toContain('[tapline] disconnected');
     jest.advanceTimersByTime(1000);
     expect(MockSocket.instances).toHaveLength(2);
+  });
+
+  describe('network conditions end with the connection', () => {
+    class Xhr {
+      open(): void {}
+      send(): void {}
+    }
+
+    beforeEach(() => installNetworkTracking({ target: { XMLHttpRequest: Xhr } }));
+    afterEach(() => uninstallNetworkTracking());
+
+    test('the host dropping the connection puts the network back to normal', () => {
+      const socket = connect(makeClient());
+      setNetworkCondition('offline');
+      socket.drop(1006);
+      expect(networkCondition()).toBe('normal');
+    });
+
+    test('stopping the client puts the network back to normal', () => {
+      const harness = makeClient();
+      connect(harness);
+      setNetworkCondition('3g');
+      harness.client.stop();
+      expect(networkCondition()).toBe('normal');
+    });
+
+    test('the host going silent puts the network back to normal', () => {
+      connect(makeClient());
+      setNetworkCondition('lossy');
+      jest.advanceTimersByTime(HOST_SILENCE_MS + PING_INTERVAL_MS);
+      expect(networkCondition()).toBe('normal');
+    });
   });
 });
 

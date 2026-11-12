@@ -17,11 +17,12 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-test('lists the built-in appearance command and the app’s own, sorted by name', () => {
+test('lists the built-in appearance and network commands and the app’s own, sorted by name', () => {
   registerTaplineCommand('language', { description: 'Switch the app language (args: { code: "en" | "ar" })', run: () => undefined });
   expect(listCommands()).toEqual([
     { name: 'appearance', description: expect.stringContaining('dark') },
     { name: 'language', description: 'Switch the app language (args: { code: "en" | "ar" })' },
+    { name: 'network', description: expect.stringContaining('offline') },
   ]);
 });
 
