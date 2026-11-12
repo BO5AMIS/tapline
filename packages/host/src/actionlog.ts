@@ -41,6 +41,8 @@ export interface ActionLogEntry {
   listed?: boolean;
   /** A touch after scrolls: the target was already in the last full list before the first scroll. Absent when unknown. */
   in_list?: boolean;
+  /** For a `look`: the picture arguments it was given (booleans and numbers only), so a look that asked for more than the action's answer had isn't called waste. */
+  look_args?: { screenshot?: boolean; width?: number; labels?: boolean };
 }
 
 export const LOG_KEEP_DAYS = 14;

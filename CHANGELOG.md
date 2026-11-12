@@ -22,7 +22,8 @@ Android; this release goes after where they went. The interface is AGENT-TOOLS 1
   `language`, `region` and `text_size`, with the values both tools share. The SDK checks the values,
   `useTaplineFontScale()` lets an app follow `text_size`, a switch to or from a right-to-left language
   reloads a development build, and `tapline init` adds `language` and `region` for i18next and
-  expo-localization.
+  expo-localization. `size: "system"` restores the phone's text size, and text size and network both
+  go back to normal when the session ends.
 - The skill has `run` examples for the common shapes (a sheet, a form, a tab tour) and a list of ways
   to spend fewer calls.
 

@@ -33,6 +33,8 @@ export interface CallRecord {
   target?: unknown;
   /** After scrolls: true (target was in the list before), false (it wasn't), absent (unknown). */
   inList?: boolean;
+  /** For a look: it asked for a screenshot, a width or labels, which the answer of the action before it could not give. */
+  askedPicture?: boolean;
 }
 
 export interface Flag {
@@ -84,6 +86,7 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
       ...(single && first.element !== undefined ? { element: first.element } : {}),
       ...(single && first.target !== undefined ? { target: first.target } : {}),
       ...(single && first.in_list !== undefined ? { inList: first.in_list } : {}),
+      ...(single && askedPicture(first) ? { askedPicture: true } : {}),
     });
   }
   // Sessions in the order they began; inside one, the call numbers (legacy: the order read).
@@ -108,6 +111,11 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     c.n = sessions.size === 1 && callOf.get(c) !== undefined && c.session !== "legacy" ? (callOf.get(c) as number) : i + 1;
   });
   return calls;
+}
+
+function askedPicture(entry: ActionLogEntry): boolean {
+  const asked = entry.look_args;
+  return asked !== undefined && (asked.screenshot === true || asked.width !== undefined || asked.labels === true);
 }
 
 function stringField(target: unknown, key: string): string | undefined {
@@ -161,7 +169,7 @@ export function analyze(calls: readonly CallRecord[]): Report {
       const c = seq[i] as CallRecord;
       const prev = seq[i - 1];
       // 1. a look right after an action whose answer had the changes
-      if (c.tool === "look" && prev !== undefined && (ACTION_TOOLS.has(prev.tool) || prev.tool === "run") && prev.ok && prev.listed && !prev.dryRun) {
+      if (c.tool === "look" && prev !== undefined && (ACTION_TOOLS.has(prev.tool) || prev.tool === "run") && prev.ok && prev.listed && !prev.dryRun && c.askedPicture !== true) {
         looks.push(c.n);
       }
       // 2. a retry after not_found that found the same element by another target

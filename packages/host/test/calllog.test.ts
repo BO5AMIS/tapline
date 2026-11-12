@@ -111,10 +111,27 @@ describe("the call log", () => {
     await tools.tap({ target: { id: "elsewhere" }, look: false });
     const taps = lines(dir).filter((l) => l["tool"] === "tap");
     expect(taps[0]?.["in_list"]).toBe(true);
-    expect(taps[1]?.["in_list"]).toBe(false);
+    // the actions before the second hunt gave the agent no list: it can't be known any more
+    expect(taps[1]?.["in_list"]).toBeUndefined();
     const report = tools.sessionReport();
     expect(JSON.stringify(report.content)).toContain("1 scroll hunt of 3 or more scrolls for an element already in the list (calls 2–5)");
     expect(JSON.stringify(report.content)).not.toContain("(maybe)");
+  });
+
+  it("an action that gave no list or changes (look: false) makes the list unknown, so the hunt after it is a maybe", async () => {
+    const { dir, tools } = await setup();
+    await tools.look({ screenshot: false });
+    await tools.tap({ target: { id: "save" }, look: false }); // could have navigated
+    for (let i = 0; i < 3; i++) await tools.scroll({ direction: "down", look: false });
+    await tools.tap({ target: { id: "save" }, look: false });
+    const taps = lines(dir).filter((l) => l["tool"] === "tap");
+    expect(taps[1]?.["in_list"]).toBeUndefined();
+    expect(JSON.stringify(tools.sessionReport().content)).toContain("1 scroll hunt (maybe) of 3 or more scrolls");
+    // a list seen again makes it known
+    await tools.look({ screenshot: false });
+    for (let i = 0; i < 3; i++) await tools.scroll({ direction: "down", look: false });
+    await tools.tap({ target: { id: "save" }, look: false });
+    expect(lines(dir).filter((l) => l["tool"] === "tap")[2]?.["in_list"]).toBe(true);
   });
 
   it("without a list before the scrolls the hunt is a maybe", async () => {
@@ -146,6 +163,26 @@ describe("the call log", () => {
 
 describe("session_report waste flags", () => {
   const flagsOf = (entries: ActionLogEntry[]): string[] => analyze(buildCalls(entries)).flags.map((f) => f.text);
+
+  it("does not flag a look that asked for what the action's answer could not give: a screenshot, a width or labels", () => {
+    const tap = entry(1, "tap", { ...TAP_SAVE, listed: true });
+    expect(flagsOf([tap, entry(2, "look", { kind: "read", look_args: { screenshot: true } })])).toEqual([]);
+    expect(flagsOf([tap, entry(2, "look", { kind: "read", look_args: { width: 300 } })])).toEqual([]);
+    expect(flagsOf([tap, entry(2, "look", { kind: "read", look_args: { labels: true } })])).toEqual([]);
+    // a look that asked for no picture is still the waste it was
+    expect(flagsOf([tap, entry(2, "look", { kind: "read", look_args: { screenshot: false } })])).toHaveLength(1);
+  });
+
+  it("logs a look's screenshot, width and labels arguments (booleans and numbers only) on its read entry", async () => {
+    const { dir, tools } = await setup();
+    await tools.look({ screenshot: true, width: 300, labels: true });
+    await tools.look({ screenshot: false });
+    await tools.look({});
+    const looks = lines(dir).filter((l) => l["tool"] === "look");
+    expect(looks[0]?.["look_args"]).toEqual({ screenshot: true, width: 300, labels: true });
+    expect(looks[1]?.["look_args"]).toEqual({ screenshot: false });
+    expect(looks[2]?.["look_args"]).toBeUndefined();
+  });
 
   it("flags a look right after an action whose answer had the changes; not after look:false, a read or a failure", () => {
     const flagged = flagsOf([entry(1, "tap", { ...TAP_SAVE, listed: true }), entry(2, "look", { kind: "read" })]);

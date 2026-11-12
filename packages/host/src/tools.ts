@@ -839,6 +839,15 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   "apps", "open_app", "pair", "look", "inspect", "audit", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
   "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
 ]);
+/** A look's picture arguments for the call log: booleans and numbers only; undefined when it gave none. */
+function pictureArgs(input: Record<string, unknown>): { screenshot?: boolean; width?: number; labels?: boolean } | undefined {
+  const out: { screenshot?: boolean; width?: number; labels?: boolean } = {};
+  if (typeof input["screenshot"] === "boolean") out.screenshot = input["screenshot"];
+  if (typeof input["width"] === "number" && Number.isFinite(input["width"])) out.width = input["width"];
+  if (typeof input["labels"] === "boolean") out.labels = input["labels"];
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Tools whose answer carries the changes or the full list unless the call said `look: false`. */
 const LISTING_TOOLS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "run"]);
 /** Tools that act on one element: after a run of scrolls they log whether the element was already in the list. */
@@ -873,10 +882,14 @@ export class TaplineTools {
   private clientIdFn: (() => string | undefined) | undefined;
   /** The tool of the previous call, for scroll runs. */
   private prevCallTool: string | undefined;
-  /** The latest full element list the agent was given (`stale`: changes only since). */
-  private listBase: { elements: TreeElement[]; stale: boolean } | undefined;
+  /**
+   * The latest full element list the agent was given. `stale`: only changes since. `unseen`: an action since then
+   * answered with no list and no changes (`look: false`), so the screen may be another one: neither "in the
+   * list" nor "not in it" can be said until a list is seen again.
+   */
+  private listBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   /** The list as it was before the current run of scrolls began. */
-  private scrollBase: { elements: TreeElement[]; stale: boolean } | undefined;
+  private scrollBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   readonly confirmations: Confirmations;
   private readonly policy: PolicyFile;
   private readonly reloadSettleMs: number;
@@ -1010,6 +1023,7 @@ export class TaplineTools {
     // A call that logged no action: a read, or an action refused before it began (then without `kind`).
     const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     const session = this.host.current();
+    const lookArgs = state.tool === "look" ? pictureArgs(input) : undefined;
     this.actionLog.write(
       {
         by: "agent",
@@ -1023,6 +1037,7 @@ export class TaplineTools {
         ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
         ...common,
         ...(listed ? { listed: true } : {}),
+        ...(lookArgs !== undefined ? { look_args: lookArgs } : {}),
       },
       began,
     );
@@ -1038,6 +1053,7 @@ export class TaplineTools {
     if (base === undefined || typeof target !== "object" || target === null) return undefined;
     const t = target as Record<string, unknown>;
     if (!["ref", "testID", "label", "text"].some((key) => typeof t[key] === "string")) return undefined;
+    if (base.unseen) return undefined;
     if (candidatesFor(target, base.elements).length > 0) return true;
     return base.stale ? undefined : false;
   }
@@ -1481,6 +1497,7 @@ export class TaplineTools {
     let response: CallToolResult;
     const live = this.host.current();
     if (args.look === false || live === undefined) {
+      this.markListUnseen();
       response = text([first, ...tail].join("\n"));
     } else {
       response = await this.withLook(live, first, args.screenshot === true);
@@ -1745,8 +1762,8 @@ export class TaplineTools {
     else this.alertOpen.delete(sid);
     const changesText = askChanges ? formatChanges(tree, { alertGone }) : null;
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
-    if (changesText === null) this.listBase = { elements: tree.elements, stale: false };
-    else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true };
+    if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
+    else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
@@ -1810,6 +1827,11 @@ export class TaplineTools {
     return ["Note: a person used the app since your last look."];
   }
 
+  /** An action answered with no list and no changes: the call log can't say what is in the list any more. */
+  private markListUnseen(): void {
+    if (this.listBase !== undefined) this.listBase = { ...this.listBase, unseen: true };
+  }
+
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
   private async act(
     method: string,
@@ -1867,6 +1889,7 @@ export class TaplineTools {
       ? `Settled in ${(settledMs / 1000).toFixed(2)} s.`
       : undefined;
     if (withLook === false) {
+      this.markListUnseen();
       this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
       response = text([line, ...this.takePersonNote()].join("\n"));
     } else {
@@ -3353,7 +3376,10 @@ export class TaplineTools {
         const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
         if (!worked) return fail(describeError(error));
       }
-      if (args.look === false) return text("Reload requested.");
+      if (args.look === false) {
+        this.markListUnseen();
+        return text("Reload requested.");
+      }
       const deadline = Date.now() + this.reloadWaitMs;
       for (;;) {
         const now = this.host.current();
