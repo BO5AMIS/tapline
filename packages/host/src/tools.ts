@@ -9,7 +9,8 @@ import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, networkLine, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { briefLines, briefScreen } from "./brief.js";
+import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -122,6 +123,9 @@ const lookField = z
 
 const screenshotField = z.boolean().optional().describe("Add a screenshot (default false)");
 
+/** AGENT-TOOLS 1.13 §13.4. What it does is in the instructions' Answers list (TOOL-TEXT, core answers). */
+const briefField = z.boolean().optional().describe("true: a short answer, as the instructions describe; false: the whole answer, also when the server runs with --brief");
+
 const dryRunField = z
   .boolean()
   .optional()
@@ -169,7 +173,7 @@ export const toolShapes = {
       .describe("Which checks to run (default all): contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, overlap, duplicate_id"),
   },
   inspect: { target: targetField },
-  tap: { target: targetField, index: indexField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField },
+  tap: { target: targetField, index: indexField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField, brief: briefField },
   long_press: {
     target: targetField,
     index: indexField,
@@ -183,6 +187,7 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   type_text: {
     text: z.string().describe("Text to enter"),
@@ -194,6 +199,7 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   scroll: {
     direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction (default down when no `to`)"),
@@ -208,6 +214,7 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   toggle: {
     target: targetField,
@@ -217,13 +224,15 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   open_url: {
     url: z.string().describe('URL or deep link to open, e.g. "myapp://settings"'),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
-  back: { dry_run: dryRunField, look: lookField, screenshot: screenshotField },
+  back: { dry_run: dryRunField, look: lookField, screenshot: screenshotField, brief: briefField },
   swipe: {
     x0: z.number().describe("Where the finger starts, in points from the left"),
     y0: z.number().describe("Where the finger starts, in points from the top"),
@@ -233,12 +242,14 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   app_command: {
     name: z.string().optional().describe("The command to run; omit to list the app's commands and what they take"),
     args: z.record(z.string(), z.unknown()).optional().describe("Arguments, as the command's description says"),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   compare_screen: {
     name: z.string().describe('A name for this screen\'s reference picture, e.g. "home" or "checkout-empty"'),
@@ -293,6 +304,7 @@ export const toolShapes = {
     timeout: z.number().min(0.5).max(30).optional().describe("Seconds to wait at most, 0.5 to 30 (default 10)"),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   logs: {
     since: z.number().optional().describe("Only lines after this timestamp (epoch milliseconds)"),
@@ -353,6 +365,7 @@ export const toolShapes = {
       .describe("Check every step's parameters and resolve step 1 (later steps depend on what it does), then touch nothing"),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
 } as const;
 
@@ -473,6 +486,8 @@ export interface ConnectInfo {
 
 export interface ToolsOptions {
   connect: ConnectInfo;
+  /** The server's `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). `look` is never brief. */
+  brief?: boolean;
   /**
    * Whether a phone has ever connected to this computer's host. When set, the first answer of the session says what
    * only a person can do (open the app, pair) if an app isn't connected: `Note: needs a person: …`, once.
@@ -1706,8 +1721,8 @@ export class TaplineTools {
       }
       const shape = toolShapes[step.tool as RunTool];
       const { tool: _tool, expect: _expect, route: _route, ...given } = step as Step & { route?: unknown };
-      // §9.1: a step's own look and screenshot are ignored (the batch answers once), whether its tool has them or not.
-      const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot") || key in shape));
+      // §9.1: a step's own look, screenshot and brief are ignored (the batch answers once), whether its tool has them or not.
+      const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot" || key === "brief") || key in shape));
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
         return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
       }
@@ -1739,6 +1754,7 @@ export class TaplineTools {
       if (step.tool === "performance") {
         delete params["look"];
         delete params["screenshot"];
+        delete params["brief"];
         // Checked before any step runs (and in a dry run), not when this step's turn comes.
         if (params["launch"] === true && params["tap"] !== undefined) {
           return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch reloads the app and tap taps in it; give one of them.`);
@@ -1860,7 +1876,7 @@ export class TaplineTools {
       this.markListUnseen();
       response = text([first, ...tail].join("\n"));
     } else {
-      response = await this.withLook(live, first, args.screenshot === true);
+      response = await this.withLook(live, first, args.screenshot === true, this.briefOn(args.brief));
       if (tail.length > 0) {
         const [top, ...rest] = response.content;
         if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...tail].join("\n") }, ...rest] };
@@ -1929,7 +1945,7 @@ export class TaplineTools {
 
   private runStepNow(step: Step): Promise<CallToolResult> {
     const { tool, expect: _expect, route: _route, ...rest } = step as Step & { route?: unknown };
-    const quiet = { ...rest, look: false, screenshot: false };
+    const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
         return this.tap(quiet as Shape<"tap">);
@@ -2170,6 +2186,8 @@ export class TaplineTools {
     width: number = DEFAULT_SCREENSHOT_WIDTH,
     onlyChanges = false,
     labels = false,
+    /** A brief answer (AGENT-TOOLS 1.13 §13.4): the answer's first line; the text then starts with it. */
+    briefFirst?: string,
   ): Promise<{ content: CallToolResult["content"]; isError: boolean }> {
     const sid = session.id;
     // Right after typing into a password field iOS may still show its last character: no picture then, and the note says why.
@@ -2204,23 +2222,38 @@ export class TaplineTools {
     }
 
     this.listed.add(sid);
+    const previousElements = this.listBase?.elements ?? [];
     this.lastLookRoute = tree.route?.names;
     if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
     const alertsNow = (tree.alerts ?? []).length > 0;
     const alertGone = this.alertOpen.has(sid) && !alertsNow;
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
-    const changesText = askChanges ? formatChanges(tree, { alertGone, eyes }) : null;
+    const changeBlock = askChanges ? changeParts(tree, { alertGone, eyes }) : null;
+    const changesText = changeBlock === null ? null : [changeBlock.label, ...changeBlock.header, ...changeBlock.changes].join("\n");
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
     if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
     else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes })];
+    // Brief: the same facts, cut. The journey's copy of a full list below stays whole.
+    const briefed =
+      briefFirst === undefined
+        ? undefined
+        : changeBlock !== null
+          ? briefLines({ first: briefFirst, label: changeBlock.label, changes: changeBlock.changes, fixed: changeBlock.header })
+          : briefLines({
+              first: briefFirst,
+              changes: [],
+              screen: briefScreen(tree.elements, previousElements, { eyes }),
+              fixed: formatStatus(tree),
+            });
     // A journey keeps the first full list of each screen (and counts the screens entered) for its report.
     if (changesText === null) this.journeyRun?.noteFullList({ route: tree.route?.names ?? [], text: lines[0] ?? "", fromAction: onlyChanges });
     // A full list in place of the changes (most of the screen changed) still says what changed out of view.
-    if (askChanges && changesText === null && !eyes) lines.push(...formatOffScreenAfterList(tree));
+    if (askChanges && changesText === null && !eyes && briefed === undefined) lines.push(...formatOffScreenAfterList(tree));
+    if (briefed !== undefined) lines[0] = briefed.join("\n");
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [...alertNotes(tree)];
@@ -2311,9 +2344,12 @@ export class TaplineTools {
     nothingDone?: (result: unknown) => boolean,
     /** Runs inside the agent's turn, right before the request: an answer stops the call there (the policy). */
     preflight?: () => Promise<CallToolResult | null>,
+    /** The call's `brief` (else the server's `--brief`): a short answer, and no `Settled in` line (AGENT-TOOLS 1.13 §13.4). */
+    brief?: boolean,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    const shortAnswer = this.briefOn(brief);
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
     let result: unknown;
@@ -2362,8 +2398,8 @@ export class TaplineTools {
       response = text([line, ...this.takePersonNote()].join("\n"));
     } else {
       // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
-      response = await this.withLook(session, line, screenshot === true);
-      if (settled !== undefined) {
+      response = await this.withLook(session, line, screenshot === true, shortAnswer);
+      if (settled !== undefined && !shortAnswer) {
         const [first, ...rest] = response.content;
         if (first !== undefined && first.type === "text") {
           // `Settled in` is the last line that isn't a note: it goes before the trailing `Note:` lines.
@@ -3334,7 +3370,7 @@ export class TaplineTools {
       update: options.updateReferences === true,
     };
     try {
-      const answer = await this.run({ steps: script.steps, look: args.look, screenshot: args.screenshot });
+      const answer = await this.run({ steps: script.steps, look: args.look, screenshot: args.screenshot, brief: false });
       if (notes.length === 0) return answer;
       const [top, ...rest] = answer.content;
       return top !== undefined && top.type === "text"
@@ -3346,15 +3382,21 @@ export class TaplineTools {
     }
   }
 
-  private async withLook(session: SessionInfo, line: string, screenshot = false): Promise<CallToolResult> {
+  /** Whether an answer is brief: the call's own `brief`, else the server's `--brief` (AGENT-TOOLS 1.13 §13.4). */
+  private briefOn(arg: boolean | undefined): boolean {
+    return arg ?? this.options.brief === true;
+  }
+
+  private async withLook(session: SessionInfo, line: string, screenshot = false, brief = false): Promise<CallToolResult> {
     // The session may have been replaced (app restarted) in the meantime.
     const live = this.host.sessions().some((s) => s.id === session.id) ? session : this.host.current();
     if (live === undefined) return text(`${line}\nNote: the app disconnected, so there's no fresh element list.`);
     // Text only unless asked: a screenshot after every step would cost image tokens the agent rarely needs.
-    const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true);
+    const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true, false, brief ? line : undefined);
     const [first, ...rest] = parts.content;
     const head = first !== undefined && first.type === "text" ? first.text : "";
-    return { content: [{ type: "text", text: `${line}\n${head}` }, ...rest] };
+    // A brief answer already carries the first line.
+    return { content: [{ type: "text", text: brief ? head : `${line}\n${head}` }, ...rest] };
   }
 
   /**
@@ -3659,7 +3701,7 @@ export class TaplineTools {
     if (hiddenTap !== null) return Promise.resolve(hiddenTap);
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
-      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief),
     );
   }
 
@@ -3669,7 +3711,7 @@ export class TaplineTools {
     if (hiddenPress !== null) return Promise.resolve(hiddenPress);
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
-      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief),
     );
   }
 
@@ -3700,6 +3742,10 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
@@ -3761,6 +3807,9 @@ export class TaplineTools {
         if (direction === "left") return ["Note: the scroll view is already at the start."];
         return ["Note: the scroll view is already at the end."];
       },
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
@@ -3786,6 +3835,7 @@ export class TaplineTools {
         undefined,
         unchanged,
         preflight,
+        args.brief,
       ),
     );
   }
@@ -3831,6 +3881,10 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
@@ -3865,6 +3919,10 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
@@ -3892,6 +3950,7 @@ export class TaplineTools {
       undefined,
       undefined,
       preflight,
+      args.brief,
     );
     return short ? this.guarded("swipe", "swipe", params, false, perform) : perform();
   }
@@ -3916,13 +3975,17 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
   async openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
     const refused = this.shortcutRefusal("open_url", args.url);
     if (refused !== null) return refused;
-    const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
+    const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot, undefined, undefined, undefined, args.brief);
     // The app's own forget link unpairs it, so it drops the connection before answering: that is the link working.
     if (answer.isError === true && /(^|\/)tapline\/forget\/?$/.test(args.url.replace(/[?#].*$/, ""))) {
       const said = answer.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");

@@ -37,6 +37,8 @@ export interface RuntimeOptions extends ResolveOptions {
   noPolicy?: boolean;
   viewerLink?: boolean;
   uxRules?: string;
+  /** `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). */
+  brief?: boolean;
   /** Serve `POST /api/<tool>`: set by a standalone `tapline host`, never by an agent's MCP server (AGENT-TOOLS 1.13 §18.10). */
   api?: boolean;
   /** Where the host's own lines go. Default: stderr with a `[tapline]` prefix (stdout is the MCP protocol's). */
@@ -158,6 +160,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const openBrowser = options.openBrowser ?? openInBrowser;
 
   const toolsOptions: ToolsOptions = {
+    ...(options.brief === true ? { brief: true } : {}),
     policy,
     uxRules,
     confirmations,

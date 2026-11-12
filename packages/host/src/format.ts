@@ -327,6 +327,15 @@ const MAX_MOVED_LINES = 5;
  * route, or most elements new or gone) and the full list reads better.
  */
 export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; eyes?: boolean } = {}): string | null {
+  const parts = changeParts(tree, options);
+  return parts === null ? null : [parts.label, ...parts.header, ...parts.changes].join("\n");
+}
+
+/** The change block in its parts, for a brief answer: the label, the header lines (never cut) and the change lines. */
+export function changeParts(
+  tree: TreeResult,
+  options: { alertGone?: boolean; eyes?: boolean } = {},
+): { label: string; header: string[]; changes: string[] } | null {
   const eyes = options.eyes === true;
   const changes = tree.changes;
   if (changes === undefined || !changes.sameRoute) return null;
@@ -342,8 +351,7 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; 
   const header = formatStatus(tree, changes.keyboard ?? null);
   const alertGone = options.alertGone === true && (tree.alerts ?? []).length === 0;
   if (alertGone) header.unshift("Alert: gone");
-  const lines = ["Same screen. Changes:", ...header];
-  const statusLines = lines.length;
+  const lines: string[] = [];
   for (const ref of changes.added) {
     const element = byRef.get(ref);
     if (element !== undefined) lines.push(`+ ${formatElement(element, { eyes })}`);
@@ -368,8 +376,8 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; 
     }
   }
   // A closed alert is itself a change, and so is the keyboard coming or going.
-  if (lines.length === statusLines && !alertGone && changes.keyboard == null) lines.push("No visible change.");
-  return lines.join("\n");
+  if (lines.length === 0 && !alertGone && changes.keyboard == null) lines.push("No visible change.");
+  return { label: "Same screen. Changes:", header, changes: lines };
 }
 
 /**
