@@ -1980,6 +1980,7 @@ export class TaplineTools {
 
   /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
   private async matchMissed(name: string, threshold: number, ignore: IgnoreItem[]): Promise<string | null> {
+    this.lastMaskElements = undefined;
     if (!SCRIPT_NAME.test(name)) return parseError(BAD_REFERENCE_NAME).message;
     const session = this.host.current();
     if (session === undefined) return "the app isn't connected";
@@ -2049,6 +2050,7 @@ export class TaplineTools {
 
   /** A `compare_screen` step of `run`: it never saves; it holds on a match and stops the batch otherwise. */
   private async compareStep(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    this.lastMaskElements = undefined;
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const name = args.name.trim();
@@ -2147,6 +2149,8 @@ export class TaplineTools {
   }
 
   async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    // Each check starts with no mask list: an update, or a first save, never records from an earlier comparison.
+    this.lastMaskElements = undefined;
     const recording = this.recording !== null && !this.replaying;
     const session = this.host.current();
     // An ignore ref that a script couldn't find again is refused before anything is compared.

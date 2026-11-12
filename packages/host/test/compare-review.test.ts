@@ -133,6 +133,36 @@ describe("the recorded mask is the one the comparison used (re-review)", () => {
   });
 });
 
+describe("an update never records from an earlier comparison's mask (re-review 3)", () => {
+  it("saves the index for the screen as it is when updating", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tapline-compare-review-"));
+    let two = false;
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "screenshot") return { ok: true, result: { mime: "image/jpeg", data: picture(300, 600), width: 300, height: 600 } };
+      if (req.method === "tree") return { ok: true, result: { screen: { width: 150, height: 300, scale: 2 }, elements: two ? TWO_PRICES : TWO_PRICES.slice(0, 1) } };
+      return { ok: true, result: {} };
+    };
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, handler);
+    apps.push(app);
+    const tools = new TaplineTools(host, {
+      connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
+      baselinesDir: join(root, "baselines"),
+      scriptsDir: join(root, "scripts"),
+    });
+    await tools.compareScreen({ name: "prices" });
+    // a comparison that painted out the only "Price" there was
+    expect(textOf(await tools.compareScreen({ name: "prices", ignore: [{ ref: "e1" }] }))).toMatch(/Matches/);
+    two = true; // a second "Price" appears
+    await tools.record({ action: "start", name: "update-flow" });
+    expect(textOf(await tools.compareScreen({ name: "prices", ignore: [{ ref: "e1" }], update: true }))).toMatch(/Saved/);
+    await tools.record({ action: "stop" });
+    const script = JSON.parse(readFileSync(join(root, "scripts", "update-flow.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
+    expect(script.steps.find((s) => s["tool"] === "compare_screen")?.["ignore"]).toEqual([{ label: "Price", index: 0 }]);
+  });
+});
+
 describe("visual checks inside run are recorded (finding 3)", () => {
   it("keeps a compare_screen step of a batch in the recording", async () => {
     const { tools, root } = await rig(() => picture(300, 600));
