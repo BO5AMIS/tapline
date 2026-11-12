@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Finding } from "./journeyreport.js";
 import type { JourneyExport } from "./journey.js";
 
@@ -125,17 +125,57 @@ function safeBranch(branch: string): boolean {
   return branch !== "" && !branch.startsWith("-") && !/[\s~^:?*[\\]|\.\.|@\{/.test(branch);
 }
 
-/** The files, and only them, into `into` (made if need be), keeping their folders. */
-function copyReport(folder: string, into: string, files: readonly string[]): void {
-  const root = resolve(folder);
+function inside(root: string, path: string): boolean {
+  return path === root || path.startsWith(root + sep);
+}
+
+/**
+ * Makes the folders from `base` down to `dir` one at a time, refusing any that is a link (a symlink or a junction):
+ * a repository can hold a `reports` link that points out of the clone (Codex review of 1.5.0).
+ */
+function makeFoldersInside(base: string, dir: string): void {
+  const steps = relative(base, dir).split(sep).filter((step) => step !== "");
+  let at = base;
+  for (const step of steps) {
+    at = join(at, step);
+    if (existsSync(at) || isLink(at)) {
+      if (isLink(at) || !lstatSync(at).isDirectory()) throw new Error(`the repository has a link or a file where the report goes (${step}); nothing was exported`);
+    } else {
+      mkdirSync(at);
+    }
+  }
+}
+
+function isLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The files, and only them, into `into` (made if need be), keeping their folders. Both ends are checked: a source is
+ * a plain file inside the report folder, and every folder and file written is inside the clone, with no link on the way.
+ */
+function copyReport(folder: string, clone: string, into: string, files: readonly string[]): void {
+  const root = realpathSync(resolve(folder));
+  const cloneRoot = realpathSync(resolve(clone));
+  const target = resolve(into);
+  if (!inside(resolve(clone), target)) throw new Error("the report would go outside the clone; nothing was exported");
   for (const file of files) {
     // Never outside the report folder, whatever a list holds (1.5 review, finding 7).
     const from = resolve(root, file);
-    if (isAbsolute(file) || file.split(/[\\/]/).includes("..") || (from !== root && !from.startsWith(root + sep))) {
+    if (isAbsolute(file) || file.split(/[\\/]/).includes("..") || !inside(root, from)) {
       throw new Error(`the report lists a file outside its folder (${JSON.stringify(file)}); nothing was exported`);
     }
-    const to = join(into, file);
-    mkdirSync(dirname(to), { recursive: true });
+    if (isLink(from) || !inside(root, realpathSync(from))) {
+      throw new Error(`the report lists a link (${JSON.stringify(file)}); nothing was exported`);
+    }
+    const to = join(target, file);
+    makeFoldersInside(resolve(clone), dirname(to));
+    if (!inside(cloneRoot, realpathSync(dirname(to)))) throw new Error("the report would go outside the clone; nothing was exported");
+    if (isLink(to)) throw new Error(`the repository has a link where a report file goes (${JSON.stringify(file)}); nothing was exported`);
     copyFileSync(from, to);
   }
 }
@@ -220,7 +260,7 @@ async function toPullRequest(input: ExportInput, run: Runner, repo: string, pr: 
   const cloned = await run("gh", ["repo", "clone", headRepo, clone, "--", "--branch", head, "--single-branch", "--depth", "1"]);
   if (cloned.code !== 0) return { ok: false, message: explain(cloned, "gh repo clone", headRepo) };
   const where = `.tapline/reports/${input.name}`;
-  copyReport(input.folder, join(clone, where), input.files);
+  copyReport(input.folder, clone, join(clone, where), input.files);
   const git = async (args: string[], what: string): Promise<string | null> => {
     const done = await run("git", args, { cwd: clone });
     return done.code === 0 ? null : explain(done, what, headRepo);
@@ -256,7 +296,7 @@ async function toIssue(input: ExportInput, run: Runner, repo: string, tmp: strin
     if (orphan !== null) return { ok: false, message: orphan };
   }
   const where = `reports/${input.name}`;
-  copyReport(input.folder, join(clone, where), input.files);
+  copyReport(input.folder, clone, join(clone, where), input.files);
   const failure =
     (await git(["add", "-f", "--", where], "git add")) ??
     (await git(["commit", "-m", `QA journey report: ${input.goal}`.slice(0, 120)], "git commit")) ??

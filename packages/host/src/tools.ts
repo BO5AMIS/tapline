@@ -1053,6 +1053,22 @@ export class TaplineTools {
   private readonly noteScope = new AsyncLocalStorage<true>();
   /** The journey this agent has running (AGENT-TOOLS 1.12 §17.1); one at a time. */
   private journeyRun: Journey | undefined;
+  /** The app the running journey started on (its identity and name): its clean-up goes to that app only. */
+  private journeyApp: { identity: string; name: string } | undefined;
+
+  /** The journey's own app if it is connected (the current one first), else undefined: never another app (Codex review of 1.5.0). */
+  private journeySession(): SessionInfo | undefined {
+    const app = this.journeyApp;
+    const current = this.host.current();
+    if (app === undefined) return current;
+    if (current !== undefined && identityOf(current) === app.identity) return current;
+    return this.host.sessions().find((s) => identityOf(s) === app.identity);
+  }
+
+  /** Why a journey's clean-up didn't reach its app. */
+  private journeyAppGone(): string {
+    return this.journeyApp === undefined ? "no app is connected" : `${this.journeyApp.name} isn't connected (Tapline changes no other app)`;
+  }
   /** The state of the journey that stopped last, for the report writer and the stress moments. */
   private journeyDone: JourneyState | undefined;
   /** Inside `run`: "run" for the batch's own checks (not counted), "step" for a step (counted like a call of its own). */
@@ -4139,6 +4155,7 @@ export class TaplineTools {
     }
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    this.journeyApp = { identity: identityOf(session), name: session.app.name };
     const journey = new Journey(
       {
         goal,
@@ -4285,18 +4302,19 @@ export class TaplineTools {
       await attempt("conditions could not be undone", () => this.undoConditions(state));
       // A picker stub the journey armed and nobody used goes back, so a person's next pick is their own (finding 5).
       await attempt("the photo picker could not be put back", async () => {
-        const live = this.host.current();
+        const live = this.journeySession();
         if (live !== undefined && live.capabilities.includes("media")) await this.host.request("media", { op: "disarm" }, { sessionId: live.id });
       });
       const undoLines: string[] = [];
       // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
       if (state.networkStress && !state.conditionRecords.some((r) => r.name === "network" && r.applied)) {
         const done = await attempt("the network condition a stress moment set was not undone", async () => {
-          const live = this.host.current();
+          const live = this.journeySession();
           return live === undefined ? undefined : this.runCondition(live, "network", "normal");
         });
         undoLines.push(done?.ok === true ? "Undone: network is normal again." : "Note: the network condition a stress moment set was not undone; set it back with app_command network normal.");
       }
+      this.journeyApp = undefined;
       const session = this.host.current();
       // The agent's next list is a full one: the journey's lists were of the glass only.
       if (session !== undefined) this.listed.delete(session.id);
@@ -4624,7 +4642,7 @@ export class TaplineTools {
 
   /** At the stop: network goes back to normal, text size to the phone's own, language and region to what the app said they were. */
   private async undoConditions(state: JourneyState): Promise<void> {
-    const session = this.host.current();
+    const session = this.journeySession();
     for (const record of state.conditionRecords) {
       if (!record.applied) continue;
       const words = record.name.replace("_", " ");
@@ -4635,7 +4653,7 @@ export class TaplineTools {
       }
       if (session === undefined) {
         record.undone = false;
-        record.undo = `Note: ${words} ${record.value} was not undone: no app is connected.`;
+        record.undo = `Note: ${words} ${record.value} was not undone: ${this.journeyAppGone()}.`;
         continue;
       }
       const back = record.name === "network" ? "normal" : record.name === "text_size" ? "system" : (record.previous ?? "");

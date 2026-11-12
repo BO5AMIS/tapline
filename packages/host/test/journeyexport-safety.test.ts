@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -64,6 +64,29 @@ describe("export refuses a file outside the report folder", () => {
     );
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.message).toMatch(/outside its folder/);
+  });
+
+  it("writes nothing through a link the repository holds where the report goes (Codex review of 1.5.0)", async () => {
+    const folder = mkdtempSync(join(tmpdir(), "tapline-report-"));
+    writeFileSync(join(folder, "report.md"), "# r");
+    const outside = mkdtempSync(join(tmpdir(), "tapline-outside-"));
+    const run: Runner = async (command, args) => {
+      if (command === "gh" && args[0] === "repo") return { code: 0, stdout: JSON.stringify({ visibility: "PRIVATE" }), stderr: "" };
+      if (command === "git" && args.includes("ls-remote")) return { code: 2, stdout: "", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const tmp = mkdtempSync(join(tmpdir(), "tapline-export-test-"));
+    mkdirSync(join(tmp, "repo"), { recursive: true });
+    // a checkout that made the repository's `reports` link real ("junction" works without admin on Windows)
+    symlinkSync(outside, join(tmp, "repo", "reports"), "junction");
+    const outcome = await exportReport(
+      { target: { to: "issue", repo: "owner/name", confirm: true }, folder, name: "r1", goal: "g", summary: "s", findingsLine: "f", findings: [], files: ["report.md"], headline: undefined },
+      run,
+      () => tmp,
+    );
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.message).toMatch(/link/);
+    expect(readdirSync(outside)).toEqual([]);
   });
 
   it("refuses repo names with .. or a leading dash", async () => {

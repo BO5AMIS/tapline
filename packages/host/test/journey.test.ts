@@ -6,7 +6,7 @@ import { Journey, formatDuration, summaryLine, withoutIds, type JourneyState } f
 import { formatChanges, formatElement, formatTree } from "../src/format.js";
 import type { TreeElement } from "../src/protocol.js";
 import type { PolicyFile } from "../src/policy.js";
-import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
+import { FakeApp, startHost, until, type IncomingRequest, type Reply } from "./helpers.js";
 
 // AGENT-TOOLS 1.12 §17.1: `journey`, its user's eyes and what it measures.
 
@@ -110,7 +110,7 @@ async function setup(options: { policy?: PolicyFile; world?: Partial<World>; onR
     clock: () => now,
     ...(options.policy !== undefined ? { policy: options.policy } : {}),
   });
-  return { app, host, tools, world, advance: (ms: number) => { now += ms; } };
+  return { app, host, port, tools, world, advance: (ms: number) => { now += ms; } };
 }
 
 const start = (tools: TaplineTools, extra: Record<string, unknown> = {}) => tools.journey({ start: true, goal: "change the settings", persona: "a first-timer", ...extra });
@@ -632,6 +632,34 @@ describe("conditions", () => {
     expect(stopped).toContain("Undone: text size is the phone's own again.");
     // the app didn't say what the region was
     expect(stopped).toContain("Note: region QA was not restored: the app doesn't report what it was before.");
+  });
+
+  it("undoes them on the journey's own app, never on another app selected since (Codex review of 1.5.0)", async () => {
+    const { app, host, port, tools } = await setup();
+    await start(tools, { conditions: { network: "3g", language: "ar" } });
+    const other = await FakeApp.connect(port, { app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } }, () => ({ ok: true, result: {} }));
+    apps.push(other.app);
+    host.select(other.session);
+    expect(host.current()?.app.id).toBe("com.example.other");
+    await tools.journey({ stop: true, reached: true });
+    expect(commands(other.app)).toEqual([]);
+    expect(commands(app).slice(2)).toEqual([
+      { name: "network", args: { mode: "normal" } },
+      { name: "language", args: { language: "en" } },
+    ]);
+  });
+
+  it("says a condition was not undone when the journey's app is gone, and changes no other app", async () => {
+    const { app, host, port, tools } = await setup();
+    await start(tools, { conditions: { language: "ar" } });
+    const other = await FakeApp.connect(port, { app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } }, () => ({ ok: true, result: {} }));
+    apps.push(other.app);
+    host.select(other.session);
+    app.ws.terminate();
+    await until(() => host.sessions().length === 1);
+    const stopped = textOf(await tools.journey({ stop: true, reached: true }));
+    expect(commands(other.app)).toEqual([]);
+    expect(stopped).toContain("Note: language ar was not undone: Demo isn't connected (Tapline changes no other app).");
   });
 
   it("applies none without conditions, and does not count them as the agent's calls or shortcuts", async () => {

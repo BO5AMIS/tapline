@@ -143,6 +143,13 @@ describe('tree with glass', () => {
     expect(result.keyboard).toBe(true);
   });
 
+  test('a peek on the glass leaves out what is under the keyboard too (a stress moment\'s survives check)', async () => {
+    await mountWorld();
+    setKeyboardReader(() => ({ shown: true, top: 650 }));
+    const result = await run(() => glassTree({ glass: true, peek: true }));
+    expect(itemTexts(result.elements)).toEqual(['Item a', 'Item b']);
+  });
+
   test('the tree method takes glass: true from the wire', async () => {
     await mountWorld();
     const result = await run(() => treeMethod({ glass: true }) as Promise<{ glass?: unknown }>);

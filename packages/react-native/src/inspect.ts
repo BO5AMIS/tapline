@@ -1473,7 +1473,7 @@ export async function tree(params: unknown = {}, glass?: GlassPass): Promise<Tre
   }
   // A journey in a user's eyes (AGENT-TOOLS 1.12 §17.1): only what shows on the glass, and no counts of the rest.
   let glassMore: { moreAbove: boolean; moreBelow: boolean } | undefined;
-  if (glass !== undefined && !all && !peek) {
+  if (glass !== undefined && !all) {
     const seen = await glass(snapshot, listed);
     listed = seen.kept;
     glassMore = { moreAbove: seen.moreAbove, moreBelow: seen.moreBelow };
