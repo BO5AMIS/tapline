@@ -196,13 +196,15 @@ function parseOr<T>(schema: z.ZodType<T>, raw: unknown): T | null {
 
 /** The host side of `media`, after the cheap checks. */
 export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<CallToolResult> {
-  const app = ctx.session.app.id;
+  // Ids are kept per app install, never per app: another phone with the same app must never be sent them (1.5 review,
+  // finding 9). An app that sends no install id gets only what it remembers itself.
+  const app = ctx.session.device.id !== undefined && ctx.session.device.id !== "" ? `${ctx.session.app.id}@${ctx.session.device.id}` : null;
   if (!ctx.session.capabilities.includes("media")) {
     return fail("Error unsupported: this app's Tapline is too old for media; update react-native-tapline.");
   }
 
   if (args.remove === true) {
-    const ids = ctx.state.addedIds(app);
+    const ids = app === null ? [] : ctx.state.addedIds(app);
     let raw: unknown;
     try {
       raw = await ctx.request({ op: "remove", ids });
@@ -214,7 +216,7 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
     if (result.declined === true) {
       return ok("The person declined the delete on the phone; the pictures this session added are still there. Call media with remove: true to ask again.");
     }
-    ctx.state.forget(app);
+    if (app !== null) ctx.state.forget(app);
     if (result.removed === 0) return ok("Nothing to remove: this session added no pictures.");
     const ios = ctx.session.device.platform === "ios";
     const confirm = ios ? " iOS asks the person to confirm the delete on the phone: ask your user to tap Delete." : "";
@@ -247,17 +249,17 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
     try {
       raw = await ctx.request({ op: "add", name: file.name, mime: file.mime, data: file.data });
     } catch (error) {
-      ctx.state.remember(app, added);
+      if (app !== null) ctx.state.remember(app, added);
       const done = added.length > 0 ? ` ${plural(added.length, "picture")} were added before it.` : "";
       return fail(`${ctx.describeError(error)}${done}`);
     }
     const result = parseOr(addResultSchema, raw);
     if (result === null) {
-      ctx.state.remember(app, added);
+      if (app !== null) ctx.state.remember(app, added);
       return fail("Error internal: the app returned a media answer the host could not read.");
     }
     if (result.needsPerson === true || result.id === undefined) {
-      ctx.state.remember(app, added);
+      if (app !== null) ctx.state.remember(app, added);
       const left = files.length - i;
       return ok(
         [
@@ -268,7 +270,7 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
     }
     added.push(result.id);
   }
-  ctx.state.remember(app, added);
+  if (app !== null) ctx.state.remember(app, added);
   return ok(
     `Added ${plural(added.length, "picture")} to the phone's photo library (${files.map((f) => f.name).join(", ")}); they show in the picker as Recently Added. Call media with remove: true to delete them afterwards.`,
   );

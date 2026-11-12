@@ -57,10 +57,11 @@ function pictures(): { dir: string; a: string; b: string } {
 
 type Handler = (params: Record<string, unknown>) => { ok: true; result?: unknown } | { ok: false; error: { code: string; message: string } };
 
-async function connect(handler: Handler, capabilities = ["tree", "media"]): Promise<{ app: FakeApp; tools: TaplineTools }> {
+async function connect(handler: Handler, capabilities = ["tree", "media"], deviceId: string | null = "install-1"): Promise<{ app: FakeApp; tools: TaplineTools }> {
   const { host, port } = await startHost();
   hosts.push(host);
-  const { app } = await FakeApp.connect(port, { capabilities }, (req) => {
+  const device = { platform: "ios", osVersion: "26.1", model: "iPhone18,2", name: "Test iPhone", ...(deviceId !== null ? { id: deviceId } : {}) };
+  const { app } = await FakeApp.connect(port, { capabilities, device }, (req) => {
     if (req.method === "tree") return { ok: true, result: { screen: { width: 400, height: 800 }, elements: [] } };
     return handler(req.params as Record<string, unknown>);
   });
@@ -161,7 +162,7 @@ describe("the media tool", () => {
       ["add", "label.png", "image/png"],
     ]);
     expect(typeof sent[0]?.data).toBe("string");
-    expect(tools.mediaState.addedIds("com.example.demo")).toEqual(["asset-1", "asset-2"]);
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual(["asset-1", "asset-2"]);
   });
 
   it("tells that a person must allow photo access, and keeps what was added", async () => {
@@ -172,7 +173,7 @@ describe("the media tool", () => {
     expect(out).toContain("Added 1 of 2 pictures. A person must allow photo access on the phone first");
     expect(out).toContain("call media again with the 1 picture left (label.png)");
     expect(out.split("\n").at(-1)).toBe("Note: needs a person: allow photo access on the phone (an OS alert Tapline can't tap).");
-    expect(tools.mediaState.addedIds("com.example.demo")).toEqual(["asset-1"]);
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual(["asset-1"]);
   });
 
   it("passes the app's unsupported answer on as it is", async () => {
@@ -206,7 +207,7 @@ describe("the media tool", () => {
     const out = textOf(await tools.media({ remove: true }));
     expect(mediaRequests(app).at(-1)).toEqual({ op: "remove", ids: ["asset-9"] });
     expect(out).toBe("Removed 1 picture this session added. iOS asks the person to confirm the delete on the phone: ask your user to tap Delete.");
-    expect(tools.mediaState.addedIds("com.example.demo")).toEqual([]);
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual([]);
   });
 
   it("keeps the ids when the person declines the delete", async () => {
@@ -214,7 +215,7 @@ describe("the media tool", () => {
     const { tools } = await connect((p) => (p.op === "add" ? { ok: true, result: { id: "asset-9" } } : { ok: true, result: { removed: 0, declined: true } }));
     await tools.media({ add: [a], confirm: true });
     expect(textOf(await tools.media({ remove: true }))).toContain("The person declined the delete");
-    expect(tools.mediaState.addedIds("com.example.demo")).toEqual(["asset-9"]);
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual(["asset-9"]);
   });
 
   it("says there is nothing to remove when nothing was added", async () => {
@@ -245,7 +246,7 @@ describe("the media tool", () => {
     expect(tools.mediaState.takePickerSkips("com.example.demo")).toBe(1);
     expect(tools.mediaState.pickerSkips("com.example.demo")).toBe(0);
     // Nothing was added to the library, so nothing is remembered for remove.
-    expect(tools.mediaState.addedIds("com.example.demo")).toEqual([]);
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual([]);
   });
 
   it("says 1 picture in the singular and records nothing when the app can't arm the picker", async () => {
@@ -274,5 +275,28 @@ describe("one call's pictures together (1.5 review, finding 10)", () => {
     });
     const read = readPictures(paths);
     expect("error" in read && read.error).toMatch(/more than 20 MB; send at most 20 MB per call/);
+  });
+});
+
+describe("remembered ids stay with their phone (1.5 review, finding 9)", () => {
+  it("never sends one install's ids to another phone running the same app", async () => {
+    const { a } = pictures();
+    const first = await connect((p) => (p.op === "add" ? { ok: true, result: { id: "asset-9" } } : { ok: true, result: { removed: 0 } }), ["tree", "media"], "install-A");
+    await first.tools.media({ add: [a], confirm: true });
+    expect(first.tools.mediaState.addedIds("com.example.demo@install-A")).toEqual(["asset-9"]);
+    // the same state, a different phone: the remove sends nothing of phone A's
+    const second = await connect(() => ({ ok: true, result: { removed: 0 } }), ["tree", "media"], "install-B");
+    const shared = second.tools.mediaState;
+    shared.remember("com.example.demo@install-A", ["asset-9"]);
+    await second.tools.media({ remove: true });
+    expect(mediaRequests(second.app).at(-1)).toEqual({ op: "remove", ids: [] });
+  });
+
+  it("an app that sends no install id gets only what it remembers itself", async () => {
+    const { a } = pictures();
+    const { app, tools } = await connect((p) => (p.op === "add" ? { ok: true, result: { id: "asset-9" } } : { ok: true, result: { removed: 1 } }), ["tree", "media"], null);
+    await tools.media({ add: [a], confirm: true });
+    await tools.media({ remove: true });
+    expect(mediaRequests(app).at(-1)).toEqual({ op: "remove", ids: [] });
   });
 });
