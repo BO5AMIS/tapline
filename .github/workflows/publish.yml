@@ -122,7 +122,8 @@ jobs:
       # above the current latest, `backport` for an older one (npm refuses to guess for either of the last two).
       - name: Publish
         run: |
-          for tarball in packed/react-native-tapline-*.tgz packed/tapline-host-*.tgz; do
+          # ./ first: npm reads "packed/x.tgz" as the GitHub repository packed/x.tgz, not as a file.
+          for tarball in ./packed/react-native-tapline-*.tgz ./packed/tapline-host-*.tgz; do
             [ -f "$tarball" ] || { echo "missing $tarball"; exit 1; }
             manifest=$(tar -xzOf "$tarball" package/package.json)
             name=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).name))')
