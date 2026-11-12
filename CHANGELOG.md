@@ -27,6 +27,15 @@ Android; this release goes after where they went. The interface is AGENT-TOOLS 1
 - The skill has `run` examples for the common shapes (a sheet, a form, a tab tour) and a list of ways
   to spend fewer calls.
 
+Fixed, from the phone checks:
+- Expo SDK 58 replaces the app's `fetch` with its own, which doesn't go through XMLHttpRequest, so the
+  network condition, the `Network:` line, `wait_for` `network_idle` and the `[network]` failure logs
+  missed `fetch` requests (offline still loaded a page). The global `fetch` is now covered too, and
+  each request is counted once.
+- `compare_screen` waits for the screen to stop moving before it saves or compares. A reference saved
+  right after a tap that pushed a screen caught it sliding in, so the replay of a recorded flow always
+  differed.
+
 ## 1.3.1 (unreleased)
 
 Fixes only, from a tester's feedback on the sibling tool.
