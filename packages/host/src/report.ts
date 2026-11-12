@@ -37,6 +37,14 @@ export interface CallRecord {
   matchedWithChanges?: boolean;
   /** For a look: it asked for a screenshot, a width or labels, which the answer of the action before it could not give. */
   askedPicture?: boolean;
+  /** The agent's client id, so thinking time is measured within one client. */
+  client?: string;
+  /** Epoch ms when the call's last entry ended; absent when the log line has no `ms` (older logs). */
+  end?: number;
+  /** The call's time in the tool, in ms; absent for older logs. */
+  ms?: number;
+  /** The call came through the thin call (§16.1). */
+  via?: "call";
 }
 
 export interface Flag {
@@ -51,6 +59,8 @@ export interface Report {
   failed: number;
   failedCodes: Array<[string, number]>;
   flags: Flag[];
+  /** The `Time:` line; absent when no call has a time (older logs). */
+  time?: string;
 }
 
 /** Groups the log's agent entries into calls, in order. Entries from before the call log have no call number: each is a call, a batch is one. */
@@ -78,13 +88,21 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     const callFailed = failedEntry === undefined ? group.find((e) => e.call_failed !== undefined)?.call_failed : undefined;
     const tool = first.of ?? (group.some((e) => e.batch !== undefined) ? "run" : first.tool);
     const single = group.length === 1 && first.batch === undefined && tool !== "run";
+    // Every entry's `t` is when it began and `ms` how long it took; the call ends when its last entry does.
+    const timed = group.filter((e) => typeof e.ms === "number" && Number.isFinite(e.ms) && e.ms >= 0);
+    const start = Math.min(...group.map((e) => Date.parse(e.t)));
+    const end = timed.length > 0 ? Math.max(...timed.map((e) => Date.parse(e.t) + (e.ms as number))) : undefined;
+    const client = group.find((e) => e.client !== undefined)?.client;
     calls.push({
       n: 0,
       session: first.session ?? "legacy",
       tool,
       ok: failedEntry === undefined && callFailed === undefined,
       ...(failedEntry?.code !== undefined ? { code: failedEntry.code } : callFailed !== undefined ? { code: callFailed } : {}),
-      t: Date.parse(first.t),
+      t: start,
+      ...(end !== undefined ? { end, ms: end - start } : {}),
+      ...(client !== undefined ? { client } : {}),
+      ...(group.some((e) => e.via === "call") ? { via: "call" as const } : {}),
       listed: group.some((e) => e.listed === true),
       dryRun: group.some((e) => e.dry_run === true),
       ...(single && first.element !== undefined ? { element: first.element } : {}),
@@ -259,6 +277,18 @@ export function analyze(calls: readonly CallRecord[]): Report {
       text: `${chains.length} ${chains.length === 1 ? "run" : "runs"} of 3 or more actions with no answer read in between (calls ${numbers(chains.map(range))}): one run each`,
     });
   }
+  // Thin calls: each started a new process. Consecutive call numbers read as a range.
+  const thin = calls.filter((c) => c.via === "call");
+  if (thin.length >= THIN_CALLS_FLAGGED) {
+    const ranges: Array<{ from: number; to: number }> = [];
+    for (const c of thin) {
+      const open = ranges[ranges.length - 1];
+      if (open !== undefined && open.to + 1 === c.n) open.to = c.n;
+      else ranges.push({ from: c.n, to: c.n });
+    }
+    flags.push({ text: `${thin.length} calls each from a new process (calls ${numbers(ranges.map(range))}): load the MCP server once; each call paid about 2 s` });
+  }
+  const time = timeLine(calls);
   return {
     calls: calls.length,
     minutes,
@@ -266,20 +296,72 @@ export function analyze(calls: readonly CallRecord[]): Report {
     failed,
     failedCodes: [...codes].sort(byCount),
     flags,
+    ...(time !== undefined ? { time } : {}),
   };
+}
+
+/** Five thin calls are enough to say "load the MCP server once" (1.13.1 item 11). */
+const THIN_CALLS_FLAGGED = 5;
+/** A gap longer than this is the agent away, not thinking (§16.1). */
+const IDLE_GAP_MS = 2 * 60_000;
+
+function median(values: readonly number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? (sorted[mid] as number) : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2;
+}
+
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+/** A total: seconds under a minute, else whole minutes. */
+const span = (ms: number): string => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`);
+
+/** AGENT-TOOLS 1.13 §16.1: where the seconds went. Calls with no `ms` (older logs) are left out. */
+function timeLine(calls: readonly CallRecord[]): string | undefined {
+  const timed = calls.filter((c) => c.ms !== undefined && c.end !== undefined);
+  if (timed.length === 0) return undefined;
+  const gaps: number[] = [];
+  const byClient = new Map<string, CallRecord[]>();
+  for (const c of timed) {
+    const key = c.client ?? "";
+    const list = byClient.get(key);
+    if (list === undefined) byClient.set(key, [c]);
+    else list.push(c);
+  }
+  for (const list of byClient.values()) {
+    list.sort((a, b) => a.t - b.t);
+    for (let i = 1; i < list.length; i++) {
+      const gap = (list[i] as CallRecord).t - ((list[i - 1] as CallRecord).end as number);
+      if (gap >= 0 && gap <= IDLE_GAP_MS) gaps.push(gap);
+    }
+  }
+  const tool = timed.map((c) => c.ms as number);
+  const perTool = new Map<string, number[]>();
+  for (const c of timed) perTool.set(c.tool, [...(perTool.get(c.tool) ?? []), c.ms as number]);
+  const top = [...perTool]
+    .map(([name, values]) => ({ name, total: values.reduce((a, b) => a + b, 0), median: median(values) }))
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+  const shown = top.slice(0, 3).map((t) => `${t.name} ${seconds(t.median)}`);
+  if (top.length > 3) shown.push("…");
+  const thinking = gaps.reduce((a, b) => a + b, 0);
+  const inTool = tool.reduce((a, b) => a + b, 0);
+  return `Time: ${span(thinking + inTool)}: thinking between calls ${span(thinking)} (median ${seconds(median(gaps))}), in the tool ${span(inTool)} (median ${seconds(median(tool))}; ${shown.join(", ")}).`;
 }
 
 const MAX_TOOLS_SHOWN = 8;
 
-export function formatReport(report: Report): string {
-  if (report.calls === 0) return "Session: 0 calls.\nWaste: none.";
+/** `accounts` are the loaded test accounts' names (§18.6); never their values. */
+export function formatReport(report: Report, accounts: readonly string[] = []): string {
+  const accountsLine = accounts.length > 0 ? `Accounts: ${accounts.join(", ")}.` : undefined;
+  if (report.calls === 0) return ["Session: 0 calls.", ...(accountsLine !== undefined ? [accountsLine] : []), "Waste: none."].join("\n");
   const shown = report.toolCounts.slice(0, MAX_TOOLS_SHOWN).map(([tool, n]) => `${tool} ${n}`);
   if (report.toolCounts.length > MAX_TOOLS_SHOWN) shown.push("…");
   const failed =
     report.failed === 0 ? "Failed: 0." : `Failed: ${report.failed} (${report.failedCodes.map(([code, n]) => `${code} ${n}`).join(", ")}).`;
   const head = `Session: ${report.calls} ${report.calls === 1 ? "call" : "calls"} in ${report.minutes} min (${shown.join(", ")}). ${failed}`;
-  if (report.flags.length === 0) return `${head}\nWaste: none.`;
-  return [head, "Waste:", ...report.flags.map((f) => `- ${f.text}`)].join("\n");
+  const top = [head, ...(report.time !== undefined ? [report.time] : []), ...(accountsLine !== undefined ? [accountsLine] : [])];
+  if (report.flags.length === 0) return [...top, "Waste: none."].join("\n");
+  return [...top, "Waste:", ...report.flags.map((f) => `- ${f.text}`)].join("\n");
 }
 
 // ---- reading the log ---------------------------------------------------------
@@ -318,9 +400,9 @@ export function readLogEntries(dir: string, sinceMs: number): ActionLogEntry[] {
 }
 
 /** The report text for a log folder: `since` on, optionally only one session's calls. */
-export function reportFor(dir: string, sinceMs: number, onlySession?: string): string {
+export function reportFor(dir: string, sinceMs: number, onlySession?: string, accounts?: readonly string[]): string {
   const entries = readLogEntries(dir, sinceMs).filter((e) => onlySession === undefined || e.session === onlySession);
-  return formatReport(analyze(buildCalls(entries)));
+  return formatReport(analyze(buildCalls(entries)), accounts);
 }
 
 /** `--since`: epoch ms, an ISO date or time, or how long ago (`90m`, `2h`, `1d`). Null when it isn't one. */

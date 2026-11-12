@@ -128,7 +128,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     ...(options.api === true
       ? {
           api: async (tool: string, args: Record<string, unknown>, clientId: string | undefined) =>
-            isToolName(tool) ? callTool(toolsFor(clientId), tool, args) : undefined,
+            // Every call here is a thin call: the log says so, and the report flags a run of them (§16.1).
+            isToolName(tool) ? (() => { const tools = toolsFor(clientId); return tools.asThinCall(() => callTool(tools, tool, args)); })() : undefined,
         }
       : {}),
   });

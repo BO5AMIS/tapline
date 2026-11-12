@@ -1064,6 +1064,8 @@ interface CallState {
   tool: string;
   /** The call before this one was a scroll. */
   afterScrolls: boolean;
+  /** The call came through the thin call. */
+  thin: boolean;
   entries: Array<{ entry: Omit<ActionLogEntry, "t" | "source">; at: Date }>;
 }
 
@@ -1086,6 +1088,12 @@ export class TaplineTools {
   private callCount = 0;
   /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
   private readonly callScope = new AsyncLocalStorage<CallState>();
+  private readonly thinScope = new AsyncLocalStorage<boolean>();
+
+  /** Runs a call that came through the thin call, so its log entries say `via: "call"` (§16.1, §18.10). */
+  asThinCall<T>(run: () => T): T {
+    return this.thinScope.run(true, run);
+  }
   private clientIdFn: (() => string | undefined) | undefined;
   /** The tool of the previous call, for scroll runs. */
   private prevCallTool: string | undefined;
@@ -1398,7 +1406,7 @@ export class TaplineTools {
     const afterScrolls = this.prevCallTool === "scroll";
     if (tool === "scroll" && !afterScrolls) this.scrollBase = this.listBase;
     this.prevCallTool = tool;
-    const state: CallState = { call: ++this.callCount, tool, afterScrolls, entries: [] };
+    const state: CallState = { call: ++this.callCount, tool, afterScrolls, thin: this.thinScope.getStore() === true, entries: [] };
     const began = new Date();
     let result: CallToolResult | Promise<CallToolResult>;
     try {
@@ -1437,13 +1445,19 @@ export class TaplineTools {
       call: state.call,
       ...(client !== undefined && client !== "" ? { client } : {}),
       size,
+      ...(state.thin ? { via: "call" as const } : {}),
     };
     const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     if (state.entries.length > 0) {
       // Actions that went through, in a call that failed after them (an expectation that didn't hold): the call's
       // own outcome goes with them, so the report doesn't count it as a success (Codex review of 1.4.0).
       const callFailed = failed && state.entries.every(({ entry }) => entry.ok) ? { call_failed: code ?? "internal" } : {};
-      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, at);
+      for (const { entry, at } of state.entries) {
+        // `at` is when the action ended. The entry says when it began and how long it took (§16.1), reads and actions alike.
+        const ms = entry.ms ?? Math.max(0, at.getTime() - began.getTime());
+        const start = entry.ms !== undefined ? new Date(at.getTime() - entry.ms) : began;
+        this.actionLog.write({ ...entry, ms, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, start);
+      }
       return;
     }
     // A call that logged no action: a read, or an action refused before it began (then without `kind`).
@@ -1489,7 +1503,8 @@ export class TaplineTools {
   sessionReport(args: Shape<"session_report"> = {}): CallToolResult {
     const dir = this.options.logDir;
     if (dir === undefined) return fail("Error unsupported: the action log is off (--no-log), so there is nothing to report.");
-    return text(reportFor(dir, args.since ?? this.startedAt, this.sessionTag));
+    // Names only; a username or password never reaches a report (§18.6).
+    return text(reportFor(dir, args.since ?? this.startedAt, this.sessionTag, this.options.accounts?.store?.names()));
   }
 
   /**

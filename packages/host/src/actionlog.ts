@@ -18,7 +18,10 @@ export interface ActionLogEntry {
   ok: boolean;
   code?: string;
   reason?: string;
+  /** The time in the tool, in ms: an action's own, a read's whole call (AGENT-TOOLS 1.13 §16.1). `t` is when it began. */
   ms?: number;
+  /** `"call"` when the call came through the thin call, a new process each time (§18.10). */
+  via?: "call";
   app?: string;
   batch?: { id: string; step: number };
   dry_run?: boolean;
