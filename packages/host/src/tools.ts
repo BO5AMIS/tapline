@@ -442,6 +442,8 @@ const TAP_SLOP = 10;
 const LONG_PRESS_MS = 500;
 
 const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
+/** The answer to a reference name that isn't one: no slashes, so no way out of the references folder. */
+const BAD_REFERENCE_NAME = "Error bad_params: name the reference with letters, digits, '.', '_' and '-'.";
 
 /** One recorded request; `route` is the screen it ended on, `fragile` marks a target that only worked that run (a ref). */
 interface ScriptStep {
@@ -1050,6 +1052,11 @@ export class TaplineTools {
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
       }
+      // Every reference name is checked before any step runs: a name with a path in it never reaches the disk.
+      const names = [step.tool === "compare_screen" ? (params as { name?: unknown }).name : undefined, step.expect?.matches];
+      if (names.some((name) => typeof name === "string" && !SCRIPT_NAME.test(name.trim()))) {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): name the reference with letters, digits, '.', '_' and '-'.`);
+      }
       if (step.expect?.ignore !== undefined) {
         const ignored = ignoreListSchema.safeParse(step.expect.ignore);
         if (!ignored.success) {
@@ -1087,6 +1094,19 @@ export class TaplineTools {
         if (missed !== null) {
           stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
           break;
+        }
+        // A picture check that held is kept in a recording, as compare_screen's is: right after the action, the
+        // script makes it that step's `matches` again (AGENT-TOOLS 1.9 §14.2).
+        if (step.expect.matches !== undefined) {
+          const recorded = await this.recordCompare({
+            name: step.expect.matches,
+            ...(step.expect.threshold !== undefined ? { threshold: step.expect.threshold } : {}),
+            ...(step.expect.ignore !== undefined ? { ignore: ignoreListSchema.parse(step.expect.ignore) } : {}),
+          });
+          if (recorded !== null) {
+            stop = { index: i, ...parseError(recorded) };
+            break;
+          }
         }
       }
       const route = (step as { route?: unknown }).route;
@@ -1858,9 +1878,16 @@ export class TaplineTools {
     } catch (error) {
       return { kind: "error", line: describeError(error) };
     }
+    if (!SCRIPT_NAME.test(name)) return { kind: "error", line: BAD_REFERENCE_NAME };
     const path = options.referencesDirs.map((dir) => join(dir, `${name}.jpg`)).find((candidate) => existsSync(candidate));
     if (path === undefined) return { kind: "missing", shot };
-    const reference: ShotImage = { mime: "image/jpeg", data: readFileSync(path).toString("base64") };
+    let reference: ShotImage;
+    try {
+      reference = { mime: "image/jpeg", data: readFileSync(path).toString("base64") };
+    } catch (error) {
+      // A reference that can't be read (no permission, a folder in its place) is a failed check, never a crash.
+      return { kind: "error", line: `Error bad_params: the reference "${name}" can't be read (${error instanceof Error ? error.message : String(error)}). To start over, use update: true.` };
+    }
     let refSize: { width: number; height: number };
     let shotSize: { width: number; height: number };
     try {
@@ -1894,7 +1921,9 @@ export class TaplineTools {
     } catch (error) {
       return { kind: "error", line: `Error bad_params: ${error instanceof Error ? error.message : String(error)} To start over, use update: true.` };
     }
-    if (diff.changedPixels === 0 || diff.changedPercent <= options.threshold) {
+    // The pass bar compares the exact share; the rounded percent is only for showing (a few pixels round to 0%).
+    const exactPercent = (diff.changedPixels / Math.max(1, diff.width * diff.height)) * 100;
+    if (diff.changedPixels === 0 || exactPercent <= options.threshold) {
       return { kind: "match", percent: diff.changedPercent, notes };
     }
 
@@ -1947,6 +1976,7 @@ export class TaplineTools {
 
   /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
   private async matchMissed(name: string, threshold: number, ignore: IgnoreItem[]): Promise<string | null> {
+    if (!SCRIPT_NAME.test(name)) return parseError(BAD_REFERENCE_NAME).message;
     const session = this.host.current();
     if (session === undefined) return "the app isn't connected";
     const folder = this.referenceFolder(session);
@@ -1973,7 +2003,7 @@ export class TaplineTools {
 
   /** In a replay, a failed check leaves its red picture at `<script>.diff/<name>.jpg`. */
   private keepDiff(check: ReferenceCheck, name: string): void {
-    if (this.replayContext === null || check.kind !== "differs") return;
+    if (this.replayContext === null || check.kind !== "differs" || !SCRIPT_NAME.test(name)) return;
     const path = join(this.replayContext.diffDir, `${name}.jpg`);
     try {
       mkdirSync(dirname(path), { recursive: true });
@@ -1994,6 +2024,8 @@ export class TaplineTools {
   }
 
   private writeReference(folder: string, name: string, shot: ShotImage): CallToolResult {
+    // Every write checks the name itself, whatever the caller checked: no way out of the references folder.
+    if (!SCRIPT_NAME.test(name)) return fail(BAD_REFERENCE_NAME);
     const path = join(folder, `${name}.jpg`);
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -2032,7 +2064,42 @@ export class TaplineTools {
     const why = this.referenceReason(check, name);
     if (why !== null) return fail(`Error ${why.code}: ${why.message}`);
     if (check.kind !== "match") return fail("Error internal: the comparison gave no answer.");
+    // A check that held inside `run` is kept in a recording too, with its options.
+    const recorded = await this.recordCompare({
+      name,
+      ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+      ...(args.ignore !== undefined ? { ignore: args.ignore } : {}),
+      ...(args.width !== undefined ? { width: args.width } : {}),
+    });
+    if (recorded !== null) return fail(recorded);
     return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+  }
+
+  /**
+   * Saves a visual check that held as a `compareScreen` step of the recording, when one is running: the name, and the
+   * threshold, the ignore list (refs made stable) and the width when given. `update` is never written. Answers an
+   * error line when an ignore ref can't be kept in a script, else null (also when nothing is recording).
+   */
+  private async recordCompare(check: { name: string; threshold?: number; ignore?: IgnoreItem[]; width?: number }): Promise<string | null> {
+    if (this.recording === null || this.replaying) return null;
+    const session = this.host.current();
+    let kept = check.ignore;
+    if (session !== undefined && kept !== undefined && kept.length > 0) {
+      const stable = await this.stableIgnore(session.id, kept);
+      if (typeof stable === "string") return stable;
+      kept = stable;
+    }
+    if (this.recording === null) return null;
+    this.recording.steps.push({
+      method: "compareScreen",
+      params: {
+        name: check.name.trim(),
+        ...(check.threshold !== undefined ? { threshold: check.threshold } : {}),
+        ...(kept !== undefined && kept.length > 0 ? { ignore: kept } : {}),
+        ...(check.width !== undefined ? { width: check.width } : {}),
+      },
+    });
+    return null;
   }
 
   /**
@@ -2050,10 +2117,24 @@ export class TaplineTools {
       }
       const element = seen.elements.find((e) => e.ref === item.ref);
       if (element === undefined) return `Error bad_params: ignore ${item.ref} isn't on the screen, so it can't be saved in a script.`;
-      if (typeof element.testID === "string" && element.testID !== "") kept.push({ id: element.testID });
-      else if (typeof element.label === "string" && element.label !== "") kept.push({ label: element.label });
-      else if (typeof element.text === "string" && element.text !== "") kept.push({ text: element.text });
-      else {
+      // When several elements share the name, the saved item keeps which one it was (`index`, counted as ignoreRects
+      // counts: elements with a frame, in list order), so a replay paints out that one and not all of them.
+      const framed = seen.elements.filter((e) => e.frame !== undefined);
+      const withIndex = (saved: Target, same: (e: TreeResult["elements"][number]) => boolean): IgnoreItem => {
+        const matching = framed.filter(same);
+        const at = matching.indexOf(element);
+        return matching.length > 1 && at >= 0 ? { ...saved, index: at } : saved;
+      };
+      if (typeof element.testID === "string" && element.testID !== "") {
+        const id = element.testID;
+        kept.push(withIndex({ id }, (e) => e.testID === id));
+      } else if (typeof element.label === "string" && element.label !== "") {
+        const label = element.label.toLowerCase();
+        kept.push(withIndex({ label: element.label }, (e) => (e.label ?? "").toLowerCase() === label));
+      } else if (typeof element.text === "string" && element.text !== "") {
+        const text = element.text.toLowerCase();
+        kept.push(withIndex({ text: element.text }, (e) => (e.text ?? "").toLowerCase() === text));
+      } else {
         return `Error bad_params: ignore ${describeElement(element)} has no id, label or text, so a script couldn't find it again; give it a testID, or ignore a rect {x, y, width, height}.`;
       }
     }
@@ -2063,24 +2144,21 @@ export class TaplineTools {
   async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
     const recording = this.recording !== null && !this.replaying;
     const session = this.host.current();
-    let kept: IgnoreItem[] | undefined = args.ignore;
-    if (recording && session !== undefined && kept !== undefined && kept.length > 0) {
-      const stable = await this.stableIgnore(session.id, kept);
+    // An ignore ref that a script couldn't find again is refused before anything is compared.
+    if (recording && session !== undefined && args.ignore !== undefined && args.ignore.length > 0) {
+      const stable = await this.stableIgnore(session.id, args.ignore);
       if (typeof stable === "string") return fail(stable);
-      kept = stable;
     }
     const answer = await this.compareScreenNow(args);
-    if (recording && this.recording !== null && answer.isError !== true) {
+    if (recording && answer.isError !== true) {
       // `update` is never written: the script checks against the reference it carries.
-      this.recording.steps.push({
-        method: "compareScreen",
-        params: {
-          name: args.name.trim(),
-          ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
-          ...(kept !== undefined && kept.length > 0 ? { ignore: kept } : {}),
-          ...(args.width !== undefined ? { width: args.width } : {}),
-        },
+      const recorded = await this.recordCompare({
+        name: args.name,
+        ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+        ...(args.ignore !== undefined ? { ignore: args.ignore } : {}),
+        ...(args.width !== undefined ? { width: args.width } : {}),
       });
+      if (recorded !== null) return fail(recorded);
     }
     return answer;
   }
@@ -2254,8 +2332,8 @@ export class TaplineTools {
     const names = new Set<string>();
     for (const step of steps) {
       const p = step as Record<string, unknown>;
-      if (step.tool === "compare_screen" && typeof p["name"] === "string") names.add(p["name"]);
-      if (step.expect?.matches !== undefined) names.add(step.expect.matches);
+      if (step.tool === "compare_screen" && typeof p["name"] === "string" && SCRIPT_NAME.test(p["name"])) names.add(p["name"]);
+      if (step.expect?.matches !== undefined && SCRIPT_NAME.test(step.expect.matches)) names.add(step.expect.matches);
     }
     const store = join(dir, (app.id ?? app.name).replace(/[^\w.-]/g, "_"));
     const folder = this.scriptSideFolder(scriptPath, "references");
