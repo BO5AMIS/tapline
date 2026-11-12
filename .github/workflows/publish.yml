@@ -1,6 +1,11 @@
 # Publishes tapline-host and react-native-tapline to npm with trusted publishing (no token stored anywhere).
 # npmjs.com → each package → Settings → Trusted Publisher: GitHub Actions, BO5AMIS / tapline, publish.yml.
 # Runs when a release is published; run it by hand (workflow_dispatch) with a tag to publish that release again.
+#
+# Two jobs, so no dependency's install script ever runs where an npm publishing token can be had:
+# - build: installs, builds, tests, checks the tag and packs the two tarballs, with no OIDC permission;
+# - publish: a clean runner with id-token: write that installs nothing and runs no package script; it only publishes
+#   the tarballs the build job packed.
 name: publish
 
 on:
@@ -14,11 +19,12 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
-  npm:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       # The tag travels as an environment variable, never pasted into a script.
       TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
@@ -26,14 +32,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      - name: npm 11.5.1 or newer (trusted publishing)
-        run: npm install -g npm@latest
 
       - run: npm ci
       - run: npm run build
@@ -57,14 +60,51 @@ jobs:
             npm pkg set repository.url="git+https://github.com/$GITHUB_REPOSITORY.git" --workspace "$pkg"
           done
 
-      - name: Publish (each version once)
+      - name: Pack both packages
         run: |
-          for pkg in packages/react-native packages/host; do
-            name=$(node -p "require('./$pkg/package.json').name")
-            version=$(node -p "require('./$pkg/package.json').version")
+          mkdir -p packed
+          npm pack --workspace packages/react-native --pack-destination packed
+          npm pack --workspace packages/host --pack-destination packed
+          ls -l packed
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packed/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # npm itself only: trusted publishing needs npm 11.5.1 or newer. No project dependency is installed here.
+      - name: npm 11.5.1 or newer (trusted publishing)
+        run: npm install -g npm@latest --ignore-scripts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packed
+
+      - name: Publish (each version once, the SDK first)
+        run: |
+          for tarball in packed/react-native-tapline-*.tgz packed/tapline-host-*.tgz; do
+            [ -f "$tarball" ] || { echo "missing $tarball"; exit 1; }
+            manifest=$(tar -xzOf "$tarball" package/package.json)
+            name=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).name))')
+            version=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "$name@$version is already on npm"
             else
-              npm publish --workspace "$pkg" --access public
+              npm publish "$tarball" --access public --ignore-scripts
             fi
           done
