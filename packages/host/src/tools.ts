@@ -33,7 +33,7 @@ import {
   type Stress,
   type Survives,
 } from "./journey.js";
-import { JourneyRecorder, findingsLine, freshFolder, screenSignature, writeReport, type FrameSource, type Touch } from "./journeyreport.js";
+import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourneys, screenSignature, writeReport, type FrameSource, type Touch } from "./journeyreport.js";
 import { exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
@@ -4011,6 +4011,8 @@ export class TaplineTools {
     if (root === undefined) return;
     try {
       mkdirSync(root, { recursive: true });
+      // The newest reports stay; older folders go, so a long-lived host doesn't fill the disk (1.5 review, finding 6).
+      pruneJourneys(root, JOURNEYS_KEPT - 1);
       // Frames and naming memory belong to the journey's own app, and only while it is connected and in front.
       const app = identityOf(first);
       const recorder = new JourneyRecorder(freshFolder(root, journey.state.goal, this.clock()), this.frameSource(app), this.clock);

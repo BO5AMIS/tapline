@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ShotImage } from "./annotate.js";
 import { jpegOf, markBox, markRing, readPixels, type ShareBox } from "./images.js";
@@ -335,6 +335,36 @@ export function reportFolderName(goal: string, at: number): string {
 }
 
 /** A folder name that doesn't exist yet in `root` (`-2`, `-3` when the same goal ran in the same minute). */
+/** How many journey reports a host keeps in its journeys folder (1.5 review, finding 6). */
+export const JOURNEYS_KEPT = 20;
+
+/**
+ * Keeps the newest `keep` report folders in `root` (by when they were last changed) and removes the rest. Only folders
+ * that hold a report or frames (what a journey writes) are counted or removed; anything else in `root` is left alone.
+ */
+export function pruneJourneys(root: string, keep: number): number {
+  let removed = 0;
+  try {
+    const reports = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(root, entry.name))
+      .filter((dir) => existsSync(join(dir, "report.md")) || existsSync(join(dir, "frames")))
+      .map((dir) => ({ dir, at: statSync(dir).mtimeMs }))
+      .sort((a, b) => b.at - a.at);
+    for (const old of reports.slice(Math.max(0, keep))) {
+      try {
+        rmSync(old.dir, { recursive: true, force: true });
+        removed++;
+      } catch {
+        // in use: left for next time
+      }
+    }
+  } catch {
+    // no folder yet, or it can't be read: nothing to prune
+  }
+  return removed;
+}
+
 export function freshFolder(root: string, goal: string, at: number): string {
   const base = reportFolderName(goal, at);
   let name = base;
@@ -403,7 +433,38 @@ function markSteps(folder: string, state: JourneyState, findings: Finding[], fra
   });
 }
 
-function buildGif(folder: string, frames: readonly FrameRecord[], maxBytes: number): ReportResult["gif"] {
+/** At most this many pictures are decoded for the GIF (each is about 1 MB as pixels): 1.5 review, finding 6. */
+export const GIF_MAX_SOURCE_FRAMES = 150;
+
+/**
+ * The frames the GIF is made of, at most `max`: every tap and every first picture of a screen stays (they tell the
+ * story); the other, still pictures are thinned evenly. Chosen before anything is decoded.
+ */
+export function framesForGif(frames: readonly FrameRecord[], max = GIF_MAX_SOURCE_FRAMES): FrameRecord[] {
+  if (frames.length <= max) return [...frames];
+  const keep = new Set<number>();
+  frames.forEach((frame, i) => {
+    const before = frames[i - 1];
+    if (i === 0 || i === frames.length - 1 || frame.tap !== undefined || before === undefined || before.screen !== frame.screen) keep.add(i);
+  });
+  const rest = frames.map((_, i) => i).filter((i) => !keep.has(i));
+  const room = Math.max(0, max - keep.size);
+  if (room > 0 && rest.length > 0) {
+    const every = rest.length / room;
+    for (let k = 0; k < room; k++) {
+      const pick = rest[Math.floor(k * every)];
+      if (pick !== undefined) keep.add(pick);
+    }
+  }
+  const chosen = [...keep].sort((a, b) => a - b).map((i) => frames[i]).filter((f): f is FrameRecord => f !== undefined);
+  // Taps and screen changes alone can be over the limit in a very long journey: then those are thinned evenly too.
+  if (chosen.length <= max) return chosen;
+  const step = chosen.length / max;
+  return Array.from({ length: max }, (_, k) => chosen[Math.floor(k * step)]).filter((f): f is FrameRecord => f !== undefined);
+}
+
+function buildGif(folder: string, all: readonly FrameRecord[], maxBytes: number): ReportResult["gif"] {
+  const frames = framesForGif(all);
   const gifFrames: GifFrame[] = [];
   for (const frame of frames) {
     const shot = readShot(folder, frame.file);
@@ -413,7 +474,7 @@ function buildGif(folder: string, frames: readonly FrameRecord[], maxBytes: numb
   if (gifFrames.length === 0) return null;
   const gif = encodeJourneyGif(gifFrames, { maxBytes });
   writeFileSync(join(folder, "journey.gif"), gif.bytes);
-  return { frames: gif.frames, bytes: gif.bytes.length, dropped: gif.dropped };
+  return { frames: gif.frames, bytes: gif.bytes.length, dropped: gif.dropped + (all.length - frames.length) };
 }
 
 // ---- words --------------------------------------------------------------------
