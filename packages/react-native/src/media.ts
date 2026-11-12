@@ -78,19 +78,42 @@ function unwrap<T>(mod: unknown, check: (value: unknown) => value is T): T | nul
   return isRecord(mod) && check(mod.default) ? mod.default : null;
 }
 
+/**
+ * Metro needs literal module names, and treats a require as optional only when it sits directly inside a `try`
+ * block: otherwise an app without the module fails to bundle at all (found on the phone with Wayfare, 2026-11-12).
+ */
 function load(name: string): unknown {
   switch (name) {
-    // Metro needs literal module names.
     case 'expo-media-library':
-      return require('expo-media-library');
+      try {
+        return require('expo-media-library');
+      } catch {
+        return null;
+      }
     case '@react-native-camera-roll/camera-roll':
-      return require('@react-native-camera-roll/camera-roll');
+      try {
+        return require('@react-native-camera-roll/camera-roll');
+      } catch {
+        return null;
+      }
     case 'expo-file-system/legacy':
-      return require('expo-file-system/legacy');
+      try {
+        return require('expo-file-system/legacy');
+      } catch {
+        return null;
+      }
     case 'expo-file-system':
-      return require('expo-file-system');
+      try {
+        return require('expo-file-system');
+      } catch {
+        return null;
+      }
     default:
-      return require('expo-image-picker');
+      try {
+        return require('expo-image-picker');
+      } catch {
+        return null;
+      }
   }
 }
 
