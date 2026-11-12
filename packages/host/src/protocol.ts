@@ -129,6 +129,8 @@ export const treeResultSchema = z.object({
   elements: z.array(elementSchema),
   /** How many elements lie wholly above and below the screen; absent when none. */
   offScreen: z.object({ above: z.number(), below: z.number() }).nullish(),
+  /** Only for a request with `glass: true` (a journey in a user's eyes): whether a scroll view can really go further. */
+  glass: z.object({ moreAbove: z.boolean(), moreBelow: z.boolean() }).optional(),
   /** The focused screen (apps using React Navigation / Expo Router). */
   route: z
     .object({

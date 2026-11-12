@@ -114,7 +114,7 @@ function impliedBy(role: string | null, actions: string[]): boolean {
  * `[tap]` goes without saying; other actions are listed, `[tap, longPress]`). `frame: false` leaves the
  * position and size out; `actions: false` the actions.
  */
-export function formatElement(element: TreeElement, options: { actions?: boolean; frame?: boolean } = {}): string {
+export function formatElement(element: TreeElement, options: { actions?: boolean; frame?: boolean; eyes?: boolean } = {}): string {
   // An element that isn't on the list (one that changed off screen) has no ref.
   const parts: string[] = element.ref !== "" ? [element.ref] : [];
   const kind = roleOf(element);
@@ -122,13 +122,17 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
 
   const text = element.text ?? "";
   const label = element.label ?? "";
-  if (text !== "") parts.push(quoteText(element));
-  else if (label !== "") parts.push(quote(label));
-  if (text !== "" && label !== "" && label.toLowerCase() !== text.toLowerCase()) {
-    parts.push(`label=${quote(label)}`);
-  }
-  if (element.testID !== null && element.testID !== undefined && element.testID !== "") {
-    parts.push(`id=${element.testID}`);
+  if (options.eyes === true) {
+    parts.push(...userEyesName(kind, text, label, quoteText(element)));
+  } else {
+    if (text !== "") parts.push(quoteText(element));
+    else if (label !== "") parts.push(quote(label));
+    if (text !== "" && label !== "" && label.toLowerCase() !== text.toLowerCase()) {
+      parts.push(`label=${quote(label)}`);
+    }
+    if (element.testID !== null && element.testID !== undefined && element.testID !== "") {
+      parts.push(`id=${element.testID}`);
+    }
   }
   if (element.value !== null && element.value !== undefined && element.value !== "") {
     parts.push(`value=${formatValue(element.value)}`);
@@ -148,9 +152,22 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
   return parts.join(" ");
 }
 
+/**
+ * What a person sees of an element's name (AGENT-TOOLS 1.12 §17.1): its visible text. A button, tab or link with none
+ * is `(icon only)`, and its accessibility label stands apart as `(VoiceOver: "…")`. Ids never show; a label that is
+ * not the visible text is not on the glass (an input's label is left out too: its placeholder shows).
+ */
+function userEyesName(kind: string | null, text: string, label: string, quotedText: string): string[] {
+  if (text !== "") return [quotedText];
+  const tappable = kind === "button" || kind === "tab" || kind === "link";
+  const parts: string[] = tappable ? ["(icon only)"] : [];
+  if (label !== "" && kind !== "input") parts.push(`(VoiceOver: ${quote(label)})`);
+  return parts;
+}
+
 /** A `~` line's element (§13 rule 2): its position and actions only when they are among what changed. */
-function changedLine(element: TreeElement, was: Record<string, unknown>): string {
-  return formatElement(element, { frame: "frame" in was, actions: "actions" in was });
+function changedLine(element: TreeElement, was: Record<string, unknown>, eyes = false): string {
+  return formatElement(element, { frame: "frame" in was, actions: "actions" in was, eyes });
 }
 
 /** Rule 3: an old value over 40 characters, cut to what changed plus 12 characters each side. */
@@ -190,21 +207,30 @@ const MAX_ELEMENTS = 200;
  * The whole screen as text (AGENT-TOOLS §3.2): the screen line, the app, route, alert and network
  * lines, then one line per element in tree order, up to 200.
  */
-export function formatTree(tree: TreeResult, app?: { name: string; id?: string }): string {
+export function formatTree(tree: TreeResult, app?: { name: string; id?: string }, options: { eyes?: boolean } = {}): string {
+  const eyes = options.eyes === true;
   const screen = tree.screen;
   const size = screen
     ? `${Math.round(screen.width)}x${Math.round(screen.height)} pt${screen.scale !== undefined ? ` @${screen.scale}x` : ""}`
     : "unknown size";
   const count = tree.elements.length;
-  const lines = [`Screen ${size} · ${count} element${count === 1 ? "" : "s"}${formatOffScreen(tree.offScreen)}`];
+  const lines = [`Screen ${size} · ${count} element${count === 1 ? "" : "s"}${eyes ? formatGlassMore(tree.glass) : formatOffScreen(tree.offScreen)}`];
   if (app !== undefined) lines.push(`App: ${app.name}${app.id !== undefined ? ` (${app.id})` : ""}`);
   const route = formatRoute(tree.route);
   if (route !== null) lines.push(route);
   lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");
-  lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map((element) => formatElement(element)));
+  lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map((element) => formatElement(element, { eyes })));
   if (count > MAX_ELEMENTS) lines.push(`(+${count - MAX_ELEMENTS} more below; scroll)`);
   return lines.join("\n");
+}
+
+/** In a user's eyes: ` (more below)` only where a view can really scroll further, no counts (AGENT-TOOLS 1.12 §17.1). */
+function formatGlassMore(glass: TreeResult["glass"]): string {
+  const parts: string[] = [];
+  if (glass?.moreBelow === true) parts.push("more below");
+  if (glass?.moreAbove === true) parts.push("more above");
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
 }
 
 /** What lies off screen, for the screen line: ` (+41 below, +2 above)`, or nothing. Left and right aren't counted. */
@@ -218,11 +244,15 @@ function formatOffScreen(offScreen: TreeResult["offScreen"]): string {
 }
 
 /** A gone element as `<role> "<name>"`. It omits the ref and position on purpose: neither means anything now. */
-function describeGone(element: TreeElement): string {
+function describeGone(element: TreeElement, eyes = false): string {
   const kind = roleOf(element);
   const text = element.text ?? "";
   const label = element.label ?? "";
   const id = element.testID ?? "";
+  if (eyes) {
+    const seen = userEyesName(kind, text, label, quoteText(element)).join(" ");
+    return [kind, seen].filter((part) => part !== null && part !== "").join(" ") || "element";
+  }
   const rest = text !== "" ? quoteText(element) : label !== "" ? quote(label) : id !== "" ? `id=${id}` : "";
   const line = [kind, rest].filter((part) => part !== null && part !== "").join(" ");
   return line !== "" ? line : "element";
@@ -295,7 +325,8 @@ const MAX_MOVED_LINES = 5;
  * Only what changed since the previous list, or null when the screen changed too much (another
  * route, or most elements new or gone) and the full list reads better.
  */
-export function formatChanges(tree: TreeResult, options: { alertGone?: boolean } = {}): string | null {
+export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; eyes?: boolean } = {}): string | null {
+  const eyes = options.eyes === true;
   const changes = tree.changes;
   if (changes === undefined || !changes.sameRoute) return null;
   const count = tree.elements.length;
@@ -314,21 +345,25 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean }
   const statusLines = lines.length;
   for (const ref of changes.added) {
     const element = byRef.get(ref);
-    if (element !== undefined) lines.push(`+ ${formatElement(element)}`);
+    if (element !== undefined) lines.push(`+ ${formatElement(element, { eyes })}`);
   }
-  for (const element of changes.removed) lines.push(`- ${describeGone(element)}`);
+  for (const element of changes.removed) lines.push(`- ${describeGone(element, eyes)}`);
   for (const { ref, was } of changes.changed) {
     const element = byRef.get(ref);
     if (element === undefined) continue;
-    lines.push(`~ ${changedLine(element, was)} (was ${formatBefore(was, element)})`);
+    // In a user's eyes a label that changed is not on the glass: only what shows is a change.
+    const shown = eyes ? Object.fromEntries(Object.entries(was).filter(([key]) => key !== "label")) : was;
+    if (eyes && Object.keys(shown).length === 0) continue;
+    lines.push(`~ ${changedLine(element, shown, eyes)} (was ${formatBefore(shown, element)})`);
   }
-  lines.push(...formatOffScreenChanges(changes));
+  // What changed out of view is not on the glass, so a user's eyes leave it out.
+  if (!eyes) lines.push(...formatOffScreenChanges(changes));
   if (changes.moved.length > MAX_MOVED_LINES) {
     lines.push(`↕ ${changes.moved.length} elements moved`);
   } else {
     for (const ref of changes.moved) {
       const element = byRef.get(ref);
-      if (element !== undefined) lines.push(`↕ ${formatElement(element)}`);
+      if (element !== undefined) lines.push(`↕ ${formatElement(element, { eyes })}`);
     }
   }
   // A closed alert is itself a change, and so is the keyboard coming or going.
