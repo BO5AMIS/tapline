@@ -232,6 +232,102 @@ function entrySteps(ctx: Context): InitStep[] {
   return steps;
 }
 
+// --- language and region stubs ----------------------------------------------------------------------------
+
+const LOCALE_IMPORT = "import './tapline-locale';";
+const REGISTER_PATTERN = /^[ \t]*import\s+['"]react-native-tapline\/register['"];?[ \t]*\r?\n/m;
+
+interface LocaleLibraries {
+  i18next: boolean;
+  expoLocalization: boolean;
+}
+
+/** The app's own localisation libraries init knows how to write working `language` and `region` commands for. */
+function localeLibraries(ctx: Context): LocaleLibraries {
+  return {
+    i18next: ctx.deps.has("i18next") || ctx.deps.has("react-i18next"),
+    expoLocalization: ctx.deps.has("expo-localization"),
+  };
+}
+
+function localeStub(ts: boolean, libs: LocaleLibraries): string {
+  const store = ts ? ": { language: string | undefined; region: string | undefined }" : "";
+  const lines: string[] = [
+    "// Tapline's standard app_command names `language` and `region` (tapline init wrote this file; edit freely).",
+    "// They are only registered while Tapline is on, so a production build has none.",
+    "import { registerLanguageCommand, registerRegionCommand } from 'react-native-tapline';",
+  ];
+  if (libs.i18next) lines.push("import i18n from 'i18next';");
+  lines.push(
+    "",
+    `/** What an agent asked for with ${libs.i18next ? "`region`" : "`language` and `region`"}: read it where your app formats dates, numbers and prices. */`,
+    `export const taplineLocale${store} = { language: undefined, region: undefined };`,
+    "",
+    `if (process.env.${ENV_NAME} === '1') {`,
+  );
+  if (libs.i18next) {
+    lines.push("  registerLanguageCommand(async (language) => {", "    await i18n.changeLanguage(language);", "  });");
+  } else {
+    lines.push(
+      "  // expo-localization reads the phone's setting and cannot change it: read taplineLocale.language first, e.g.",
+      "  //   taplineLocale.language ?? getLocales()[0]?.languageCode",
+      "  registerLanguageCommand((language) => {",
+      "    taplineLocale.language = language;",
+      "  });",
+    );
+  }
+  lines.push("  registerRegionCommand((region) => {", "    taplineLocale.region = region;", "  });", "}", "");
+  return lines.join("\n");
+}
+
+/**
+ * When the app has i18next / react-i18next or expo-localization: a small file next to the entry file with working
+ * `language` and `region` commands, imported right after the register line. Edits only a file it can edit safely.
+ * `entry` is the entry file's step list; the import goes into its step.
+ */
+function localeSteps(ctx: Context, entry: InitStep[]): InitStep[] {
+  const libs = localeLibraries(ctx);
+  if (!libs.i18next && !libs.expoLocalization) return [];
+  const index = entry.findIndex((step) => step.file !== "package.json" && (step.action === "create" || step.action === "edit" || step.action === "skip"));
+  const target = index === -1 ? undefined : entry[index];
+  const byHand = (why: string): InitStep[] => [
+    {
+      file: target?.file ?? "package.json",
+      action: "advice",
+      detail: `${why}. To let an agent switch language and region, call registerLanguageCommand and registerRegionCommand (from 'react-native-tapline') where your app starts${libs.i18next ? "; the language one calls i18n.changeLanguage(language)" : ""}`,
+    },
+  ];
+  if (target === undefined) return byHand("the entry file can't be edited");
+
+  const dir = target.file.includes("/") ? target.file.slice(0, target.file.lastIndexOf("/") + 1) : "";
+  const existing = findFile(ctx.files, `${dir}tapline-locale`);
+  const base = target.content ?? ctx.files.read(target.file);
+  const steps: InitStep[] = [];
+  if (existing !== undefined) {
+    steps.push({ file: existing, action: "skip", detail: "already there" });
+  } else {
+    const ts = ctx.files.isFile("tsconfig.json");
+    const names = [libs.i18next ? "i18next" : "", libs.expoLocalization ? "expo-localization" : ""].filter((n) => n !== "").join(" and ");
+    steps.push({
+      file: `${dir}tapline-locale.${ts ? "ts" : "js"}`,
+      action: "create",
+      detail: `language and region commands for ${names}`,
+      content: localeStub(ts, libs),
+    });
+  }
+  if (base.includes("tapline-locale")) return steps;
+  const match = REGISTER_PATTERN.exec(base);
+  if (match === null) return [...steps, ...byHand(`couldn't find the register line in ${target.file}`)];
+  const at = match.index + match[0].length;
+  const content = `${base.slice(0, at)}${LOCALE_IMPORT}${eolOf(base)}${base.slice(at)}`;
+  // The entry's own step carries the import; a file that was left alone becomes an edit.
+  entry[index] =
+    target.action === "skip"
+      ? { file: target.file, action: "edit", detail: "imported the language and region commands", content }
+      : { ...target, detail: `${target.detail}, and the language and region commands`, content };
+  return steps;
+}
+
 function mainStep(ctx: Context, from: string): InitStep {
   const pattern = new RegExp(`("main"\\s*:\\s*)"${from.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}"`);
   if (!pattern.test(ctx.pkgText)) {
@@ -399,8 +495,10 @@ export function planInit(files: FileAccess): InitPlan {
   const isExpo = deps.has("expo");
   const isRouter = pkg.main === "expo-router/entry" || deps.has("expo-router");
   const ctx: Context = { files, pkg, pkgText, deps, isExpo, isRouter };
+  const entry = entrySteps(ctx);
+  const locale = localeSteps(ctx, entry);
   return {
-    steps: [...entrySteps(ctx), ...metroSteps(ctx), ...nativeIntentSteps(ctx), ...envSteps(ctx), ...easSteps(ctx)],
+    steps: [...entry, ...locale, ...metroSteps(ctx), ...nativeIntentSteps(ctx), ...envSteps(ctx), ...easSteps(ctx)],
     install: installPlan(ctx),
   };
 }

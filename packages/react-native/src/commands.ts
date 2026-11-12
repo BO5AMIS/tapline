@@ -1,4 +1,13 @@
-import { Appearance } from 'react-native';
+import { Appearance, I18nManager } from 'react-native';
+import { reload } from './actions';
+import {
+  BUILT_IN_COMMANDS,
+  TEXT_SIZES,
+  isRtlLanguage,
+  parseLanguage,
+  parseRegion,
+  runTextSize,
+} from './locale';
 import { NETWORK_MODES, setNetworkCondition, type NetworkMode } from './network';
 import { TaplineError, isRecord, type Json } from './types';
 
@@ -50,9 +59,71 @@ const network: TaplineCommand = {
   },
 };
 
+/** Built in: the text size, through Tapline's font-scale helper (the app must use it; see locale.ts). */
+const textSize: TaplineCommand = {
+  description: `Set the text size the app shows (args: { size: ${TEXT_SIZES.map((s) => `"${s}"`).join(' | ')} }); needs the app to use useTaplineFontScale`,
+  run: runTextSize,
+};
+
 function installBuiltIns(): void {
   registry.set('appearance', appearance);
   registry.set('network', network);
+  registry.set('text_size', textSize);
+}
+
+function isDevelopmentBuild(): boolean {
+  return typeof __DEV__ !== 'undefined' && __DEV__;
+}
+
+/**
+ * The standard `language` command (args: { language }): checks the code, runs the app's handler, and when
+ * the switch changes the layout direction (to or from ar, he, fa, ur) reloads a development build or says
+ * the app must be restarted, because React Native only reads the direction at start.
+ */
+function languageCommand(command: TaplineCommand): TaplineCommand {
+  return {
+    description: command.description,
+    run: async (args) => {
+      const language = parseLanguage(args);
+      await command.run({ ...args, language });
+      const rtl = isRtlLanguage(language);
+      if (rtl === I18nManager.isRTL) return { language, say: `Language ${language}.` };
+      I18nManager.allowRTL(true);
+      I18nManager.forceRTL(rtl);
+      const direction = rtl ? 'right-to-left' : 'left-to-right';
+      if (isDevelopmentBuild()) {
+        await reload();
+        return {
+          language,
+          restart: 'reload',
+          say: `Language ${language}. The layout is now ${direction}, which React Native only reads at start, so Tapline is reloading the app. Wait for it to reconnect.`,
+        };
+      }
+      return {
+        language,
+        restart: 'required',
+        say: `Language ${language}. The layout is now ${direction}, which React Native only reads at start: the app must be restarted (close it and open it again).`,
+      };
+    },
+  };
+}
+
+/** The standard `region` command (args: { region }): checks the country code, then runs the app's handler. */
+function regionCommand(command: TaplineCommand): TaplineCommand {
+  return {
+    description: command.description,
+    run: async (args) => {
+      const region = parseRegion(args);
+      await command.run({ ...args, region });
+      return { region, say: `Region ${region}.` };
+    },
+  };
+}
+
+function standardCommand(name: string, command: TaplineCommand): TaplineCommand {
+  if (name === 'language') return languageCommand(command);
+  if (name === 'region') return regionCommand(command);
+  return command;
 }
 installBuiltIns();
 
@@ -61,11 +132,33 @@ export function registerTaplineCommand(name: string, command: TaplineCommand): (
   if (!NAME.test(name)) {
     throw new Error(`Tapline command names are letters, digits, ".", "_" and "-", starting with a letter: "${name}"`);
   }
+  if (BUILT_IN_COMMANDS.includes(name)) throw new Error(`Tapline command "${name}" is built in and cannot be replaced`);
   if (typeof command.run !== 'function') throw new Error(`Tapline command "${name}" needs a run function`);
-  registry.set(name, command);
+  // `language` and `region` are standard names: their arguments are checked here, wherever the app registers them.
+  const registered = standardCommand(name, command);
+  registry.set(name, registered);
   return () => {
-    if (registry.get(name) === command) registry.delete(name);
+    if (registry.get(name) === registered) registry.delete(name);
   };
+}
+
+/**
+ * Registers the standard `language` command: `handler` receives a checked BCP 47 code (`ar`, `en-GB`) and
+ * switches the app's language. A switch to or from a right-to-left language reloads a development build.
+ */
+export function registerLanguageCommand(handler: (language: string) => unknown): () => void {
+  return registerTaplineCommand('language', {
+    description: 'Switch the app language (args: { language: BCP 47 code such as "ar" or "en-GB" })',
+    run: (args) => handler(String(args.language)),
+  });
+}
+
+/** Registers the standard `region` command: `handler` receives a checked ISO 3166 country code (`QA`). */
+export function registerRegionCommand(handler: (region: string) => unknown): () => void {
+  return registerTaplineCommand('region', {
+    description: 'Switch the app region (args: { region: ISO 3166 country code such as "QA" })',
+    run: (args) => handler(String(args.region)),
+  });
 }
 
 /** Removes the app's commands and restores the built-ins (tests). */

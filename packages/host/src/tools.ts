@@ -3195,6 +3195,8 @@ export class TaplineTools {
           const covers = "covers" in result && typeof result.covers === "string" ? ` ${result.covers}` : "";
           return `${networkLine(result.mode)}${covers}`;
         }
+        // Standard `language`, `region` and `text_size` (AGENT-TOOLS §16.3): the app's own sentence, e.g. `Text size xl (1.12×).`
+        if (typeof result === "object" && result !== null && "say" in result && typeof result.say === "string") return result.say;
         return result === null || result === undefined ? `Ran ${name}.` : `Ran ${name}: ${JSON.stringify(result)}`;
       },
       args.look,

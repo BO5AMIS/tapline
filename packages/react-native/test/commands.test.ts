@@ -18,20 +18,21 @@ afterEach(() => {
 });
 
 test('lists the built-in appearance and network commands and the app’s own, sorted by name', () => {
-  registerTaplineCommand('language', { description: 'Switch the app language (args: { code: "en" | "ar" })', run: () => undefined });
+  registerTaplineCommand('signin', { description: 'Sign in as a test user', run: () => undefined });
   expect(listCommands()).toEqual([
     { name: 'appearance', description: expect.stringContaining('dark') },
-    { name: 'language', description: 'Switch the app language (args: { code: "en" | "ar" })' },
     { name: 'network', description: expect.stringContaining('offline') },
+    { name: 'signin', description: 'Sign in as a test user' },
+    { name: 'text_size', description: expect.stringContaining('size') },
   ]);
 });
 
 test('runs a command with its args and returns a JSON-safe result', async () => {
   const run = jest.fn(async (args: Record<string, unknown>) => ({ ok: true, code: args.code, later: () => 1, when: new Date(0) }));
-  registerTaplineCommand('language', { description: 'Switch language', run });
-  const result = await runCommand({ name: 'language', args: { code: 'ar' } });
+  registerTaplineCommand('seed', { description: 'Switch language', run });
+  const result = await runCommand({ name: 'seed', args: { code: 'ar' } });
   expect(run).toHaveBeenCalledWith({ code: 'ar' });
-  expect(result).toEqual({ name: 'language', result: { ok: true, code: 'ar', when: '1970-01-01T00:00:00.000Z' } });
+  expect(result).toEqual({ name: 'seed', result: { ok: true, code: 'ar', when: '1970-01-01T00:00:00.000Z' } });
 });
 
 test('an unknown command is not_found and names the ones there are', async () => {

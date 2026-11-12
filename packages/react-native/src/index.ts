@@ -167,7 +167,9 @@ export function stopTapline(): void {
   }
 }
 
-export { registerTaplineCommand } from './commands';
+export { registerTaplineCommand, registerLanguageCommand, registerRegionCommand } from './commands';
+export { useTaplineFontScale, getTaplineFontScale, subscribeTaplineFontScale, TEXT_SIZES } from './locale';
+export type { TextSize } from './locale';
 export type { TaplineCommand } from './commands';
 export { isTaplineLink, parseTaplineLink } from './link';
 export type { TaplineLink } from './link';
