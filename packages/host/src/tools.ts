@@ -4644,7 +4644,8 @@ export class TaplineTools {
     if (survives === undefined || (survives.text === undefined && survives.goal_step === undefined)) {
       return { survived: null, why: "nothing was checked (no survives given)." };
     }
-    const session = this.host.current();
+    // The journey's own app, the one the moment happened to; never another app selected since.
+    const session = this.journeySession();
     if (session === undefined) return { survived: false, why: "the app isn't connected any more." };
     // What a person sees (AGENT-TOOLS 1.12 §17.4): in a user's eyes the glass only; a label a screen reader hears is no proof.
     const tree = treeResultSchema.safeParse(

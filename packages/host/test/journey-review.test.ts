@@ -104,6 +104,25 @@ describe("journey start and stop lifecycle (finding 3)", () => {
     }
   });
 
+  it("a network stress moment's survives check reads the journey's app, not another app selected since", async () => {
+    const r = await make();
+    await begin(r);
+    // The other app shows a different screen: none of the journey app's texts.
+    const other = await FakeApp.connect(
+      r.host.boundPort() ?? 0,
+      { app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } },
+      (q) => (q.method === "tree" ? { ok: true, result: { screen: SCREEN, elements: [] } } : { ok: true, result: {} }),
+    );
+    try {
+      r.host.select(other.session);
+      const answer = textOf(await r.tools.journey({ stress: { kind: "network", mode: "offline" }, survives: { text: "Add egg" } }));
+      expect(answer).toContain("it survived");
+      expect(other.app.requests.filter((q) => q.method === "tree")).toEqual([]);
+    } finally {
+      other.app.ws.terminate();
+    }
+  });
+
   it("no new start while a stop is still cleaning up", async () => {
     const r = await make();
     await begin(r, { conditions: { network: "3g" } });
