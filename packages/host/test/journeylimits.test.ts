@@ -37,6 +37,19 @@ describe("frames for the GIF", () => {
   });
 });
 
+describe("frames for the GIF when the mandatory ones are over the cap", () => {
+  it("keeps the first and the final frame, within the limit", () => {
+    // every one of 151 frames has a tap
+    const all = Array.from({ length: 151 }, (_, i) => frame(i + 1, 1, true));
+    const chosen = framesForGif(all);
+    expect(chosen).toHaveLength(GIF_MAX_SOURCE_FRAMES);
+    expect(chosen[0]?.n).toBe(1);
+    expect(chosen.at(-1)?.n).toBe(151);
+    expect(chosen.map((f) => f.n)).toEqual([...chosen.map((f) => f.n)].sort((a, b) => a - b));
+    expect(new Set(chosen.map((f) => f.n)).size).toBe(chosen.length);
+  });
+});
+
 describe("old reports", () => {
   it("keeps the newest, removes older report folders, and leaves anything else alone", () => {
     const root = mkdtempSync(join(tmpdir(), "tapline-journeys-"));

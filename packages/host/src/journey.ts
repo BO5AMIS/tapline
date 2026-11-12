@@ -201,7 +201,7 @@ const TAP_TOOLS: ReadonlySet<string> = new Set(["tap", "long_press", "toggle"]);
 const SCROLL_TOOLS: ReadonlySet<string> = new Set(["scroll", "swipe"]);
 const WAIT_TOOLS: ReadonlySet<string> = new Set(["wait", "wait_for"]);
 /** Tools that only look: two or more in a row with no action in between is a hesitation. */
-export const READ_TOOLS_FOR_HESITATION: ReadonlySet<string> = new Set(["look", "check_layout", "audit", "inspect", "logs", "crash", "compare_screen", "filmstrip"]);
+export const READ_TOOLS_FOR_HESITATION: ReadonlySet<string> = new Set(["look", "check_layout", "audit", "inspect", "logs", "crash", "compare_screen", "filmstrip", "ux_check"]);
 
 const SETTLED = /^Settled in (\d+(?:\.\d+)?) s\.$/m;
 const CRASH_NOTE = /^Note: the app (?:crashed|disconnected)/m;
@@ -419,7 +419,29 @@ export function withoutFieldText(text: string): string {
   return text.replace(/ (?:value|placeholder)=(?:"(?:[^"\\]|\\.)*"(?:…\(\+\d+\))?|[^\s"]+)/g, "");
 }
 
-const URL_IN_TEXT = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>]+/g;
+/**
+ * `scheme://…`, and also `scheme:/…` and `scheme:…` (an OAuth callback such as `com.example.app:/oauth2redirect?code=…`).
+ * The short forms count as links only when what follows has a `?`, `#` or `/`, so "10:30" and "Note: …" stay as they are.
+ */
+const URL_IN_TEXT = /\b[A-Za-z][A-Za-z0-9+.-]*:(?:\/\/)?[^\s"'<>]+/g;
+
+/** A `scheme:/path?query#fragment` or `scheme:path?query` link: no authority; query, fragment and token-like segments go. */
+function cutOpaque(bare: string, colon: number): string {
+  const scheme = bare.slice(0, colon + 1);
+  let rest = bare.slice(colon + 1);
+  if (!/[?#/]/.test(rest)) return bare;
+  const hashAt = rest.indexOf("#");
+  const fragment = hashAt >= 0 ? "#…" : "";
+  if (hashAt >= 0) rest = rest.slice(0, hashAt);
+  const queryAt = rest.indexOf("?");
+  const query = queryAt >= 0 ? "?…" : "";
+  if (queryAt >= 0) rest = rest.slice(0, queryAt);
+  const path = rest
+    .split("/")
+    .map((segment) => (SECRET_SEGMENT.test(segment) ? "…" : segment))
+    .join("/");
+  return `${scheme}${path}${query}${fragment}`;
+}
 /** A path segment that looks like a token or an id worth hiding: 16 or more of letters, digits, - and _, with a digit. */
 const SECRET_SEGMENT = /^(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{16,}$/;
 
@@ -432,7 +454,9 @@ export function withoutUrlSecrets(text: string): string {
   return text.replace(URL_IN_TEXT, (url) => {
     const trail = /[.,;:!?)\]]+$/.exec(url)?.[0] ?? "";
     const bare = trail === "" ? url : url.slice(0, -trail.length);
-    const scheme = bare.slice(0, bare.indexOf("://") + 3);
+    const colon = bare.indexOf(":");
+    if (!bare.startsWith("//", colon + 1)) return `${cutOpaque(bare, colon)}${trail}`;
+    const scheme = bare.slice(0, colon + 3);
     let rest = bare.slice(scheme.length);
     const hashAt = rest.indexOf("#");
     const fragment = hashAt >= 0 ? "#…" : "";

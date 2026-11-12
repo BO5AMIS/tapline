@@ -66,7 +66,7 @@ interface Coded {
 }
 
 /** The frames made the same size as the first one. */
-function fitted(frames: GifFrame[], width: number): GifFrame[] {
+export function fitted(frames: GifFrame[], width: number): GifFrame[] {
   const first = frames[0];
   if (first === undefined) return [];
   const scaledFirst = scaleToWidth(first.pixels, width);
@@ -74,9 +74,17 @@ function fitted(frames: GifFrame[], width: number): GifFrame[] {
   return frames.map((frame, i) => {
     const scaled = i === 0 ? scaledFirst : scaleToWidth(frame.pixels, width);
     if (scaled.height === height) return { ...frame, pixels: scaled };
+    // Another shape (the phone turned): the whole picture is fitted inside the canvas, centred, never cropped.
+    const k = Math.min(width / frame.pixels.width, height / frame.pixels.height);
+    const inner = scaleToWidth(frame.pixels, Math.max(1, Math.round(frame.pixels.width * k)));
     const data = new Uint8Array(width * height * 4).fill(255);
-    const rows = Math.min(height, scaled.height);
-    data.set(scaled.data.subarray(0, rows * width * 4));
+    const left = Math.max(0, Math.floor((width - inner.width) / 2));
+    const top = Math.max(0, Math.floor((height - inner.height) / 2));
+    const rows = Math.min(inner.height, height - top);
+    const columns = Math.min(inner.width, width - left);
+    for (let y = 0; y < rows; y++) {
+      data.set(inner.data.subarray(y * inner.width * 4, (y * inner.width + columns) * 4), ((top + y) * width + left) * 4);
+    }
     return { ...frame, pixels: { width, height, data } };
   });
 }

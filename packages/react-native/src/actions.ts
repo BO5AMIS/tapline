@@ -1134,8 +1134,8 @@ async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs
     if (!found || found.info.disabled || again.entry.info.disabled) {
       return { done: false, reason: found ? 'disabled' : 'no_action', afterMs: Date.now() - started };
     }
-    // A control may change its own text after the first tap ("Added 1"); one that became another element (a list
-    // recycled the row) isn't the one the safety check saw: no second tap on it.
+    // The second tap is refused as `changed` when the id, label or text is no longer what the first tap found: a
+    // control that renames itself ("Added 1") and a list row that was recycled are both another element now.
     if (!sameTarget(first, again.entry)) return { done: false, reason: 'changed', afterMs: Date.now() - started };
     const handler = findHandler(found.node, 'onPress');
     if (!handler) return { done: false, reason: 'no_action', afterMs: Date.now() - started };

@@ -99,7 +99,9 @@ export function inert(text: string): string {
   return text
     .replace(/[\\`*_[\]<>|!]/g, (c) => `\\${c}`)
     .replace(/@/g, "@\u200b")
-    .replace(/(https?):\/\//gi, "$1\u200b://");
+    .replace(/(https?):\/\//gi, "$1\u200b://")
+    // GitHub also turns a bare `www.` word into a link.
+    .replace(/\bwww\./gi, (w) => `${w.slice(0, 3)}\u200b.`);
 }
 
 function bodyOf(input: ExportInput, pictureUrl: (relative: string) => string, reportUrl: string, all: boolean): string {
@@ -192,10 +194,30 @@ async function visibilityRefusal(run: Runner, repo: string, allowed: boolean): P
     // refused below
   }
   if (visibility === "") return `Tapline couldn't tell whether ${repo} is public, so it wrote nothing`;
-  if (visibility === "PUBLIC" && !allowed) {
-    return `${repo} is a public repository, so the report (screenshots of the app included) would be visible to everyone; export again with public: true if your user wants that`;
-  }
+  if (visibility === "PUBLIC" && !allowed) return publicWords(repo);
   return null;
+}
+
+function publicWords(repo: string): string {
+  return `${repo} is a public repository, so the report (screenshots of the app included) would be visible to everyone; export again with public: true if your user wants that`;
+}
+
+/**
+ * Whether the export's repository is public and the agent didn't say `public: true`, asked before the journey ends so a
+ * refused public export can be tried again. Everything else (an invalid target, gh missing or not signed in, an answer
+ * that can't be read) is null here: the export itself says so, after the journey has ended and its report is written.
+ */
+export async function exportRefusal(target: JourneyExport, run: Runner): Promise<string | null> {
+  if (target.confirm !== true || target.public === true || validTarget(target) !== null) return null;
+  try {
+    const seen = await run("gh", ["repo", "view", target.repo, "--json", "visibility"]);
+    if (seen.code !== 0) return null;
+    const parsed: unknown = JSON.parse(seen.stdout);
+    const visibility = typeof parsed === "object" && parsed !== null && "visibility" in parsed && typeof parsed.visibility === "string" ? parsed.visibility.toUpperCase() : "";
+    return visibility === "PUBLIC" ? publicWords(target.repo) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

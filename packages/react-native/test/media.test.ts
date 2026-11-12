@@ -178,6 +178,82 @@ describe('add with @react-native-camera-roll/camera-roll', () => {
     expect(cameraRoll.save).toHaveBeenCalledTimes(1);
     expect(addedAssetIds()).toEqual(['ph://late']);
   });
+
+  test('a save that completes after needsPerson is reported with the next add, so the host can keep it', async () => {
+    const cameraRoll = roll();
+    let allow: () => void = () => undefined;
+    cameraRoll.save.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          allow = () => resolve('ph://late');
+        }),
+    );
+    setMediaModules(modules({ cameraRoll }));
+    expect(await media({ op: 'add', ...PICTURE, owner: 'host-a' })).toEqual({ needsPerson: true });
+    allow(); // the person allows; the agent does not retry this picture
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const next = await media({ op: 'add', name: 'lunch.jpg', mime: 'image/jpeg', data: 'QUJD', owner: 'host-a' });
+    expect(next).toEqual({ id: 'ph://camera-1', late: ['ph://late'] });
+    // told once, and only to the host that added it
+    expect(await media({ op: 'add', name: 'dinner.jpg', mime: 'image/jpeg', data: 'QUJD', owner: 'host-a' })).toEqual({ id: 'ph://camera-2' });
+  });
+
+  test('a late save is not reported to another host', async () => {
+    const cameraRoll = roll();
+    let allow: () => void = () => undefined;
+    cameraRoll.save.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          allow = () => resolve('ph://late');
+        }),
+    );
+    setMediaModules(modules({ cameraRoll }));
+    await media({ op: 'add', ...PICTURE, owner: 'host-a' });
+    allow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await media({ op: 'add', name: 'lunch.jpg', mime: 'image/jpeg', data: 'QUJD', owner: 'host-b' })).toEqual({ id: 'ph://camera-1' });
+  });
+
+  test('a restarted host adding the same name does not get the earlier host\'s saved picture', async () => {
+    const cameraRoll = roll();
+    let allow: () => void = () => undefined;
+    cameraRoll.save.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          allow = () => resolve('ph://host-a');
+        }),
+    );
+    setMediaModules(modules({ cameraRoll }));
+    expect(await media({ op: 'add', ...PICTURE, owner: 'host-a' })).toEqual({ needsPerson: true });
+    // host B asks for the same name while A's save waits: its own save, its own id
+    expect(await media({ op: 'add', ...PICTURE, owner: 'host-b' })).toEqual({ id: 'ph://camera-1' });
+    expect(cameraRoll.save).toHaveBeenCalledTimes(2);
+    allow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // A's late picture is not handed to B either
+    expect(await media({ op: 'add', ...PICTURE, owner: 'host-b' })).toEqual({ id: 'ph://camera-2' });
+    expect(await media({ op: 'remove', ids: [], owner: 'host-b' })).toEqual({ removed: 2 });
+    expect(addedAssetIds()).toEqual(['ph://host-a']);
+  });
+
+  test('a retry after the late answer collects the saved id and saves no duplicate', async () => {
+    const cameraRoll = roll();
+    let allow: () => void = () => undefined;
+    cameraRoll.save.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          allow = () => resolve('ph://late');
+        }),
+    );
+    setMediaModules(modules({ cameraRoll }));
+    await media({ op: 'add', ...PICTURE });
+    allow();
+    await new Promise((resolve) => setTimeout(resolve, 0)); // finished before the retry arrives
+    expect(await media({ op: 'add', ...PICTURE })).toEqual({ id: 'ph://late' });
+    expect(cameraRoll.save).toHaveBeenCalledTimes(1);
+    // collected: the same name saves a new picture now, and nothing is reported late
+    expect(await media({ op: 'add', ...PICTURE })).toEqual({ id: 'ph://camera-1' });
+  });
 });
 
 describe('add without a library', () => {

@@ -1,4 +1,4 @@
-import { isOnGlass } from './glassclip';
+import { measureScrollers, visiblePartOnGlass } from './glassclip';
 import { measureFiber, takeSnapshot, type Entry } from './inspect';
 import { TaplineError, isRecord } from './types';
 
@@ -82,10 +82,12 @@ async function presentNow(condition: Condition): Promise<boolean> {
         return false;
       }),
   );
+  // The scroll views are measured once for this poll, not once per candidate.
+  const scrollers = innermost.length > 0 ? await measureScrollers(snapshot) : new Map();
   for (const entry of innermost) {
     // A native tab has no frame to measure: it is on the glass.
     const frame = entry.tab ? null : await measureFiber(entry.node.fiber);
-    if (await isOnGlass(snapshot, entry, frame)) return true;
+    if (visiblePartOnGlass(snapshot, entry, frame, scrollers) !== null) return true;
   }
   return false;
 }

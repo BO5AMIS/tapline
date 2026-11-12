@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { markRing, readPixels } from "../src/images.js";
-import { GIF_MAX_BYTES, GIF_WIDTH, encodeJourneyGif, gifInfo, slidePlan, type GifFrame } from "../src/journeygif.js";
+import { GIF_MAX_BYTES, GIF_WIDTH, encodeJourneyGif, fitted, gifInfo, slidePlan, type GifFrame } from "../src/journeygif.js";
 import { shot } from "./journeyhelpers.js";
 
 // AGENT-TOOLS 1.12 §17.5: the journey's GIF.
@@ -31,6 +31,23 @@ describe("the journey GIF", () => {
     const gif = encodeJourneyGif([{ pixels: pixels([40, 90, 200], 720, 1560), at: 0 }]);
     const info = gifInfo(gif.bytes);
     expect([info.width, info.height]).toEqual([360, 780]);
+  });
+
+  it("fits a turned screen inside the canvas whole, not cropped", () => {
+    const portrait = pixels([40, 90, 200], 360, 780);
+    const landscape = pixels([200, 30, 30], 780, 360); // the phone turned: the first frame sets a 360 x 780 canvas
+    const [, turned] = fitted([{ pixels: portrait, at: 0 }, { pixels: landscape, at: 100 }], 360);
+    const out = turned?.pixels;
+    expect([out?.width, out?.height]).toEqual([360, 780]);
+    if (out === undefined) return;
+    const at = (x: number, y: number): number[] => Array.from(out.data.subarray((y * out.width + x) * 4, (y * out.width + x) * 4 + 3));
+    // the picture is scaled to 360 x 166 and centred: its first and last rows and both side edges are there
+    const rows = [0, 1, 2].map((k) => Math.floor((780 - 166) / 2) + k).concat([Math.floor((780 - 166) / 2) + 163]);
+    for (const y of rows) {
+      expect(at(2, y)[0]).toBeGreaterThan(150);
+      expect(at(357, y)[0]).toBeGreaterThan(150);
+    }
+    expect(at(180, 10)).toEqual([255, 255, 255]); // the empty bands are white
   });
 
   it("draws a tap as a ring on the screen before it, shown just before the result", () => {

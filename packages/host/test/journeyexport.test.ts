@@ -80,6 +80,7 @@ describe("export to a pull request", () => {
     const r = await make(gh.run);
     const { said } = await journeyAndStop(r, PR);
     expect(gh.words()).toEqual([
+      "gh repo view o/r --json visibility", // asked before the journey ends
       "gh auth status",
       "gh pr view 310 --repo o/r --json headRefName,headRepository,headRepositoryOwner,isCrossRepository,url",
       "gh repo view o/r --json visibility",
@@ -89,7 +90,7 @@ describe("export to a pull request", () => {
       "git push origin HEAD:refs/heads/feat/eggs",
       "gh pr comment 310 --repo o/r --body-file <tmp>/comment.md",
     ]);
-    const clone = gh.calls[3]?.args[3] ?? "";
+    const clone = gh.calls[4]?.args[3] ?? "";
     // never the user's working tree: every git command ran inside the temporary clone
     for (const git of gh.calls.filter((c) => c.command === "git")) expect(git.cwd).toBe(clone);
     expect(clone.startsWith(r.dir)).toBe(false);
@@ -134,6 +135,7 @@ describe("export to an issue", () => {
     const { said } = await journeyAndStop(r, ISSUE);
     const clone = gh.calls.find((c) => c.args[1] === "clone")?.args[3] ?? "";
     expect(gh.words()).toEqual([
+      "gh repo view o/r --json visibility", // asked before the journey ends
       "gh auth status",
       "gh repo view o/r --json visibility",
       "gh api repos/o/r/branches/qa-reports --silent",
@@ -146,7 +148,7 @@ describe("export to an issue", () => {
       "gh issue create --repo o/r --title QA journey: change the settings --body-file <tmp>/issue.md",
     ]);
     for (const git of gh.calls.filter((c) => c.command === "git")) expect(git.cwd).toBe(clone);
-    const issue = gh.calls[9];
+    const issue = gh.calls[10];
     expect(issue?.body).toContain("Findings: 1 medium.");
     expect(issue?.body).toContain(`https://github.com/o/r/raw/qa-reports/reports/${NAME}/findings/`);
     expect(said).toContain(`Exported: pushed 6 files of the report to reports/${NAME}/ on branch qa-reports of o/r (made it), and opened an issue: https://github.com/o/r/issues/7`);
@@ -157,7 +159,7 @@ describe("export to an issue", () => {
     const r = await make(gh.run);
     const { said } = await journeyAndStop(r, ISSUE);
     expect(gh.calls.some((c) => c.args[0] === "checkout")).toBe(false);
-    expect(gh.words()[3]).toBe("gh repo clone o/r <clone> -- --branch qa-reports --single-branch --depth 1");
+    expect(gh.words()[4]).toBe("gh repo clone o/r <clone> -- --branch qa-reports --single-branch --depth 1");
     expect(said).not.toContain("(made it)");
   });
 });
@@ -179,12 +181,14 @@ describe("the gate", () => {
   it("refuses a public repository unless public: true", async () => {
     const gh = fake((c) => (c.args[0] === "repo" && c.args[1] === "view" ? { stdout: JSON.stringify({ visibility: "PUBLIC" }) } : undefined));
     const r = await make(gh.run);
-    const { said } = await journeyAndStop(r, ISSUE);
-    expect(said).toMatch(/Export failed: o\/r is a public repository, so the report .* would be visible to everyone; export again with public: true if your user wants that\. The report stays local: .*change-the-settings/);
+    const { said, running } = await journeyAndStop(r, ISSUE);
+    expect(said).toMatch(/^Error not_allowed: o\/r is a public repository, so the report .* would be visible to everyone; export again with public: true if your user wants that\. The journey is still running/);
+    // refused before the journey ended: it can be stopped again, with the option, and nothing was written meanwhile
+    expect(running).toBe(true);
     expect(gh.calls.some((c) => c.command === "git")).toBe(false);
-    const again = fake((c) => (c.args[0] === "repo" && c.args[1] === "view" ? { stdout: JSON.stringify({ visibility: "PUBLIC" }) } : undefined));
-    const r2 = await make(again.run);
-    expect((await journeyAndStop(r2, { ...ISSUE, public: true })).said).toContain("Exported:");
+    const again = textOf(await r.tools.journey({ stop: true, reached: true, export: { ...ISSUE, public: true } }));
+    expect(again).toContain("Exported:");
+    expect(r.tools.currentJourney()).toBeUndefined();
   });
 
   it("will not write when it cannot tell whether the repository is public", async () => {

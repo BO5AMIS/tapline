@@ -122,7 +122,8 @@ describe("journey start and stop", () => {
     const lines = said.split("\n");
     expect(lines[0]).toBe('Journey started: "change the settings" as a first-timer, in a user\'s eyes.');
     expect(lines[1]).toMatch(/^Screen 402x874 pt @3x · 4 elements \(more below\)$/);
-    expect(said).toContain("Route: home");
+    // The route name is the app's own naming, not on the glass.
+    expect(said).not.toContain("Route:");
   });
 
   it('says "no persona" without one', async () => {

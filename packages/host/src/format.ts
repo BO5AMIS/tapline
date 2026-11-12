@@ -216,7 +216,8 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
   const count = tree.elements.length;
   const lines = [`Screen ${size} · ${count} element${count === 1 ? "" : "s"}${eyes ? formatGlassMore(tree.glass) : formatOffScreen(tree.offScreen)}`];
   if (app !== undefined) lines.push(`App: ${app.name}${app.id !== undefined ? ` (${app.id})` : ""}`);
-  const route = formatRoute(tree.route);
+  // A route name is the app's own naming, not on the glass: a user's eyes don't get it (tree.route stays for the journey's measures).
+  const route = eyes ? null : formatRoute(tree.route);
   if (route !== null) lines.push(route);
   lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");

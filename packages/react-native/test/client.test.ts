@@ -691,14 +691,21 @@ describe('never throws into the app', () => {
 describe('a photo-picker stub ends with the connection', () => {
   const armParams = { op: 'picker', index: 1, total: 1, name: 'a.jpg', mime: 'image/jpeg', data: 'QUJD' };
 
+  /** Arms the picker the way the host does: a media request over the socket, answered by the client. */
+  async function arm(socket: MockSocket, id: number): Promise<void> {
+    socket.receive({ type: 'request', id, method: 'media', params: armParams });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(socket.messages.at(-1)).toMatchObject({ type: 'response', id, ok: true });
+  }
+
   test("the app's own picker is back after the connection drops, and after stop", async () => {
     const original = async (): Promise<unknown> => ({ canceled: true });
     const mod: Record<string, unknown> = { launchImageLibraryAsync: original, launchCameraAsync: original };
     setMediaModules({ expo: null, cameraRoll: null, fileSystem: null, imagePicker: mod });
     try {
-      const harness = makeClient();
+      const harness = makeClient({ capabilities: ['tree', 'press', 'media'], methods: { media } });
       const socket = connect(harness);
-      await media(armParams);
+      await arm(socket, 1);
       expect(mod.launchImageLibraryAsync).not.toBe(original);
       socket.drop(1006);
       expect(mod.launchImageLibraryAsync).toBe(original);
@@ -708,7 +715,7 @@ describe('a photo-picker stub ends with the connection', () => {
       const second = last();
       second.open();
       second.receive(WELCOME);
-      await media(armParams);
+      await arm(second, 2);
       expect(mod.launchImageLibraryAsync).not.toBe(original);
       harness.client.stop();
       expect(mod.launchImageLibraryAsync).toBe(original);

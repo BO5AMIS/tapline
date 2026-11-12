@@ -161,6 +161,9 @@ export function setMediaModules(next: MediaModules | undefined): void {
   addedIds.length = 0;
   permissionPending = null;
   pendingSaves.clear();
+  abandonedSaves.clear();
+  completedSaves.clear();
+  lateSaved.length = 0;
 }
 
 let patienceMs = DEFAULT_PATIENCE_MS;
@@ -178,8 +181,31 @@ export function setMediaPatience(ms: number): void {
  */
 const addedIds: Array<{ id: string; owner: string }> = [];
 let permissionPending: Promise<unknown> | null = null;
-/** A camera-roll save the person has not answered yet, by picture name, so a retry waits for it instead of saving twice. */
+/** A camera-roll save the person has not answered yet, by host and picture name, so a retry waits for it instead of saving twice. */
 const pendingSaves = new Map<string, Promise<string>>();
+/** Names of saves whose caller was already told `needsPerson`: if one completes, nobody is waiting for its id. */
+const abandonedSaves = new Set<string>();
+/** The id of an abandoned save that completed, by host and picture name, until a retry collects it (so a retry saves nothing twice). */
+const completedSaves = new Map<string, string>();
+/**
+ * Ids of abandoned saves that completed and that no answer has carried to the host yet. The next `add` answer
+ * reports them (`late`), so the host can remember them for `remove` after a JS reload.
+ */
+const lateSaved: Array<{ id: string; owner: string }> = [];
+
+/** A retry got this save's id itself: it is neither late nor waiting to be collected. */
+function collected(name: string, id: string): void {
+  if (completedSaves.get(name) === id) completedSaves.delete(name);
+  const at = lateSaved.findIndex((late) => late.id === id);
+  if (at >= 0) lateSaved.splice(at, 1);
+}
+
+/** The late ids of this host, taken out of the list. */
+function takeLate(owner: string): string[] {
+  const mine = lateSaved.filter((late) => late.owner === owner).map((late) => late.id);
+  for (let i = lateSaved.length - 1; i >= 0; i--) if (lateSaved[i]?.owner === owner) lateSaved.splice(i, 1);
+  return mine;
+}
 
 /** The asset ids this session has added and not yet removed. */
 export function addedAssetIds(): readonly string[] {
@@ -235,6 +261,8 @@ export interface AddOutcome {
   /** The new asset's id; absent when a person must answer the OS prompt first. */
   id?: string;
   needsPerson?: boolean;
+  /** Ids of earlier saves that finished after their `needsPerson` answer; the host remembers them. */
+  late?: string[];
 }
 
 function isGranted(result: unknown): boolean {
@@ -266,6 +294,12 @@ async function writeTemp(files: FileSystemModule, mime: string, data: string): P
 }
 
 async function addPicture(params: Record<string, unknown>): Promise<AddOutcome> {
+  const outcome = await addOne(params);
+  const late = takeLate(ownerOf(params)).filter((id) => id !== outcome.id);
+  return late.length > 0 ? { ...outcome, late } : outcome;
+}
+
+async function addOne(params: Record<string, unknown>): Promise<AddOutcome> {
   const name = paramString(params, 'name');
   const mime = paramString(params, 'mime');
   const data = paramString(params, 'data');
@@ -292,7 +326,14 @@ async function addPicture(params: Record<string, unknown>): Promise<AddOutcome> 
   // @react-native-camera-roll: iOS asks for add-only access by itself when the save starts.
   const library = cameraRoll;
   if (library === null) throw new TaplineError('unsupported', UNSUPPORTED_LIBRARY);
-  let saving = pendingSaves.get(name);
+  // One host's save is never another's: a restarted host adding the same name saves its own picture.
+  const key = `${ownerOf(params)}\u0000${name}`;
+  const finished = completedSaves.get(key);
+  if (finished !== undefined) {
+    collected(key, finished);
+    return { id: finished };
+  }
+  let saving = pendingSaves.get(key);
   let temp: string | null = null;
   if (saving === undefined) {
     const uri = await writeTemp(fileSystem, mime, data);
@@ -301,21 +342,33 @@ async function addPicture(params: Record<string, unknown>): Promise<AddOutcome> 
       if (typeof saved !== 'string' || saved === '') throw new TaplineError('internal', 'the photo library did not return the new picture\'s id');
       return saved;
     });
-    pendingSaves.set(name, saving);
+    pendingSaves.set(key, saving);
     const cleanup = (): void => {
-      pendingSaves.delete(name);
+      pendingSaves.delete(key);
       if (temp !== null) void fileSystem.deleteAsync(temp, { idempotent: true }).catch(() => undefined);
     };
     saving.then(
       (id) => {
         cleanup();
-        addedIds.push({ id, owner: ownerOf(params) });
+        const owner = ownerOf(params);
+        addedIds.push({ id, owner });
+        if (abandonedSaves.delete(key)) {
+          completedSaves.set(key, id);
+          lateSaved.push({ id, owner });
+        }
       },
-      cleanup,
+      () => {
+        cleanup();
+        abandonedSaves.delete(key);
+      },
     );
   }
   const waited = await within(saving, patienceMs);
-  if (!waited.done) return { needsPerson: true };
+  if (!waited.done) {
+    abandonedSaves.add(key);
+    return { needsPerson: true };
+  }
+  collected(key, waited.value);
   return { id: waited.value };
 }
 

@@ -1,12 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import jpeg from "jpeg-js";
 import { gifInfo } from "../src/journeygif.js";
 import { Journey, type JourneyState } from "../src/journey.js";
-import { MAX_FINDINGS, SEVERITY_RULES, buildFindings, countFindings, findingsLine, reportFolderName, screenSignature, type SeenFinding } from "../src/journeyreport.js";
-import { HOME, rig, textOf, type Rig } from "./journeyhelpers.js";
+import { JourneyRecorder, MAX_FINDINGS, SEVERITY_RULES, buildFindings, countFindings, findingsLine, reportFolderName, scrubFolder, screenSignature, type SeenFinding, type FrameSource } from "../src/journeyreport.js";
+import { HOME, rig, shot, textOf, type Rig } from "./journeyhelpers.js";
 
 // AGENT-TOOLS 1.12 §17.5: the frames a journey keeps and the report written at stop.
 
@@ -74,6 +74,25 @@ describe("frames during a journey", () => {
     await r.tools.tap({ target: { text: "Add egg" } });
     const folder = folderOf(textOf(await r.tools.journey({ stop: true, reached: true })));
     expect(readdirSync(join(folder, "frames"))).toHaveLength(3); // the start, and a frame for each animating tap
+  });
+
+  it("keeps a frame for a touch even when the screen did not change, and none for a look", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-recorder-"));
+    try {
+      const source: FrameSource = {
+        where: () => "front",
+        peek: async () => ({ signature: "same", screen: { w: 360, h: 780 }, route: ["home"] }),
+        shot: async () => ({ mime: "image/jpeg", data: shot([40, 90, 200], 36, 78) }),
+      };
+      const rec = new JourneyRecorder(join(dir, "report"), source, () => 0);
+      await rec.frame(0, 1, undefined, false);
+      await rec.frame(1, 1, undefined, false); // a look at the same screen: nothing new
+      await rec.frame(2, 1, { point: { x: 10, y: 20 } }, false); // a touch that changed nothing: kept, with where it landed
+      expect(rec.frames.map((f) => f.step)).toEqual([0, 2]);
+      expect(rec.frames[1]?.tap).toEqual({ x: 10 / 360, y: 20 / 780 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("the screen signature ignores refs and tells a different screen apart", () => {
@@ -160,6 +179,41 @@ describe("the report folder", () => {
     const html = readFileSync(join(folder, "report.html"), "utf8");
     expect(html).toContain("open &lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;");
     expect(html).not.toContain("<b>x</b>");
+  });
+
+  it("escapes what the app wrote in a finding title in report.md, so it cannot add an image or link", async () => {
+    const r = await make({ onRequest: (req) => (req.method === "uxCheck" ? uxAnswer([{ ...UX_ISSUE, problem: "![pwn](https://evil.example/x.png) [click](https://evil.example) <b>hi</b>" }]) : undefined) });
+    await start(r);
+    await r.tools.uxCheck({});
+    const folder = folderOf(textOf(await r.tools.journey({ stop: true, reached: false })));
+    const md = readFileSync(join(folder, "report.md"), "utf8");
+    expect(md).not.toContain("![pwn]");
+    expect(md).not.toContain("[click](");
+    expect(md).not.toContain("<b>");
+    expect(md).toContain("\\!\\[pwn\\]");
+  });
+
+  it("replaces the report's own folder path in report.md and report.html, so an export does not publish it", async () => {
+    const r = await make();
+    await start(r);
+    const where = join(r.dir, "journeys", "2026-11-12-1530-change-the-settings");
+    await r.tools.tap({ target: { text: where } });
+    const folder = folderOf(textOf(await r.tools.journey({ stop: true, reached: false })));
+    expect(folder).toBe(where);
+    for (const file of ["report.md", "report.html"]) {
+      const text = readFileSync(join(folder, file), "utf8");
+      expect(text).toMatch(/&lt;report&gt;|<report>/);
+      expect(text.toLowerCase()).not.toContain(where.toLowerCase());
+    }
+  });
+
+  it("scrubFolder takes the folder out in both slash styles", () => {
+    const folder = String.raw`C:\Users\Sam\.tapline\journeys\2026-goal`;
+    const doubled = folder.replace(/\\/g, "\\\\");
+    const text = String.raw`a ${folder}\frames\001.jpg b C:/Users/Sam/.tapline/journeys/2026-goal/x c ${doubled} d`;
+    const out = scrubFolder(text, folder);
+    expect(out).not.toMatch(/Sam/);
+    expect(out.match(/<report>/g)).toHaveLength(3);
   });
 
   it("names shortcuts used, a skipped photo picker, and eyes: agent", async () => {

@@ -176,6 +176,26 @@ describe("the media tool", () => {
     expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual(["asset-1"]);
   });
 
+  it("keeps the ids of saves that finished late, so remove still finds them after a reload", async () => {
+    const { a, b } = pictures();
+    const sent: Array<Record<string, unknown>> = [];
+    let adds = 0;
+    const { tools } = await connect((p) => {
+      sent.push(p);
+      if (p.op === "remove") return { ok: true, result: { removed: 2 } };
+      adds += 1;
+      // first add: the person had not answered; the picture was saved after that. The next add reports it as late.
+      return adds === 1 ? { ok: true, result: { needsPerson: true } } : { ok: true, result: { id: "asset-2", late: ["asset-1", "asset-2"] } };
+    });
+    await tools.media({ add: [a], confirm: true });
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual([]);
+    await tools.media({ add: [b], confirm: true });
+    // each id once, though the late list repeats the one the answer carries
+    expect(tools.mediaState.addedIds("com.example.demo@install-1")).toEqual(["asset-1", "asset-2"]);
+    await tools.media({ remove: true });
+    expect(sent.at(-1)).toMatchObject({ op: "remove", ids: ["asset-1", "asset-2"] });
+  });
+
   it("passes the app's unsupported answer on as it is", async () => {
     const { a } = pictures();
     const message =
@@ -265,6 +285,7 @@ describe("one call's pictures together (1.5 review, finding 10)", () => {
     const { join } = await import("node:path");
     const { readPictures } = await import("../src/media.js");
     const dir = mkdtempSync(join(tmpdir(), "tapline-media-big-"));
+    dirs.push(dir);
     const paths = [1, 2, 3].map((n) => {
       const path = join(dir, `big${n}.jpg`);
       const fd = openSync(path, "w");

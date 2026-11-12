@@ -124,7 +124,7 @@ export function readPictures(paths: readonly string[]): { files: MediaFile[] } |
   return { files };
 }
 
-export const addResultSchema = z.object({ id: z.string().optional(), needsPerson: z.boolean().optional() });
+export const addResultSchema = z.object({ id: z.string().optional(), needsPerson: z.boolean().optional(), late: z.array(z.string()).optional() });
 export const removeResultSchema = z.object({
   removed: z.number(),
   pending: z.boolean().optional(),
@@ -145,7 +145,8 @@ export class MediaState {
   }
 
   remember(app: string, ids: readonly string[]): void {
-    this.added.set(app, [...(this.added.get(app) ?? []), ...ids]);
+    const known = this.added.get(app) ?? [];
+    this.added.set(app, [...known, ...ids.filter((id, at) => !known.includes(id) && ids.indexOf(id) === at)]);
   }
 
   forget(app: string): void {
@@ -261,6 +262,8 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
       if (app !== null) ctx.state.remember(app, added);
       return fail("Error internal: the app returned a media answer the host could not read.");
     }
+    // Saves that finished after an earlier needsPerson: kept, so remove: true still finds them after a JS reload.
+    if (app !== null && result.late !== undefined) ctx.state.remember(app, result.late);
     if (result.needsPerson === true || result.id === undefined) {
       if (app !== null) ctx.state.remember(app, added);
       const left = files.length - i;

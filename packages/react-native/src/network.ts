@@ -600,7 +600,12 @@ const REQUEST_INIT_KEYS = [
 function ownedInit(init: unknown): Record<string | symbol, unknown> {
   const copy: Record<string | symbol, unknown> = {};
   if (typeof init === 'object' && init !== null) {
-    Object.assign(copy, init);
+    // Own enumerable keys as data properties (Object.assign would let an own `__proto__` key set the prototype).
+    const own = init as Record<string | symbol, unknown>;
+    for (const key of Reflect.ownKeys(init)) {
+      if (!Object.prototype.propertyIsEnumerable.call(init, key)) continue;
+      Object.defineProperty(copy, key, { value: own[key], enumerable: true, writable: true, configurable: true });
+    }
     const source = init as Record<string, unknown>;
     for (const key of REQUEST_INIT_KEYS) {
       if (!(key in copy) && key in source) copy[key] = source[key];

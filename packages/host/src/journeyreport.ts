@@ -125,7 +125,8 @@ export class JourneyRecorder {
         return;
       }
       const peek = await this.source.peek();
-      if (peek !== undefined && peek.signature === this.lastSignature && !animating) {
+      // A touch is kept even when the screen did not change: the report shows where it landed.
+      if (peek !== undefined && peek.signature === this.lastSignature && !animating && touch === undefined) {
         this.skipped++;
         return;
       }
@@ -459,8 +460,12 @@ export function framesForGif(frames: readonly FrameRecord[], max = GIF_MAX_SOURC
   const chosen = [...keep].sort((a, b) => a - b).map((i) => frames[i]).filter((f): f is FrameRecord => f !== undefined);
   // Taps and screen changes alone can be over the limit in a very long journey: then those are thinned evenly too.
   if (chosen.length <= max) return chosen;
-  const step = chosen.length / max;
-  return Array.from({ length: max }, (_, k) => chosen[Math.floor(k * step)]).filter((f): f is FrameRecord => f !== undefined);
+  // The first and the last stay (the start and the result); the ones between are sampled.
+  const middle = chosen.slice(1, -1);
+  const room2 = Math.max(0, max - 2);
+  const step = middle.length / Math.max(1, room2);
+  const sampled = Array.from({ length: Math.min(room2, middle.length) }, (_, k) => middle[Math.floor(k * step)]);
+  return [chosen[0], ...sampled, chosen[chosen.length - 1]].filter((f): f is FrameRecord => f !== undefined);
 }
 
 function buildGif(folder: string, all: readonly FrameRecord[], maxBytes: number): ReportResult["gif"] {
@@ -481,6 +486,11 @@ function buildGif(folder: string, all: readonly FrameRecord[], maxBytes: number)
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Text the app controls (a label, a route), made safe to sit in report.md: no link, image or tag can be written by it. */
+function escapeMarkdown(value: string): string {
+  return value.replace(/\s*[\r\n]+\s*/g, " ").replace(/[\\`[\]<>!]/g, (c) => `\\${c}`);
 }
 
 function screenName(state: JourneyState, n: number | undefined): string {
@@ -525,6 +535,20 @@ function usedLines(state: JourneyState, rec: JourneyRecorder): string[] {
   return lines;
 }
 
+/**
+ * The report's own folder, in whatever slash style a step's text carries it, replaced by `<report>`: an export
+ * must not publish this computer's user name and folders.
+ */
+export function scrubFolder(text: string, folder: string): string {
+  const base = folder.replace(/[\\/]+$/, "");
+  if (base === "") return text;
+  const slashes = base.replace(/\\/g, "/");
+  const forms = [base, slashes, slashes.replace(/\//g, "\\"), slashes.replace(/\//g, "\\\\")];
+  const unique = [...new Set(forms)].sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(unique.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
+  return text.replace(pattern, "<report>");
+}
+
 export interface Ctx {
   state: JourneyState;
   rec: JourneyRecorder;
@@ -567,8 +591,8 @@ export function renderMarkdown(ctx: Ctx): string {
   const screens = pathScreens(ctx);
   if (screens.length === 0) lines.push("No screen was listed during the journey.", "");
   for (const s of screens) {
-    lines.push(`### ${s.title}`, "");
-    if (s.picture !== undefined) lines.push(`![${s.title}](${s.picture})`, "");
+    lines.push(`### ${escapeMarkdown(s.title)}`, "");
+    if (s.picture !== undefined) lines.push(`![${escapeMarkdown(s.title)}](${s.picture})`, "");
     else lines.push("(no picture was kept for this screen)", "");
     for (const step of s.steps) lines.push(`- ${stepLine(step)}`);
     if (s.steps.length > 0) lines.push("");
@@ -577,7 +601,7 @@ export function renderMarkdown(ctx: Ctx): string {
   if (ctx.findings.length === 0) lines.push("None.", "");
   if (ctx.omitted > 0) lines.push(`Showing the worst ${ctx.findings.length}; ${ctx.omitted} more findings are not listed.`, "");
   ctx.findings.forEach((f, i) => {
-    lines.push(`### ${i + 1}. [${f.severity}] ${f.kind}`, "", f.title, "", `- Screen: ${screenName(state, f.screen)}`, `- Basis: ${f.basis}`, "");
+    lines.push(`### ${i + 1}. [${f.severity}] ${f.kind}`, "", escapeMarkdown(f.title), "", `- Screen: ${escapeMarkdown(screenName(state, f.screen))}`, `- Basis: ${f.basis}`, "");
     if (f.shot !== undefined) lines.push(`![Finding ${i + 1}](${f.shot})`, "");
   });
   if (state.stress.length > 0) {
@@ -700,9 +724,9 @@ export async function writeReport(options: WriteOptions): Promise<ReportResult> 
   }
 
   const ctx: Ctx = { state, rec, findings, counts, omitted, gif, maxTaps: options.maxTaps, textRules: options.textRules ?? [] };
-  const markdown = renderMarkdown(ctx);
+  const markdown = scrubFolder(renderMarkdown(ctx), folder);
   writeFileSync(join(folder, "report.md"), markdown, "utf8");
-  writeFileSync(join(folder, "report.html"), renderHtml(ctx), "utf8");
+  writeFileSync(join(folder, "report.html"), scrubFolder(renderHtml(ctx), folder), "utf8");
   // An export uploads the report, its GIF and the pictures the report uses, not every raw frame.
   // Only the report's own pictures: app text in the report can't name another file (1.5 review, finding 7).
   const used = [...markdown.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)]

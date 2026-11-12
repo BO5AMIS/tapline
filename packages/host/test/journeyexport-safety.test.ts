@@ -31,6 +31,12 @@ describe("app text in a GitHub comment", () => {
     expect(out).not.toMatch(/https?:\/\//);
     expect(out).toContain("\\*bold\\*");
   });
+
+  it("can't add a link with a bare www. address either", () => {
+    const out = inert("visit www.evil.example now, or (WWW.Evil.example)");
+    expect(out).not.toMatch(/www\./i);
+    expect(out).toContain("www​.evil.example");
+  });
 });
 
 describe("export refuses a file outside the report folder", () => {

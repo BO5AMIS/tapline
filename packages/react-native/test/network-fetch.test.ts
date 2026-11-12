@@ -180,6 +180,21 @@ test('fetch options the app passes inherited or non-enumerable still reach its f
   expect(seen[0]).toMatchObject({ method: 'POST', body: 'payload', credentials: 'omit', cache: 'no-store' });
 });
 
+test('an init with an own __proto__ key cannot set the prototype of the copy the app receives', async () => {
+  const seen: unknown[] = [];
+  const target = makeTarget((_input, init) => {
+    seen.push(init);
+    return ok();
+  });
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const init: Record<string, unknown> = JSON.parse('{"method":"POST","__proto__":{"polluted":true}}') as Record<string, unknown>;
+  await (target.fetch as (input: unknown, init?: unknown) => Promise<unknown>)('https://api.example.com/x', init);
+  const received = seen[0] as Record<string, unknown>;
+  expect(received.method).toBe('POST');
+  expect(received.polluted).toBeUndefined();
+  expect(Object.getPrototypeOf(received)).toBe(Object.prototype);
+});
+
 test('offline fails a fetch without sending it, and the failure is reported', async () => {
   const sent: string[] = [];
   const target = makeTarget((input) => {

@@ -231,6 +231,23 @@ describe('wait_for with glass', () => {
     await expect(run(() => waitFor({ text: 'Item c', timeout: 0.5 }))).resolves.toMatchObject({ met: true });
   });
 
+  test('measures the scroll views once per poll, however many elements match', async () => {
+    await mountWorld(1000); // rows a, b and c are scrolled out of the list; d shows
+    const measure = jest.fn(async (fiber: Fiber): Promise<Frame | null> => {
+      const found = nearestId(fiber);
+      if (!found) return null;
+      if (found.id === 'list') {
+        return found.own ? { x: 0, y: 100, width: 400, height: 500 } : { x: 0, y: 100 - offset, width: 400, height: CONTENT_HEIGHT };
+      }
+      const at = ROWS[found.id];
+      return at === undefined ? null : { x: 0, y: 100 + at - offset, width: 400, height: 60 };
+    });
+    setMeasurer(measure);
+    await expect(run(() => waitFor({ text: 'Item', glass: true, timeout: 1 }))).resolves.toMatchObject({ met: true });
+    const ofList = measure.mock.calls.filter(([fiber]) => nearestId(fiber)?.id === 'list' && nearestId(fiber)?.own === true);
+    expect(ofList).toHaveLength(1);
+  });
+
   test('gone: true is met by an element that is only clipped away', async () => {
     await mountWorld();
     await expect(run(() => waitFor({ text: 'Item c', glass: true, gone: true, timeout: 1 }))).resolves.toMatchObject({ met: true });
