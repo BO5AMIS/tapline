@@ -165,15 +165,43 @@ export function failureWithDiff(failure: string): string {
   return lines.join("\n");
 }
 
+/**
+ * What a failed replay's answer says about the app (AGENT-TOOLS 1.10 §15.4), for JUnit's `<system-out>`: the
+ * `Logs (since step <n>):` block and the crash note.
+ */
+export function failureDiagnostics(failure: string): string | null {
+  const lines = failure.split("\n");
+  const out: string[] = [];
+  const start = lines.findIndex((line) => /^Logs \(since step \d+\):$/.test(line));
+  if (start >= 0) {
+    out.push(lines[start] ?? "");
+    for (const line of lines.slice(start + 1)) {
+      if (!/^\d\d:\d\d:\d\d\.\d{3} (error|warning|info) /.test(line)) break;
+      out.push(line);
+    }
+  }
+  out.push(...lines.filter((line) => /^Note: the app (crashed|disconnected)\b/.test(line)));
+  return out.length > 0 ? out.join("\n") : null;
+}
+
 /** JUnit XML for `tapline replay --junit`: one test case per script, the stop message as the failure. */
 export function junitXml(results: Array<{ name: string; seconds: number; failure: string | null }>): string {
   const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const diagnosticsOut = (failure: string): string[] => {
+    const said = failureDiagnostics(failure);
+    return said === null ? [] : [`      <system-out>${esc(said)}</system-out>`];
+  };
   const failures = results.filter((r) => r.failure !== null).length;
   const total = results.reduce((sum, r) => sum + r.seconds, 0);
   const cases = results.map((r) =>
     r.failure === null
       ? `    <testcase classname="tapline" name="${esc(r.name)}" time="${r.seconds.toFixed(3)}"/>`
-      : `    <testcase classname="tapline" name="${esc(r.name)}" time="${r.seconds.toFixed(3)}">\n      <failure message="${esc(r.failure.split("\n")[0] ?? "")}">${esc(r.failure)}</failure>\n    </testcase>`,
+      : [
+          `    <testcase classname="tapline" name="${esc(r.name)}" time="${r.seconds.toFixed(3)}">`,
+          `      <failure message="${esc(r.failure.split("\n")[0] ?? "")}">${esc(r.failure)}</failure>`,
+          ...diagnosticsOut(r.failure),
+          "    </testcase>",
+        ].join("\n"),
   );
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',

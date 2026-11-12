@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { junitXml, readScript, refStep, scriptSteps, toToolStep } from "../src/script.js";
+import { failureDiagnostics, junitXml, readScript, refStep, scriptSteps, toToolStep } from "../src/script.js";
+
+describe("failure diagnostics in JUnit (AGENT-TOOLS 1.10 §15.4)", () => {
+  const failure = [
+    "Error not_found: Ran 0 of 1 steps; stopped at step 1 (tap id=save): No element.",
+    "Logs (since step 1):",
+    "10:42:07.120 error TypeError: trip is undefined",
+    "10:42:07.130 warning [network] GET /trips → 404",
+    "Note: the app crashed: TypeError: trip is undefined at TripScreen.tsx:42. logs and crash show more.",
+  ].join("\n");
+  it("picks the Logs block and the crash note", () => {
+    expect(failureDiagnostics(failure)).toBe(failure.split("\n").slice(1).join("\n"));
+    expect(failureDiagnostics("Error not_found: nothing else")).toBeNull();
+  });
+  it("puts them in system-out", () => {
+    const xml = junitXml([{ name: "flow", seconds: 1, failure }]);
+    expect(xml).toContain("<system-out>Logs (since step 1):\n10:42:07.120 error TypeError: trip is undefined");
+    expect(xml).toMatch(/<\/failure>\n      <system-out>[\s\S]*<\/system-out>\n    <\/testcase>/);
+    expect(junitXml([{ name: "ok", seconds: 1, failure: null }])).not.toContain("system-out");
+  });
+});
 
 // AGENT-TOOLS 1.8 §9.4: the shared script format, from Tapline's recorded calls.
 

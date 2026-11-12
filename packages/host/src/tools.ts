@@ -8,7 +8,7 @@ import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatOffScreenAfterList, formatTree } from "./format.js";
+import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
@@ -1069,12 +1069,15 @@ export class TaplineTools {
     const trace: string[] = [];
     let ran = 0;
     let stop: { index: number; code: string; message: string; rest: string[] } | null = null;
+    // The newest log time when the current step began: a failed step shows the app's warnings since then (§15.4).
+    let stepMark: number | undefined;
     for (const [i, step] of steps.entries()) {
       if (Date.now() - started > RUN_TIMEOUT_MS) {
         stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
         break;
       }
       const at = Date.now();
+      stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
       const answer = await this.runStep(step).finally(() => {
         this.batch = undefined;
@@ -1113,18 +1116,43 @@ export class TaplineTools {
       : `Error ${stop.code}: Ran ${ran} of ${total} steps; stopped at step ${stop.index + 1} (${describeRunStep(steps[stop.index] as Step)}): ${stop.message}`;
     const diffNote = stop !== null && this.diffSaved !== null ? [`Note: the difference is saved at ${this.diffSaved}.`] : [];
     const first = [head, ...trace, ...(stop?.rest ?? []), ...diffNote].join("\n");
+    const tail = [...(stop !== null ? this.failureLogs(session.id, stop.index + 1, stepMark) : []), ...notes];
     let response: CallToolResult;
     const live = this.host.current();
     if (args.look === false || live === undefined) {
-      response = text([first, ...notes].join("\n"));
+      response = text([first, ...tail].join("\n"));
     } else {
       response = await this.withLook(live, first, args.screenshot === true);
-      if (notes.length > 0) {
+      if (tail.length > 0) {
         const [top, ...rest] = response.content;
-        if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] };
+        if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...tail].join("\n") }, ...rest] };
       }
     }
     return failed ? { ...response, isError: true } : response;
+  }
+
+  /** The newest log time of a session (or of the app's current session), undefined without lines. */
+  private newestLogTs(sessionId: string): number | undefined {
+    return this.sessionLogs(sessionId).reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
+  }
+
+  /** A session's buffered lines; when it is gone (the app went away and came back), the current session's. */
+  private sessionLogs(sessionId: string): LogEntry[] {
+    const ids = [sessionId, this.host.current()?.id].filter((id): id is string => id !== undefined);
+    for (const id of ids) {
+      try {
+        return this.host.logs(id);
+      } catch {
+        // that session is gone; try the next
+      }
+    }
+    return [];
+  }
+
+  /** AGENT-TOOLS §15.4: `Logs (since step <n>):` and up to 20 lines at warning or above since the step began. */
+  private failureLogs(sessionId: string, step: number, since: number | undefined): string[] {
+    const lines = filterLogs(this.sessionLogs(sessionId), { since, level: "warning", limit: 20 });
+    return lines.length === 0 ? [] : [`Logs (since step ${step}):`, ...formatLogs(lines).split("\n")];
   }
 
   /** `run` with dry_run (§11.4): the steps are checked already; step 1 is resolved, nothing is touched. */

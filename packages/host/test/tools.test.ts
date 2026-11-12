@@ -1403,6 +1403,37 @@ describe("other tools", () => {
     expect(textOf(await tools.logs({ level: "error", grep: "nothing" }))).toBe('No log entries at error or above, matching "nothing".\nLatest: 4000');
   });
 
+  it("a failed run step carries the app's warnings since that step began (AGENT-TOOLS 1.10 §15.4)", async () => {
+    const holder: { app?: FakeApp } = {};
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "press") {
+        holder.app?.send({ type: "event", event: "log", data: { level: "log", message: "pressed", ts: 9000 } });
+        holder.app?.send({ type: "event", event: "log", data: { level: "error", message: "TypeError: trip is undefined", ts: 9001 } });
+        return { ok: false, error: { code: "not_found", message: "No element with id \"save\"." } };
+      }
+      return defaultHandler(req);
+    };
+    const { host, app, tools } = await setup(handler)();
+    holder.app = app;
+    app.send({ type: "event", event: "log", data: { level: "warn", message: "before the run", ts: 1000 } });
+    const id = host.sessions()[0]?.id ?? "";
+    for (let i = 0; i < 100 && host.logs(id).length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    const result = await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }], look: false });
+    expect(result.isError).toBe(true);
+    const said = textOf(result);
+    expect(said).toContain("stopped at step 1");
+    expect(said).toMatch(/\nLogs \(since step 1\):\n\d\d:\d\d:\d\d\.\d{3} error TypeError: trip is undefined/);
+    expect(said).not.toContain("before the run");
+    expect(said).not.toContain("pressed");
+  });
+
+  it("a passing run carries no logs", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    app.send({ type: "event", event: "log", data: { level: "error", message: "noise", ts: 1000 } });
+    const said = textOf(await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }], look: false }));
+    expect(said).not.toContain("Logs (since");
+  });
+
   it("wait returns a fresh look", async () => {
     const { tools } = await setup(defaultHandler)();
     const result = await tools.wait({ seconds: 0.1 });
