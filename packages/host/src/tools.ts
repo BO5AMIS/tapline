@@ -7,7 +7,7 @@ import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
-import { composeFilmstrip, diffImages, type DiffResult } from "./images.js";
+import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
@@ -75,6 +75,15 @@ export const targetSchema = z
     }
   });
 export type Target = z.infer<typeof targetSchema>;
+
+const rectSchema = z
+  .object({
+    x: z.number().describe("Points"),
+    y: z.number().describe("Points"),
+    width: z.number().positive().describe("Points"),
+    height: z.number().positive().describe("Points"),
+  })
+  .strict();
 
 const targetField = targetSchema.describe("Exactly one of ref, id, label, text or x and y");
 const lookField = z
@@ -211,6 +220,16 @@ export const toolShapes = {
       .max(1320)
       .optional()
       .describe("Screenshot width in pixels, 160 to 1320 (default 600); keep it the same for a name"),
+    threshold: z
+      .number()
+      .min(0)
+      .max(100)
+      .optional()
+      .describe("The share of the screen, in percent, 0 to 100 (default 0.5), that may change and still match"),
+    ignore: z
+      .array(z.union([rectSchema, targetSchema]))
+      .optional()
+      .describe("Painted out on both pictures before comparing (a clock, an avatar): targets {id}, {label}, {text}, {ref}, or a rect {x, y, width, height} in points"),
   },
   filmstrip: {
     frames: z.number().int().min(2).max(9).optional().describe("How many frames (default 6)"),
@@ -256,7 +275,7 @@ export const toolShapes = {
       .min(1)
       .max(MAX_STEPS)
       .describe(
-        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2).',
+        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves). expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold.',
       ),
     trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
     dry_run: z
@@ -269,6 +288,85 @@ export const toolShapes = {
 } as const;
 
 type Shape<K extends keyof typeof toolShapes> = z.infer<z.ZodObject<(typeof toolShapes)[K]>>;
+
+// ---- compare_screen ---------------------------------------------------------
+
+const DEFAULT_MATCH_THRESHOLD = 0.5;
+const MAX_REGION_LINES = 8;
+
+/** What `ignore` paints out: a target, or a rectangle in points. */
+type IgnoreItem = Target | { x: number; y: number; width: number; height: number };
+
+interface ReferenceOptions {
+  /** The share of the screen, in percent, that may change and still match. */
+  threshold: number;
+  ignore: IgnoreItem[];
+  width: number;
+  /** Folders to look in for `<name>.jpg`, in order. */
+  referencesDirs: string[];
+}
+
+type ReferenceCheck =
+  | { kind: "missing"; shot: ShotImage }
+  | { kind: "size"; message: string }
+  | { kind: "error"; line: string }
+  | { kind: "match"; percent: number; notes: string[] }
+  | { kind: "differs"; percent: number; lines: string[]; reason: string; image: ShotImage; notes: string[] };
+
+function describeIgnore(item: Target): string {
+  if (item.id !== undefined) return `id=${item.id}`;
+  if (item.label !== undefined) return `label ${JSON.stringify(item.label)}`;
+  if (item.text !== undefined) return JSON.stringify(item.text);
+  if (item.ref !== undefined) return item.ref;
+  return `${String(item.x)},${String(item.y)}`;
+}
+
+/** The pixel rectangles to paint out for `ignore`, from a fresh element list; targets not on the screen give a note. */
+function ignoreRects(
+  ignore: IgnoreItem[],
+  elements: TreeResult["elements"],
+  scale: number,
+  size: { width: number; height: number },
+): { rects: DiffBox[]; notes: string[] } {
+  const rects: DiffBox[] = [];
+  const notes: string[] = [];
+  const add = (x: number, y: number, width: number, height: number): void => {
+    const x0 = Math.max(0, Math.floor(x * scale));
+    const y0 = Math.max(0, Math.floor(y * scale));
+    const x1 = Math.min(size.width, Math.ceil((x + width) * scale));
+    const y1 = Math.min(size.height, Math.ceil((y + height) * scale));
+    if (x1 > x0 && y1 > y0) rects.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+  };
+  for (const item of ignore) {
+    if ("width" in item) {
+      add(item.x, item.y, item.width, item.height);
+      continue;
+    }
+    let found: TreeResult["elements"] = [];
+    if (item.ref !== undefined) found = elements.filter((e) => e.ref === item.ref);
+    else if (item.id !== undefined) found = elements.filter((e) => e.testID === item.id);
+    else if (item.label !== undefined) {
+      const wanted = item.label.toLowerCase();
+      found = elements.filter((e) => (e.label ?? "").toLowerCase() === wanted);
+    } else if (item.text !== undefined) {
+      const wanted = item.text.toLowerCase();
+      found = elements.filter((e) => (e.text ?? "").toLowerCase() === wanted);
+      if (found.length === 0) found = elements.filter((e) => wanted !== "" && (e.text ?? "").toLowerCase().includes(wanted));
+    } else if (item.x !== undefined && item.y !== undefined) {
+      const px = item.x;
+      const py = item.y;
+      found = elements
+        .filter((e) => e.frame && px >= e.frame.x && px <= e.frame.x + e.frame.width && py >= e.frame.y && py <= e.frame.y + e.frame.height)
+        .sort((a, b) => (a.frame?.width ?? 0) * (a.frame?.height ?? 0) - (b.frame?.width ?? 0) * (b.frame?.height ?? 0))
+        .slice(0, 1);
+    }
+    found = found.filter((e) => e.frame !== undefined);
+    if (item.index !== undefined) found = found.slice(item.index, item.index + 1);
+    if (found.length === 0) notes.push(`ignore ${describeIgnore(item)} isn't on the screen; skipped.`);
+    for (const e of found) if (e.frame) add(e.frame.x, e.frame.y, e.frame.width, e.frame.height);
+  }
+  return { rects, notes };
+}
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -937,6 +1035,9 @@ export class TaplineTools {
       }
       const shape = toolShapes[step.tool as RunTool];
       const { tool: _tool, expect: _expect, route: _route, ...params } = step as Step & { route?: unknown };
+      if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
+        return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
+      }
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
@@ -1053,6 +1154,8 @@ export class TaplineTools {
         return this.waitFor(quiet as Shape<"wait_for">);
       case "app_command":
         return this.appCommand(quiet as Shape<"app_command">);
+      case "compare_screen":
+        return this.compareStep(rest as Shape<"compare_screen">);
     }
   }
 
@@ -1066,6 +1169,15 @@ export class TaplineTools {
 
   /** Null when the expectation holds within its time; else how it failed. */
   private async expectMissed(e: Expect): Promise<string | null> {
+    if (e.text !== undefined || e.id !== undefined || e.label !== undefined) {
+      const missed = await this.textExpectMissed(e);
+      if (missed !== null) return missed;
+    }
+    // A picture check comes last, once the rest held.
+    return e.matches === undefined ? null : this.matchMissed(e.matches, e.threshold ?? DEFAULT_MATCH_THRESHOLD);
+  }
+
+  private async textExpectMissed(e: Expect): Promise<string | null> {
     const seconds = e.timeout ?? EXPECT_TIMEOUT_S;
     const which = e.text !== undefined ? { text: e.text } : e.id !== undefined ? { id: e.id } : { label: e.label as string };
     const seen = await this.waitFor({ ...which, ...(e.gone === true ? { gone: true } : {}), timeout: Math.max(0.5, seconds), look: false });
@@ -1701,63 +1813,83 @@ export class TaplineTools {
     } else content.push({ type: "image", data: image.data, mimeType: image.mime });
   }
 
-  async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
-    const session = this.host.current();
-    if (session === undefined) return this.notConnected();
-    const name = args.name.trim();
-    if (!SCRIPT_NAME.test(name)) return fail("Error bad_params: name the reference with letters, digits, '.', '_' and '-'.");
+  /** Where this app's reference pictures are kept, or an error answer. */
+  private referenceFolder(session: SessionInfo): string | CallToolResult {
     const dir = this.options.baselinesDir;
     if (dir === undefined) return fail("Error internal: no folder for reference pictures is configured.");
-    const appFolder = (session.app.id ?? session.app.name).replace(/[^\w.-]/g, "_");
-    const path = join(dir, appFolder, `${name}.jpg`);
-    let shot: ShotImage;
-    try {
-      shot = await this.takeShot(session.id, args.width ?? DEFAULT_SCREENSHOT_WIDTH, 0.9);
-    } catch (error) {
-      return fail(describeError(error));
-    }
-    if (args.update === true || !existsSync(path)) {
-      try {
-        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-        writeFileSync(path, Buffer.from(shot.data, "base64"), { mode: 0o600 });
-      } catch (error) {
-        return fail(`Error internal: couldn't save the reference: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      return text(
-        `Saved the reference picture "${name}" (${shot.width ?? "?"}x${shot.height ?? "?"}) in ${path}. Next time, compare_screen { name: "${name}" } shows what changed.`,
-      );
-    }
-    let diff: DiffResult;
-    try {
-      diff = diffImages({ mime: "image/jpeg", data: readFileSync(path).toString("base64") }, shot);
-    } catch (error) {
-      return fail(
-        `Error bad_params: ${error instanceof Error ? error.message : String(error)} To start over, use update: true.`,
-      );
-    }
-    if (diff.changedPixels === 0) return text(`No visible change from the reference "${name}".`);
+    return join(dir, (session.app.id ?? session.app.name).replace(/[^\w.-]/g, "_"));
+  }
 
-    // Name the regions in points, with the elements they touch, from a fresh element list.
-    let scale = 1;
-    let elements: TreeResult["elements"] = [];
+  /** The element list for naming regions and masking, read as a peek: the agent's refs and baseline must stay as they are. */
+  private async peekElements(sessionId: string): Promise<{ scaleBase: number | undefined; elements: TreeResult["elements"] }> {
     try {
-      // `peek`: the agent isn't given this list, so its refs and its baseline for changes must stay as they are.
-      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
-      if (tree.success && tree.data.screen) {
-        scale = diff.width / tree.data.screen.width;
-        elements = tree.data.elements;
-      }
+      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId }));
+      if (tree.success && tree.data.screen) return { scaleBase: tree.data.screen.width, elements: tree.data.elements };
     } catch {
       // positions stay in pixels
     }
+    return { scaleBase: undefined, elements: [] };
+  }
+
+  /**
+   * Takes the screen and compares it with the saved reference called `name`, never saving. `referencesDirs` are the
+   * folders to look in, in order. A missing reference hands back the screenshot, so the caller may save it.
+   */
+  private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
+    let shot: ShotImage;
+    try {
+      shot = await this.takeShot(session.id, options.width, 0.9);
+    } catch (error) {
+      return { kind: "error", line: describeError(error) };
+    }
+    const path = options.referencesDirs.map((dir) => join(dir, `${name}.jpg`)).find((candidate) => existsSync(candidate));
+    if (path === undefined) return { kind: "missing", shot };
+    const reference: ShotImage = { mime: "image/jpeg", data: readFileSync(path).toString("base64") };
+    let refSize: { width: number; height: number };
+    let shotSize: { width: number; height: number };
+    try {
+      refSize = imageSize(reference);
+      shotSize = imageSize(shot);
+    } catch (error) {
+      return { kind: "error", line: `Error bad_params: ${error instanceof Error ? error.message : String(error)} To start over, use update: true.` };
+    }
+    if (refSize.width !== shotSize.width || refSize.height !== shotSize.height) {
+      return {
+        kind: "size",
+        message: `the reference "${name}" is ${refSize.width}x${refSize.height} px and this screen is ${shotSize.width}x${shotSize.height}; take it at the same width, or update: true.`,
+      };
+    }
+
+    let seen: { scaleBase: number | undefined; elements: TreeResult["elements"] } | undefined;
+    const notes: string[] = [];
+    const mask: DiffBox[] = [];
+    if (options.ignore.length > 0) {
+      seen = await this.peekElements(session.id);
+      if (seen.scaleBase === undefined) {
+        return { kind: "error", line: "Error internal: couldn't read the screen's elements to paint out what ignore names." };
+      }
+      const masked = ignoreRects(options.ignore, seen.elements, shotSize.width / seen.scaleBase, shotSize);
+      mask.push(...masked.rects);
+      notes.push(...masked.notes);
+    }
+    let diff: DiffResult;
+    try {
+      diff = diffImages(reference, shot, { mask });
+    } catch (error) {
+      return { kind: "error", line: `Error bad_params: ${error instanceof Error ? error.message : String(error)} To start over, use update: true.` };
+    }
+    if (diff.changedPixels === 0 || diff.changedPercent <= options.threshold) {
+      return { kind: "match", percent: diff.changedPercent, notes };
+    }
+
+    // Name the regions in points, with the elements they touch.
+    const found = seen ?? (await this.peekElements(session.id));
+    const scale = found.scaleBase === undefined ? 1 : diff.width / found.scaleBase;
     const unit = scale === 1 ? "pixels" : "points";
-    const lines = [
-      `${diff.changedPercent}% of the screen changed from the reference "${name}", in ${diff.boxes.length} region${diff.boxes.length === 1 ? "" : "s"} (${unit}):`,
-    ];
-    for (const box of diff.boxes) {
+    const regions = diff.boxes.map((box) => {
       const b = { x: box.x / scale, y: box.y / scale, width: box.width / scale, height: box.height / scale };
       // The smallest named elements there: a page-sized container overlaps every change.
-      const near = elements
+      const near = found.elements
         .filter((e) => e.frame && e.frame.x < b.x + b.width && e.frame.x + e.frame.width > b.x && e.frame.y < b.y + b.height && e.frame.y + e.frame.height > b.y)
         .filter((e) => (e.text ?? "") !== "" || (e.label ?? "") !== "" || (e.testID ?? "") !== "")
         .map((e) => ({ e, area: (e.frame?.width ?? 0) * (e.frame?.height ?? 0) }))
@@ -1765,14 +1897,122 @@ export class TaplineTools {
         .sort((x, y) => x.area - y.area)
         .slice(0, 2)
         .map(({ e }) => describeElement(e));
-      lines.push(
-        `- @${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}${near.length > 0 ? `: ${near.join(", ")}` : ""}`,
-      );
+      return { at: `@${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`, near };
+    });
+    const count = regions.length;
+    const where = `in ${count} region${count === 1 ? "" : "s"} (${unit})`;
+    const lines = [`Differs from the reference "${name}": ${diff.changedPercent}% changed, ${where}:`];
+    for (const region of regions.slice(0, MAX_REGION_LINES)) {
+      lines.push(`- ${region.at}${region.near.length > 0 ? `: ${region.near.join(", ")}` : ""}`);
     }
-    lines.push("The image shows the screen now, faded, with the changed pixels in red.");
-    const content: CallToolResult["content"] = [];
-    this.deliver(session.id, diff.image, lines, content);
-    return { content: [{ type: "text", text: lines.join("\n") }, ...content] };
+    if (count > MAX_REGION_LINES) lines.push(`(+${count - MAX_REGION_LINES} more regions)`);
+    const listed = regions.slice(0, MAX_REGION_LINES).map((region) => region.at).join(", ");
+    const reason = `${diff.changedPercent}% changed from the reference "${name}" (threshold ${options.threshold}%), ${where}: ${listed}${count > MAX_REGION_LINES ? `, +${count - MAX_REGION_LINES} more` : ""}.`;
+    return { kind: "differs", percent: diff.changedPercent, lines, reason, image: diff.image, notes };
+  }
+
+  /** Why a check does not hold (for `run`, as a step or as `matches`), or null when it matches. */
+  private referenceReason(check: ReferenceCheck, name: string): { code: string; message: string } | null {
+    switch (check.kind) {
+      case "match":
+        return null;
+      case "missing":
+        return { code: "expect_failed", message: `no reference "${name}" yet; save one with compare_screen { name: "${name}" }.` };
+      case "size":
+        return { code: "bad_params", message: check.message };
+      case "error": {
+        const { code, message } = parseError(check.line);
+        return { code, message };
+      }
+      case "differs":
+        return { code: "expect_failed", message: check.reason };
+    }
+  }
+
+  /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
+  private async matchMissed(name: string, threshold: number): Promise<string | null> {
+    const session = this.host.current();
+    if (session === undefined) return "the app isn't connected";
+    const folder = this.referenceFolder(session);
+    if (typeof folder !== "string") return parseError(folder.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")).message;
+    const check = await this.checkAgainstReference(session, name, { threshold, ignore: [], width: DEFAULT_SCREENSHOT_WIDTH, referencesDirs: [folder] });
+    return this.referenceReason(check, name)?.message ?? null;
+  }
+
+  /** A `compare_screen` step of `run`: it never saves; it holds on a match and stops the batch otherwise. */
+  private async compareStep(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const name = args.name.trim();
+    if (!SCRIPT_NAME.test(name)) return fail("Error bad_params: name the reference with letters, digits, '.', '_' and '-'.");
+    const folder = this.referenceFolder(session);
+    if (typeof folder !== "string") return folder;
+    const check = await this.checkAgainstReference(session, name, {
+      threshold: args.threshold ?? DEFAULT_MATCH_THRESHOLD,
+      ignore: args.ignore ?? [],
+      width: args.width ?? DEFAULT_SCREENSHOT_WIDTH,
+      referencesDirs: [folder],
+    });
+    const why = this.referenceReason(check, name);
+    if (why !== null) return fail(`Error ${why.code}: ${why.message}`);
+    if (check.kind !== "match") return fail("Error internal: the comparison gave no answer.");
+    return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+  }
+
+  async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const name = args.name.trim();
+    if (!SCRIPT_NAME.test(name)) return fail("Error bad_params: name the reference with letters, digits, '.', '_' and '-'.");
+    const folder = this.referenceFolder(session);
+    if (typeof folder !== "string") return folder;
+    const width = args.width ?? DEFAULT_SCREENSHOT_WIDTH;
+    const save = (shot: ShotImage): CallToolResult => {
+      const path = join(folder, `${name}.jpg`);
+      try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, Buffer.from(shot.data, "base64"), { mode: 0o600 });
+      } catch (error) {
+        return fail(`Error internal: couldn't save the reference: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      let size = `${shot.width ?? "?"}x${shot.height ?? "?"}`;
+      try {
+        const real = imageSize(shot);
+        size = `${real.width}x${real.height}`;
+      } catch {
+        // the app's own size stays
+      }
+      return text(`Saved the reference "${name}" (${size} px).`);
+    };
+    if (args.update === true) {
+      try {
+        return save(await this.takeShot(session.id, width, 0.9));
+      } catch (error) {
+        return fail(describeError(error));
+      }
+    }
+    const check = await this.checkAgainstReference(session, name, {
+      threshold: args.threshold ?? DEFAULT_MATCH_THRESHOLD,
+      ignore: args.ignore ?? [],
+      width,
+      referencesDirs: [folder],
+    });
+    switch (check.kind) {
+      case "missing":
+        return save(check.shot);
+      case "error":
+        return fail(check.line);
+      case "size":
+        return fail(`Error bad_params: ${check.message}`);
+      case "match":
+        return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+      case "differs": {
+        const lines = [...check.lines, "The image shows the screen now, faded, with the changed pixels in red.", ...check.notes.map((n) => `Note: ${n}`)];
+        const content: CallToolResult["content"] = [];
+        this.deliver(session.id, check.image, lines, content);
+        return { content: [{ type: "text", text: lines.join("\n") }, ...content] };
+      }
+    }
   }
 
   async filmstrip(args: Shape<"filmstrip">): Promise<CallToolResult> {

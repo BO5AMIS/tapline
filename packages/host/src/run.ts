@@ -7,11 +7,11 @@ import { z } from "zod";
  * the whole batch.
  */
 
-export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "app_command"] as const;
+export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "app_command", "compare_screen"] as const;
 export type RunTool = (typeof RUN_TOOLS)[number];
 
 /** Tools a step may not be (they read or manage, rather than act): `bad_params`. */
-export const NOT_IN_RUN = ["look", "run", "audit", "apps", "viewer", "record", "replay", "inspect", "check_layout", "pair", "open_app", "logs", "reload", "compare_screen", "filmstrip"];
+export const NOT_IN_RUN = ["look", "run", "audit", "apps", "viewer", "record", "replay", "inspect", "check_layout", "pair", "open_app", "logs", "reload", "filmstrip"];
 
 export const expectSchema = z
   .object({
@@ -20,11 +20,14 @@ export const expectSchema = z
     label: z.string().optional(),
     gone: z.boolean().optional(),
     value: z.string().optional(),
+    matches: z.string().optional(),
+    threshold: z.number().min(0).max(100).optional(),
     timeout: z.number().min(0.5).max(30).optional(),
   })
-  .refine((e) => [e.text, e.id, e.label].filter((v) => v !== undefined).length === 1, {
-    message: "expect needs exactly one of text, id or label",
+  .refine((e) => [e.text, e.id, e.label].filter((v) => v !== undefined).length === 1 || (e.matches !== undefined && [e.text, e.id, e.label].every((v) => v === undefined)), {
+    message: "expect needs exactly one of text, id or label, or matches (alone, or with one of them)",
   })
+  .refine((e) => e.threshold === undefined || e.matches !== undefined, { message: "expect.threshold goes with matches" })
   .refine((e) => e.value === undefined || e.text === undefined, { message: "expect.value goes with id or label" });
 export type Expect = z.infer<typeof expectSchema>;
 
@@ -65,6 +68,8 @@ export function describeRunStep(step: Step): string {
       return `app_command ${String(p["name"] ?? "")}`.trim();
     case "back":
       return "back";
+    case "compare_screen":
+      return `compare_screen ${JSON.stringify(p["name"] ?? "")}`;
     default:
       return where ? `${step.tool} ${where}` : step.tool;
   }

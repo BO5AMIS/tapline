@@ -35,6 +35,8 @@ export interface DiffResult {
 export interface DiffOptions {
   /** Colour distance (0..1) a pixel must exceed to count as changed. Default 0.1. */
   threshold?: number;
+  /** Pixel rectangles painted out (one flat colour) on both pictures before they are compared. */
+  mask?: DiffBox[];
 }
 
 export interface FilmstripOptions {
@@ -62,6 +64,7 @@ const RED: Rgb = [255, 0, 0];
 /** How much red covers a changed pixel (0..1); the rest is the new content. */
 const RED_TINT = 0.55;
 const WHITE: Rgb = [255, 255, 255];
+const MASK_COLOUR: Rgb = [128, 128, 128];
 const LABEL_BOX: Rgb = [30, 30, 30];
 const GLYPH_W = 5;
 const GLYPH_H = 7;
@@ -95,6 +98,12 @@ function decodeJpeg(shot: ShotImage, what: string): Decoded {
     throw new Error(`${what} could not be read as a JPEG.`);
   }
   return decoded;
+}
+
+/** The size in pixels of a JPEG; throws when it can't be read. */
+export function imageSize(shot: ShotImage): { width: number; height: number } {
+  const { width, height } = decodeJpeg(shot, "The picture");
+  return { width, height };
 }
 
 function encodeJpeg(canvas: Decoded): OutputImage {
@@ -206,6 +215,11 @@ export function diffImages(before: ShotImage, after: ShotImage, options: DiffOpt
     throw new Error(
       `The screenshots differ in size (${a.width}x${a.height} vs ${b.width}x${b.height}); take both at the same width.`,
     );
+  }
+
+  for (const m of options.mask ?? []) {
+    fillRect(a, m.x, m.y, m.width, m.height, MASK_COLOUR);
+    fillRect(b, m.x, m.y, m.width, m.height, MASK_COLOUR);
   }
 
   const { width, height } = b;

@@ -509,7 +509,7 @@ describe("compare_screen and filmstrip", () => {
       // The list it names elements from is the host's own: it must not renumber the agent's refs
       // or move the baseline of its next changes.
       expect(app.requests.filter((r) => r.method === "tree").map((r) => r.params)).toEqual([{ peek: true }]);
-      expect(text).toMatch(/[0-9.]+% of the screen changed/);
+      expect(text).toMatch(/Differs from the reference "home": [0-9.]+% changed/);
       expect(text).toContain("1 region");
       expect(text).toMatch(/@\d+,\d+ \d+x\d+/);
       expect(text).toContain('e2 image "Avatar"'); // the smallest element there, not the page around it
@@ -524,9 +524,9 @@ describe("compare_screen and filmstrip", () => {
     const { tools, dir } = await screenTools([picture(false), picture(false), picture(true), picture(true)]);
     try {
       await tools.compareScreen({ name: "home" });
-      expect(textOf(await tools.compareScreen({ name: "home" }))).toContain("No visible change");
+      expect(textOf(await tools.compareScreen({ name: "home" }))).toContain('Matches the reference "home": 0% changed.');
       expect(textOf(await tools.compareScreen({ name: "home", update: true }))).toContain("Saved");
-      expect(textOf(await tools.compareScreen({ name: "home" }))).toContain("No visible change");
+      expect(textOf(await tools.compareScreen({ name: "home" }))).toContain('Matches the reference "home": 0% changed.');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
