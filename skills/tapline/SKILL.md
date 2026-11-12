@@ -239,6 +239,13 @@ Evidence: screenshot moment, if any.
 Then, apart from the bugs: what passed, what you couldn't test and why, and screens that
 took more than a few seconds (`Settled in` gives the time).
 
+**As a real user.** When the question is whether people can find, understand and finish a feature, not only
+whether it works, run a `journey`: `start` with a `goal` and a `persona`, act as that person would (you see
+only what is on the glass, and target by ref or visible text), then `stop` with `reached`. The tool measures
+the taps, the time, the wrong turns and the hesitations, and writes a visual report. Build personas for this
+app's own users and agree them with your user: [references/personas.md](references/personas.md) has the
+recipe and examples. `ux_check` checks a screen against usability basics along the way.
+
 ## 7. Safety
 
 - It is the user's own phone and their real app data. Don't buy, subscribe, send messages or
