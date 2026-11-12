@@ -581,6 +581,21 @@ function applyCondition(
 // is wrapped too, whatever it is, and wrapped again when the app replaces it after Tapline started.
 
 const FETCH_MARK = Symbol.for('tapline.fetch');
+/**
+ * On the init a counting wrapper passes on: the request is already counted and conditioned. Another Tapline wrapper
+ * further in (an app's interceptor in between, maybe after an await) passes it straight through. Spreads keep it.
+ */
+const FETCH_OWNED = Symbol.for('tapline.fetch.owned');
+
+function isOwned(init: unknown): boolean {
+  return typeof init === 'object' && init !== null && (init as Record<symbol, unknown>)[FETCH_OWNED] === true;
+}
+
+function ownedInit(init: unknown): Record<string | symbol, unknown> {
+  const copy: Record<string | symbol, unknown> = typeof init === 'object' && init !== null ? { ...(init as Record<string, unknown>) } : {};
+  copy[FETCH_OWNED] = true;
+  return copy;
+}
 /** While a wrapped fetch calls the app's own fetch: XHRs opened in that moment belong to that fetch. */
 let insideFetch = 0;
 let fetchInstalled: { target: Record<string, unknown>; original: AnyFn } | null = null;
@@ -696,10 +711,10 @@ function wrapFetch(original: AnyFn): AnyFn {
     } catch {
       rawUrl = '';
     }
-    const call = (): unknown => {
+    const call = (forward: unknown = init): unknown => {
       insideFetch += 1;
       try {
-        return original.call(this, input, init);
+        return original.call(this, input, forward);
       } finally {
         insideFetch -= 1;
       }
@@ -707,7 +722,7 @@ function wrapFetch(original: AnyFn): AnyFn {
     // The global fetch may be an earlier wrapper again; the wrapper that is global then counts. Called from inside
     // another Tapline-wrapped fetch (an app's wrapper in between), or not the active wrapper: it passes through.
     followGlobalWrapper();
-    if (wrapped !== activeFetchWrapper || insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
+    if (isOwned(init) || wrapped !== activeFetchWrapper || insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
     const devServer = defaultIgnore(rawUrl);
     const signal = signalOf(input, init);
     const method = fetchMethod(input, init);
@@ -743,7 +758,7 @@ function wrapFetch(original: AnyFn): AnyFn {
       }
       let response: unknown;
       try {
-        response = await call();
+        response = await call(ownedInit(init));
       } catch (error) {
         if (!isAbort(error)) failed(null, 'network error');
         throw error;
@@ -901,9 +916,10 @@ export function uninstallNetworkTracking(): void {
   fetchInstalled = null;
   fetchTarget = null;
   try {
-    // Put the app's fetch back, unless the app replaced it again since.
+    // Put the app's fetch back, unless the app replaced it again since: the own fetch of whichever wrapper is global
+    // now (an interceptor may have put an earlier one back since the last fetch).
     const now = wrappedFetch?.target.fetch;
-    if (wrappedFetch && isFn(now) && (now as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) wrappedFetch.target.fetch = wrappedFetch.original;
+    if (wrappedFetch && isFetchWrapper(now)) wrappedFetch.target.fetch = wrapperOriginals.get(now) ?? wrappedFetch.original;
   } catch {
     // ignore
   }

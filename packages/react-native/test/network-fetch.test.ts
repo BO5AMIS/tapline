@@ -124,6 +124,49 @@ test('stopping Tapline ends a fetch\'s condition: no 3G delays after it, no made
   expect(sent).toEqual(['https://api.example.com/big', 'https://api.example.com/later']);
 });
 
+test('uninstall right after an interceptor put the earlier wrapper back restores the app\'s own fetch', () => {
+  const own = (): Promise<unknown> => ok();
+  const target = makeTarget(own);
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const first = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  target.fetch = (input: unknown, init?: unknown) => first(input, init);
+  ensureFetchWrapped();
+  target.fetch = first; // no fetch before uninstall
+  uninstallNetworkTracking();
+  expect(target.fetch).toBe(own);
+});
+
+test('an interceptor cleaned up while its request waits: the request is still counted and reported once', async () => {
+  let release: (value: unknown) => void = () => undefined;
+  const seen: unknown[] = [];
+  const target = makeTarget((_input, init) => {
+    seen.push(init);
+    return new Promise((resolve) => (release = resolve));
+  });
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const failures: NetworkFailure[] = [];
+  const off = onNetworkFailure((f) => failures.push(f));
+  const first = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  let open: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  target.fetch = async (input: unknown, init?: unknown) => {
+    await gate;
+    return first(input, init);
+  };
+  ensureFetchWrapped();
+  const pending = (target.fetch as (input: unknown, init?: unknown) => Promise<unknown>)('https://api.example.com/trips', { method: 'POST' });
+  target.fetch = first; // the interceptor cleans up while its request waits
+  open();
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  expect(inFlight()).toBe(1);
+  release({ status: 500, headers: { get: () => null } });
+  await pending;
+  expect(inFlight()).toBe(0);
+  expect(failures).toHaveLength(1);
+  expect(seen[0]).toMatchObject({ method: 'POST' }); // the app's init arrives intact
+  off();
+});
+
 test('offline fails a fetch without sending it, and the failure is reported', async () => {
   const sent: string[] = [];
   const target = makeTarget((input) => {
