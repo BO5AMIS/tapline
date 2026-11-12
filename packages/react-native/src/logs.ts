@@ -23,6 +23,9 @@ let reentrant = false;
 const originals = new Map<LogLevel, ConsoleFn>();
 let previousHandler: ErrorHandler | undefined;
 let ourHandler: ErrorHandler | null = null;
+/** Every global handler this module ever installed (an uninstalled one may be left in place). */
+const ourHandlers = new WeakSet<ErrorHandler>();
+let stopOurHandler: (() => void) | null = null;
 
 function consoleOf(): Record<string, unknown> {
   return console as unknown as Record<string, unknown>;
@@ -158,16 +161,27 @@ export function installLogs(): void {
 
   const utils = errorUtils();
   if (utils && typeof utils.setGlobalHandler === 'function') {
-    previousHandler = typeof utils.getGlobalHandler === 'function' ? utils.getGlobalHandler() : undefined;
-    ourHandler = (error: unknown, isFatal?: boolean): void => {
-      try {
-        recordError(error, isFatal === true);
-      } catch {
-        // ignore
+    const existing = typeof utils.getGlobalHandler === 'function' ? utils.getGlobalHandler() : undefined;
+    // Never chain to a handler of ours (one an earlier install left behind): it would record every error twice.
+    previousHandler = existing !== undefined && !ourHandlers.has(existing) ? existing : undefined;
+    const previous = previousHandler;
+    let live = true;
+    const handler: ErrorHandler = (error: unknown, isFatal?: boolean): void => {
+      if (live) {
+        try {
+          recordError(error, isFatal === true);
+        } catch {
+          // ignore
+        }
       }
-      if (previousHandler) previousHandler(error, isFatal);
+      if (previous) previous(error, isFatal);
     };
-    utils.setGlobalHandler(ourHandler);
+    ourHandlers.add(handler);
+    ourHandler = handler;
+    stopOurHandler = () => {
+      live = false;
+    };
+    utils.setGlobalHandler(handler);
   }
 }
 
@@ -181,6 +195,9 @@ export function uninstallLogs(): void {
   if (utils && typeof utils.setGlobalHandler === 'function' && ourHandler) {
     if (previousHandler) utils.setGlobalHandler(previousHandler);
   }
+  // With no previous handler there is nothing to put back: our handler stays installed but records nothing.
+  if (stopOurHandler) stopOurHandler();
+  stopOurHandler = null;
   previousHandler = undefined;
   ourHandler = null;
   sink = null;

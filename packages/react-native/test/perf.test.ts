@@ -9,7 +9,12 @@ function fakeTime(heap: (() => number | null) | undefined = undefined) {
   let pending: (() => void) | null = null;
   let heapTimer: (() => void) | null = null;
   const commitListeners = new Set<(root: unknown) => void>();
+  const stateListeners = new Set<(state: string) => void>();
   const deps: Partial<PerfDeps> = {
+    onAppState: (listener) => {
+      stateListeners.add(listener);
+      return () => stateListeners.delete(listener);
+    },
     now: () => now,
     requestFrame: (fn) => {
       pending = fn;
@@ -47,6 +52,10 @@ function fakeTime(heap: (() => number | null) | undefined = undefined) {
     tickHeap() {
       heapTimer?.();
     },
+    appState(state: string) {
+      for (const l of [...stateListeners]) l(state);
+    },
+    stateListeners: () => stateListeners.size,
     commit(root: unknown) {
       for (const l of [...commitListeners]) l(root);
     },
@@ -86,6 +95,48 @@ describe('PerfSampler maths', () => {
     const r = s.stop();
     expect(r.drops).toBe(2);
     expect(r.busyMs).toBe(180);
+  });
+
+  test('a stretch in the background is no frame interval: not a drop, not the longest stall', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.frame(16);
+    t.appState('background');
+    t.idle(8000); // requestAnimationFrame is paused
+    t.appState('active');
+    t.frame(16);
+    t.frame(16);
+    const r = s.stop();
+    expect(r.drops).toBe(0);
+    expect(r.busyMs).toBeLessThanOrEqual(16);
+    expect(t.stateListeners()).toBe(0);
+  });
+
+  test('a frame that comes before the app-state change still skips the interval, and a window ending in the background has no tail stall', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.frame(16);
+    t.appState('inactive');
+    t.frame(900);
+    t.appState('background');
+    t.idle(5000);
+    const r = s.stop();
+    expect(r.drops).toBe(0);
+    expect(r.busyMs).toBeLessThanOrEqual(16);
+  });
+
+  test('a real stall after coming back is still a drop', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.appState('background');
+    t.idle(3000);
+    t.appState('active');
+    t.frame(16);
+    t.frame(120);
+    expect(s.stop().drops).toBe(1);
   });
 
   test('the lowest sample is the slowest whole second; the last partial second is left out', () => {

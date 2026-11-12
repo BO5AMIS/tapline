@@ -1,5 +1,6 @@
 import { audit, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
+import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
 import { feedMethod, frameAfterAction } from './live';
@@ -47,6 +48,8 @@ export const methods: Record<string, MethodFn> = {
   perfStart: () => perfStart(),
   perfStop: () => perfStop(),
   perfSettle: () => settleOutcome(),
+  // The computer has the crash saved at `ts`: the phone may forget that one (and no other).
+  crashAck: (params) => crashAck(params),
   screenshot: (params) => screenshot(params),
   feed: (params) => feedMethod(params),
   overlay: () => overlay(),

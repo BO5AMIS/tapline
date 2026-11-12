@@ -1,7 +1,8 @@
 import { TaplineClient, type WebSocketLike } from '../src/client';
-import { CRASH_KEY, MAX_SAVED_CHARS, configureCrash, crashFromError, deliverSavedCrash, fitRecord } from '../src/crash';
+import { CRASH_KEY, MAX_SAVED_CHARS, ackSavedCrash, configureCrash, crashFromError, deliverSavedCrash, fitRecord } from '../src/crash';
+import { methods } from '../src/methods';
 import { setEventSink } from '../src/events';
-import { clearLogs, installLogs, recordError, setLogSink, uninstallLogs } from '../src/logs';
+import { clearLogs, getLogEntries, installLogs, recordError, setLogSink, uninstallLogs } from '../src/logs';
 import { memoryStorage, type TaplineStorage } from '../src/storage';
 
 type Handler = (error: unknown, isFatal?: boolean) => void;
@@ -36,6 +37,11 @@ afterEach(() => {
   holder.ErrorUtils = savedErrorUtils;
 });
 
+/** The global handler as it is now (a function, so TypeScript doesn't remember an earlier assignment). */
+function globalHandler(): Handler | undefined {
+  return currentHandler;
+}
+
 function fail(): Error {
   const error = new TypeError('undefined is not an object (evaluating trip.days)');
   error.stack = 'TypeError: undefined is not an object\n    at TripScreen (/app/src/TripScreen.tsx:42:13)\n    at renderWithHooks (/app/node_modules/react/index.js:10:1)';
@@ -64,6 +70,16 @@ describe('a fatal error is kept for the next connection', () => {
     expect(live?.data).toMatchObject({ fatal: true, name: 'TypeError', message: 'undefined is not an object (evaluating trip.days)' });
   });
 
+  test('installing again after an uninstall with no previous handler does not record an error twice', () => {
+    currentHandler = undefined;
+    installLogs();
+    uninstallLogs();
+    installLogs();
+    clearLogs();
+    globalHandler()?.(new Error('once'), false);
+    expect(getLogEntries().filter((entry) => entry.message.includes('once'))).toHaveLength(1);
+  });
+
   test('a non-fatal error is not kept', async () => {
     installLogs();
     currentHandler?.(fail(), false);
@@ -85,16 +101,59 @@ describe('a fatal error is kept for the next connection', () => {
 });
 
 describe('sending the saved crash', () => {
-  test('sends it as a crash event once a computer is connected, then forgets it', async () => {
+  test('sends it as a crash event once a computer is connected, and forgets it only when the computer acknowledges it', async () => {
     recordError(fail(), true);
     setEventSink((event, data) => sent.push({ event, data }));
     await deliverSavedCrash();
     const crash = sent.find((s) => s.event === 'crash');
     expect(crash?.data).toMatchObject({ name: 'TypeError', message: 'undefined is not an object (evaluating trip.days)' });
+    // sent is not delivered: the record stays, and the next connection sends it again
+    expect(await storage.getItem(CRASH_KEY)).not.toBeNull();
+    sent.length = 0;
+    await deliverSavedCrash();
+    expect(sent.filter((s) => s.event === 'crash')).toHaveLength(1);
+    const ts = (crash?.data as { ts: number }).ts;
+    await methods.crashAck?.({ ts });
     expect(await storage.getItem(CRASH_KEY)).toBeNull();
     sent.length = 0;
     await deliverSavedCrash();
     expect(sent).toEqual([]);
+  });
+
+  test('an acknowledgement for another crash leaves the stored one alone', async () => {
+    await storage.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'newer', stack: '', ts: 2000 }));
+    await ackSavedCrash(1000);
+    expect(await storage.getItem(CRASH_KEY)).not.toBeNull();
+    await methods.crashAck?.({ ts: 'x' });
+    await methods.crashAck?.(null);
+    expect(await storage.getItem(CRASH_KEY)).not.toBeNull();
+    await ackSavedCrash(2000);
+    expect(await storage.getItem(CRASH_KEY)).toBeNull();
+  });
+
+  test('overlapping deliveries run one after the other, and a crash saved meanwhile survives the older one being acknowledged', async () => {
+    let reading = 0;
+    let mostAtOnce = 0;
+    const inner = memoryStorage();
+    configureCrash({
+      getItem: async (key) => {
+        reading += 1;
+        mostAtOnce = Math.max(mostAtOnce, reading);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        reading -= 1;
+        return inner.getItem(key);
+      },
+      setItem: (key, value) => inner.setItem(key, value),
+      removeItem: (key) => inner.removeItem(key),
+    });
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'first', stack: '', ts: 1000 }));
+    setEventSink((event, data) => sent.push({ event, data }));
+    const both = Promise.all([deliverSavedCrash(), deliverSavedCrash()]);
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'second', stack: '', ts: 2000 }));
+    await both;
+    expect(mostAtOnce).toBe(1);
+    await ackSavedCrash(1000);
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'second', ts: 2000 });
   });
 
   test('keeps it while no computer is connected', async () => {
@@ -136,7 +195,8 @@ describe('sending the saved crash', () => {
       await jest.advanceTimersByTimeAsync(10);
       const events = (Socket.last?.out ?? []).map((line) => JSON.parse(line) as { type: string; event?: string; data?: { message?: string } });
       expect(events.find((m) => m.event === 'crash')?.data?.message).toBe('old crash');
-      expect(await storage.getItem(CRASH_KEY)).toBeNull();
+      // sent, not yet acknowledged by the computer: still kept
+      expect(await storage.getItem(CRASH_KEY)).not.toBeNull();
       client.stop();
     } finally {
       jest.useRealTimers();

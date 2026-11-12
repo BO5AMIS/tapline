@@ -5,8 +5,8 @@ import { isRecord } from './types';
 
 /**
  * A fatal JavaScript error is kept on the phone the moment React Native's global handler sees it, because the
- * app may be gone a moment later. The next connection sends it to the computer (the `crash` event) and then
- * forgets it. A development build maps the stack to the app's files and lines first. The computer counts a
+ * app may be gone a moment later. The next connection sends it to the computer (the `crash` event); it forgets
+ * it only when the computer acknowledges that crash (`crashAck`). A development build maps the stack to the app's files and lines first. The computer counts a
  * crash it already heard live (same time and message) only once.
  */
 
@@ -31,6 +31,7 @@ let saving: Promise<void> = Promise.resolve();
 export function configureCrash(next: TaplineStorage | null): void {
   storage = next;
   saving = Promise.resolve();
+  delivery = Promise.resolve();
 }
 
 export function crashFromError(error: unknown, ts: number): CrashRecord {
@@ -109,11 +110,43 @@ function inDevelopment(): boolean {
   return typeof __DEV__ !== 'undefined' && __DEV__;
 }
 
+/** Deliveries wait their turn: one at a time, so two of them never read, send and compare in an interleaved way. */
+let delivery: Promise<void> = Promise.resolve();
+
 /**
- * Sends the crash kept from an earlier run (or this one) to the computer, then forgets it. Does nothing
- * while no computer is connected, so the crash stays for the next connection. Never throws.
+ * Sends the crash kept from an earlier run (or this one) to the computer. The record stays on the phone until
+ * the computer says it has it (`crashAck`, see `ackSavedCrash`); until then every connection sends it again, and
+ * the computer counts it once. Does nothing while no computer is connected. Never throws.
  */
-export async function deliverSavedCrash(): Promise<void> {
+export function deliverSavedCrash(): Promise<void> {
+  const next = delivery.then(deliverOnce);
+  delivery = next;
+  return next;
+}
+
+/**
+ * The computer has the crash saved at `ts`: forget it, but only that one. A newer crash saved since (or one
+ * the computer has not acknowledged) stays. Never throws.
+ */
+export async function ackSavedCrash(ts: number): Promise<void> {
+  const target = storage;
+  if (target === null) return;
+  try {
+    await saving;
+    const record = parseSaved(await target.getItem(CRASH_KEY));
+    if (record !== null && record.ts === ts) await target.removeItem(CRASH_KEY);
+  } catch {
+    // never reaches the app
+  }
+}
+
+/** The `crashAck` request of the computer. */
+export async function crashAck(params: unknown): Promise<Record<string, never>> {
+  if (isRecord(params) && typeof params.ts === 'number') await ackSavedCrash(params.ts);
+  return {};
+}
+
+async function deliverOnce(): Promise<void> {
   const target = storage;
   if (target === null) return;
   try {
@@ -136,7 +169,6 @@ export async function deliverSavedCrash(): Promise<void> {
     }
     if (!hasEventSink()) return;
     emitEvent('crash', { ...record, stack });
-    await target.removeItem(CRASH_KEY);
   } catch {
     // never reaches the app
   }

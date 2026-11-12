@@ -1,3 +1,4 @@
+import { AppState } from 'react-native';
 import { isCompositeTag, isFiber, fiberName, type Fiber } from './fiber';
 import { onCommitRoot } from './register';
 import { TaplineError, isRecord } from './types';
@@ -64,6 +65,8 @@ export interface PerfDeps {
   /** A development build: React times its renders. */
   dev: boolean;
   onCommitRoot: (listener: (root: unknown) => void) => () => void;
+  /** Foreground/background changes ("active", "inactive", "background"); returns the way to stop listening. */
+  onAppState: (listener: (state: string) => void) => () => void;
 }
 
 /** The Hermes heap in MB (live allocated bytes, else the heap's size); null without Hermes. */
@@ -98,6 +101,23 @@ function defaultDeps(): PerfDeps {
     heapMb: hermesHeapMb,
     dev: typeof __DEV__ !== 'undefined' && __DEV__,
     onCommitRoot,
+    onAppState: (listener) => {
+      try {
+        const source = AppState as unknown as {
+          addEventListener?: (type: 'change', fn: (state: string) => void) => { remove?: () => void } | undefined;
+        };
+        const subscription = typeof source.addEventListener === 'function' ? source.addEventListener('change', listener) : undefined;
+        return () => {
+          try {
+            subscription?.remove?.();
+          } catch {
+            // ignore
+          }
+        };
+      } catch {
+        return () => undefined;
+      }
+    },
   };
 }
 
@@ -119,6 +139,11 @@ export class PerfSampler {
   private frameHandle: unknown = null;
   private heapTimer: unknown = null;
   private stopCommits: (() => void) | null = null;
+  private stopAppState: (() => void) | null = null;
+  /** The app is not in front: requestAnimationFrame is paused, so no frame is due. */
+  private away = false;
+  /** The next frame follows a stretch away from the front: its interval is not a stall. */
+  private skipGap = false;
   private readonly renders = new Map<string, { ms: number; count: number }>();
   /** React gave no timing for a render that did work (a build without the profiler). */
   private timingMissing = false;
@@ -141,6 +166,21 @@ export class PerfSampler {
     this.frameHandle = deps.requestFrame(this.onFrame);
     this.heapTimer = deps.setInterval(() => this.sampleHeap(), HEAP_SAMPLE_MS);
     if (deps.dev) this.stopCommits = deps.onCommitRoot((root) => this.onCommit(root));
+    this.away = false;
+    this.skipGap = false;
+    this.stopAppState = deps.onAppState((state) => this.onAppState(state));
+  }
+
+  /** requestAnimationFrame stops while the app is in the background: the pause is no frame interval. */
+  private onAppState(state: string): void {
+    if (!this.running) return;
+    if (state === 'active') {
+      this.away = false;
+      this.lastFrame = this.deps.now();
+    } else {
+      this.away = true;
+      this.skipGap = true;
+    }
   }
 
   /** Ends the window without a result (the host went away). */
@@ -157,7 +197,7 @@ export class PerfSampler {
     this.running = false;
     this.release();
     // A stall that is still going on counts: no frame has ended it yet, so it lasted at least this long.
-    const tail = end - this.lastFrame;
+    const tail = this.away ? 0 : end - this.lastFrame;
     if (tail > DROP_MS) {
       this.drops += 1;
       if (tail > this.busy) this.busy = tail;
@@ -200,12 +240,17 @@ export class PerfSampler {
     const stopCommits = this.stopCommits;
     this.stopCommits = null;
     if (stopCommits !== null) stopCommits();
+    const stopAppState = this.stopAppState;
+    this.stopAppState = null;
+    if (stopAppState !== null) stopAppState();
   }
 
   private readonly onFrame = (): void => {
     if (!this.running) return;
     const t = this.deps.now();
-    const gap = t - this.lastFrame;
+    // The first frame after the app was away: its interval spans the pause, so it is not counted.
+    const gap = this.skipGap ? 0 : t - this.lastFrame;
+    this.skipGap = false;
     this.lastFrame = t;
     this.frames += 1;
     if (gap > DROP_MS) this.drops += 1;
