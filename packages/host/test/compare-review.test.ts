@@ -163,6 +163,30 @@ describe("an update never records from an earlier comparison's mask (re-review 3
   });
 });
 
+describe("an ignore by label matches as a label target does (re-review 4)", () => {
+  it("paints out an element with no accessibility label by its text", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tapline-compare-review-"));
+    let n = 0;
+    const shots = [picture(300, 600), picture(300, 600, [[50, 50, 20]])];
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "screenshot") return { ok: true, result: { mime: "image/jpeg", data: shots[Math.min(n++, 1)] ?? "", width: 300, height: 600 } };
+      if (req.method === "tree") {
+        const refresh = { ref: "e5", role: "button", label: null, text: "Refresh", frame: { x: 20, y: 20, width: 40, height: 40 } };
+        return { ok: true, result: { screen: { width: 150, height: 300, scale: 2 }, elements: [refresh] } };
+      }
+      return { ok: true, result: {} };
+    };
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, handler);
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" }, baselinesDir: join(root, "baselines") });
+    await tools.compareScreen({ name: "refresh" });
+    const out = textOf(await tools.compareScreen({ name: "refresh", ignore: [{ label: "Refresh" }], threshold: 0 }));
+    expect(out).toMatch(/^Matches the reference "refresh"/);
+  });
+});
+
 describe("visual checks inside run are recorded (finding 3)", () => {
   it("keeps a compare_screen step of a batch in the recording", async () => {
     const { tools, root } = await rig(() => picture(300, 600));

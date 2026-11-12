@@ -323,6 +323,14 @@ function describeIgnore(item: Target): string {
 }
 
 /** The pixel rectangles to paint out for `ignore`, from a fresh element list; targets not on the screen give a note. */
+/**
+ * An element as a {label} target matches it: its accessibility label, else its text, as the app's SDK matches
+ * (labelOf in the SDK). The ignore masks, recorded indexes and expectations use the same rule as the targets.
+ */
+function labelOfElement(e: { label?: string | null; text?: string | null }): string {
+  return e.label ?? e.text ?? "";
+}
+
 function ignoreRects(
   ignore: IgnoreItem[],
   elements: TreeResult["elements"],
@@ -348,7 +356,7 @@ function ignoreRects(
     else if (item.id !== undefined) found = elements.filter((e) => e.testID === item.id);
     else if (item.label !== undefined) {
       const wanted = item.label.toLowerCase();
-      found = elements.filter((e) => (e.label ?? "").toLowerCase() === wanted);
+      found = elements.filter((e) => labelOfElement(e).toLowerCase() === wanted);
     } else if (item.text !== undefined) {
       const wanted = item.text.toLowerCase();
       found = elements.filter((e) => (e.text ?? "").toLowerCase() === wanted);
@@ -1229,7 +1237,7 @@ export class TaplineTools {
     for (;;) {
       const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
       const element = tree.success
-        ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : (el.label ?? "").toLowerCase() === (e.label ?? "").toLowerCase()))
+        ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : labelOfElement(el).toLowerCase() === (e.label ?? "").toLowerCase()))
         : undefined;
       if (element !== undefined) {
         actual = typeof element.checked === "boolean" ? (element.checked ? "on" : "off") : typeof element.value === "string" ? element.value : undefined;
@@ -1561,7 +1569,7 @@ export class TaplineTools {
       typeof t.testID === "string"
         ? el.testID === t.testID
         : typeof t.label === "string"
-          ? (el.label ?? "").toLowerCase() === t.label.toLowerCase()
+          ? labelOfElement(el).toLowerCase() === t.label.toLowerCase()
           : typeof t.text === "string"
             ? el.text === t.text
             : false,
@@ -2137,7 +2145,7 @@ export class TaplineTools {
         kept.push(withIndex({ id }, (e) => e.testID === id));
       } else if (typeof element.label === "string" && element.label !== "") {
         const label = element.label.toLowerCase();
-        kept.push(withIndex({ label: element.label }, (e) => (e.label ?? "").toLowerCase() === label));
+        kept.push(withIndex({ label: element.label }, (e) => labelOfElement(e).toLowerCase() === label));
       } else if (typeof element.text === "string" && element.text !== "") {
         const text = element.text.toLowerCase();
         kept.push(withIndex({ text: element.text }, (e) => (e.text ?? "").toLowerCase() === text));
