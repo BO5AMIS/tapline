@@ -36,7 +36,9 @@ export const RESERVED_COMMANDS: readonly string[] = ['network', 'text_size'];
 
 // --- validation ---------------------------------------------------------------------------------------------
 
-const LANGUAGE_TAG = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
+// BCP 47: language, then subtags of 2-8; a one-letter singleton (`u`, `x`) starts an extension or private-use part
+// and needs at least one subtag of 1-8 after it (`en-US-u-ca-gregory`, `de-x-test`).
+const LANGUAGE_TAG = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*(?:-[A-Za-z0-9](?:-[A-Za-z0-9]{1,8})+)*$/;
 const REGION_CODE = /^[A-Za-z]{2}$/;
 
 function badParams(message: string): TaplineError {
@@ -90,14 +92,24 @@ let getterUsed = false;
 const listeners = new Set<() => void>();
 
 function emit(): void {
-  for (const listener of [...listeners]) listener();
+  for (const listener of [...listeners]) {
+    try {
+      listener();
+    } catch {
+      // one failing subscriber must not stop the others, or the session reset
+    }
+  }
 }
 
 function currentScale(): number {
   return override ?? PixelRatio.getFontScale();
 }
 
-/** The font scale to use: the one an agent set with `text_size`, else the system's. Calling it counts as using the helper. */
+/**
+ * The font scale to use: the one an agent set with `text_size`, else the system's. Calling it counts as using the helper.
+ * It already holds the system's scale, so text sized with it sets `allowFontScaling={false}` (else the system scale
+ * applies twice).
+ */
 export function getTaplineFontScale(): number {
   getterUsed = true;
   return currentScale();
@@ -114,7 +126,11 @@ export function subscribeTaplineFontScale(listener: () => void): () => void {
 /**
  * The font scale the app should apply to its text: the size an agent set with the `text_size`
  * command, else the system's. React Native reads the system scale natively, so Tapline cannot
- * change it; an app that multiplies its font sizes by this value opts in to `text_size`.
+ * change it; an app that multiplies its font sizes by this value opts in to `text_size`. The value already
+ * holds the system's scale: that text sets `allowFontScaling={false}`, so the system scale applies once.
+ *
+ *     const scale = useTaplineFontScale();
+ *     <Text allowFontScaling={false} style={{ fontSize: 16 * scale }}>…</Text>
  */
 export function useTaplineFontScale(): number {
   const [scale, setScale] = useState(currentScale);
@@ -169,7 +185,8 @@ export const TEXT_SIZE_UNSUPPORTED =
 /** The built-in `text_size` run: validates, then sets the override. */
 export function runTextSize(args: Record<string, unknown>): { size: TextSize | typeof SYSTEM_TEXT_SIZE; scale: number; say: string } {
   const size = parseTextSize(args);
-  if (!fontScaleHelperUsed()) throw new TaplineError('unsupported', TEXT_SIZE_UNSUPPORTED);
+  // "system" always clears an override, also once the screens that used the helper are gone
+  if (size !== SYSTEM_TEXT_SIZE && !fontScaleHelperUsed()) throw new TaplineError('unsupported', TEXT_SIZE_UNSUPPORTED);
   if (size === SYSTEM_TEXT_SIZE) {
     setTaplineFontScale(null);
     const scale = PixelRatio.getFontScale();

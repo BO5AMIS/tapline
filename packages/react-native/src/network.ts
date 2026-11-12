@@ -675,7 +675,8 @@ function wrapFetch(original: AnyFn): AnyFn {
         insideFetch -= 1;
       }
     };
-    if (rawUrl === '' || isIgnored(rawUrl)) return call();
+    // Called from inside another Tapline-wrapped fetch (an app's wrapper in between): that one counts and conditions it.
+    if (insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
     const devServer = defaultIgnore(rawUrl);
     const signal = signalOf(input, init);
     const method = fetchMethod(input, init);

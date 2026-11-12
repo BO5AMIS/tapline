@@ -158,8 +158,10 @@ export function analyze(calls: readonly CallRecord[]): Report {
     }
   }
   const byCount = (a: [string, number], b: [string, number]): number => b[1] - a[1] || a[0].localeCompare(b[0]);
-  const first = calls[0]?.t;
-  const last = calls[calls.length - 1]?.t;
+  // the earliest and the latest call: with several sessions the list is in session order, not time order
+  const times = calls.map((c) => c.t);
+  const first = times.length > 0 ? times.reduce((a, b) => Math.min(a, b)) : undefined;
+  const last = times.length > 0 ? times.reduce((a, b) => Math.max(a, b)) : undefined;
   const minutes = first !== undefined && last !== undefined ? Math.max(1, Math.round((last - first) / 60000)) : 0;
 
   const looks: number[] = [];

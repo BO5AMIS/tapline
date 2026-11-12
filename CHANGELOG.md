@@ -20,7 +20,8 @@ Android; this release goes after where they went. The interface is AGENT-TOOLS 1
   Tapline's own connection is never slowed.
 - Language, region and text size without the phone's Settings: the standard `app_command` names
   `language`, `region` and `text_size`, with the values both tools share. The SDK checks the values,
-  `useTaplineFontScale()` lets an app follow `text_size`, a switch to or from a right-to-left language
+  `useTaplineFontScale()` lets an app follow `text_size` (the value holds the system scale, so that text
+  sets `allowFontScaling={false}`), a switch to or from a right-to-left language
   reloads a development build, and `tapline init` adds `language` and `region` for i18next and
   expo-localization. `size: "system"` restores the phone's text size, and text size and network both
   go back to normal when the session ends.

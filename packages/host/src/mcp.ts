@@ -38,12 +38,19 @@ function looseInput(name: ToolName): z.ZodObject<z.ZodRawShape, z.core.$loose> {
   return z.object<z.ZodRawShape>(toolShapes[name]).passthrough();
 }
 
-/** Runs a tool's handler only when every argument is one the tool has; else answers bad_params. */
+/**
+ * Runs a tool's handler only when every argument is one the tool has; else answers bad_params, and that refusal
+ * is numbered and logged like any call so the session report counts it.
+ */
 function guarded<K extends ToolName>(
+  tools: TaplineTools,
   name: K,
   handler: (args: ToolArgs<K>) => ToolAnswer | Promise<ToolAnswer>,
 ): (args: Record<string, unknown>) => ToolAnswer | Promise<ToolAnswer> {
-  return (args) => unknownArgumentError(name, args) ?? handler(args as ToolArgs<K>);
+  return (args) => {
+    const refused = unknownArgumentError(name, args);
+    return refused === null ? handler(args as ToolArgs<K>) : tools.rejectedCall(name, args, refused);
+  };
 }
 
 /**
@@ -77,7 +84,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("apps"),
       annotations: { readOnlyHint: true },
     },
-    guarded("apps", () => tools.apps()),
+    guarded(tools, "apps", () => tools.apps()),
   );
 
   server.registerTool(
@@ -87,7 +94,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("open_app"),
       inputSchema: looseInput("open_app"),
     },
-    guarded("open_app", (args) => tools.openApp(args)),
+    guarded(tools, "open_app", (args) => tools.openApp(args)),
   );
 
   server.registerTool(
@@ -97,7 +104,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("pair"),
       inputSchema: looseInput("pair"),
     },
-    guarded("pair", (args) => tools.pair(args)),
+    guarded(tools, "pair", (args) => tools.pair(args)),
   );
 
   server.registerTool(
@@ -108,7 +115,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("look"),
       annotations: { readOnlyHint: true },
     },
-    guarded("look", (args) => tools.look(args)),
+    guarded(tools, "look", (args) => tools.look(args)),
   );
 
   server.registerTool(
@@ -119,7 +126,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("check_layout"),
       annotations: { readOnlyHint: true },
     },
-    guarded("check_layout", (args) => tools.checkLayout(args)),
+    guarded(tools, "check_layout", (args) => tools.checkLayout(args)),
   );
 
   server.registerTool(
@@ -129,7 +136,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("run"),
       inputSchema: looseInput("run"),
     },
-    guarded("run", (args) => tools.run(args)),
+    guarded(tools, "run", (args) => tools.run(args)),
   );
 
   server.registerTool(
@@ -140,7 +147,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("audit"),
       annotations: { readOnlyHint: true },
     },
-    guarded("audit", (args) => tools.audit(args)),
+    guarded(tools, "audit", (args) => tools.audit(args)),
   );
 
   server.registerTool(
@@ -151,7 +158,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("inspect"),
       annotations: { readOnlyHint: true },
     },
-    guarded("inspect", (args) => tools.inspect(args)),
+    guarded(tools, "inspect", (args) => tools.inspect(args)),
   );
 
   server.registerTool(
@@ -161,7 +168,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("tap"),
       inputSchema: looseInput("tap"),
     },
-    guarded("tap", (args) => tools.tap(args)),
+    guarded(tools, "tap", (args) => tools.tap(args)),
   );
 
   server.registerTool(
@@ -171,7 +178,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("swipe"),
       inputSchema: looseInput("swipe"),
     },
-    guarded("swipe", (args) => tools.swipe(args)),
+    guarded(tools, "swipe", (args) => tools.swipe(args)),
   );
 
   server.registerTool(
@@ -181,7 +188,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("long_press"),
       inputSchema: looseInput("long_press"),
     },
-    guarded("long_press", (args) => tools.longPress(args)),
+    guarded(tools, "long_press", (args) => tools.longPress(args)),
   );
 
   server.registerTool(
@@ -191,7 +198,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("type_text"),
       inputSchema: looseInput("type_text"),
     },
-    guarded("type_text", (args) => tools.typeText(args)),
+    guarded(tools, "type_text", (args) => tools.typeText(args)),
   );
 
   server.registerTool(
@@ -201,7 +208,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("scroll"),
       inputSchema: looseInput("scroll"),
     },
-    guarded("scroll", (args) => tools.scroll(args)),
+    guarded(tools, "scroll", (args) => tools.scroll(args)),
   );
 
   server.registerTool(
@@ -211,7 +218,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("toggle"),
       inputSchema: looseInput("toggle"),
     },
-    guarded("toggle", (args) => tools.toggle(args)),
+    guarded(tools, "toggle", (args) => tools.toggle(args)),
   );
 
   server.registerTool(
@@ -221,7 +228,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("open_url"),
       inputSchema: looseInput("open_url"),
     },
-    guarded("open_url", (args) => tools.openUrl(args)),
+    guarded(tools, "open_url", (args) => tools.openUrl(args)),
   );
 
   server.registerTool(
@@ -231,7 +238,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("back"),
       inputSchema: looseInput("back"),
     },
-    guarded("back", (args) => tools.back(args)),
+    guarded(tools, "back", (args) => tools.back(args)),
   );
 
   server.registerTool(
@@ -241,7 +248,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("app_command"),
       inputSchema: looseInput("app_command"),
     },
-    guarded("app_command", (args) => tools.appCommand(args)),
+    guarded(tools, "app_command", (args) => tools.appCommand(args)),
   );
 
   server.registerTool(
@@ -252,7 +259,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("compare_screen"),
       annotations: { readOnlyHint: true },
     },
-    guarded("compare_screen", (args) => tools.compareScreen(args)),
+    guarded(tools, "compare_screen", (args) => tools.compareScreen(args)),
   );
 
   server.registerTool(
@@ -262,7 +269,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("filmstrip"),
       inputSchema: looseInput("filmstrip"),
     },
-    guarded("filmstrip", (args) => tools.filmstrip(args)),
+    guarded(tools, "filmstrip", (args) => tools.filmstrip(args)),
   );
 
   server.registerTool(
@@ -273,7 +280,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("viewer"),
       annotations: { readOnlyHint: true },
     },
-    guarded("viewer", (args) => tools.viewer(args)),
+    guarded(tools, "viewer", (args) => tools.viewer(args)),
   );
 
   server.registerTool(
@@ -283,7 +290,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("record"),
       inputSchema: looseInput("record"),
     },
-    guarded("record", (args) => tools.record(args)),
+    guarded(tools, "record", (args) => tools.record(args)),
   );
 
   server.registerTool(
@@ -293,7 +300,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("replay"),
       inputSchema: looseInput("replay"),
     },
-    guarded("replay", (args) => tools.replay(args)),
+    guarded(tools, "replay", (args) => tools.replay(args)),
   );
 
   server.registerTool(
@@ -304,7 +311,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("wait_for"),
       annotations: { readOnlyHint: true },
     },
-    guarded("wait_for", (args) => tools.waitFor(args)),
+    guarded(tools, "wait_for", (args) => tools.waitFor(args)),
   );
 
   server.registerTool(
@@ -315,7 +322,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("logs"),
       annotations: { readOnlyHint: true },
     },
-    guarded("logs", (args) => tools.logs(args)),
+    guarded(tools, "logs", (args) => tools.logs(args)),
   );
 
   server.registerTool(
@@ -326,7 +333,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("crash"),
       annotations: { readOnlyHint: true },
     },
-    guarded("crash", (args) => tools.crash(args)),
+    guarded(tools, "crash", (args) => tools.crash(args)),
   );
 
   server.registerTool(
@@ -336,7 +343,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("reload"),
       inputSchema: looseInput("reload"),
     },
-    guarded("reload", (args) => tools.reload(args)),
+    guarded(tools, "reload", (args) => tools.reload(args)),
   );
 
   server.registerTool(
@@ -346,7 +353,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       description: toolDescription("performance"),
       inputSchema: looseInput("performance"),
     },
-    guarded("performance", (args) => tools.performance(args)),
+    guarded(tools, "performance", (args) => tools.performance(args)),
   );
 
   server.registerTool(
@@ -357,7 +364,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("wait"),
       annotations: { readOnlyHint: true },
     },
-    guarded("wait", (args) => tools.wait(args)),
+    guarded(tools, "wait", (args) => tools.wait(args)),
   );
 
   server.registerTool(
@@ -368,7 +375,7 @@ export function createMcpServer(tools: TaplineTools): McpServer {
       inputSchema: looseInput("session_report"),
       annotations: { readOnlyHint: true },
     },
-    guarded("session_report", (args) => tools.sessionReport(args)),
+    guarded(tools, "session_report", (args) => tools.sessionReport(args)),
   );
 
   // The call log names the agent by the MCP client's name, known once the client has said hello.

@@ -33,6 +33,26 @@ afterEach(() => {
   uninstallNetworkTracking();
 });
 
+test('an app wrapper around Tapline\'s fetch, wrapped again, counts and reports a request once', async () => {
+  let release: (value: unknown) => void = () => undefined;
+  const target = makeTarget(() => new Promise((resolve) => (release = resolve)));
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const failures: NetworkFailure[] = [];
+  const off = onNetworkFailure((f) => failures.push(f));
+  // a logger the app installs after Tapline: it calls the fetch it replaced (Tapline's)
+  const previous = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  target.fetch = (input: unknown, init?: unknown) => previous(input, init);
+  ensureFetchWrapped(); // Tapline wraps the app's wrapper too
+  const app = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  const pending = app('https://api.example.com/trips');
+  expect(inFlight()).toBe(1);
+  release({ status: 500, headers: { get: () => null } });
+  await pending;
+  expect(inFlight()).toBe(0);
+  expect(failures).toHaveLength(1);
+  off();
+});
+
 test('offline fails a fetch without sending it, and the failure is reported', async () => {
   const sent: string[] = [];
   const target = makeTarget((input) => {

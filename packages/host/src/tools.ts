@@ -985,6 +985,12 @@ export class TaplineTools {
     this.clientIdFn = read;
   }
 
+  /** A call refused before it reached its tool (an unknown argument): numbered and logged like any other, so the report counts it. */
+  rejectedCall(tool: string, args: unknown, answer: CallToolResult): CallToolResult {
+    const result = this.loggedCall(tool, args, () => answer);
+    return result instanceof Promise ? answer : result;
+  }
+
   /** Numbers a call of the agent and logs it when its answer is known (§16.1). Calls within a call (`run`'s steps) are part of it. */
   private loggedCall(
     tool: string,
