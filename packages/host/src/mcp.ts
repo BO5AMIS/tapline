@@ -26,6 +26,7 @@ import { TaplineHost } from "./server.js";
 import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
 import { z } from "zod";
 import { TaplineTools, toolShapes, unknownArgumentError, type ToolArgs } from "./tools.js";
+import { realRunner } from "./journeyexport.js";
 
 type ToolName = keyof typeof toolShapes;
 type ToolAnswer = Awaited<ReturnType<TaplineTools["apps"]>>;
@@ -503,6 +504,9 @@ export async function runMcp(
     screenshotDir: join(configDir(), "shots"),
     scriptsDir: join(configDir(), "scripts"),
     baselinesDir: join(configDir(), "baselines"),
+    // Journey reports (AGENT-TOOLS 1.12 §17.5) and the user's own gh and git for `export`
+    journeysDir: join(configDir(), "journeys"),
+    exportRunner: realRunner,
     // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
     ...(options.noLog === true ? {} : { logDir: join(configDir(), "log") }),
     ...(viewer === "off"

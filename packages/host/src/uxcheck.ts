@@ -30,6 +30,8 @@ export interface UxFindingSummary {
   basis: string;
   /** The element's ref, when the finding concerns one. */
   ref?: string;
+  /** The element's frame in points, for the report's red box. */
+  frame?: { x: number; y: number; width: number; height: number };
 }
 
 export const uxResultSchema = z.object({

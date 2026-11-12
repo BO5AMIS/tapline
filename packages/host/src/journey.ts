@@ -28,9 +28,13 @@ export const exportSchema = z
     to: z.enum(["pr", "issue"]),
     repo: z.string().min(3).max(140),
     pr: z.number().int().min(1).optional(),
+    confirm: z.boolean().optional().describe("true: your user asked for this export (it writes to their GitHub)"),
+    public: z.boolean().optional().describe("true: the repository is public and the report may be written there"),
+    fork: z.boolean().optional().describe("With to: pr: true when the pull request's branch is in another repository (a fork) and the report may be written there"),
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.to === "issue" && value.fork !== undefined) ctx.addIssue({ code: "custom", message: 'export to "issue" takes no fork.' });
     if (value.to === "pr" && value.pr === undefined) ctx.addIssue({ code: "custom", message: 'export to "pr" needs the pull request number: pr.' });
     if (value.to === "issue" && value.pr !== undefined) ctx.addIssue({ code: "custom", message: 'export to "issue" takes no pr.' });
   });
@@ -76,8 +80,13 @@ export interface JourneyScreen {
   at: number;
 }
 
+/** What the measures counted a call as, for the report's findings. */
+export type StepFlag = "wrong_turn" | "dead_end" | "error" | "crash";
+
 /** One call the agent made during the journey: the list the report's path and the GIF frames are built from. */
 export interface JourneyStep {
+  /** Set when the call was a wrong turn, a dead end, an error or a crash. */
+  flags?: StepFlag[];
   n: number;
   tool: string;
   /** The target as the agent wrote it, in words (`"Save"`, `e3`, `120,300`), when it gave one. */
@@ -128,6 +137,18 @@ export interface ConditionRecord {
   undo?: string;
 }
 
+/** One stress moment (§17.4): what was done and whether what had to survive did. */
+export interface StressResult {
+  kind: Stress["kind"];
+  /** The answer's sentence, `Stress: background; it survived: …`. */
+  said: string;
+  /** null: nothing was asked to survive, so nothing was checked. */
+  survived: boolean | null;
+  /** The count of steps made before it, to find its screen. */
+  afterStep: number;
+  at: number;
+}
+
 export interface JourneyState {
   goal: string;
   persona: string | undefined;
@@ -147,6 +168,8 @@ export interface JourneyState {
   steps: JourneyStep[];
   shortcuts: UsedShortcut[];
   conditionRecords: ConditionRecord[];
+  /** The stress moments (§17.4) and how the app took them. */
+  stress: StressResult[];
   /** The route key of the screen the agent is on now. */
   currentScreen: number | undefined;
 }
@@ -204,6 +227,7 @@ export class Journey {
       steps: [],
       shortcuts: [],
       conditionRecords: [],
+      stress: [],
       currentScreen: undefined,
     };
   }
@@ -271,13 +295,21 @@ export class Journey {
     }
     if (ACTION_TOOLS.has(tool) && ok && !screenChanged) this.actionsOnScreen++;
 
+    const flags: StepFlag[] = [];
     // A screen entered and left by `back` with no action on it (a sheet that closes is no screen).
     if (tool === "back" && ok && !/^Closed the sheet\./.test(outcome.text) && pre.entered && pre.actionsOnScreen === 0) {
       m.wrongTurns++;
+      flags.push("wrong_turn");
     }
 
-    if (code === "not_actionable" || code === "not_allowed") m.deadEnds++;
-    if (code === "not_found" || CRASH_NOTE.test(outcome.text)) m.errors++;
+    if (code === "not_actionable" || code === "not_allowed") {
+      m.deadEnds++;
+      flags.push("dead_end");
+    }
+    if (code === "not_found" || CRASH_NOTE.test(outcome.text)) {
+      m.errors++;
+      flags.push(CRASH_NOTE.test(outcome.text) ? "crash" : "error");
+    }
 
     // Hesitation: a run of two or more reads with no action. One counts at the second read.
     if (READ_TOOLS_FOR_HESITATION.has(tool)) {
@@ -296,6 +328,7 @@ export class Journey {
       ok,
       ...(code !== undefined ? { code } : {}),
       said: first.length > 200 ? `${first.slice(0, 200)}…` : first,
+      ...(flags.length > 0 ? { flags } : {}),
       at: outcome.at,
       ms: outcome.ms,
       screen: this.state.currentScreen,

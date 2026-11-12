@@ -180,12 +180,12 @@ describe("journey start and stop", () => {
     expect((await start(tools)).isError).not.toBe(true);
   });
 
-  it("validates export and says it comes later", async () => {
+  it("validates export, and says nothing was exported when no report folder is set up", async () => {
     const { tools } = await setup();
     await start(tools);
     expect(textOf(await tools.journey({ export: { to: "issue", repo: "owner/repo" } }))).toMatch(/^Error bad_params: export go with stop/);
-    const said = textOf(await tools.journey({ stop: true, reached: true, export: { to: "pr", repo: "owner/repo", pr: 12 } }));
-    expect(said).toContain("Export comes later");
+    const said = textOf(await tools.journey({ stop: true, reached: true, export: { to: "pr", repo: "owner/repo", pr: 12, confirm: true } }));
+    expect(said).toContain("Export needs the report folder");
   });
 
   it("hands the report writer's hook the state and shows its lines after the summary", async () => {
@@ -221,13 +221,9 @@ describe("journey start and stop", () => {
     expect(textOf(await tools.journey({ stop: true, reached: false }))).toContain("Eyes: the agent's, not a user's");
   });
 
-  it("stress is accepted in shape but not built yet", async () => {
+  it("stress needs a journey", async () => {
     const { tools } = await setup();
     expect(textOf(await tools.journey({ stress: { kind: "background" } }))).toMatch(/^Error bad_params: no journey is running/);
-    await start(tools);
-    const said = await tools.journey({ stress: { kind: "network", mode: "offline" }, survives: { text: "2 eggs" } });
-    expect(said.isError).toBe(true);
-    expect(textOf(said)).toMatch(/^Error unsupported: stress moments are not in this build yet/);
   });
 });
 
