@@ -131,7 +131,15 @@ jobs:
               echo "$name@$version is already on npm"
               continue
             fi
-            latest=$(npm view "$name" dist-tags.latest 2>/dev/null || true)
+            # Only a package npm says isn't there (E404) has no latest; any other failure stops the run, so a lookup
+            # that failed can never make a backport the new latest.
+            if latest=$(npm view "$name" dist-tags.latest 2>lookup.err); then
+              :
+            elif grep -q "E404" lookup.err; then
+              latest=""
+            else
+              echo "Couldn't read $name's latest version from npm:"; cat lookup.err; exit 1
+            fi
             tag=$(VERSION="$version" LATEST="$latest" node -e '
               const v = process.env.VERSION, l = process.env.LATEST;
               if (v.includes("-")) { process.stdout.write("next"); process.exit(0); }
