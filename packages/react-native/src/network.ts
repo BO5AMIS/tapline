@@ -1,7 +1,8 @@
 /**
  * Network tracking: counts requests in flight (so an agent can wait for loading to finish)
- * and reports failed ones. React Native's fetch is built on XMLHttpRequest, so patching
- * XMLHttpRequest.prototype covers both. Nothing here may ever throw into the app.
+ * and reports failed ones. React Native's fetch is built on XMLHttpRequest, but Expo SDK 58's
+ * expo/fetch is native, so both XMLHttpRequest.prototype and the global fetch are wrapped (a
+ * request is counted once). Nothing here may ever throw into the app.
  */
 
 export interface NetworkFailure {
@@ -184,7 +185,8 @@ function patchedOpen(original: AnyFn): AnyFn {
         requests.set(this, {
           method: String(args[0]).toUpperCase(),
           url: redactUrl(rawUrl),
-          ignored: isIgnored(rawUrl),
+          // A request that a wrapped fetch opens is counted and conditioned by the fetch wrapper, not twice.
+          ignored: insideFetch > 0 || isIgnored(rawUrl),
           devServer: defaultIgnore(rawUrl),
         });
       }
@@ -482,6 +484,143 @@ function applyCondition(
   return true;
 }
 
+// ---- fetch ----------------------------------------------------------------------
+// Expo SDK 58 replaces the global fetch with expo/fetch, which doesn't go through XMLHttpRequest. So the global fetch
+// is wrapped too, whatever it is, and wrapped again when the app replaces it after Tapline started.
+
+const FETCH_MARK = Symbol.for('tapline.fetch');
+/** While a wrapped fetch calls the app's own fetch: XHRs opened in that moment belong to that fetch. */
+let insideFetch = 0;
+let fetchInstalled: { target: Record<string, unknown>; original: AnyFn } | null = null;
+/** Where the global fetch lives: the install target (globalThis in an app). */
+let fetchTarget: Record<string, unknown> | null = null;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function fetchUrl(input: unknown): string {
+  if (typeof input === 'string') return input;
+  if (typeof input === 'object' && input !== null) {
+    const record = input as { url?: unknown; href?: unknown };
+    if (typeof record.url === 'string') return record.url;
+    if (typeof record.href === 'string') return record.href;
+  }
+  return String(input);
+}
+
+function fetchMethod(input: unknown, init: unknown): string {
+  const fromInit = typeof init === 'object' && init !== null ? (init as { method?: unknown }).method : undefined;
+  if (typeof fromInit === 'string') return fromInit.toUpperCase();
+  const fromInput = typeof input === 'object' && input !== null ? (input as { method?: unknown }).method : undefined;
+  return typeof fromInput === 'string' ? fromInput.toUpperCase() : 'GET';
+}
+
+function responseStatus(response: unknown): number | null {
+  const status = typeof response === 'object' && response !== null ? (response as { status?: unknown }).status : undefined;
+  return typeof status === 'number' ? status : null;
+}
+
+function responseLength(response: unknown): number {
+  try {
+    const headers = typeof response === 'object' && response !== null ? (response as { headers?: unknown }).headers : undefined;
+    const get = typeof headers === 'object' && headers !== null ? (headers as { get?: unknown }).get : undefined;
+    const raw = isFn(get) ? get.call(headers, 'content-length') : null;
+    const n = typeof raw === 'string' ? Number(raw) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function isAbort(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';
+}
+
+function wrapFetch(original: AnyFn): AnyFn {
+  const wrapped = async function fetch(this: unknown, input: unknown, init?: unknown): Promise<unknown> {
+    let rawUrl = '';
+    try {
+      rawUrl = fetchUrl(input);
+    } catch {
+      rawUrl = '';
+    }
+    const call = (): unknown => {
+      insideFetch += 1;
+      try {
+        return original.call(this, input, init);
+      } finally {
+        insideFetch -= 1;
+      }
+    };
+    if (rawUrl === '' || isIgnored(rawUrl)) return call();
+    const devServer = defaultIgnore(rawUrl);
+    const method = fetchMethod(input, init);
+    const url = redactUrl(rawUrl);
+    const startedAt = Date.now();
+    const forGeneration = generation;
+    pending += 1;
+    let done = false;
+    const settle = (): void => {
+      if (done) return;
+      done = true;
+      if (forGeneration === generation && pending > 0) pending -= 1;
+    };
+    const failed = (status: number | null, error: string | null): void => {
+      const at = Date.now();
+      notify({ method, url, status, error, ms: Math.max(0, at - startedAt), at });
+    };
+    try {
+      const mode = devServer ? 'normal' : condition;
+      if (mode === 'offline' || (mode === 'lossy' && random() < LOSSY_FAIL_SHARE)) {
+        await wait(mode === 'offline' ? 0 : between(LOSSY_FAIL_DELAY_MS));
+        failed(null, 'network error');
+        throw new TypeError('Network request failed');
+      }
+      if (mode === '3g') {
+        const body = typeof init === 'object' && init !== null ? (init as { body?: unknown }).body : undefined;
+        await wait(Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + bodyBytes(body) / THREE_G_BYTES_PER_MS));
+      } else if (mode === 'lossy') {
+        await wait(between(LOSSY_SLOW_DELAY_MS));
+      }
+      let response: unknown;
+      try {
+        response = await call();
+      } catch (error) {
+        if (!isAbort(error)) failed(null, 'network error');
+        throw error;
+      }
+      if (mode === '3g') await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS));
+      const status = responseStatus(response);
+      if (status !== null && status >= 400) failed(status, null);
+      return response;
+    } finally {
+      settle();
+    }
+  };
+  (wrapped as unknown as Record<symbol, boolean>)[FETCH_MARK] = true;
+  return wrapped as AnyFn;
+}
+
+/**
+ * Wraps the app's global fetch, once per function: a fetch replaced after Tapline started (Expo installs its own
+ * lazily) is wrapped when this runs next. Called on install, on each condition change and whenever requests are
+ * counted. Never throws into the app.
+ */
+export function ensureFetchWrapped(given?: Record<string, unknown>): void {
+  if (!installed) return;
+  const target = given ?? fetchTarget;
+  if (target === null) return;
+  try {
+    const current = target.fetch;
+    if (!isFn(current) || (current as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) return;
+    target.fetch = wrapFetch(current);
+    fetchInstalled = { target, original: current };
+  } catch {
+    // never throw into the app
+  }
+}
+
 /** The mode the app's requests are in now. */
 export function networkCondition(): NetworkMode {
   return condition;
@@ -493,6 +632,7 @@ export function setNetworkCondition(mode: NetworkMode): void {
   if (mode !== 'normal' && !installed) {
     throw new Error('network conditions need Tapline running in the app (the request patch is not installed)');
   }
+  ensureFetchWrapped();
   condition = mode;
 }
 
@@ -544,6 +684,9 @@ export function installNetworkTracking(options: NetworkOptions = {}): void {
   } catch {
     // never throw into the app
   }
+  if (!installed) return;
+  fetchTarget = (options.target ?? globalThis) as unknown as Record<string, unknown>;
+  ensureFetchWrapped();
 }
 
 export function uninstallNetworkTracking(): void {
@@ -553,6 +696,16 @@ export function uninstallNetworkTracking(): void {
   pending = 0;
   generation += 1;
   condition = 'normal';
+  const wrappedFetch = fetchInstalled;
+  fetchInstalled = null;
+  fetchTarget = null;
+  try {
+    // Put the app's fetch back, unless the app replaced it again since.
+    const now = wrappedFetch?.target.fetch;
+    if (wrappedFetch && isFn(now) && (now as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) wrappedFetch.target.fetch = wrappedFetch.original;
+  } catch {
+    // ignore
+  }
   if (!current) return;
   try {
     if (current.open.own) current.proto.open = current.open.fn;
@@ -570,6 +723,7 @@ export function uninstallNetworkTracking(): void {
 
 /** Requests that have been sent and not yet finished (dev-server traffic excluded). */
 export function inFlight(): number {
+  ensureFetchWrapped();
   return pending;
 }
 
