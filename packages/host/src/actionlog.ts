@@ -25,6 +25,22 @@ export interface ActionLogEntry {
   confirmed?: boolean;
   /** For typing: how many characters, never the text. */
   chars?: number;
+  /** AGENT-TOOLS 1.11 §16.1: `"read"` for a call that isn't an action (look, wait_for, logs, ...). */
+  kind?: "read";
+  /** One id per host run (an agent's session); with `call` it names a call. */
+  session?: string;
+  /** The call's number within the session, from 1; a `run`'s steps share their run's number. */
+  call?: number;
+  /** For a step of a batch call (`run`, `replay`): the tool call it belongs to. */
+  of?: string;
+  /** The agent's client id (the MCP client's name). */
+  client?: string;
+  /** The size of the call's answer in characters (its text), never the text itself. */
+  size?: number;
+  /** The call's answer carried the change list or the full list (the call wasn't `look: false`). */
+  listed?: boolean;
+  /** A touch after scrolls: the target was already in the last full list before the first scroll. Absent when unknown. */
+  in_list?: boolean;
 }
 
 export const LOG_KEEP_DAYS = 14;
@@ -54,9 +70,9 @@ export class ActionLog {
   }
 
   /** Appends one line. A log that can't be written never fails the action. */
-  write(entry: Omit<ActionLogEntry, "t" | "source">): void {
+  write(entry: Omit<ActionLogEntry, "t" | "source">, when?: Date): void {
     if (!this.ready) return;
-    const at = this.now();
+    const at = when ?? this.now();
     const line: ActionLogEntry = { t: at.toISOString(), source: "tapline", ...entry };
     try {
       appendFileSync(join(this.dir, `actions-${at.toISOString().slice(0, 10)}.jsonl`), `${JSON.stringify(line)}\n`, { mode: 0o600 });

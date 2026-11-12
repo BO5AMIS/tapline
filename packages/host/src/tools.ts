@@ -14,6 +14,8 @@ import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
+import { reportFor } from "./report.js";
+import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
@@ -288,6 +290,9 @@ export const toolShapes = {
     tap: targetField.optional().describe("Tap this first, then measure what it sets off"),
   },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
+  session_report: {
+    since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
+  },
   run: {
     steps: z
       .array(stepSchema)
@@ -422,6 +427,8 @@ export interface ToolsOptions {
   pairedBefore?: () => boolean;
   /** Where the action log goes (AGENT-TOOLS 1.8 §12); none: no log. */
   logDir?: string;
+  /** The agent's client id for the call log (the MCP client's name); read at each call, as it is known after initialize. */
+  clientId?: () => string | undefined;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
   policy?: PolicyFile;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
@@ -807,6 +814,33 @@ const CRASH_NOTED_TOOLS = [
   "openUrl", "logs", "reload", "performance", "wait",
 ] as const satisfies readonly (keyof TaplineTools)[];
 
+/** Every tool the agent calls, by handler name (the call log numbers these). */
+const CALL_TOOLS: Readonly<Record<string, string>> = {
+  apps: "apps", openApp: "open_app", pair: "pair", look: "look", run: "run", inspect: "inspect", audit: "audit",
+  checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
+  replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
+  appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report",
+};
+/** Calls logged with `"kind": "read"` when they logged no action of their own. */
+const READ_TOOLS: ReadonlySet<string> = new Set([
+  "apps", "open_app", "pair", "look", "inspect", "audit", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
+  "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
+]);
+/** Tools whose answer carries the changes or the full list unless the call said `look: false`. */
+const LISTING_TOOLS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "run"]);
+/** Tools that act on one element: after a run of scrolls they log whether the element was already in the list. */
+const ELEMENT_ACTIONS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "toggle"]);
+
+/** What a call in flight collects for the call log. */
+interface CallState {
+  call: number;
+  tool: string;
+  /** The call before this one was a scroll. */
+  afterScrolls: boolean;
+  entries: Array<{ entry: Omit<ActionLogEntry, "t" | "source">; at: Date }>;
+}
+
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
   private readonly reloadWaitMs: number;
@@ -818,6 +852,19 @@ export class TaplineTools {
   private batch: { id: string; step: number } | undefined;
   /** Extra fields for the next log line (a dry run, a confirmed touch). */
   private logExtra: Partial<ActionLogEntry> | undefined;
+  /** The call log (AGENT-TOOLS 1.11 §16.1): this run's id, when it began, and how many calls the agent has made. */
+  private readonly sessionTag = randomBytes(4).toString("hex");
+  private readonly startedAt = Date.now();
+  private callCount = 0;
+  /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
+  private readonly callScope = new AsyncLocalStorage<CallState>();
+  private clientIdFn: (() => string | undefined) | undefined;
+  /** The tool of the previous call, for scroll runs. */
+  private prevCallTool: string | undefined;
+  /** The latest full element list the agent was given (`stale`: changes only since). */
+  private listBase: { elements: TreeElement[]; stale: boolean } | undefined;
+  /** The list as it was before the current run of scrolls began. */
+  private scrollBase: { elements: TreeElement[]; stale: boolean } | undefined;
   readonly confirmations: Confirmations;
   private readonly policy: PolicyFile;
   private readonly reloadSettleMs: number;
@@ -880,6 +927,114 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args)));
     }
+    // Outermost: every call of the agent is numbered and logged (reads too) once its answer is known.
+    for (const [name, tool] of Object.entries(CALL_TOOLS)) {
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.loggedCall(tool, args[0], () => method.apply(this, args)));
+    }
+  }
+
+  /** The agent's client id for the call log; the MCP server passes the client's name once it is known. */
+  setClientId(read: () => string | undefined): void {
+    this.clientIdFn = read;
+  }
+
+  /** Numbers a call of the agent and logs it when its answer is known (§16.1). Calls within a call (`run`'s steps) are part of it. */
+  private loggedCall(
+    tool: string,
+    args: unknown,
+    run: () => CallToolResult | Promise<CallToolResult>,
+  ): CallToolResult | Promise<CallToolResult> {
+    if (this.actionLog === null || this.callScope.getStore() !== undefined) return run();
+    const afterScrolls = this.prevCallTool === "scroll";
+    if (tool === "scroll" && !afterScrolls) this.scrollBase = this.listBase;
+    this.prevCallTool = tool;
+    const state: CallState = { call: ++this.callCount, tool, afterScrolls, entries: [] };
+    const began = new Date();
+    let result: CallToolResult | Promise<CallToolResult>;
+    try {
+      result = this.callScope.run(state, run);
+    } catch (error) {
+      this.flushCall(state, args, began, undefined);
+      throw error;
+    }
+    if (result instanceof Promise) {
+      return result.then(
+        (answer) => {
+          this.flushCall(state, args, began, answer);
+          return answer;
+        },
+        (error: unknown) => {
+          this.flushCall(state, args, began, undefined);
+          throw error;
+        },
+      );
+    }
+    this.flushCall(state, args, began, result);
+    return result;
+  }
+
+  private flushCall(state: CallState, args: unknown, began: Date, answer: CallToolResult | undefined): void {
+    if (this.actionLog === null) return;
+    const said = (answer?.content ?? []).map((block) => (block.type === "text" ? block.text : ""));
+    const size = said.reduce((sum, part) => sum + part.length, 0);
+    const failed = answer === undefined || answer.isError === true;
+    const input = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {};
+    const listed =
+      LISTING_TOOLS.has(state.tool) && !failed && input["look"] !== false && input["dry_run"] !== true && !(state.tool === "app_command" && input["name"] === undefined);
+    const client = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60);
+    const common = {
+      session: this.sessionTag,
+      call: state.call,
+      ...(client !== undefined && client !== "" ? { client } : {}),
+      size,
+    };
+    if (state.entries.length > 0) {
+      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...(listed ? { listed: true } : {}) }, at);
+      return;
+    }
+    // A call that logged no action: a read, or an action refused before it began (then without `kind`).
+    const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
+    const session = this.host.current();
+    this.actionLog.write(
+      {
+        by: "agent",
+        tool: state.tool,
+        ...(READ_TOOLS.has(state.tool) ? { kind: "read" as const } : {}),
+        // the target only (as given); typed text, pictures and log text never
+        ...(loggedTarget(args).target !== undefined ? { target: loggedTarget(args).target } : {}),
+        ok: !failed,
+        ...(code !== undefined ? { code } : {}),
+        ms: Date.now() - began.getTime(),
+        ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
+        ...common,
+        ...(listed ? { listed: true } : {}),
+      },
+      began,
+    );
+  }
+
+  /**
+   * Whether a touch's target was in the list the agent had before its run of scrolls: true (it was), false (it
+   * wasn't), undefined (can't be known: no list, a point, or a list that only changed since).
+   */
+  private knownBeforeScrolls(params: unknown): boolean | undefined {
+    const base = this.scrollBase;
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (base === undefined || typeof target !== "object" || target === null) return undefined;
+    const t = target as Record<string, unknown>;
+    if (!["ref", "testID", "label", "text"].some((key) => typeof t[key] === "string")) return undefined;
+    if (candidatesFor(target, base.elements).length > 0) return true;
+    return base.stale ? undefined : false;
+  }
+
+  /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
+  sessionReport(args: Shape<"session_report"> = {}): CallToolResult {
+    const dir = this.options.logDir;
+    if (dir === undefined) return fail("Error unsupported: the action log is off (--no-log), so there is nothing to report.");
+    return text(reportFor(dir, args.since ?? this.startedAt, this.sessionTag));
   }
 
   /**
@@ -1577,6 +1732,9 @@ export class TaplineTools {
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
     const changesText = askChanges ? formatChanges(tree, { alertGone }) : null;
+    // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
+    if (changesText === null) this.listBase = { elements: tree.elements, stale: false };
+    else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id })];
@@ -1817,7 +1975,8 @@ export class TaplineTools {
         ? elementSchema.safeParse((result as { element: unknown }).element)
         : null;
     const session = this.host.current();
-    this.actionLog.write({
+    const state = by === "agent" ? this.callScope.getStore() : undefined;
+    const entry: Omit<ActionLogEntry, "t" | "source"> = {
       by,
       tool,
       ...loggedTarget(params),
@@ -1830,8 +1989,19 @@ export class TaplineTools {
       ...(session !== undefined ? { app: session.app.id ?? session.app.name } : {}),
       ...(by === "agent" && this.batch !== undefined ? { batch: this.batch } : {}),
       ...(by === "agent" ? (this.logExtra ?? {}) : {}),
-    });
+    };
     if (by === "agent") this.logExtra = undefined;
+    if (state === undefined) {
+      this.actionLog.write(entry);
+      return;
+    }
+    if (state.tool !== tool) entry.of = state.tool;
+    // After scrolls: was the target already in the list before the first one? (a scroll hunt is exact when it was)
+    if (state.afterScrolls && state.tool === tool && ELEMENT_ACTIONS.has(tool)) {
+      const known = this.knownBeforeScrolls(params);
+      if (known !== undefined) entry.in_list = known;
+    }
+    state.entries.push({ entry, at: new Date() });
   }
 
   private showAction(by: "agent" | "person", method: string, result: unknown, params: unknown, code?: string, reason?: string): void {

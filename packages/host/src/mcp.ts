@@ -360,6 +360,20 @@ export function createMcpServer(tools: TaplineTools): McpServer {
     guarded("wait", (args) => tools.wait(args)),
   );
 
+  server.registerTool(
+    "session_report",
+    {
+      title: "Session report",
+      description: toolDescription("session_report"),
+      inputSchema: looseInput("session_report"),
+      annotations: { readOnlyHint: true },
+    },
+    guarded("session_report", (args) => tools.sessionReport(args)),
+  );
+
+  // The call log names the agent by the MCP client's name, known once the client has said hello.
+  tools.setClientId(() => server.server.getClientVersion()?.name);
+
   publishPlainSchemas(server);
   return server;
 }
