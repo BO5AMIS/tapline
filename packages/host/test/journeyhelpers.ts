@@ -98,7 +98,10 @@ export async function rig(options: RigOptions = {}): Promise<Rig> {
         if (target?.text === "Missing") return { ok: false, error: { code: "not_found", message: 'nothing on screen shows "Missing"' } };
         if (target?.text === "Settings" || target?.ref === "e2") world.route = ["settings"];
         const element = target?.text === "Add egg" || target?.ref === "e3" ? HOME[2] : elementsFor()[1];
-        return { ok: true, result: { element, settledMs: 310 } };
+        // A double tap (`again`): the app makes the second tap itself, that many ms later.
+        const again = params["again"];
+        const second = typeof again === "number" ? { second: { done: true, afterMs: again } } : {};
+        return { ok: true, result: { element, ...second, settledMs: 310 } };
       }
       case "back":
         world.route = ["home"];

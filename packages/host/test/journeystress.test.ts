@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ControlQueue } from "../src/control.js";
 import type { PolicyFile } from "../src/policy.js";
 import { HOME, reloadable, rig, textOf, type Rig, type RigOptions } from "./journeyhelpers.js";
 
@@ -76,34 +77,51 @@ describe("stress: network", () => {
 });
 
 describe("stress: double_tap", () => {
-  it("touches the target twice, 80 ms apart, and checks what must survive", async () => {
-    const times: number[] = [];
-    const r = await make({
-      capabilities: ["tree", "press", "screenshot", "dryRun"],
-      onRequest: (req) => {
-        if (req.method === "press" && !isDry(req.params)) times.push(Date.now());
-        return undefined;
-      },
-    });
+  it("asks the app for both taps in one request, 80 ms apart, and checks what must survive", async () => {
+    const r = await make({ capabilities: ["tree", "press", "screenshot", "dryRun"] });
     await begin(r);
     const answer = textOf(await r.tools.journey({ stress: { kind: "double_tap", target: { text: "Add egg" } }, survives: { text: "2 eggs" } }));
     expect(answer.split("\n")[0]).toBe('Stress: double_tap on "Add egg"; it survived: text "2 eggs" is still in the field.');
-    expect(answer.split("\n")[1]).toMatch(/^Both taps went through, 80 ms apart: Tapped .* \/ Tapped /);
-    expect(times).toHaveLength(2);
-    const gap = (times[1] ?? 0) - (times[0] ?? 0);
-    expect(gap).toBeGreaterThanOrEqual(60);
-    expect(gap).toBeLessThan(400);
-    // each touch is a tap of the journey, counted
-    expect(r.tools.currentJourney()?.state.measures.taps).toBe(2);
+    expect(answer.split("\n")[1]).toBe("Both taps went through, 80 ms apart.");
+    const presses = r.app.requests.filter((q) => q.method === "press" && !isDry(q.params));
+    expect(presses).toHaveLength(1);
+    expect(presses[0]?.params).toMatchObject({ target: { text: "Add egg" }, again: 80 });
+    // one stress moment, not two taps of the journey
+    expect(r.tools.currentJourney()?.state.measures.taps).toBe(0);
+    expect(r.tools.currentJourney()?.state.stress).toHaveLength(1);
   });
 
-  it("each of the two touches goes through the usual checks", async () => {
-    const r = await make({ capabilities: ["tree", "press", "screenshot", "dryRun"], tools: { policy: { version: 1, confirm: ["Pay"], block: [] } } });
+  it("keeps the 80 ms with the live view's control queue on (the real server)", async () => {
+    const r = await make({ capabilities: ["tree", "press", "screenshot", "dryRun"], tools: { control: new ControlQueue() } });
     await begin(r);
-    await r.tools.journey({ stress: { kind: "double_tap", target: { text: "Add egg" } } });
-    // the policy's check (a dry run) came before the first touch and before the second, and the real presses followed
-    expect(r.app.dryRuns.filter((q) => q.method === "press").length).toBeGreaterThanOrEqual(3);
-    expect(r.app.requests.filter((q) => q.method === "press")).toHaveLength(2);
+    const answer = textOf(await r.tools.journey({ stress: { kind: "double_tap", target: { text: "Add egg" } } }));
+    expect(answer.split("\n")[1]).toBe("Both taps went through, 80 ms apart.");
+    expect(r.app.requests.filter((q) => q.method === "press" && !isDry(q.params))).toHaveLength(1);
+  });
+
+  it("says when the app guarded against the second tap", async () => {
+    const r = await make({
+      capabilities: ["tree", "press", "screenshot", "dryRun"],
+      onRequest: (req) =>
+        req.method === "press" && !isDry(req.params)
+          ? { ok: true, result: { element: { ref: "e3", role: "button", text: "Add egg" }, second: { done: false, reason: "disabled", afterMs: 81 }, settledMs: 100 } }
+          : undefined,
+    });
+    await begin(r);
+    const answer = textOf(await r.tools.journey({ stress: { kind: "double_tap", target: { text: "Add egg" } } }));
+    expect(answer.split("\n")[1]).toBe("The first tap went through; the second, 81 ms later, didn't land (disabled).");
+  });
+
+  it("refuses to claim a double tap when the app made only one (an older SDK)", async () => {
+    const r = await make({
+      capabilities: ["tree", "press", "screenshot", "dryRun"],
+      onRequest: (req) => (req.method === "press" && !isDry(req.params) ? { ok: true, result: { element: { ref: "e3", role: "button", text: "Add egg" }, settledMs: 100 } } : undefined),
+    });
+    await begin(r);
+    const answer = await r.tools.journey({ stress: { kind: "double_tap", target: { text: "Add egg" } } });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/the app made only the first tap \(a double tap in one request needs react-native-tapline 1\.5 or later/);
+    expect(r.tools.currentJourney()?.state.stress).toEqual([]);
   });
 
   it("is refused when the policy would ask a person's OK for the target: one OK never covers two touches", async () => {

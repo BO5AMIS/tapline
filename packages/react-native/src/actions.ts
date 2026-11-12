@@ -1030,6 +1030,7 @@ async function pressLike(
   rawParams: unknown,
 ): Promise<PressResult> {
   const params = paramsOf(rawParams);
+  const afterMs = kind === 'press' ? againAfter(params.again) : undefined;
   const { snapshot, entry } = await resolveTarget(params.target, kind);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
@@ -1091,8 +1092,60 @@ async function pressLike(
     const own = appHandler(actor, 'onPress');
     if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
   }
-  return { element, ...(reach.scrolled ? { scrolled: true as const } : {}), ...keyboardNote(closedKeyboard), ...forced, ...(await settleOutcome()) };
+  const second = afterMs === undefined ? undefined : await pressAgain(actor, params, afterMs);
+  return {
+    element,
+    ...(reach.scrolled ? { scrolled: true as const } : {}),
+    ...keyboardNote(closedKeyboard),
+    ...forced,
+    ...(second !== undefined ? { second } : {}),
+    ...(await settleOutcome()),
+  };
 }
+
+/** `again`: a second tap this many milliseconds after the first (a stress double tap, AGENT-TOOLS 1.12 §17.4). */
+function againAfter(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 20 || raw > 1000) {
+    throw badParams('again must be milliseconds from 20 to 1000');
+  }
+  return Math.round(raw);
+}
+
+/**
+ * The second tap of a double tap, made `afterMs` after the first on whatever is there by then, as a finger would
+ * land: the app may have disabled or removed the control (that is the guard against a double submit working).
+ * It goes through the same checks as a tap; a refusal is the answer's `second`, never an error.
+ */
+async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs: number): Promise<PressSecond> {
+  const started = Date.now();
+  await new Promise<void>((resolve) => setTimeout(resolve, afterMs));
+  try {
+    const again = await reresolve(first, 'press', params.target);
+    const found = findActionable(again.snapshot, again.entry, 'press', false);
+    if (!found || found.info.disabled || again.entry.info.disabled) {
+      return { done: false, reason: found ? 'disabled' : 'no_action', afterMs: Date.now() - started };
+    }
+    const handler = findHandler(found.node, 'onPress');
+    if (!handler) return { done: false, reason: 'no_action', afterMs: Date.now() - started };
+    const { frame } = await elementFor(found);
+    if (params.force !== true) await assertReachable(again.snapshot, found, frame);
+    const at = Date.now() - started;
+    callHandler('onPress', handler, [pressEvent(found.node.fiber, frame)]);
+    return { done: true, afterMs: at };
+  } catch (error) {
+    const reason =
+      error instanceof TaplineError
+        ? error.code === 'not_actionable'
+          ? (error.message.split(':')[0] ?? error.code)
+          : error.code
+        : 'internal';
+    return { done: false, reason, afterMs: Date.now() - started };
+  }
+}
+
+/** What happened to a double tap's second tap, and how long after the first it came. */
+export type PressSecond = { done: true; afterMs: number } | { done: false; reason: string; afterMs: number };
 
 /**
  * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
@@ -1108,6 +1161,8 @@ export type PressResult = {
   scrolled?: true;
   scrolls?: true;
   point?: { x: number; y: number };
+  /** With `again`: the second tap of a double tap. */
+  second?: PressSecond;
 } & SettleOutcome;
 
 /** Where a finger would land: the middle of the element (points, rounded). */

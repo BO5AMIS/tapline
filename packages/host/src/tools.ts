@@ -917,6 +917,13 @@ const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
   "look", "run", "inspect", "audit", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll", "toggle",
   "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
 ]);
+/** A stress double tap's two taps, this many ms apart (AGENT-TOOLS 1.12 §17.4): the app makes the second. */
+const DOUBLE_TAP_GAP_MS = 80;
+/** What the app says of a double tap's second tap. */
+const pressSecondSchema = z.union([
+  z.object({ done: z.literal(true), afterMs: z.number() }),
+  z.object({ done: z.literal(false), reason: z.string().regex(/^[a-z_]{1,40}$/), afterMs: z.number() }),
+]);
 /** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
 const FRAME_TOOLS: ReadonlySet<string> = new Set([
   "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait",
@@ -4236,20 +4243,32 @@ export class TaplineTools {
         );
       }
     }
-    const first = this.tap({ target, look: false });
-    await sleep(80);
-    const second = this.tap({ target, look: false });
-    const [a, b] = await Promise.all([first, second]);
+    // Both taps go to the app in one request, in one turn of the agent: the app makes the second DOUBLE_TAP_GAP_MS after
+    // the first, so nothing (the control queue, the app's own request queue, a settle) can stretch the gap. The moment is
+    // one stress, not two taps of the journey.
+    const params = { target: toWireTarget(target), again: DOUBLE_TAP_GAP_MS, ...(this.userEyes() ? { noScroll: true } : {}) };
+    let pressed: unknown;
+    const answer = await this.act("press", params, (r) => {
+      pressed = r;
+      return `Tapped ${this.elementName(r)}.`;
+    }, false);
     const line = (r: CallToolResult): string => (r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n").split("\n")[0] ?? "");
-    const refused = [a, b].find((r) => r.isError === true);
-    if (refused !== undefined) {
-      return fail(`Stress: double_tap on ${targetWords(target)} didn't happen as asked: ${line(refused)}`);
+    if (answer.isError === true) {
+      return fail(`Stress: double_tap on ${targetWords(target)} didn't happen as asked: ${line(answer)}`);
+    }
+    const second = pressSecondSchema.safeParse(typeof pressed === "object" && pressed !== null && "second" in pressed ? (pressed as { second: unknown }).second : undefined);
+    if (!second.success) {
+      return fail(
+        `Stress: double_tap on ${targetWords(target)} didn't happen as asked: the app made only the first tap (a double tap in one request needs react-native-tapline 1.5 or later in the app).`,
+      );
     }
     const checked = await this.survivalOf(running, survives);
-    const answer = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
-    const head = answer.content[0];
-    const said = head !== undefined && head.type === "text" ? head.text : "";
-    return text(`${said}\nBoth taps went through, 80 ms apart: ${line(a)} / ${line(b)}`);
+    const done = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
+    const s = second.data;
+    const how = s.done
+      ? `Both taps went through, ${s.afterMs} ms apart.`
+      : `The first tap went through; the second, ${s.afterMs} ms later, didn't land (${s.reason}).`;
+    return text(`${line(done)}\n${how}`);
   }
 
   /** Records the moment and answers it: `Stress: <kind>; it survived: …` or `…; it didn't survive: …`. */
