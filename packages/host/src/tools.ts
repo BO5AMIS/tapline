@@ -333,10 +333,10 @@ export const toolShapes = {
     stop: z.boolean().optional().describe("End the journey (needs reached)"),
     reached: z.boolean().optional().describe("With stop: whether the goal was reached"),
     why: z.string().max(1000).optional().describe("With stop: why, in a line"),
-    export: exportSchema.optional().describe("With stop, only when your user asks: put the report in a GitHub PR or issue"),
-    stress: stressSchema.optional().describe("A real-world moment during the journey (comes later)"),
-    survives: survivesSchema.optional().describe("With stress: what must still be there after (comes later)"),
-    done: z.boolean().optional().describe("With stress: a person has done the moment you asked for (comes later)"),
+    export: exportSchema.optional().describe("With stop, only when your user asks: put the report in a GitHub PR or issue. Needs confirm: true; public: true for a public repository, fork: true for a PR from a fork"),
+    stress: stressSchema.optional().describe("A real-world moment during the journey: network (with mode), double_tap (with target), relaunch (a reload in development builds), background or rotate (a person does them, then call again with done)"),
+    survives: survivesSchema.optional().describe("With stress: what must still be there after, {text} or {goal_step}"),
+    done: z.boolean().optional().describe("With stress: the person has done the moment you asked them to (background or rotate)"),
   },
   run: {
     steps: z
