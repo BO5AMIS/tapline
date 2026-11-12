@@ -1,10 +1,11 @@
 import { mount, unmountAll } from './helpers';
 import React from 'react';
-import { Dimensions, PixelRatio, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Dimensions, PixelRatio, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import { act } from 'react-test-renderer';
 import { configureActions, longPress, press, toggle, typeText } from '../src/actions';
 import { propsOf, type Fiber } from '../src/fiber';
 import { collectNodes, forgetLastTree, resetRefs, setHitTester, setMeasurer } from '../src/inspect';
+import { installAlertTracking, uninstallAlertTracking } from '../src/alerts';
 import { isRecord, TaplineError, type Frame } from '../src/types';
 
 // AGENT-TOOLS 1.12 §16.2: tap, long_press, toggle and type_text on an element that is in the tree but off
@@ -226,6 +227,115 @@ describe('still refused when no scroll helps', () => {
     expect(world.calls).toEqual([]);
     expect(result.forced).toBe('off_screen');
     expect(result.scrolled).toBeUndefined();
+    expect(onRow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('review 1.4: partly visible targets, alert before scroll, refusal after a scroll, re-resolve fallback', () => {
+  test('a row 1 pt over the bottom edge is scrolled clear first, once', async () => {
+    await mountWorld({ at: { 'row-20': 721, field: 200, sw: 300 } });
+    const result = await run(() => press({ target: { testID: 'row-20' } }));
+    expect(world.calls).toHaveLength(1);
+    expect(result.scrolled).toBe(true);
+    expect(onRow).toHaveBeenCalledTimes(1);
+  });
+
+  test('a partly visible row that cannot scroll further is tapped after one attempt, not looped on', async () => {
+    await mountWorld({ at: { 'row-20': 721, field: 200, sw: 300 }, contentHeight: 800 });
+    const result = await run(() => press({ target: { testID: 'row-20' } }));
+    expect(world.calls.length).toBeLessThanOrEqual(1);
+    expect(result.scrolled).toBeUndefined();
+    expect(onRow).toHaveBeenCalledTimes(1);
+  });
+
+  test('a dry run predicts the scroll for a partly visible row', async () => {
+    await mountWorld({ at: { 'row-20': 721, field: 200, sw: 300 } });
+    const result = await run(() => press({ target: { testID: 'row-20' }, dryRun: true }));
+    expect(result).toMatchObject({ dryRun: true, scrolls: true });
+    expect(world.calls).toEqual([]);
+  });
+
+  test('an open alert is answered before anything scrolls', async () => {
+    jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+    installAlertTracking();
+    try {
+      await mountWorld();
+      Alert.alert('Saved', 'Done.');
+      for (const call of [
+        () => press({ target: { testID: 'row-20' } }),
+        () => toggle({ target: { testID: 'sw' } }),
+        () => typeText({ target: { testID: 'field' }, text: 'x' }),
+      ]) {
+        const error = await failure(run(call));
+        expect(error.message).toMatch(/^behind_alert: /);
+      }
+      expect(world.calls).toEqual([]);
+    } finally {
+      uninstallAlertTracking();
+    }
+  });
+
+  test('a refusal after a scroll says so', async () => {
+    await mountWorld();
+    const cover = nodeWithId('outside').fiber;
+    setHitTester(async () => cover);
+    const error = await failure(run(() => press({ target: { testID: 'row-20' } })));
+    expect(error.message).toMatch(/^covered: /);
+    expect(error.message).toMatch(/\(after scrolling to it\)$/);
+    // without a scroll the message is as before
+    await unmountAll();
+    await mountWorld({ at: { 'row-20': 100, field: 200, sw: 300 } });
+    const plain = await failure(run(() => press({ target: { testID: 'row-20' } })));
+    expect(plain.message).not.toContain('after scrolling');
+  });
+});
+
+describe('review 1.4: a list that remounts the row while scrolling', () => {
+  let rekey: (() => void) | null = null;
+  let mounts = 0;
+
+  function Counter(): null {
+    React.useEffect(() => {
+      mounts += 1;
+    }, []);
+    return null;
+  }
+
+  function Remounting(): React.ReactElement {
+    const [generation, setGeneration] = React.useState(0);
+    rekey = () => setGeneration((value) => value + 1);
+    return (
+      <Pressable key={generation} testID="row-20" onPress={onRow}>
+        <Text>Row 20</Text>
+        <Counter />
+      </Pressable>
+    );
+  }
+
+  test('press falls back to the testID when the ref no longer points at a mounted row', async () => {
+    world = { offset: 0, contentHeight: 4000, calls: [], at: { 'row-20': 2000 } };
+    await mount(
+      <ScrollView testID="list">
+        <Remounting />
+      </ScrollView>,
+    );
+    const list = nodeWithId('list').fiber.stateNode;
+    if (!isRecord(list)) throw new Error('no list instance');
+    list.scrollTo = (arg: Record<string, unknown>) => {
+      world.offset = Math.min(Math.max(0, Number(arg.y)), 3200);
+      world.calls.push(Number(arg.y));
+      act(() => rekey?.());
+    };
+    setMeasurer(async (fiber) => {
+      const found = nearestId(fiber);
+      if (!found) return null;
+      if (found.id === 'list') return found.own ? LIST_FRAME : { x: 0, y: -world.offset, width: 400, height: 4000 };
+      return { x: 0, y: 2000 - world.offset, width: 400, height: 80 };
+    });
+    // not inside an outer act, so the remount in scrollTo is committed at once
+    const result = await press({ target: { testID: 'row-20' } });
+    expect(mounts).toBe(2);
+    expect(result.scrolled).toBe(true);
     expect(onRow).toHaveBeenCalledTimes(1);
   });
 });
