@@ -89,6 +89,9 @@ const dryRunField = z
   .optional()
   .describe("true: run every check and say what would happen; touch nothing");
 
+/** `index` written beside `target` rather than in it: agents do that, and it means the same. */
+const indexField = z.number().int().min(0).optional().describe("Same as target.index");
+
 const forceField = z
   .boolean()
   .optional()
@@ -127,9 +130,10 @@ export const toolShapes = {
       .describe("Which checks to run (default all): contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, overlap, duplicate_id"),
   },
   inspect: { target: targetField },
-  tap: { target: targetField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField },
+  tap: { target: targetField, index: indexField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField },
   long_press: {
     target: targetField,
+    index: indexField,
     seconds: z
       .number()
       .min(0.1)
@@ -144,6 +148,7 @@ export const toolShapes = {
   type_text: {
     text: z.string().describe("Text to enter"),
     target: targetField.optional().describe("Input to type into; default: the focused input, else the only input on screen (else ambiguous; none at all is not_found)"),
+    index: indexField,
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
     force: forceField,
@@ -167,6 +172,7 @@ export const toolShapes = {
   },
   toggle: {
     target: targetField,
+    index: indexField,
     value: z.boolean().optional().describe("Desired state; omit to flip"),
     force: forceField,
     dry_run: dryRunField,
@@ -511,6 +517,11 @@ function text(message: string): CallToolResult {
 
 function fail(message: string): CallToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
+}
+
+/** The target with an `index` that was written beside it moved inside (its own index wins). */
+function withIndex(target: Target, index: number | undefined): Target {
+  return index !== undefined && target.index === undefined ? { ...target, index } : target;
 }
 
 function toWireTarget(target: Target): WireTarget {
@@ -2237,7 +2248,7 @@ export class TaplineTools {
   }
 
   tap(args: Shape<"tap">): Promise<CallToolResult> {
-    const params = { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) };
+    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
       this.act("press", params, (r) => `Tapped ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
     );
@@ -2245,7 +2256,7 @@ export class TaplineTools {
 
   /** `seconds` is accepted for the shared interface; Tapline calls the handler, so it doesn't hold. */
   longPress(args: Shape<"long_press">): Promise<CallToolResult> {
-    const params = { target: toWireTarget(args.target), ...(args.force === true ? { force: true } : {}) };
+    const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
       this.act("longPress", params, (r) => `Long-pressed ${this.elementName(r)}.`, args.look, args.screenshot, undefined, undefined, preflight),
     );
@@ -2257,7 +2268,7 @@ export class TaplineTools {
       replace: args.replace ?? true,
       submit: args.submit ?? false,
     };
-    if (args.target !== undefined) params["target"] = toWireTarget(args.target);
+    if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) return this.dryRun("type_text", "type", params);
@@ -2335,7 +2346,7 @@ export class TaplineTools {
   }
 
   toggle(args: Shape<"toggle">): Promise<CallToolResult> {
-    const params: Record<string, unknown> = { target: toWireTarget(args.target) };
+    const params: Record<string, unknown> = { target: toWireTarget(withIndex(args.target, args.index)) };
     if (args.value !== undefined) params["value"] = args.value;
     if (args.force === true) params["force"] = true;
     // The switch already had the asked value: the app touched nothing, and that line is the whole answer.

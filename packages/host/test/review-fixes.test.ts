@@ -151,3 +151,14 @@ describe("recordings after Tapwright's review", () => {
     expect(stopped).toContain("The script keeps the other text typed in it");
   });
 });
+
+describe("an index written beside the target", () => {
+  it("counts as the target's own (from Tapwright's first-time agent)", async () => {
+    const SAVE = { ref: "e3", type: "Pressable", role: "button", text: "Duplicate", frame: { x: 0, y: 300, width: 100, height: 40 }, actions: ["press"] };
+    const { app, tools } = await setup((req) => (req.method === "press" ? { ok: true, result: { element: SAVE } } : { ok: true, result: {} }));
+    await tools.tap({ target: { text: "Duplicate" }, index: 1, look: false });
+    await tools.tap({ target: { text: "Duplicate", index: 0 }, index: 1, look: false });
+    const sent = app.requests.filter((r) => r.method === "press").map((r) => (r.params as { target: unknown }).target);
+    expect(sent).toEqual([{ text: "Duplicate", index: 1 }, { text: "Duplicate", index: 0 }]);
+  });
+});
