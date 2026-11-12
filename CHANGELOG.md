@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.5.0, "the Real User Update" (unreleased)
+
+Tests whether people can find, understand and finish a feature, not only whether it works. The interface
+is AGENT-TOOLS 1.12, shared with Tapwright.
+
+- `journey`: `start` with a goal and a persona, then act in a user's eyes: only what shows on the glass,
+  no ids or labels, nothing scrolls by itself, and shortcuts (`open_url`, `app_command`) only when the
+  start allows them. `stop` gives the taps to the goal, the time, wrong turns, hesitations and dead ends,
+  and the findings by severity.
+- A report folder per journey in `~/.tapline/journeys`: report.md, report.html, a GIF of the run with
+  the taps marked, and a picture per finding. The newest 20 are kept. Typed text never goes in.
+- `export` on `stop` puts the report on a pull request or an issue through the user's own `gh`, only
+  with `confirm: true`, and refuses a public repository unless `public: true`.
+- Stress moments: a bad network and a double tap at once; background, rotate and a relaunch with a
+  person, counted only when the app shows they happened. `survives` checks what must still be there.
+- `ux_check`: the screen against usability basics, and house rules with `--ux-rules FILE`.
+- `media`: test pictures for an app's photo picker, in the phone's library or straight to the next
+  image-picker call, with the user's `confirm`; `remove` deletes only what this phone's session added.
+- Personas: a recipe and examples in the skill (`references/personas.md`).
+- The app needs none of the photo modules: `media` uses them when they are there, and an app without
+  them bundles and runs as before.
+
 ## 1.4.0, "the Fewer Steps Update" (unreleased)
 
 The same check now takes fewer calls. The JLD tester's iPhone runs needed about 1.5 times the calls of
