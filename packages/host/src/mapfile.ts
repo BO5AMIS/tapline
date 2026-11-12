@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 
 // The map file (AGENT-TOOLS 1.13 §18.9). The format is shared with Tapwright, so a field
@@ -10,7 +10,7 @@ import { z } from "zod";
 export const MAP_FORMAT = "agent-tools-map";
 export const MAP_VERSION = 1;
 
-/** A lock older than this is counted as left behind (§18.9). */
+/** A lock or temp file older than this is counted as left behind (§18.9). */
 const LOCK_STALE_MS = 10_000;
 /** How long a save waits for a fresh lock before it gives up. */
 const LOCK_WAIT_MS = 15_000;
@@ -23,6 +23,9 @@ export type PlaceKey =
   | { route: string[]; tab?: string; layer?: string }
   | { signature: string; parts: Record<string, unknown> };
 
+export type MoveTool = "tap" | "long_press" | "toggle" | "back" | "open_url" | "swipe";
+export type RoadBy = "tapline" | "tapwright" | "both";
+
 export interface MapPlace {
   key: PlaceKey;
   link: string | null;
@@ -31,8 +34,10 @@ export interface MapPlace {
   [unknown: string]: unknown;
 }
 
+// `tool` and `by` are plain strings on read: a value a newer Tapwright adds must not make the
+// file unreadable. Only `version` gates. Narrow at the use site (MoveTool, RoadBy).
 export type Move = {
-  tool: "tap" | "long_press" | "toggle" | "back" | "open_url" | "swipe";
+  tool: MoveTool | (string & {});
   target?: { id?: string; label?: string; text?: string; row?: true; x?: number; y?: number };
   url?: string;
 };
@@ -42,7 +47,7 @@ export interface MapRoad {
   to: string;
   move: Move;
   names?: { id?: string; label?: string; text?: string };
-  by: "tapline" | "tapwright" | "both";
+  by: RoadBy | (string & {});
   seen: number;
   failed: number;
   ms: number;
@@ -76,13 +81,16 @@ export interface MapFile {
 export interface MapIo {
   /** The file's text, or null when it doesn't exist. */
   readFile(path: string): Promise<string | null>;
+  /** Writes the file and syncs it to disk before it returns. */
   writeFile(path: string, data: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
-  /** Creates the file only if it is absent; false when it already exists. */
-  createExclusive(path: string): Promise<boolean>;
+  /** Creates the file with `data` only if it is absent; false when it already exists. */
+  createExclusive(path: string, data: string): Promise<boolean>;
   remove(path: string): Promise<void>;
   /** The file's modified time in ms, or null when it doesn't exist. */
   statMtimeMs(path: string): Promise<number | null>;
+  /** The names in a folder; empty when it doesn't exist. */
+  listDir(path: string): Promise<string[]>;
   mkdirp(path: string): Promise<void>;
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -106,17 +114,31 @@ export function nodeMapIo(): MapIo {
         throw error;
       }
     },
-    writeFile: (path, data) => writeFile(path, data, "utf8"),
-    rename: (from, to) => rename(from, to),
-    async createExclusive(path) {
+    async writeFile(path, data) {
+      // Open, write, sync, close: the rename must never publish a file that isn't on disk yet.
+      const handle = await open(path, "w");
       try {
-        const handle = await open(path, "wx");
+        await handle.writeFile(data, "utf8");
+        await handle.sync();
+      } finally {
         await handle.close();
-        return true;
+      }
+    },
+    rename: (from, to) => rename(from, to),
+    async createExclusive(path, data) {
+      let handle;
+      try {
+        handle = await open(path, "wx");
       } catch (error) {
         if (errorCode(error) === "EEXIST") return false;
         throw error;
       }
+      try {
+        await handle.writeFile(data, "utf8");
+      } finally {
+        await handle.close();
+      }
+      return true;
     },
     async remove(path) {
       try {
@@ -133,6 +155,14 @@ export function nodeMapIo(): MapIo {
         throw error;
       }
     },
+    async listDir(path) {
+      try {
+        return await readdir(path);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") return [];
+        throw error;
+      }
+    },
     mkdirp: async (path) => {
       await mkdir(path, { recursive: true });
     },
@@ -143,8 +173,11 @@ export function nodeMapIo(): MapIo {
 
 /** The folder is named by the app's own id, reduced so it can never leave the maps folder. */
 export function mapDir(app: string, options: { mapsDir?: string; home?: string }): string {
-  let id = app.replace(/[^A-Za-z0-9._-]/g, "_");
+  // Windows drops trailing dots and spaces from a folder name, so two ids could meet in one folder.
+  let id = app.replace(/[. ]+$/, "").replace(/[^A-Za-z0-9._-]/g, "_");
   if (/^\.*$/.test(id)) id = "_";
+  // Device names such as CON or NUL can't be folders on Windows.
+  if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i.test(id)) id = `_${id}`;
   const base = options.mapsDir !== undefined ? resolve(options.mapsDir) : resolve(options.home ?? homedir(), ".tapline", "maps");
   return join(base, id);
 }
@@ -161,7 +194,7 @@ const placeSchema = z.looseObject({
   last: z.string(),
 });
 const moveSchema = z.looseObject({
-  tool: z.enum(["tap", "long_press", "toggle", "back", "open_url", "swipe"]),
+  tool: z.string(),
   target: z.looseObject({}).optional(),
   url: z.string().optional(),
 });
@@ -170,7 +203,7 @@ const roadSchema = z.looseObject({
   to: z.string(),
   move: moveSchema,
   names: z.looseObject({}).optional(),
-  by: z.enum(["tapline", "tapwright", "both"]),
+  by: z.string(),
   seen: z.number(),
   failed: z.number(),
   ms: z.number(),
@@ -202,7 +235,7 @@ function parseMap(text: string, app: string): MapFile | null {
     return null;
   }
   const parsed = fileSchema.safeParse(raw);
-  // A file for another app in this folder is not ours either.
+  // A file for another app id in this folder is not ours either.
   if (!parsed.success || parsed.data.app !== app) return null;
   return parsed.data as MapFile;
 }
@@ -237,105 +270,183 @@ function stable(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+/** What names one road: where it starts, the move, where it ends. */
+export function roadId(from: string, move: Move, to: string): string {
+  return `${from}\u0000${stable(move)}\u0000${to}`;
+}
+
 function placeIdentity(key: PlaceKey): string {
   // A signature key is the same place by its signature; `parts` is only for fuzzy matching.
   return "signature" in key ? `sig:${key.signature}` : `route:${stable(key)}`;
 }
 
-function newer<T extends { last: string }>(older: T, candidate: T): { older: T; newer: T } {
+/** Negative when a is older than b. Dates compare as times; anything else as text. */
+function compareLast(a: string, b: string): number {
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function orderByLast<T extends { last: string }>(older: T, candidate: T): { older: T; newer: T } {
   // Equal stamps: the candidate (mine) is the newer one.
-  return candidate.last >= older.last ? { older, newer: candidate } : { older: candidate, newer: older };
+  return compareLast(candidate.last, older.last) >= 0 ? { older, newer: candidate } : { older: candidate, newer: older };
 }
 
 function mergePlace(disk: MapPlace, mine: MapPlace): MapPlace {
-  const { older, newer: latest } = newer(disk, mine);
-  const titles = { ...older.titles, ...latest.titles };
-  const merged: MapPlace = { ...older, ...latest, link: latest.link ?? older.link };
+  const { older, newer } = orderByLast(disk, mine);
+  const titles = { ...older.titles, ...newer.titles };
+  const merged: MapPlace = { ...older, ...newer, link: newer.link ?? older.link };
   if (Object.keys(titles).length > 0) merged.titles = titles;
   return merged;
 }
 
 function mergeRoad(disk: MapRoad, mine: MapRoad): MapRoad {
-  const { older, newer: latest } = newer(disk, mine);
+  const { older, newer } = orderByLast(disk, mine);
+  // Each tool has driven it once: it is both's.
   const by = disk.by === mine.by ? disk.by : "both";
-  const merged: MapRoad = { ...older, ...latest, by };
-  const names = { ...older.names, ...latest.names };
+  const merged: MapRoad = { ...older, ...newer, by };
+  const names = { ...older.names, ...newer.names };
   if (Object.keys(names).length > 0) merged.names = names;
   return merged;
 }
 
-export function mergeMaps(disk: MapFile, mine: MapFile): MapFile {
+function renameName(name: string, renames: Record<string, string>): string {
+  return Object.hasOwn(renames, name) ? (renames[name] as string) : name;
+}
+
+function renamePlaces(file: MapFile, renames: Record<string, string>): MapFile {
+  if (Object.keys(renames).length === 0) return file;
   const places: Record<string, MapPlace> = {};
-  const nameByKey = new Map<string, string>();
-  for (const [name, place] of Object.entries(disk.places)) {
-    places[name] = place;
-    nameByKey.set(placeIdentity(place.key), name);
+  for (const [name, place] of Object.entries(file.places)) {
+    const target = renameName(name, renames);
+    // A name that is already taken is not overwritten by a rename.
+    places[target !== name && file.places[target] !== undefined ? name : target] = place;
   }
-  // Names of my places that are the same place under another name.
-  const renamed = new Map<string, string>();
+  return {
+    ...file,
+    places,
+    roads: file.roads.map((r) => ({ ...r, from: renameName(r.from, renames), to: renameName(r.to, renames) })),
+    reflexes: file.reflexes.map((r) => (typeof r.at === "string" ? { ...r, at: renameName(r.at, renames) } : r)),
+  };
+}
+
+/**
+ * Merges mine into the disk copy. `options.renamed` (old to new) are renames I made on purpose:
+ * they are applied to the disk copy first so the merge doesn't bring the old name back.
+ * `renames` in the answer lists every name of mine that ended up under another (a clash with a
+ * different place of the same name gets the next free `_n`).
+ */
+export function mergeMapsWithRenames(
+  disk: MapFile,
+  mine: MapFile,
+  options: { renamed?: Record<string, string> } = {},
+): { map: MapFile; renames: Record<string, string> } {
+  const base = options.renamed !== undefined ? renamePlaces(disk, options.renamed) : disk;
+  const places: Record<string, MapPlace> = { ...base.places };
+  const nameByKey = new Map<string, string>();
+  for (const [name, place] of Object.entries(places)) nameByKey.set(placeIdentity(place.key), name);
+  const taken = new Set([...Object.keys(base.places), ...Object.keys(mine.places)]);
+  // One key found under two names: both sides follow the kept name.
+  const both: Record<string, string> = {};
+  // A different place with the same name: only my side takes the new name.
+  const clash: Record<string, string> = {};
+
   for (const [name, place] of Object.entries(mine.places)) {
     const identity = placeIdentity(place.key);
     const known = nameByKey.get(identity);
     if (known !== undefined) {
-      const existing = places[known];
-      if (existing === undefined) continue;
-      // One key under two names keeps the older name.
-      if (known !== name) {
-        const keepMine = place.last < existing.last;
-        const keptName = keepMine ? name : known;
-        const merged = mergePlace(existing, place);
-        if (keepMine) delete places[known];
-        places[keptName] = merged;
-        nameByKey.set(identity, keptName);
-        renamed.set(name, keptName);
-        renamed.set(known, keptName);
-      } else {
+      const existing = places[known] as MapPlace;
+      if (known === name) {
         places[known] = mergePlace(existing, place);
+        continue;
       }
+      // Found independently under two names: the older name stays.
+      const keepMine = compareLast(place.last, existing.last) < 0 && places[name] === undefined;
+      const kept = keepMine ? name : known;
+      if (keepMine) delete places[known];
+      places[kept] = mergePlace(existing, place);
+      nameByKey.set(identity, kept);
+      both[name] = kept;
+      both[known] = kept;
       continue;
     }
-    const clash = places[name];
-    places[name] = clash === undefined ? place : mergePlace(clash, place);
+    if (places[name] !== undefined) {
+      let n = 2;
+      while (taken.has(`${name}_${n}`)) n += 1;
+      const fresh = `${name}_${n}`;
+      taken.add(fresh);
+      places[fresh] = place;
+      nameByKey.set(identity, fresh);
+      clash[name] = fresh;
+      continue;
+    }
+    places[name] = place;
     nameByKey.set(identity, name);
   }
 
-  const rename = (name: string): string => renamed.get(name) ?? name;
+  const mineMap = { ...both, ...clash };
   const roads = new Map<string, MapRoad>();
-  for (const road of [...disk.roads, ...mine.roads]) {
-    const moved: MapRoad = { ...road, from: rename(road.from), to: rename(road.to) };
-    const id = `${moved.from}\u0000${stable(moved.move)}\u0000${moved.to}`;
+  const add = (road: MapRoad, renames: Record<string, string>): void => {
+    const moved: MapRoad = { ...road, from: renameName(road.from, renames), to: renameName(road.to, renames) };
+    const id = roadId(moved.from, moved.move, moved.to);
     const have = roads.get(id);
     roads.set(id, have === undefined ? moved : mergeRoad(have, moved));
-  }
+  };
+  for (const road of base.roads) add(road, both);
+  for (const road of mine.roads) add(road, mineMap);
 
   const reflexes = new Map<string, MapReflex>();
-  for (const reflex of [...disk.reflexes, ...mine.reflexes]) reflexes.set(reflex.name, reflex);
+  const addReflex = (reflex: MapReflex, renames: Record<string, string>): void => {
+    reflexes.set(reflex.name, typeof reflex.at === "string" ? { ...reflex, at: renameName(reflex.at, renames) } : reflex);
+  };
+  for (const reflex of base.reflexes) addReflex(reflex, both);
+  for (const reflex of mine.reflexes) addReflex(reflex, mineMap);
 
+  // Unknown top-level fields: the disk copy decides, so a stale one in memory never overwrites a newer one.
   const merged: MapFile = {
-    ...disk,
     ...mine,
+    ...base,
     places,
     roads: [...roads.values()],
-    routes: { ...disk.routes, ...mine.routes },
+    routes: { ...base.routes, ...mine.routes },
     reflexes: [...reflexes.values()],
   };
   // One random key per map: the file on disk decides, so older hashes stay comparable.
-  const titleKey = disk.titleKey ?? mine.titleKey;
+  const titleKey = base.titleKey ?? mine.titleKey;
   if (titleKey !== undefined) merged.titleKey = titleKey;
-  return merged;
+  return { map: merged, renames: mineMap };
+}
+
+export function mergeMaps(disk: MapFile, mine: MapFile, options: { renamed?: Record<string, string> } = {}): MapFile {
+  return mergeMapsWithRenames(disk, mine, options).map;
+}
+
+/** What a caller took out on purpose. Each removal waits for the other tool's newer evidence. */
+export interface MapRemovals {
+  places?: { name: string; before: string }[];
+  roads?: { from: string; move: Move; to: string; before: string }[];
+  reflexes?: string[];
+  /** Places renamed on purpose (old to new). */
+  renamed?: Record<string, string>;
 }
 
 // Writing: read, merge and write under a lock (§18.9).
 
+function tokenFor(io: MapIo): string {
+  return `${process.pid}.${io.now()}.${Math.random().toString(36).slice(2, 12)}`;
+}
+
 async function withLock<T>(io: MapIo, lockPath: string, body: () => Promise<T>): Promise<T> {
+  const token = tokenFor(io);
   const deadline = io.now() + LOCK_WAIT_MS;
   for (;;) {
-    if (await io.createExclusive(lockPath)) break;
+    if (await io.createExclusive(lockPath, token)) break;
     const madeAt = await io.statMtimeMs(lockPath);
     // It vanished between the two calls: try again at once.
     if (madeAt === null) continue;
     if (io.now() - madeAt > LOCK_STALE_MS) {
-      await io.remove(lockPath);
+      await reclaim(io, lockPath, token);
       continue;
     }
     if (io.now() > deadline) throw new Error(`the map file is locked (${lockPath}); try again`);
@@ -344,8 +455,28 @@ async function withLock<T>(io: MapIo, lockPath: string, body: () => Promise<T>):
   try {
     return await body();
   } finally {
-    await io.remove(lockPath);
+    // Remove the lock only if it is still mine. A reclaimer may have taken it over.
+    if ((await io.readFile(lockPath)) === token) await io.remove(lockPath);
   }
+}
+
+/** Takes a lock that looked stale by renaming it away, so only one reclaimer wins. */
+async function reclaim(io: MapIo, lockPath: string, token: string): Promise<void> {
+  const grabbed = `${lockPath}.${token}.stale`;
+  try {
+    await io.rename(lockPath, grabbed);
+  } catch (error) {
+    // Someone else reclaimed it first, or its holder released it.
+    if (errorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  const madeAt = await io.statMtimeMs(grabbed);
+  if (madeAt !== null && io.now() - madeAt <= LOCK_STALE_MS) {
+    // It was fresh after all (it changed hands between our look and our rename): give it back.
+    const text = (await io.readFile(grabbed)) ?? "";
+    await io.createExclusive(lockPath, text);
+  }
+  await io.remove(grabbed);
 }
 
 async function renameWithRetry(io: MapIo, from: string, to: string): Promise<void> {
@@ -361,28 +492,124 @@ async function renameWithRetry(io: MapIo, from: string, to: string): Promise<voi
   }
 }
 
-/** Merges `map` into what is on disk and writes it. `readOnly` (replay) throws before touching anything. */
-export async function saveMap(dir: string, map: MapFile, options: { readOnly?: boolean; io?: MapIo } = {}): Promise<void> {
+/** A temp file, then a rename over the target. The temp file is removed on any failure. */
+async function writeAtomic(io: MapIo, target: string, data: string): Promise<void> {
+  const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    await io.writeFile(temp, data);
+    await renameWithRetry(io, temp, target);
+  } catch (error) {
+    await io.remove(temp).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Removes temp and grabbed-lock files a crashed writer left behind. Runs under the lock. */
+async function sweepLeftovers(io: MapIo, dir: string): Promise<void> {
+  for (const name of await io.listDir(dir)) {
+    if (!/^map\.json(\.lock)?\..+\.(tmp|stale)$/.test(name)) continue;
+    const path = join(dir, name);
+    const madeAt = await io.statMtimeMs(path);
+    if (madeAt !== null && io.now() - madeAt > LOCK_STALE_MS) await io.remove(path).catch(() => undefined);
+  }
+}
+
+// Route files (§18.5) live next to the map. Only paths inside the folder are touched.
+function insideDir(dir: string, relative: string): string | null {
+  const full = resolve(dir, relative);
+  return full.startsWith(resolve(dir) + sep) ? full : null;
+}
+
+async function readRoute(io: MapIo, dir: string, relative: string): Promise<Record<string, unknown> | null> {
+  const full = insideDir(dir, relative);
+  if (full === null) return null;
+  const text = await io.readFile(full);
+  if (text === null) return null;
+  try {
+    const raw: unknown = JSON.parse(text);
+    return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function rewriteRouteFiles(io: MapIo, dir: string, paths: string[], renames: Record<string, string>): Promise<void> {
+  if (Object.keys(renames).length === 0) return;
+  for (const relative of paths) {
+    const route = await readRoute(io, dir, relative);
+    const full = insideDir(dir, relative);
+    if (route === null || full === null) continue;
+    let changed = false;
+    for (const field of ["start", "end"]) {
+      const value = route[field];
+      if (typeof value === "string" && Object.hasOwn(renames, value)) {
+        route[field] = renames[value];
+        changed = true;
+      }
+    }
+    if (changed) await writeAtomic(io, full, `${JSON.stringify(route, null, 2)}\n`);
+  }
+}
+
+async function applyRemovals(io: MapIo, dir: string, disk: MapFile, merged: MapFile, removed: MapRemovals): Promise<void> {
+  // A removal only holds when the disk copy is not newer than what the caller saw.
+  for (const { name, before } of removed.places ?? []) {
+    const onDisk = disk.places[name];
+    if (onDisk !== undefined && compareLast(onDisk.last, before) > 0) continue;
+    delete merged.places[name];
+    merged.roads = merged.roads.filter((r) => r.from !== name && r.to !== name);
+    merged.reflexes = merged.reflexes.filter((r) => r.at !== name);
+    for (const [route, relative] of Object.entries(merged.routes)) {
+      const file = await readRoute(io, dir, relative);
+      if (file !== null && (file["start"] === name || file["end"] === name)) delete merged.routes[route];
+    }
+  }
+  for (const { from, move, to, before } of removed.roads ?? []) {
+    const id = roadId(from, move, to);
+    const onDisk = disk.roads.find((r) => roadId(r.from, r.move, r.to) === id);
+    if (onDisk !== undefined && compareLast(onDisk.last, before) > 0) continue;
+    merged.roads = merged.roads.filter((r) => roadId(r.from, r.move, r.to) !== id);
+  }
+  if (removed.reflexes !== undefined) merged.reflexes = merged.reflexes.filter((r) => !removed.reflexes?.includes(r.name));
+}
+
+/**
+ * Merges `map` into what is on disk and writes it; answers the merged file, which the caller
+ * adopts. `readOnly` (replay) throws before touching anything.
+ */
+export async function saveMap(
+  dir: string,
+  map: MapFile,
+  options: { readOnly?: boolean; io?: MapIo; removed?: MapRemovals } = {},
+): Promise<MapFile> {
   if (options.readOnly === true) throw new Error("the map is read-only here (replay never writes it)");
   const io = options.io ?? nodeMapIo();
   const file = join(dir, "map.json");
   await io.mkdirp(dir);
-  await withLock(io, `${file}.lock`, async () => {
+  return withLock(io, `${file}.lock`, async () => {
+    await sweepLeftovers(io, dir);
     const text = await io.readFile(file);
     let merged = map;
+    let renames: Record<string, string> = {};
+    let disk = emptyMap(map.app);
     if (text !== null) {
-      const disk = parseMap(text, map.app);
+      const parsed = parseMap(text, map.app);
       // A file we can't read is left alone, never overwritten.
-      if (disk === null) throw new Error(`the map file is unreadable and was left alone (${file})`);
-      merged = mergeMaps(disk, map);
+      if (parsed === null) throw new Error(`the map file is unreadable and was left alone (${file})`);
+      disk = parsed;
+      const result = mergeMapsWithRenames(disk, map, { renamed: options.removed?.renamed });
+      merged = result.map;
+      renames = result.renames;
     }
-    const temp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-    try {
-      await io.writeFile(temp, `${JSON.stringify(merged, null, 2)}\n`);
-      await renameWithRetry(io, temp, file);
-    } catch (error) {
-      await io.remove(temp).catch(() => undefined);
-      throw error;
-    }
+    if (options.removed !== undefined) await applyRemovals(io, dir, disk, merged, options.removed);
+    await writeAtomic(io, file, `${JSON.stringify(merged, null, 2)}\n`);
+    // Route files follow a rename: explicit ones in every route, a clash only in my own new routes.
+    const explicit = options.removed?.renamed ?? {};
+    await rewriteRouteFiles(io, dir, Object.values(merged.routes), explicit);
+    const mineOnly = Object.entries(merged.routes)
+      .filter(([name]) => disk.routes[name] === undefined)
+      .map(([, relative]) => relative);
+    await rewriteRouteFiles(io, dir, mineOnly, renames);
+    return merged;
   });
 }

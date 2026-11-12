@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,6 +10,8 @@ import {
   loadMap,
   mapDir,
   mergeMaps,
+  mergeMapsWithRenames,
+  roadId,
   saveMap,
   type MapFile,
   type MapIo,
@@ -78,6 +80,24 @@ describe("mapDir", () => {
       expect(dir.startsWith(base + sep)).toBe(true);
       expect(dir.slice(base.length + 1)).toMatch(/^[A-Za-z0-9._-]+$/);
       expect(dir.slice(base.length + 1)).not.toMatch(/^\.+$/);
+    }
+  });
+});
+
+describe("mapDir on Windows", () => {
+  it("strips trailing dots and spaces", () => {
+    const base = resolve("/tmp/maps");
+    expect(mapDir("com.example.wayfare...", { mapsDir: "/tmp/maps" })).toBe(join(base, "com.example.wayfare"));
+    expect(mapDir("com.example.wayfare. . ", { mapsDir: "/tmp/maps" })).toBe(join(base, "com.example.wayfare"));
+  });
+
+  it("prefixes device names with _", () => {
+    const base = resolve("/tmp/maps");
+    for (const id of ["con", "CON", "nul.txt", "aux", "com1", "LPT9", "prn.x"]) {
+      expect(mapDir(id, { mapsDir: "/tmp/maps" })).toBe(join(base, `_${id}`));
+    }
+    for (const id of ["console", "com10", "auxiliary", "com.example.wayfare"]) {
+      expect(mapDir(id, { mapsDir: "/tmp/maps" })).toBe(join(base, id));
     }
   });
 });
@@ -409,15 +429,19 @@ describe("the lock and the write", () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
-  it("two processes writing at once never lose a road", async () => {
-    const dir = temp();
-    mkdirSync(dir, { recursive: true });
-    const script = join(dir, "..", `child-${Date.now()}.mjs`);
+  // The child runs the TypeScript source directly, which needs Node 22.6 or later.
+  const [nodeMajor = 0, nodeMinor = 0] = process.versions.node.split(".").map(Number);
+  const canStripTypes = nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 6);
+
+  it.skipIf(!canStripTypes)("two processes writing at once never lose a road (needs Node 22.6+ to run the source)", async () => {
+    const root = temp();
+    const dir = join(root, "map");
+    const script = join(root, "child.mjs");
     const modUrl = pathToFileURL(resolve(import.meta.dirname, "../src/mapfile.ts")).href;
     writeFileSync(
       script,
       `
-const { saveMap, mergeMaps, loadMap } = await import(${JSON.stringify(modUrl)});
+const { saveMap } = await import(${JSON.stringify(modUrl)});
 const [dir, who] = process.argv.slice(2);
 for (let i = 0; i < 12; i++) {
   const mine = {
@@ -427,10 +451,8 @@ for (let i = 0; i < 12; i++) {
   };
   await saveMap(dir, mine);
 }
-void mergeMaps; void loadMap;
 `,
     );
-    dirs.push(script);
     const run = (who: string): Promise<number> =>
       new Promise((res, rej) => {
         const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", script, dir, who], { stdio: "inherit" });
@@ -442,5 +464,278 @@ void mergeMaps; void loadMap;
     const out = loadMap(dir, APP);
     expect(out.status).toBe("ok");
     expect(out.map.roads).toHaveLength(24);
+    expect(readdirSync(dir)).toEqual(["map.json"]);
   }, 60_000);
+
+  it("two reclaimers of one stale lock never both hold it", async () => {
+    const dir = temp();
+    const real = await realIo();
+    const lock = join(dir, "map.json.lock");
+    writeFileSync(lock, "dead");
+    const old = new Date(Date.now() - 20_000);
+    utimesSync(lock, old, old);
+    const slow: MapIo = {
+      ...real,
+      rename: async (a, b) => {
+        await new Promise((r) => setTimeout(r, 5));
+        return real.rename(a, b);
+      },
+      readFile: async (p) => {
+        await new Promise((r) => setTimeout(r, 3));
+        return real.readFile(p);
+      },
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
+    };
+    const a: MapFile = { ...emptyMap(), roads: [road("a", "b", "one", "2026-11-12T10:00:00Z")] };
+    const b: MapFile = { ...emptyMap(), roads: [road("b", "c", "two", "2026-11-12T10:00:01Z", "tapwright")] };
+    await Promise.all([saveMap(dir, a, { io: slow }), saveMap(dir, b, { io: slow })]);
+    expect(loadMap(dir, APP).map.roads).toHaveLength(2);
+    expect(readdirSync(dir)).toEqual(["map.json"]);
+  });
+
+  it("a fresh lock grabbed by mistake is given back and waited for", async () => {
+    const dir = temp();
+    const real = await realIo();
+    const lock = join(dir, "map.json.lock");
+    writeFileSync(lock, "holder");
+    let lied = false;
+    let sawGivenBack = false;
+    const io: MapIo = {
+      ...real,
+      // The first look at the lock says it is old; the rename then finds it fresh.
+      statMtimeMs: async (p) => {
+        if (p === lock && !lied) {
+          lied = true;
+          return Date.now() - 20_000;
+        }
+        return real.statMtimeMs(p);
+      },
+      sleep: async () => {
+        if (!sawGivenBack) {
+          sawGivenBack = readFileSync(lock, "utf8") === "holder";
+          rmSync(lock);
+        }
+      },
+    };
+    await saveMap(dir, emptyMap(), { io });
+    expect(sawGivenBack).toBe(true);
+    expect(existsSync(join(dir, "map.json"))).toBe(true);
+    expect(readdirSync(dir)).toEqual(["map.json"]);
+  });
+
+  it("a lock that changed hands is not removed on release", async () => {
+    const dir = temp();
+    const real = await realIo();
+    const lock = join(dir, "map.json.lock");
+    const io: MapIo = {
+      ...real,
+      rename: async (a, b) => {
+        writeFileSync(lock, "someone-else");
+        return real.rename(a, b);
+      },
+    };
+    await saveMap(dir, emptyMap(), { io });
+    expect(readFileSync(lock, "utf8")).toBe("someone-else");
+  });
+
+  it("sweeps old temp files under the lock and keeps fresh ones", async () => {
+    const dir = temp();
+    const oldTmp = join(dir, "map.json.123.abc.tmp");
+    const freshTmp = join(dir, "map.json.456.def.tmp");
+    writeFileSync(oldTmp, "x");
+    writeFileSync(freshTmp, "y");
+    const old = new Date(Date.now() - 20_000);
+    utimesSync(oldTmp, old, old);
+    await saveMap(dir, emptyMap());
+    expect(existsSync(oldTmp)).toBe(false);
+    expect(existsSync(freshTmp)).toBe(true);
+  });
+
+  it("syncs the temp file before the rename", async () => {
+    const dir = temp();
+    const real = await realIo();
+    const calls: string[] = [];
+    const io: MapIo = {
+      ...real,
+      writeFile: async (p, d) => {
+        calls.push("write");
+        return real.writeFile(p, d);
+      },
+      rename: async (a, b) => {
+        calls.push("rename");
+        return real.rename(a, b);
+      },
+    };
+    await saveMap(dir, emptyMap(), { io });
+    expect(calls).toEqual(["write", "rename"]);
+  });
+});
+
+describe("renames, clashes and removals", () => {
+  it("a rename made on purpose is not undone by the disk copy", async () => {
+    const dir = temp();
+    const key = { route: ["(tabs)", "settings"] };
+    const before: MapFile = {
+      ...emptyMap(),
+      places: { settings: { key, link: null, last: "2026-11-12T10:00:00Z" } },
+      roads: [road("home", "settings", "s", "2026-11-12T10:00:00Z")],
+      reflexes: [{ name: "r", when: { text: "x" }, do: { tool: "tap" }, at: "settings" }],
+    };
+    await saveMap(dir, before);
+    const mine: MapFile = {
+      ...emptyMap(),
+      places: { prefs: { key, link: null, last: "2026-11-12T11:00:00Z" } },
+      roads: [road("home", "prefs", "s", "2026-11-12T11:00:00Z")],
+    };
+    const out = await saveMap(dir, mine, { removed: { renamed: { settings: "prefs" } } });
+    expect(Object.keys(out.places)).toEqual(["prefs"]);
+    expect(out.roads).toHaveLength(1);
+    expect(out.roads[0]?.to).toBe("prefs");
+    expect(out.reflexes[0]?.at).toBe("prefs");
+    expect(loadMap(dir, APP).map).toEqual(out);
+  });
+
+  it("a rename also rewrites start and end in the route files", async () => {
+    const dir = temp();
+    mkdirSync(join(dir, "routes"), { recursive: true });
+    writeFileSync(join(dir, "routes", "sign_in.json"), JSON.stringify({ name: "sign_in", start: "welcome", end: "home" }));
+    const key = { route: ["welcome"] };
+    const disk: MapFile = {
+      ...emptyMap(),
+      places: { welcome: { key, link: null, last: "2026-11-12T10:00:00Z" } },
+      routes: { sign_in: "routes/sign_in.json" },
+    };
+    await saveMap(dir, disk);
+    const mine: MapFile = { ...emptyMap(), places: { intro: { key, link: null, last: "2026-11-12T11:00:00Z" } } };
+    await saveMap(dir, mine, { removed: { renamed: { welcome: "intro" } } });
+    const route = JSON.parse(readFileSync(join(dir, "routes", "sign_in.json"), "utf8")) as { start: string; end: string };
+    expect(route).toMatchObject({ start: "intro", end: "home" });
+  });
+
+  it("two places with different keys and one name stay two: mine gets the next free _n", () => {
+    const disk: MapFile = {
+      ...emptyMap(),
+      places: { trips: { key: { route: ["trips"] }, link: null, last: "2026-11-12T10:00:00Z" } },
+      roads: [road("home", "trips", "a", "2026-11-12T10:00:00Z")],
+    };
+    const mine: MapFile = {
+      ...emptyMap(),
+      places: {
+        trips: { key: { route: ["(admin)", "trips"] }, link: null, last: "2026-11-12T11:00:00Z" },
+        trips_2: { key: { route: ["other"] }, link: null, last: "2026-11-12T11:00:00Z" },
+      },
+      roads: [road("trips", "trips_2", "b", "2026-11-12T11:00:00Z")],
+      reflexes: [{ name: "r", when: { text: "x" }, do: { tool: "tap" }, at: "trips" }],
+    };
+    const { map, renames } = mergeMapsWithRenames(disk, mine);
+    expect(renames).toEqual({ trips: "trips_3" });
+    expect(Object.keys(map.places).sort()).toEqual(["trips", "trips_2", "trips_3"]);
+    expect(map.places["trips"]?.key).toEqual({ route: ["trips"] });
+    expect(map.places["trips_3"]?.key).toEqual({ route: ["(admin)", "trips"] });
+    expect(map.roads.find((r) => r.move.target?.id === "b")?.from).toBe("trips_3");
+    expect(map.roads.find((r) => r.move.target?.id === "a")?.to).toBe("trips");
+    expect(map.reflexes[0]?.at).toBe("trips_3");
+  });
+
+  it("roads of a clash-renamed place follow it in a saved route file of mine", async () => {
+    const dir = temp();
+    mkdirSync(join(dir, "routes"), { recursive: true });
+    await saveMap(dir, { ...emptyMap(), places: { trips: { key: { route: ["trips"] }, link: null, last: "2026-11-12T10:00:00Z" } } });
+    writeFileSync(join(dir, "routes", "go.json"), JSON.stringify({ start: "trips", end: "home" }));
+    const mine: MapFile = {
+      ...emptyMap(),
+      places: { trips: { key: { route: ["(admin)", "trips"] }, link: null, last: "2026-11-12T11:00:00Z" } },
+      routes: { go: "routes/go.json" },
+    };
+    await saveMap(dir, mine);
+    const route = JSON.parse(readFileSync(join(dir, "routes", "go.json"), "utf8")) as { start: string };
+    expect(route.start).toBe("trips_2");
+  });
+
+  it("an unknown by or tool from a newer tool does not make the file unreadable", () => {
+    const dir = temp();
+    const odd = { ...road("a", "b", "x", "2026-11-12T10:00:00Z"), by: "someone-new", move: { tool: "pinch", target: { id: "x" } } };
+    writeFileSync(join(dir, "map.json"), JSON.stringify({ ...emptyMap(), roads: [odd] }));
+    const out = loadMap(dir, APP);
+    expect(out.status).toBe("ok");
+    expect(out.map.roads[0]?.by).toBe("someone-new");
+  });
+
+  it("last compares as a time, with a text fallback", () => {
+    const key = { route: ["home"] };
+    // The same instant written two ways; the later instant must win even though it sorts first as text.
+    const disk: MapFile = { ...emptyMap(), places: { home: { key, link: "disk://", last: "2026-11-12T12:00:00+02:00" } } };
+    const mine: MapFile = { ...emptyMap(), places: { home: { key, link: "mine://", last: "2026-11-12T11:00:00Z" } } };
+    expect(mergeMaps(disk, mine).places["home"]?.link).toBe("mine://");
+    const odd1: MapFile = { ...emptyMap(), places: { home: { key, link: "a://", last: "b" } } };
+    const odd2: MapFile = { ...emptyMap(), places: { home: { key, link: "b://", last: "a" } } };
+    expect(mergeMaps(odd1, odd2).places["home"]?.link).toBe("a://");
+  });
+
+  it("an unknown top-level field newer on disk is not overwritten by a stale one in memory", () => {
+    const disk: MapFile = { ...emptyMap(), extra: "new" };
+    const mine: MapFile = { ...emptyMap(), extra: "stale", onlyMine: 1 };
+    const out = mergeMaps(disk, mine);
+    expect(out["extra"]).toBe("new");
+    expect(out["onlyMine"]).toBe(1);
+  });
+
+  it("removes a place with its roads and reflexes, and a route that starts there", async () => {
+    const dir = temp();
+    mkdirSync(join(dir, "routes"), { recursive: true });
+    writeFileSync(join(dir, "routes", "r.json"), JSON.stringify({ start: "gone", end: "home" }));
+    const file: MapFile = {
+      ...emptyMap(),
+      places: {
+        gone: { key: { route: ["gone"] }, link: null, last: "2026-11-12T10:00:00Z" },
+        home: { key: { route: ["home"] }, link: null, last: "2026-11-12T10:00:00Z" },
+      },
+      roads: [road("home", "gone", "g", "2026-11-12T10:00:00Z"), road("home", "home", "h", "2026-11-12T10:00:00Z")],
+      reflexes: [{ name: "x", when: { text: "t" }, do: { tool: "tap" }, at: "gone" }],
+      routes: { r: "routes/r.json" },
+    };
+    await saveMap(dir, file);
+    const out = await saveMap(dir, file, { removed: { places: [{ name: "gone", before: "2026-11-12T10:00:00Z" }] } });
+    expect(Object.keys(out.places)).toEqual(["home"]);
+    expect(out.roads.map((r) => r.move.target?.id)).toEqual(["h"]);
+    expect(out.reflexes).toEqual([]);
+    expect(out.routes).toEqual({});
+    expect(loadMap(dir, APP).map).toEqual(out);
+  });
+
+  it("a removal waits for the other tool's newer evidence", async () => {
+    const dir = temp();
+    const newer = road("a", "b", "x", "2026-11-12T12:00:00Z", "tapwright");
+    const place = { key: { route: ["p"] }, link: null, last: "2026-11-12T12:00:00Z" };
+    await saveMap(dir, { ...emptyMap(), roads: [newer], places: { p: place } });
+    // I last saw them at 10:00 and drop them; the disk copies are newer, so they stay.
+    const mine: MapFile = { ...emptyMap(), roads: [road("a", "b", "x", "2026-11-12T10:00:00Z")], places: { p: { ...place, last: "2026-11-12T10:00:00Z" } } };
+    const out = await saveMap(dir, mine, {
+      removed: {
+        roads: [{ from: "a", move: { tool: "tap", target: { id: "x" } }, to: "b", before: "2026-11-12T10:00:00Z" }],
+        places: [{ name: "p", before: "2026-11-12T10:00:00Z" }],
+      },
+    });
+    expect(out.roads).toHaveLength(1);
+    expect(out.places["p"]).toBeDefined();
+  });
+
+  it("removes a road and a reflex by name when the disk copy is not newer", async () => {
+    const dir = temp();
+    const file: MapFile = {
+      ...emptyMap(),
+      roads: [road("a", "b", "x", "2026-11-12T10:00:00Z"), road("b", "c", "y", "2026-11-12T10:00:00Z")],
+      reflexes: [{ name: "k", when: { text: "t" }, do: { tool: "tap" } }],
+    };
+    await saveMap(dir, file);
+    const out = await saveMap(dir, file, {
+      removed: {
+        roads: [{ from: "a", move: { tool: "tap", target: { id: "x" } }, to: "b", before: "2026-11-12T10:00:00Z" }],
+        reflexes: ["k"],
+      },
+    });
+    expect(out.roads.map((r) => r.from)).toEqual(["b"]);
+    expect(out.reflexes).toEqual([]);
+    expect(roadId("a", { tool: "tap", target: { id: "x" } }, "b")).toBe(roadId("a", { target: { id: "x" }, tool: "tap" }, "b"));
+  });
 });
