@@ -13,7 +13,7 @@ interface ErrorUtilsLike {
   setGlobalHandler?: (handler: ErrorHandler) => void;
 }
 
-const LEVELS: LogLevel[] = ['log', 'info', 'warn', 'error'];
+const LEVELS: LogLevel[] = ['log', 'info', 'debug', 'warn', 'error'];
 
 const buffer: LogEntry[] = [];
 let sink: LogSink | null = null;

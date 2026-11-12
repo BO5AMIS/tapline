@@ -8,7 +8,7 @@ import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, describeElement, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
@@ -267,6 +267,9 @@ export const toolShapes = {
   },
   logs: {
     since: z.number().optional().describe("Only lines after this timestamp (epoch milliseconds)"),
+    level: z.enum(["error", "warning", "info"]).optional().describe("That level and above (default info: everything)"),
+    grep: z.string().optional().describe("Only lines containing this text (case-insensitive)"),
+    limit: z.number().int().min(1).max(500).optional().describe("At most this many lines, the newest (1 to 500, default 100)"),
   },
   reload: { look: lookField },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
@@ -2889,9 +2892,9 @@ export class TaplineTools {
         // fall through with an empty list
       }
     }
-    const last = entries.reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
-    const footer = last !== undefined ? `\n(latest ts ${last}; pass since=${last} for newer lines)` : "";
-    return text(`${formatLogs(entries)}${footer}`);
+    const newest = entries.reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
+    const query = { since: args.since, level: args.level, grep: args.grep, limit: args.limit };
+    return text(formatLogAnswer(filterLogs(entries, query), query, newest ?? args.since ?? Date.now()));
   }
 
   async reload(args: Shape<"reload">): Promise<CallToolResult> {

@@ -478,9 +478,19 @@ describe("formatChanges (AGENT-TOOLS §3.1)", () => {
 });
 
 describe("formatLogs", () => {
-  it("renders time, level and message", () => {
-    const out = formatLogs([{ level: "warn", message: "careful", ts: Date.UTC(2026, 0, 1, 12, 30, 5, 7) }]);
-    expect(out).toBe("12:30:05.007 warn careful");
+  it("renders local time, level and message", () => {
+    const out = formatLogs([{ level: "warn", message: "careful", ts: new Date(2026, 0, 1, 12, 30, 5, 7).getTime() }]);
+    expect(out).toBe("12:30:05.007 warning careful");
+  });
+  it("maps levels and keeps an entry on one line, cut at 300 characters", () => {
+    const ts = new Date(2026, 0, 1, 9, 0, 0, 0).getTime();
+    expect(formatLogs([{ level: "log", message: "a", ts }])).toBe("09:00:00.000 info a");
+    expect(formatLogs([{ level: "info", message: "fatal one", fatal: true, ts }])).toBe("09:00:00.000 error fatal one");
+    expect(formatLogs([{ level: "error", message: "TypeError: x", stack: "at A (a.js:1)\nat B (b.js:2)", ts }])).toBe(
+      "09:00:00.000 error TypeError: x | at A (a.js:1) | at B (b.js:2)",
+    );
+    const long = formatLogs([{ level: "log", message: "x".repeat(357), ts }]);
+    expect(long).toBe(`09:00:00.000 info ${"x".repeat(300)}…(+57)`);
   });
   it("handles an empty list", () => {
     expect(formatLogs([])).toBe("(no log lines)");

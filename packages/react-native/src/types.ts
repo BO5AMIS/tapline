@@ -149,7 +149,7 @@ export type Target =
   | { text: string; index?: number }
   | { x: number; y: number; index?: number };
 
-export type LogLevel = 'log' | 'info' | 'warn' | 'error';
+export type LogLevel = 'log' | 'info' | 'debug' | 'warn' | 'error';
 
 export interface LogEntry {
   level: LogLevel;

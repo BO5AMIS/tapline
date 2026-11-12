@@ -1379,8 +1379,28 @@ describe("other tools", () => {
     const id = host.sessions()[0]?.id ?? "";
     for (let i = 0; i < 100 && host.logs(id).length === 0; i++) await new Promise((r) => setTimeout(r, 10));
     const text = textOf(await tools.logs({}));
-    expect(text).toContain("warn careful");
-    expect(text).toContain("since=5000");
+    expect(text).toContain("warning careful");
+    expect(text).toContain("Latest: 5000");
+  });
+
+  it("logs filters by level, grep and limit (AGENT-TOOLS 1.10 §15.1)", async () => {
+    const { host, app, tools } = await setup(defaultHandler)();
+    app.send({ type: "event", event: "log", data: { level: "log", message: "loaded trips", ts: 1000 } });
+    app.send({ type: "event", event: "log", data: { level: "warn", message: "[network] GET /trips → 404", ts: 2000 } });
+    app.send({ type: "event", event: "log", data: { level: "error", message: "Request timeout", ts: 3000 } });
+    app.send({ type: "event", event: "log", data: { level: "debug", message: "cache hit", ts: 4000 } });
+    const id = host.sessions()[0]?.id ?? "";
+    for (let i = 0; i < 100 && host.logs(id).length < 4; i++) await new Promise((r) => setTimeout(r, 10));
+    const warn = textOf(await tools.logs({ level: "warning" }));
+    expect(warn).toContain("warning [network] GET /trips → 404");
+    expect(warn).toContain("error Request timeout");
+    expect(warn).not.toContain("loaded trips");
+    expect(warn).toMatch(/Latest: 4000$/);
+    expect(textOf(await tools.logs({ grep: "TIMEOUT" }))).toMatch(/error Request timeout\nLatest: 4000$/);
+    const one = textOf(await tools.logs({ limit: 1 }));
+    expect(one).toContain("info cache hit");
+    expect(one.split("\n")).toHaveLength(2);
+    expect(textOf(await tools.logs({ level: "error", grep: "nothing" }))).toBe('No log entries at error or above, matching "nothing".\nLatest: 4000');
   });
 
   it("wait returns a fresh look", async () => {

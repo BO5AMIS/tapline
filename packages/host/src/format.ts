@@ -372,15 +372,76 @@ export function formatRoute(route: TreeResult["route"]): string | null {
   return `Route: ${route.names.join(" › ")}${params.length > 0 ? ` (${clip(params.join(", "), 160)})` : ""}`;
 }
 
-/** Log entries as `HH:MM:SS.mmm level message` lines. */
+export type LogLevelName = "error" | "warning" | "info";
+const LEVEL_RANK: Record<LogLevelName, number> = { info: 0, warning: 1, error: 2 };
+export const LOG_TEXT_MAX = 300;
+
+/** AGENT-TOOLS §15.1: error (console.error, JS errors, requests 500 and up), warning, or info. */
+export function logLevelOf(entry: LogEntry): LogLevelName {
+  if (entry.fatal === true) return "error";
+  const level = (entry.level ?? "log").toLowerCase();
+  if (level === "error" || level === "fatal") return "error";
+  if (level === "warn" || level === "warning") return "warning";
+  return "info";
+}
+
+export function atLeast(entry: LogEntry, level: LogLevelName): boolean {
+  return LEVEL_RANK[logLevelOf(entry)] >= LEVEL_RANK[level];
+}
+
+/** Local wall-clock time, `HH:MM:SS.mmm`. */
+export function clockTime(ts: number, millis = true): string {
+  const d = new Date(ts);
+  const two = (n: number): string => String(n).padStart(2, "0");
+  const base = `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  return millis ? `${base}.${String(d.getMilliseconds()).padStart(3, "0")}` : base;
+}
+
+/** An entry's whole text on one line: the message, then its stack when it adds anything. */
+export function logText(entry: LogEntry): string {
+  const stack = entry.stack !== undefined && entry.stack !== "" && entry.stack !== entry.message ? `\n${entry.stack}` : "";
+  return `${entry.message}${stack}`.replace(/\s*\n\s*/g, " | ").trim();
+}
+
+/** Log entries as `HH:MM:SS.mmm <level> <text>` lines, text cut at 300 characters with what is missing. */
 export function formatLogs(entries: LogEntry[]): string {
   if (entries.length === 0) return "(no log lines)";
   return entries
     .map((entry) => {
-      const when = entry.ts !== undefined ? new Date(entry.ts).toISOString().slice(11, 23) : "--:--:--.---";
-      const fatal = entry.fatal === true ? " FATAL" : "";
-      const stack = entry.stack !== undefined && entry.stack !== "" ? `\n${entry.stack}` : "";
-      return `${when} ${entry.level ?? "log"}${fatal} ${entry.message}${stack}`;
+      const when = entry.ts !== undefined ? clockTime(entry.ts) : "--:--:--.---";
+      const full = logText(entry);
+      const shown = full.length > LOG_TEXT_MAX ? `${full.slice(0, LOG_TEXT_MAX)}…(+${full.length - LOG_TEXT_MAX})` : full;
+      return `${when} ${logLevelOf(entry)} ${shown}`;
     })
     .join("\n");
+}
+
+export interface LogQuery {
+  since?: number;
+  level?: LogLevelName;
+  grep?: string;
+  limit?: number;
+}
+
+/** Applies `since`, `level`, `grep` and `limit` (the newest), oldest first. */
+export function filterLogs(entries: LogEntry[], query: LogQuery): LogEntry[] {
+  const needle = query.grep?.toLowerCase();
+  const kept = entries.filter(
+    (entry) =>
+      (query.since === undefined || (entry.ts ?? 0) > query.since) &&
+      atLeast(entry, query.level ?? "info") &&
+      (needle === undefined || needle === "" || logText(entry).toLowerCase().includes(needle)),
+  );
+  const limit = query.limit ?? 100;
+  return kept.length > limit ? kept.slice(kept.length - limit) : kept;
+}
+
+/** The `logs` answer (AGENT-TOOLS §15.1): the lines, or what was asked when there are none, then `Latest:`. */
+export function formatLogAnswer(entries: LogEntry[], query: LogQuery, latest: number): string {
+  if (entries.length > 0) return `${formatLogs(entries)}\nLatest: ${latest}`;
+  const asked: string[] = [];
+  if (query.level !== undefined && query.level !== "info") asked.push(`at ${query.level} or above`);
+  if (query.grep !== undefined && query.grep !== "") asked.push(`matching "${query.grep}"`);
+  if (query.since !== undefined) asked.push(`since ${clockTime(query.since)}`);
+  return `No log entries${asked.length > 0 ? ` ${asked.join(", ")}` : ""}.\nLatest: ${latest}`;
 }
