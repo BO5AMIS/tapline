@@ -69,7 +69,7 @@ function publishPlainSchemas(server: McpServer): void {
 
 /** Registers every Tapline tool on an MCP server. */
 export function createMcpServer(tools: TaplineTools): McpServer {
-  const server = new McpServer({ name: "tapline", version: "1.4.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: "1.5.0" }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     "apps",
