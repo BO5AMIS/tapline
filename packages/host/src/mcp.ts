@@ -5,7 +5,7 @@ import {
   configDir,
   hostUrl,
   markPaired,
-  pairedMarkerPath,
+  pairedBefore,
   reachableHost,
   resolveConfig,
   screenshotMode,
@@ -15,7 +15,6 @@ import {
   type ViewerMode,
 } from "./config.js";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
 import { Confirmations } from "./confirm.js";
@@ -53,9 +52,11 @@ function guarded<K extends ToolName>(
  */
 function publishPlainSchemas(server: McpServer): void {
   const handlers: unknown = Reflect.get(server.server, "_requestHandlers");
-  if (!(handlers instanceof Map)) return;
-  const original: unknown = handlers.get("tools/list");
-  if (typeof original !== "function") return;
+  const original: unknown = handlers instanceof Map ? handlers.get("tools/list") : undefined;
+  if (!(handlers instanceof Map) || typeof original !== "function") {
+    process.stderr.write("tapline: the MCP SDK changed; tool schemas keep additionalProperties (harmless, but strict clients may refuse it)\n");
+    return;
+  }
   const list = original as (request: unknown, extra: unknown) => Promise<{ tools: Array<{ inputSchema: Record<string, unknown> }> }>;
   handlers.set("tools/list", async (request: unknown, extra: unknown) => {
     const answer = await list(request, extra);
@@ -445,7 +446,7 @@ export async function runMcp(
     confirmations,
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },
-    pairedBefore: () => existsSync(pairedMarkerPath(options.env)),
+    pairedBefore: () => pairedBefore(options.env),
     pairImagePath: join(configDir(), `pair-${port}.png`),
     offerDir: join(configDir(), "offers"),
     screenshots,

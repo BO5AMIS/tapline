@@ -60,3 +60,24 @@ describe("Note: needs a person", () => {
     expect(textOf(await tools.apps())).not.toContain("needs a person");
   });
 });
+
+describe("needs a person: review fixes (1.3.1)", () => {
+  it("a pair call spends the note without telling the agent to call pair", async () => {
+    const tools = await toolsWith(() => false);
+    const paired = textOf(await tools.pair({}));
+    expect(paired).not.toContain("needs a person");
+    expect(textOf(await tools.apps())).not.toContain("needs a person");
+  });
+
+  it("counts what an earlier version left in ~/.tapline as paired", async () => {
+    const { pairedBefore } = await import("../src/config.js");
+    const env = { TAPLINE_HOME: "/fake/tapline" };
+    const only = (name: string) => (path: string) => path.split("\\").join("/").endsWith(`/fake/tapline/${name}`);
+    expect(pairedBefore(env, () => false)).toBe(false);
+    expect(pairedBefore(env, only("paired"))).toBe(true);
+    expect(pairedBefore(env, only("log"))).toBe(true);
+    expect(pairedBefore(env, only("offers"))).toBe(true);
+    expect(pairedBefore(env, only("token"))).toBe(false);
+    expect(pairedBefore(env, () => { throw new Error("EACCES"); })).toBe(false);
+  });
+});

@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedMarkerPath, tokenFilePath } from "./config.js";
+import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -59,7 +59,7 @@ function defaultRun(command: string, args: string[]): Promise<{ code: number; st
 
 function defaultGitStatus(dir: string): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("git", ["-C", dir, "status", "--porcelain"], { timeout: 3000, windowsHide: true, encoding: "utf8" }, (error, stdout) => {
+    execFile("git", ["--no-optional-locks", "-C", dir, "status", "--porcelain"], { timeout: 3000, windowsHide: true, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
       resolve(error === null ? stdout : null);
     });
   });
@@ -408,7 +408,7 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
 export function needsAPerson(results: CheckResult[], overrides: Partial<DoctorDeps> = {}): string[] {
   const deps: DoctorDeps = { ...defaultDeps(), ...overrides };
   const items: string[] = [];
-  if (!deps.fileExists(pairedMarkerPath(deps.env))) {
+  if (!pairedBefore(deps.env, deps.fileExists)) {
     items.push(
       "Pair the phone: have your agent call `pair`, then scan the QR code (or tap Connect) on the phone, on the same Wi-Fi as this computer. The app must be a build with Tapline turned on (EXPO_PUBLIC_TAPLINE_ENABLED=1); doctor can't see the phone's build.",
     );

@@ -908,11 +908,15 @@ export class TaplineTools {
    */
   private withPersonNote(answer: CallToolResult): CallToolResult {
     if (this.personNoteDone || this.options.pairedBefore === undefined) return answer;
-    this.personNoteDone = true;
-    if (this.host.current() !== undefined) return answer;
+    if (this.host.current() !== undefined) {
+      this.personNoteDone = true;
+      return answer;
+    }
+    if (answer.content[0]?.type !== "text") return answer; // nowhere to put it yet: the next answer says it
     const items: string[] = [];
     if (!this.options.pairedBefore()) items.push("the phone isn't paired yet (call `pair`, then the user scans the QR code or taps Connect)");
     items.push("the app isn't connected (the user opens it on the phone, on the same Wi-Fi as this computer)");
+    this.personNoteDone = true;
     return appendNote(answer, `Note: needs a person: ${items.join("; ")}.`);
   }
 
@@ -1003,6 +1007,7 @@ export class TaplineTools {
   // -- pair
 
   async pair(args: Shape<"pair">): Promise<CallToolResult> {
+    this.personNoteDone = true; // its answer says what the person does; no "call pair" note on it
     const { url, name } = this.options.connect;
     // Zero-QR pairing (Tapline 1.1): a development build whose JavaScript comes from this computer finds the
     // offer itself and asks its person to connect. Open for 10 minutes, one use, local network only.

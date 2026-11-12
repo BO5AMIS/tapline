@@ -4,7 +4,7 @@
 
 Fixes only, from a tester's feedback on the sibling tool.
 
-- Every tool refuses an argument it doesn't have: `Error bad_params: audit doesn't take labels; it takes types.`
+- Every tool refuses an argument it doesn't have (at the top level; `run` steps are checked as before): `Error bad_params: audit doesn't take labels; it takes types.`
   Before, the extra key was dropped silently and the call ran without it. The published tool schemas are unchanged.
 - A "needs a person" list: `tapline doctor` ends with a `Needs a person:` block (the phone has not paired yet, the
   firewall rule is missing), and the first answer of an MCP session adds `Note: needs a person: …` once when no app

@@ -1827,7 +1827,9 @@ function whereOf(finding: AuditFinding): AuditWhere | null {
   const text = finding.entry?.info.text ?? '';
   const label = finding.entry?.info.label ?? null;
   const where: AuditWhere = {
-    ...(finding.frame !== null ? { frame: finding.frame } : {}),
+    ...(finding.frame !== null && [finding.frame.x, finding.frame.y, finding.frame.width, finding.frame.height].every(Number.isFinite)
+      ? { frame: finding.frame }
+      : {}),
     ...(text !== '' ? { text: text.length > 80 ? `${text.slice(0, 79)}…` : text } : {}),
     ...(label !== null && label !== '' ? { label: label.length > 80 ? `${label.slice(0, 79)}…` : label } : {}),
   };

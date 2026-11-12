@@ -127,6 +127,21 @@ export function pairedMarkerPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(configDir(env), "paired");
 }
 
+/**
+ * Whether a phone has used this computer's host before: the marker (1.3.1 on), or what an earlier version left
+ * after a phone connected (its action log, screenshots, pairing offers, scripts or reference pictures).
+ */
+export function pairedBefore(env: NodeJS.ProcessEnv = process.env, exists: (path: string) => boolean = existsSync): boolean {
+  const dir = configDir(env);
+  return [pairedMarkerPath(env), ...["log", "shots", "offers", "scripts", "baselines"].map((name) => join(dir, name))].some((path) => {
+    try {
+      return exists(path);
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** Notes that an app has connected to this computer's host. Never throws. */
 export function markPaired(env: NodeJS.ProcessEnv = process.env): void {
   try {
