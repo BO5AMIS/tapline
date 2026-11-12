@@ -32,6 +32,8 @@ interface Setup {
   /** The tree answers, by the number of the tree call that wants changes (0 is the first one after the action). */
   tree?: (n: number) => Record<string, unknown>;
   capabilities?: string[];
+  /** Makes the tree call that wants changes fail (by its number). */
+  treeFails?: (n: number) => boolean;
   options?: Partial<ToolsOptions>;
 }
 
@@ -42,9 +44,15 @@ async function setup(config: Setup = {}) {
   const handler = (req: IncomingRequest): Reply => {
     if (req.method === "tree") {
       if (!wantsChanges(req)) return { ok: true, result: { screen: SCREEN, elements: [SAVE] } };
-      const extra = config.tree?.(wanted++) ?? {};
+      if (config.treeFails?.(wanted) === true) {
+        wanted++;
+        return { ok: false, error: { code: "internal", message: "the app broke" } };
+      }
+      const n = wanted++;
+      const extra = config.tree?.(n) ?? {};
       return { ok: true, result: { screen: SCREEN, elements: [SAVE], changes: SAME, ...extra } };
     }
+    if (req.method === "screenshot") return { ok: true, result: { mime: "image/jpeg", data: "AAAA", width: 10, height: 10 } };
     return { ok: true, result: { element: SAVE, settledMs: 120, ...(config.pressed ?? {}) } };
   };
   const hello = { capabilities: config.capabilities ?? ["tree", "press", "longPress", "logs", "dryRun", "pressFacts"] };
@@ -198,6 +206,59 @@ describe("a tap that changes nothing", () => {
     expect(answer).toMatch(NOTE);
     expect(answer).toContain("Its onPress ran and returned.");
     expect(answer).not.toContain("Settled in");
+  });
+
+  it("a second look that fails gives that error, not a note about a quiet screen", async () => {
+    const { tools } = await setup({ pressed: { handler: { kind: "own" }, startedRequests: 0 }, treeFails: (n) => n === 1 });
+    const answer = await tools.tap({ target: { id: "save" } });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("the app broke");
+    expect(textOf(answer)).not.toContain("the tap was delivered");
+  });
+
+  it("a screen that changes on the first look causes no wait", async () => {
+    const { tools, state } = await setup({
+      pressed: { handler: { kind: "own" }, startedRequests: 0 },
+      tree: () => ({ elements: [SAVE, NEW_TEXT], changes: { ...SAME, added: ["e9"] } }),
+    });
+    expect(textOf(await tools.tap({ target: { id: "save" } }))).toContain('+ e9 text "Saved"');
+    expect(state.slept).toEqual([]);
+  });
+
+  it("a screenshot on a no-change tap is taken once, on the final look", async () => {
+    const { tools, app } = await setup({ pressed: { handler: { kind: "own" }, startedRequests: 0 } });
+    await tools.tap({ target: { id: "save" }, screenshot: true });
+    expect(app.requests.filter((r) => r.method === "screenshot")).toHaveLength(1);
+  });
+
+  it("a screenshot on a tap that changed the screen is taken once too", async () => {
+    const { tools, app } = await setup({
+      pressed: { handler: { kind: "own" }, startedRequests: 0 },
+      tree: () => ({ elements: [SAVE, NEW_TEXT], changes: { ...SAME, added: ["e9"] } }),
+    });
+    const answer = await tools.tap({ target: { id: "save" }, screenshot: true });
+    expect(app.requests.filter((r) => r.method === "screenshot")).toHaveLength(1);
+    expect(answer.content.some((block) => block.type === "image")).toBe(true);
+  });
+
+  it("a handler that threw is said in every answer: changed screen, look:false, once when nothing changed", async () => {
+    const pressed = { handler: { kind: "own", threw: "nothing to save" }, startedRequests: 0 };
+    const changed = await setup({ pressed, tree: () => ({ elements: [SAVE, NEW_TEXT], changes: { ...SAME, added: ["e9"] } }) });
+    expect(textOf(await changed.tools.tap({ target: { id: "save" } }))).toContain("Note: its onPress threw: nothing to save (see logs).");
+    const quiet = await setup({ pressed });
+    const noLook = textOf(await quiet.tools.tap({ target: { id: "save" }, look: false }));
+    expect(noLook).toContain("Note: its onPress threw: nothing to save (see logs).");
+    const same = textOf(await quiet.tools.tap({ target: { id: "save" } }));
+    expect(same.split("threw: nothing to save")).toHaveLength(2);
+    expect(same).toContain("Its onPress threw: nothing to save (see logs).");
+    const long = await setup({ pressed });
+    expect(textOf(await long.tools.longPress({ target: { id: "save" }, look: false }))).toContain("Note: its onLongPress threw: nothing to save (see logs).");
+  });
+
+  it("a step of run whose handler threw stops the batch as internal, with the text in the trace", async () => {
+    const { tools } = await setup({ pressed: { handler: { kind: "own", threw: "nothing to save" }, startedRequests: 0 } });
+    const answer = textOf(await tools.run({ steps: [{ tool: "tap", target: { id: "save" } }, { tool: "tap", target: { id: "save" } }], trace: true }));
+    expect(answer).toMatch(/^Error internal: Ran 0 of 2 steps; stopped at step 1 .*its onPress threw: nothing to save \(see logs\)\./);
   });
 
   it("a tap that already took 0.6 s is not delayed: N is what was watched", async () => {

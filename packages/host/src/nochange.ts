@@ -11,7 +11,7 @@ export const ACTION_NAMES = { tap: "tap", long_press: "long press", double_tap: 
 export type NoChangeAction = keyof typeof ACTION_NAMES;
 
 /** The handler a touch calls, for the clause: a tap calls onPress, a long press onLongPress. */
-const HANDLER_NAMES: Record<NoChangeAction, string> = { tap: "onPress", long_press: "onLongPress", double_tap: "onPress" };
+export const HANDLER_NAMES: Record<NoChangeAction, string> = { tap: "onPress", long_press: "onLongPress", double_tap: "onPress" };
 
 /** What the app says of the touch (`press` and `longPress` results, capability `pressFacts`). */
 export const pressFactsSchema = z.object({
@@ -62,6 +62,12 @@ export function noChangeClause(
   if (handler.kind === "parent") return `It has no handler of its own; ${nameOf(handler.element)} took it.`;
   if (requestRunning && (facts.startedRequests ?? 0) > 0) return "It started a request that is still running: wait_for network_idle.";
   return `Its ${name} ran and returned.`;
+}
+
+/** What a handler that threw is said to be, in every answer: `its onPress threw: <message> (see logs).` Null when it didn't. */
+export function threwText(action: NoChangeAction, facts: PressFacts): string | null {
+  const threw = facts.handler?.threw;
+  return threw === undefined ? null : `its ${HANDLER_NAMES[action]} threw: ${cleanMessage(threw)} (see logs).`;
 }
 
 /** Whether an answer's text says the screen didn't change (a change block with only that line). */

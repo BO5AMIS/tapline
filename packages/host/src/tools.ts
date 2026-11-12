@@ -10,7 +10,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
-import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, type NoChangeAction } from "./nochange.js";
+import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
@@ -2489,6 +2489,11 @@ export class TaplineTools {
       return text([line, ...this.takePersonNote()].join("\n"));
     }
     this.showAction("agent", method, result, params);
+    // A handler that threw: a step of `run` or `replay` fails (the touch happened, and the app's code is what is wrong);
+    // anywhere else every answer says so, whether the screen changed or not (lead's decision, review of 1.6 task 5).
+    const threwLine = touch !== undefined ? threwText(touch, readPressFacts(result)) : null;
+    if (threwLine !== null && this.batch !== undefined) return fail(`Error internal: ${threwLine}`);
+    let threwSaid = false;
     let response: CallToolResult;
     const extra = [...(extraNotes?.(result) ?? [])];
     this.lastLookRoute = undefined;
@@ -2502,7 +2507,10 @@ export class TaplineTools {
       this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
       response = text([line, ...this.takePersonNote()].join("\n"));
     } else {
-      // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
+      // The touch happened about `settledMs` before the answer came; every wait is counted from there.
+      const touchedAt = this.clock() - (typeof settledMs === "number" && Number.isFinite(settledMs) ? settledMs : 0);
+      // A touch that may change nothing is looked at without a picture first: the picture is for the final look.
+      const mayWait = touch !== undefined && this.batch === undefined && !this.replaying;
       const lookAgain = async (shot: boolean): Promise<CallToolResult> => {
         const looked = await this.withLook(session, line, shot, shortAnswer);
         if (settled === undefined || shortAnswer) return looked;
@@ -2516,24 +2524,32 @@ export class TaplineTools {
         return { ...looked, content: [{ type: "text", text: all.join("\n") }, ...rest] };
       };
       // The app waited until it was still (AGENT-TOOLS §6), so the list is fresh.
-      response = await lookAgain(screenshot === true);
+      response = await lookAgain(screenshot === true && !mayWait);
       // A touch that changed nothing is watched a little longer before it is said so (§3). Not inside `run`
       // (a batch answers once), and the app has to have answered with a list.
-      if (touch !== undefined && this.batch === undefined && !this.replaying && response.isError !== true && saysNoVisibleChange(answerText(response))) {
-        const touchedAt = this.clock() - (typeof settledMs === "number" && Number.isFinite(settledMs) ? settledMs : 0);
+      if (mayWait && response.isError !== true && !saysNoVisibleChange(answerText(response)) && screenshot === true) {
+        response = await this.withPicture(session, response);
+      }
+      if (mayWait && touch !== undefined && response.isError !== true && saysNoVisibleChange(answerText(response))) {
         const wait = NO_CHANGE_WATCH_MS - (this.clock() - touchedAt);
         if (wait > 0) await this.sleep(wait);
         const later = await lookAgain(screenshot === true);
-        if (later.isError !== true && !saysNoVisibleChange(answerText(later))) {
-          // Something changed meanwhile: the normal answer, and no note. What the first look said once stays said.
-          const carried = answerText(response).split("\n").filter((row) => /^Note: (changes are since your last list|a person used the app)/.test(row));
-          const body = answerText(later);
-          const missing = carried.filter((row) => !body.includes(row));
-          const [top, ...rest] = later.content;
-          response = missing.length > 0 && top !== undefined && top.type === "text"
+        // What the first look said once stays said.
+        const carried = answerText(response).split("\n").filter((row) => /^Note: (changes are since your last list|a person used the app)/.test(row));
+        const missing = carried.filter((row) => !answerText(later).includes(row));
+        const [top, ...rest] = later.content;
+        const merged: CallToolResult =
+          missing.length > 0 && top !== undefined && top.type === "text"
             ? { ...later, content: [{ type: "text", text: [top.text.trimEnd(), ...missing].join("\n") }, ...rest] }
             : later;
+        if (later.isError === true) {
+          // The app crashed or went away while it was watched: that answer stands, not a note about a quiet screen.
+          response = later;
+        } else if (!saysNoVisibleChange(answerText(later))) {
+          // Something changed meanwhile: the normal answer, and no note.
+          response = merged;
         } else {
+          response = merged;
           const seconds = Math.max(this.clock() - touchedAt, 0) / 1000;
           const clause = noChangeClause(
             touch,
@@ -2542,9 +2558,12 @@ export class TaplineTools {
             (element) => this.shortName(element, true),
           );
           extra.push(`${noChangeNote(touch, seconds)}${clause !== null ? ` ${clause}` : ""}`);
+          // The clause already says a handler threw.
+          threwSaid = threwLine !== null;
         }
       }
     }
+    if (threwLine !== null && !threwSaid) extra.push(`Note: ${threwLine}`);
     const capMs = typeof result === "object" && result !== null && "settleCapMs" in result ? (result as { settleCapMs: unknown }).settleCapMs : undefined;
     if (typeof capMs === "number" && Number.isFinite(capMs) && capMs > 0) {
       extra.push(`Note: the screen was still changing after ${Number((capMs / 1000).toFixed(3))} s (an animation or video); positions may be mid-change.`);
@@ -2891,6 +2910,39 @@ export class TaplineTools {
     const parsed = screenshotResultSchema.safeParse(raw);
     if (!parsed.success) throw new TaplineError("internal", "The app returned a screenshot the host could not read.");
     return parsed.data;
+  }
+
+  /** A picture of the screen now, added to an answer that was made without one: its path line (file mode) or image, else a note. */
+  private async withPicture(session: SessionInfo, answer: CallToolResult): Promise<CallToolResult> {
+    const [first, ...rest] = answer.content;
+    if (first === undefined || first.type !== "text") return answer;
+    const rows = first.text.trimEnd().split("\n");
+    const notes: string[] = [];
+    const content: CallToolResult["content"] = [];
+    let line: string | undefined;
+    if (this.secureWindow()) notes.push(SECURE_QUIET_NOTE);
+    else if (this.noScreenshot.has(session.id)) notes.push(NO_SCREENSHOT_NOTE);
+    else {
+      try {
+        const image = await this.takeShot(session.id, DEFAULT_SCREENSHOT_WIDTH, 0.75);
+        if (this.options.screenshots === "file") {
+          const size = image.width !== undefined && image.height !== undefined ? ` (${image.width}x${image.height})` : "";
+          line = `Screenshot: ${this.saveShot(session.id, image.mime, image.data)}${size}`;
+        } else content.push({ type: "image", data: image.data, mimeType: image.mime });
+      } catch (error) {
+        if (error instanceof TaplineError && error.code === "unsupported") {
+          this.noScreenshot.add(session.id);
+          notes.push(NO_SCREENSHOT_NOTE);
+        } else notes.push(`Note: screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    // The path line goes before the Settled line and the notes.
+    let end = rows.length;
+    while (end > 1 && rows[end - 1]?.startsWith("Note: ") === true) end--;
+    if (rows[end - 1]?.startsWith("Settled in") === true) end--;
+    if (line !== undefined) rows.splice(end, 0, line);
+    rows.push(...notes);
+    return { ...answer, content: [{ type: "text", text: rows.join("\n") }, ...rest, ...content] };
   }
 
   /** Adds an image to a result: inline, or saved with its path in file mode. */
@@ -3547,7 +3599,7 @@ export class TaplineTools {
     const [first, ...rest] = parts.content;
     const head = first !== undefined && first.type === "text" ? first.text : "";
     // A brief answer already carries the first line.
-    return { content: [{ type: "text", text: brief ? head : `${line}\n${head}` }, ...rest] };
+    return { content: [{ type: "text", text: brief ? head : `${line}\n${head}` }, ...rest], ...(parts.isError ? { isError: true } : {}) };
   }
 
   /**

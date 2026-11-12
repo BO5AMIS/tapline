@@ -191,3 +191,13 @@ describe('press counts the requests it started', () => {
     expect(result.startedRequests).toBe(0);
   });
 });
+
+describe('an input with no onPress of its own', () => {
+  test('is only focused: press reports no handler', async () => {
+    const { TextInput } = jest.requireActual('react-native') as typeof import('react-native');
+    await mount(<TextInput testID="field" />);
+    useFrames({ field: frame(0, 100, 400, 50) });
+    const result = await run(() => press({ target: { testID: 'field' } }));
+    expect(result.handler).toBeUndefined();
+  });
+});

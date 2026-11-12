@@ -1115,22 +1115,27 @@ async function pressLike(
   const closedKeyboard = closeKeyboardFor(actor);
   const requestsBefore = startedRequests();
   let threw: string | undefined;
+  // An input with no onPress of its own was only focused: no handler ran, so none is reported.
+  let handled = handler !== null;
   if (handler) threw = callHandlerCaught(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
   else {
     // A finger focuses the input and also fires the input's own onPress (not an ancestor's: the
     // input takes the touch).
     focusInput(actor, frame);
     const own = appHandler(actor, 'onPress');
-    if (own) threw = callHandlerCaught('onPress', own, [pressEvent(actor.node.fiber, frame)]);
+    if (own) {
+      handled = true;
+      threw = callHandlerCaught('onPress', own, [pressEvent(actor.node.fiber, frame)]);
+    }
   }
   // Whose handler it was: the touched element's own, or an ancestor's that took the touch (§3).
-  const facts: HandlerFacts = sameFiber(actor.node.fiber, touched.node.fiber)
+  const facts: HandlerFacts | undefined = !handled ? undefined : sameFiber(actor.node.fiber, touched.node.fiber)
     ? { kind: 'own', ...(threw !== undefined ? { threw } : {}) }
     : { kind: 'parent', element, ...(threw !== undefined ? { threw } : {}) };
   const second = afterMs === undefined ? undefined : await pressAgain(actor, params, afterMs);
   const settled = await settleOutcome();
   return {
-    handler: facts,
+    ...(facts !== undefined ? { handler: facts } : {}),
     startedRequests: Math.max(0, startedRequests() - requestsBefore),
     element,
     ...(reach.scrolled ? { scrolled: true as const } : {}),
