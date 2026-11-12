@@ -48,7 +48,9 @@ describe("the one form field", () => {
   it("is required, has no default and offers the two choices", () => {
     const field = OK_SCHEMA.properties[OK_FIELD];
     expect(OK_SCHEMA.required).toEqual([OK_FIELD]);
-    expect(field?.enum).toEqual(["Allow once", "Don't allow"]);
+    // Don't allow first: a host that fills in the first choice by itself denies.
+    expect(field?.enum).toEqual(["Don't allow", "Allow once"]);
+    expect(field?.enum?.[0]).toBe(OK_DENY);
     expect(field).not.toHaveProperty("default");
   });
 });
@@ -73,8 +75,8 @@ describe("Dialogs", () => {
     expect(await asked).toBe(expected);
   });
 
-  it("a thrown error is Don't allow", async () => {
-    expect(await new Dialogs(new FakeClient(true, "throw")).askOk("caption")).toBe("deny");
+  it("an error before any answer means there is no dialog, not a refusal", async () => {
+    expect(await new Dialogs(new FakeClient(true, "throw")).askOk("caption")).toBe("unavailable");
   });
 
   it("one dialog at a time, the second waits", async () => {

@@ -31,6 +31,9 @@ import { VIEWER_HTML } from "./viewer-page.js";
 /** How long a client of the thin call may stay silent before its tools (its report, its journey) are dropped. */
 export const CLIENT_IDLE_MS = 30 * 60 * 1000;
 
+/** The client id of a thin call that names none. */
+export const ANONYMOUS_CLIENT = "anonymous";
+
 export interface RuntimeOptions extends ResolveOptions {
   screenshots?: string;
   viewer?: string;
@@ -207,7 +210,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
 
   /** Every call through `/api` is a thin call: the log says so, and the report flags a run of them (§16.1). */
   function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined): Promise<CallToolResult> {
-    const tools = toolsFor(clientId);
+    // A thin call never uses the MCP server's tools: those hold its dialog and the OKs given for its calls.
+    const tools = toolsFor(clientId ?? ANONYMOUS_CLIENT);
     return tools.asThinCall(() => callTool(tools, tool, args));
   }
 
@@ -221,7 +225,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
       return known.tools;
     }
     // The call log names the agent by this id.
-    const tools = new TaplineTools(host, { ...toolsOptions, clientId: () => clientId });
+    const tools = new TaplineTools(host, { ...toolsOptions, clientId: () => clientId, confirmScope: "api" });
     clients.set(clientId, { tools, lastUsed: now });
     return tools;
   }

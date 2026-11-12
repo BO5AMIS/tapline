@@ -73,7 +73,8 @@ export function createMcpServer(tools: TaplineTools, options: { noDialog?: boole
         inputSchema: looseInput(name),
         ...(meta.readOnly ? { annotations: { readOnlyHint: true } } : {}),
       },
-      (args: Record<string, unknown>) => runTool(tools, name, args),
+      // The request's abort signal closes a dialog the call is waiting on when the client cancels or times out.
+      (args: Record<string, unknown>, extra: { signal: AbortSignal }) => tools.withCall(extra.signal, () => runTool(tools, name, args)),
     );
   }
 

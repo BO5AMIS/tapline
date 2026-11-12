@@ -44,7 +44,7 @@ describe("the host's dialog over MCP", () => {
     expect(seen[0]).toMatchObject({
       mode: "form",
       message: 'Allow: tap "Delete trip" in Wayfare? (policy word "Delete")',
-      requestedSchema: { required: [OK_FIELD], properties: { [OK_FIELD]: { type: "string", enum: ["Allow once", "Don't allow"] } } },
+      requestedSchema: { required: [OK_FIELD], properties: { [OK_FIELD]: { type: "string", enum: ["Don't allow", "Allow once"] } } },
     });
   });
 

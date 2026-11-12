@@ -544,6 +544,8 @@ export interface ToolsOptions {
   canConfirm?: boolean;
   /** The host's dialog for a person's OK (AGENT-TOOLS 1.13 §11.3). Default: none, as when the client can't show one. */
   dialogs?: Dialogs;
+  /** Part of every OK's key: `mcp` for the agent's own MCP server (the default), `api` for thin calls, so the two never share an OK. */
+  confirmScope?: string;
   /**
    * Where `pair` writes the development offer for the Metro helper (`~/.tapline/offers`), so a phone that can
    * only reach Metro (a firewall in the way of 7210-7219) still finds it. None: only the host's own endpoint.
@@ -1120,7 +1122,7 @@ export class TaplineTools {
   readonly confirmations: Confirmations;
   private dialogs: Dialogs | undefined;
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
-  private heldMs = 0;
+  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal }>();
   private readonly policy: PolicyFile;
   private readonly uxRules: UxRules;
   /**
@@ -1847,7 +1849,8 @@ export class TaplineTools {
     const before = this.runAccount;
     this.runAccount = args.account;
     try {
-      return await this.runBatch(args);
+      // The batch counts its own waits for a person's OK, unless the call already has a counter (§9.3).
+      return await (this.holdScope.getStore() !== undefined ? this.runBatch(args) : this.holdScope.run({ ms: 0 }, () => this.runBatch(args)));
     } finally {
       this.runAccount = before;
     }
@@ -1952,7 +1955,8 @@ export class TaplineTools {
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
     const started = Date.now();
-    const heldAtStart = this.heldMs;
+    const hold = this.holdScope.getStore() ?? { ms: 0 };
+    const heldAtStart = hold.ms;
     const batchId = `b${started.toString(36)}`;
     const notes: string[] = [];
     const trace: string[] = [];
@@ -1962,7 +1966,7 @@ export class TaplineTools {
     let stepMark: number | undefined;
     for (const [i, step] of steps.entries()) {
       // Time spent waiting for a person's OK isn't counted (§9.3).
-      if (Date.now() - started - (this.heldMs - heldAtStart) > RUN_TIMEOUT_MS) {
+      if (Date.now() - started - (hold.ms - heldAtStart) > RUN_TIMEOUT_MS) {
         stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
         break;
       }
@@ -3865,8 +3869,7 @@ export class TaplineTools {
     if (verdict.kind !== "confirm") return { waited: null };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
-    const key = `${client}|${session.app.id}|${tool}|${elementKey(verdict.element)}`;
+    const key = this.confirmKey(session, tool, verdict.element);
     const ask = { kind: tool, caption, word: verdict.word };
     const fp = this.fingerprint(verdict.element);
     const name = this.shortName(verdict.element, false);
@@ -3874,6 +3877,10 @@ export class TaplineTools {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
       return { stop: fail(`Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${tail}`) };
     };
+    const hold = this.holdScope.getStore();
+    const cancelled = hold?.signal;
+    const wasCancelled = (): boolean => cancelled?.aborted === true;
+    if (wasCancelled()) return refuse("The call was cancelled before anyone answered.");
     const check = this.confirmations.check(key, ask);
     if (check.granted) return { waited: { fp, via: check.via } };
     if ("held" in check) {
@@ -3887,20 +3894,56 @@ export class TaplineTools {
     const abort = new AbortController();
     const waitStarted = Date.now();
     // The dialog's answer goes through the same request the live view answers: the first one wins, the other is closed.
-    void dialogs
-      .askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
-      .then((answer) => {
-        if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
-      });
-    const settled = await this.confirmations.wait(check.request.id);
+    const noDialog = new Promise<"no_dialog">((resolve) => {
+      void dialogs
+        .askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
+        .then((answer) => {
+          if (answer === "unavailable") resolve("no_dialog");
+          else if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
+        });
+    });
+    // A cancelled or timed-out call closes the dialog and the request, and never touches.
+    const onCancel = (): void => this.confirmations.withdraw(check.request.id);
+    cancelled?.addEventListener("abort", onCancel, { once: true });
+    const settled = await Promise.race([this.confirmations.wait(check.request.id), noDialog]);
+    cancelled?.removeEventListener("abort", onCancel);
     abort.abort();
-    // Time spent waiting for a person isn't the batch's time (§9.3).
-    this.heldMs += Date.now() - waitStarted;
+    // Time spent waiting for a person isn't the batch's time (§9.3); it is counted for this call only.
+    if (hold !== undefined) hold.ms += Date.now() - waitStarted;
+    if (settled === "no_dialog") {
+      // The client can't show the dialog (it answered an error, not a choice): the live-view-only answer, no hold.
+      return refuse(this.liveViewLine());
+    }
+    if (wasCancelled()) {
+      if (settled.allow) this.confirmations.check(key, ask);
+      return refuse("The call was cancelled before anyone answered.");
+    }
     if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
-    if (!settled.allow) return refuse("They declined. Don't ask again by repeating the call: ask your user what they want.");
+    if (!settled.allow) return refuse("They declined. Ask your user what to do.");
     const used = this.confirmations.check(key, ask);
     if (!used.granted) return { stop: fail(CHANGED_WHILE_WAITING) };
     return { waited: { fp, via: used.via } };
+  }
+
+  /** Where an OK is given when no dialog can be shown (AGENT-TOOLS 1.8 §11.2). */
+  private liveViewLine(): string {
+    return this.options.canConfirm === false
+      ? "The live view is off, so nobody can allow it here; ask your user."
+      : "The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.";
+  }
+
+  /** An OK is for this server, this client, this app, this tool and this element only (Tapwright's review, M1). */
+  private confirmKey(session: SessionInfo, tool: string, element: TreeElement): string {
+    const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
+    return `${this.options.confirmScope ?? "mcp"}|${client}|${session.app.id}|${tool}|${elementKey(element)}`;
+  }
+
+  /**
+   * Runs a call of the agent with its own wait counter and, when there is one, the request's abort signal, so a
+   * wait for a person's OK is counted for this call only and closes when the call is cancelled.
+   */
+  withCall<T>(signal: AbortSignal | undefined, run: () => T): T {
+    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}) }, run);
   }
 
   /**
@@ -3930,7 +3973,12 @@ export class TaplineTools {
     }
     if (waited !== undefined && waited !== null) {
       // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
-      const same = verdict.kind === "confirm" && this.fingerprint(verdict.element) === waited.fp && this.host.current()?.id === session.id;
+      // A call that was cancelled while it waited never touches.
+      const same =
+        verdict.kind === "confirm" &&
+        this.fingerprint(verdict.element) === waited.fp &&
+        this.host.current()?.id === session.id &&
+        this.holdScope.getStore()?.signal?.aborted !== true;
       if (!same) {
         this.showAction("agent", method, undefined, params, "not_allowed", "needs_confirmation");
         return { stop: fail(CHANGED_WHILE_WAITING) };
@@ -3940,10 +3988,8 @@ export class TaplineTools {
     if (verdict.kind === "none") return { granted: false };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    // An OK is for this app, this tool and this element only (Tapwright's review, M1).
     // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
-    const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
-    const check = this.confirmations.check(`${client}|${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
+    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.element), { kind: tool, caption, word: verdict.word });
     if (check.granted) return { granted: true, via: check.via };
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
@@ -3954,14 +4000,10 @@ export class TaplineTools {
         ),
       };
     }
-    const where =
-      this.options.canConfirm === false
-        ? "The live view is off, so nobody can allow it here; ask your user."
-        : "The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.";
     this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
     return {
       stop: fail(
-        `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${where}${check.suffix}`,
+        `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${this.liveViewLine()}${check.suffix}`,
       ),
     };
   }

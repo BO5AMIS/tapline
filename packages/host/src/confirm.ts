@@ -151,6 +151,16 @@ export class Confirmations {
     return true;
   }
 
+  /** The call that asked was cancelled: the request closes everywhere, and nobody is held to it (no "declined", no "expired"). */
+  withdraw(id: string): void {
+    const p = this.pending.get(id);
+    if (p === undefined) return;
+    clearTimeout(p.timer);
+    this.pending.delete(id);
+    this.emit({ type: "confirm_closed", id, allow: false });
+    this.settle(id, { allow: false, via: "live view", expired: true });
+  }
+
   /** Closes everything (the server stops). */
   close(): void {
     for (const p of this.pending.values()) clearTimeout(p.timer);

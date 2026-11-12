@@ -7,7 +7,10 @@ export const OK_FIELD = "answer";
 export const OK_ALLOW = "Allow once";
 export const OK_DENY = "Don't allow";
 
-/** The one form field: required, no default, so a host that accepts an empty form still can't produce an allow. */
+/**
+ * The one form field: required, no default, so a host that accepts an empty form still can't produce an allow.
+ * Don't allow comes first, so a host that fills in the first choice by itself denies.
+ */
 export interface ElicitSchema {
   type: "object";
   properties: Record<string, { type: "string"; title: string; enum: string[] }>;
@@ -16,7 +19,7 @@ export interface ElicitSchema {
 
 export const OK_SCHEMA: ElicitSchema = {
   type: "object",
-  properties: { [OK_FIELD]: { type: "string", title: "Allow this touch?", enum: [OK_ALLOW, OK_DENY] } },
+  properties: { [OK_FIELD]: { type: "string", title: "Allow this touch?", enum: [OK_DENY, OK_ALLOW] } },
   required: [OK_FIELD],
 };
 
@@ -34,7 +37,8 @@ export interface ElicitClient {
 /** A person's OK is asked for up to this long, as long as the live view's request lives (§11.3). */
 export const DIALOG_TTL_MS = 120_000;
 
-export type OkAnswer = "allow" | "deny" | "aborted";
+/** `unavailable`: the client answered an error before any choice (for example method not found): there is no dialog. */
+export type OkAnswer = "allow" | "deny" | "aborted" | "unavailable";
 
 export class Dialogs {
   private tail: Promise<unknown> = Promise.resolve();
@@ -80,8 +84,8 @@ export class Dialogs {
       if (answer === "aborted" || own.signal.aborted) return "aborted";
       return answer.action === "accept" && answer.content?.[OK_FIELD] === OK_ALLOW ? "allow" : "deny";
     } catch {
-      // An error is Don't allow, unless it came from our own abort.
-      return own.signal.aborted ? "aborted" : "deny";
+      // An error before any answer means this client has no dialog; a real decline or cancel is a result, not an error.
+      return own.signal.aborted ? "aborted" : "unavailable";
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", stop);

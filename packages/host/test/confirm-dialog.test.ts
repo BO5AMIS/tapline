@@ -159,7 +159,7 @@ describe("a person's OK in the host's dialog (§11.3)", () => {
     const declined = await call;
     expect(declined.isError).toBe(true);
     expect(textOf(declined)).toBe(
-      `Error not_allowed: needs_confirmation: button "Delete trip" needs a person's OK (policy word "Delete"). They declined. Don't ask again by repeating the call: ask your user what they want.`,
+      `Error not_allowed: needs_confirmation: button "Delete trip" needs a person's OK (policy word "Delete"). They declined. Ask your user what to do.`,
     );
     const again = await tools.tap({ target: { id: "delete-trip" }, look: false });
     expect(textOf(again)).toMatch(/they declined it just now\. Don't ask again/);
