@@ -12,7 +12,7 @@ import {
 import { openAlerts } from './alerts';
 import { keyboardState } from './keyboard';
 import { refreshCover } from './native';
-import { inFlight } from './network';
+import { inFlight, networkCondition } from './network';
 import { commitRevision, getRoots } from './register';
 import {
   TaplineError,
@@ -1485,7 +1485,10 @@ export async function tree(params: unknown = {}): Promise<TreeResult> {
     result.alerts = alerts.map(({ kind, title, message, buttons, standIn }) => ({ kind, title, message, buttons, standIn }));
   }
   const busy = inFlight();
-  if (busy > 0) result.network = { inFlight: busy };
+  const mode = networkCondition();
+  if (busy > 0 || mode !== 'normal') {
+    result.network = { ...(busy > 0 ? { inFlight: busy } : {}), ...(mode !== 'normal' ? { condition: mode } : {}) };
+  }
   // `Keyboard: shown` in the header while it is up; in a change block only when it came or went.
   const keyboard = keyboardState()?.shown;
   if (keyboard === true) result.keyboard = true;

@@ -1,4 +1,5 @@
 import { Appearance } from 'react-native';
+import { NETWORK_MODES, setNetworkCondition, type NetworkMode } from './network';
 import { TaplineError, isRecord, type Json } from './types';
 
 /**
@@ -31,8 +32,27 @@ const appearance: TaplineCommand = {
   },
 };
 
+/** The one sentence the answer gives about what the conditions reach and what they leave out. */
+export const NETWORK_COVERAGE =
+  "It covers the app's own fetch and XMLHttpRequest requests; WebSockets, images the native side loads and native SDKs are not affected.";
+
+/** Built in: slow, flaky or no network for the app's own requests; back to normal by itself when the session ends. */
+const network: TaplineCommand = {
+  description:
+    'Make the app\'s own network requests slow, flaky or fail (args: { mode: "offline" | "3g" | "lossy" | "normal" }); back to normal when the session ends',
+  run: (args) => {
+    const mode = args.mode;
+    if (typeof mode !== 'string' || !NETWORK_MODES.includes(mode as NetworkMode)) {
+      throw new Error('mode must be "offline", "3g", "lossy" or "normal"');
+    }
+    setNetworkCondition(mode as NetworkMode);
+    return mode === 'normal' ? { mode } : { mode, covers: NETWORK_COVERAGE };
+  },
+};
+
 function installBuiltIns(): void {
   registry.set('appearance', appearance);
+  registry.set('network', network);
 }
 installBuiltIns();
 

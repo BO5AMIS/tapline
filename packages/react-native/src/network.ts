@@ -32,13 +32,28 @@ interface RequestInfo {
   method: string;
   url: string;
   ignored: boolean;
+  /** Metro / dev-server traffic: tracked or not, never conditioned. */
+  devServer: boolean;
 }
 
 interface Installed {
   proto: Record<string, unknown>;
   open: { own: boolean; fn: AnyFn };
   send: { own: boolean; fn: AnyFn };
+  abort: { own: boolean; fn: AnyFn | null };
 }
+
+/** What Tapline can make the app's requests behave like (`network` app command). */
+export type NetworkMode = 'offline' | '3g' | 'lossy' | 'normal';
+export const NETWORK_MODES: readonly NetworkMode[] = ['offline', '3g', 'lossy', 'normal'];
+
+const THREE_G_LATENCY_MS = 400;
+/** 750 kbit/s in bytes per millisecond. */
+const THREE_G_BYTES_PER_MS = 750_000 / 8 / 1000;
+const MAX_TRANSFER_MS = 30_000;
+const LOSSY_FAIL_SHARE = 0.2;
+const LOSSY_FAIL_DELAY_MS: readonly [number, number] = [100, 400];
+const LOSSY_SLOW_DELAY_MS: readonly [number, number] = [50, 250];
 
 const MAX_URL_CHARS = 200;
 const ABSOLUTE_URL = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i;
@@ -50,6 +65,10 @@ let installed: Installed | null = null;
 let customIgnore: ((url: string) => boolean) | null = null;
 let pending = 0;
 let generation = 0;
+let condition: NetworkMode = 'normal';
+let random: () => number = Math.random;
+/** Requests whose send is delayed (or doomed), so abort() can cancel them. */
+const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null }>();
 
 /** scheme://host[:port]/path, query replaced by "?…", no fragment or credentials. */
 export function redactUrl(raw: string): string {
@@ -164,6 +183,7 @@ function patchedOpen(original: AnyFn): AnyFn {
           method: String(args[0]).toUpperCase(),
           url: redactUrl(rawUrl),
           ignored: isIgnored(rawUrl),
+          devServer: defaultIgnore(rawUrl),
         });
       }
     } catch {
@@ -182,6 +202,16 @@ function patchedSend(original: AnyFn): AnyFn {
       settle = null;
     }
     try {
+      if (condition !== 'normal' && typeof this === 'object' && this !== null) {
+        const info = requests.get(this);
+        if (info && !info.ignored && !info.devServer && applyCondition(this, condition, original, args, settle)) {
+          return undefined;
+        }
+      }
+    } catch {
+      // conditioning must never break a request: fall through to a plain send
+    }
+    try {
       return original.apply(this, args);
     } catch (error) {
       // the request never started: it can't end, so stop counting it
@@ -192,6 +222,218 @@ function patchedSend(original: AnyFn): AnyFn {
       }
       throw error;
     }
+  };
+}
+
+function patchedAbort(original: AnyFn): AnyFn {
+  return function abort(this: unknown, ...args: unknown[]): unknown {
+    try {
+      if (typeof this === 'object' && this !== null) {
+        const entry = held.get(this);
+        if (entry) {
+          clearTimeout(entry.timer);
+          held.delete(this);
+          entry.settle?.();
+        }
+      }
+    } catch {
+      // never throw into the app
+    }
+    return original.apply(this, args);
+  };
+}
+
+function between(range: readonly [number, number]): number {
+  return range[0] + random() * (range[1] - range[0]);
+}
+
+function assign(target: object, key: string, value: unknown): void {
+  try {
+    (target as Record<string, unknown>)[key] = value;
+  } catch {
+    try {
+      Object.defineProperty(target, key, { value, configurable: true, writable: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function makeEvent(type: string): unknown {
+  const Ctor = (globalThis as { Event?: unknown }).Event;
+  if (isFn(Ctor)) {
+    try {
+      return new (Ctor as unknown as new (type: string) => unknown)(type);
+    } catch {
+      // fall back to a plain object
+    }
+  }
+  return { type };
+}
+
+/** Fails a request the way React Native does with no connection: status 0, `error`, then `loadend`. */
+function failRequest(xhr: object): void {
+  try {
+    assign(xhr, 'readyState', 4);
+    assign(xhr, 'status', 0);
+    const target = xhr as { dispatchEvent?: unknown; onreadystatechange?: unknown };
+    if (isFn(target.dispatchEvent)) {
+      const dispatch = target.dispatchEvent as (event: unknown) => unknown;
+      for (const type of ['readystatechange', 'error', 'loadend']) {
+        try {
+          dispatch.call(xhr, makeEvent(type));
+        } catch {
+          // a handler's error stays the app's
+        }
+      }
+    } else if (isFn(target.onreadystatechange)) {
+      (target.onreadystatechange as AnyFn).call(xhr);
+    }
+  } catch {
+    // never throw into the app
+  }
+}
+
+function sizeOf(xhr: object): number {
+  const x = xhr as { getResponseHeader?: unknown; responseText?: unknown; response?: unknown };
+  try {
+    if (isFn(x.getResponseHeader)) {
+      const length = Number((x.getResponseHeader as (name: string) => unknown).call(xhr, 'content-length'));
+      if (Number.isFinite(length) && length > 0) return length;
+    }
+  } catch {
+    // fall through
+  }
+  try {
+    if (typeof x.responseText === 'string') return x.responseText.length;
+  } catch {
+    // responseText throws for non-text response types
+  }
+  const response = x.response;
+  if (typeof response === 'object' && response !== null) {
+    const { byteLength, size } = response as { byteLength?: unknown; size?: unknown };
+    if (typeof byteLength === 'number') return byteLength;
+    if (typeof size === 'number') return size;
+  }
+  return 0;
+}
+
+function bodyBytes(body: unknown): number {
+  if (typeof body === 'string') return body.length;
+  if (typeof body === 'object' && body !== null) {
+    const { byteLength, size } = body as { byteLength?: unknown; size?: unknown };
+    if (typeof byteLength === 'number') return byteLength;
+    if (typeof size === 'number') return size;
+  }
+  return 0;
+}
+
+/** Holds back the events that deliver the finished response until the transfer would have taken. */
+function holdResponse(xhr: object): void {
+  const target = xhr as { dispatchEvent?: unknown };
+  if (!isFn(target.dispatchEvent)) return;
+  const dispatch = target.dispatchEvent as (event: unknown) => unknown;
+  let queue: unknown[] | null = null;
+  let released = false;
+  assign(xhr, 'dispatchEvent', function dispatchEvent(this: unknown, event: unknown): unknown {
+    if (released) return dispatch.call(xhr, event);
+    if (queue) {
+      queue.push(event);
+      return true;
+    }
+    if ((xhr as { readyState?: unknown }).readyState === 4) {
+      const delay = Math.min(MAX_TRANSFER_MS, Math.ceil(sizeOf(xhr) / THREE_G_BYTES_PER_MS));
+      if (delay > 0) {
+        const events: unknown[] = [event];
+        queue = events;
+        setTimeout(() => {
+          queue = null;
+          released = true;
+          for (const queued of events) {
+            try {
+              dispatch.call(xhr, queued);
+            } catch {
+              // a handler's error stays the app's
+            }
+          }
+        }, delay);
+        return true;
+      }
+      released = true;
+    }
+    return dispatch.call(xhr, event);
+  });
+}
+
+/** Returns true when the condition took over the request (the real send happens later, or never). */
+function applyCondition(
+  xhr: object,
+  mode: NetworkMode,
+  original: AnyFn,
+  args: unknown[],
+  settle: (() => void) | null,
+): boolean {
+  const realSend = (): void => {
+    held.delete(xhr);
+    if (mode === '3g') holdResponse(xhr);
+    try {
+      original.apply(xhr, args);
+    } catch {
+      settle?.();
+      failRequest(xhr);
+    }
+  };
+  const fail = (): void => {
+    held.delete(xhr);
+    failRequest(xhr);
+  };
+  let timer: ReturnType<typeof setTimeout>;
+  if (mode === 'offline') {
+    timer = setTimeout(fail, 0);
+  } else if (mode === '3g') {
+    const upload = bodyBytes(args[0]) / THREE_G_BYTES_PER_MS;
+    timer = setTimeout(realSend, Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + upload));
+  } else if (random() < LOSSY_FAIL_SHARE) {
+    timer = setTimeout(fail, between(LOSSY_FAIL_DELAY_MS));
+  } else {
+    timer = setTimeout(realSend, between(LOSSY_SLOW_DELAY_MS));
+  }
+  held.set(xhr, { timer, settle });
+  return true;
+}
+
+/** The mode the app's requests are in now. */
+export function networkCondition(): NetworkMode {
+  return condition;
+}
+
+/** Puts the app's requests into a mode; `normal` restores them. Requests already sent are not touched. */
+export function setNetworkCondition(mode: NetworkMode): void {
+  if (!NETWORK_MODES.includes(mode)) throw new Error(`mode must be one of ${NETWORK_MODES.join(', ')}`);
+  if (mode !== 'normal' && !installed) {
+    throw new Error('network conditions need Tapline running in the app (the request patch is not installed)');
+  }
+  condition = mode;
+}
+
+/** Back to normal; safe to call any time (host gone, Tapline stopped). */
+export function resetNetworkCondition(): void {
+  condition = 'normal';
+}
+
+/** A seeded random source for `lossy` (tests); `null` goes back to Math.random. */
+export function seedNetworkRandom(seed: number | null): void {
+  if (seed === null) {
+    random = Math.random;
+    return;
+  }
+  let state = seed >>> 0;
+  random = () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
@@ -206,16 +448,19 @@ export function installNetworkTracking(options: NetworkOptions = {}): void {
     const record = proto as Record<string, unknown>;
     const open = record.open;
     const send = record.send;
+    const abort = record.abort;
     if (!isFn(open) || !isFn(send)) return;
 
     installed = {
       proto: record,
       open: { own: Object.prototype.hasOwnProperty.call(record, 'open'), fn: open },
       send: { own: Object.prototype.hasOwnProperty.call(record, 'send'), fn: send },
+      abort: { own: Object.prototype.hasOwnProperty.call(record, 'abort'), fn: isFn(abort) ? abort : null },
     };
     customIgnore = options.ignore ?? null;
     record.open = patchedOpen(open);
     record.send = patchedSend(send);
+    if (isFn(abort)) record.abort = patchedAbort(abort);
   } catch {
     // never throw into the app
   }
@@ -227,12 +472,17 @@ export function uninstallNetworkTracking(): void {
   customIgnore = null;
   pending = 0;
   generation += 1;
+  condition = 'normal';
   if (!current) return;
   try {
     if (current.open.own) current.proto.open = current.open.fn;
     else delete current.proto.open;
     if (current.send.own) current.proto.send = current.send.fn;
     else delete current.proto.send;
+    if (current.abort.fn) {
+      if (current.abort.own) current.proto.abort = current.abort.fn;
+      else delete current.proto.abort;
+    }
   } catch {
     // ignore
   }

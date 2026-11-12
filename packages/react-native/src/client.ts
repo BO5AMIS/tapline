@@ -9,6 +9,7 @@ import { forgetLastTree } from './inspect';
 import { originalLog, setLogSink } from './logs';
 import { methods as defaultMethods, type MethodFn } from './methods';
 import { refreshCover } from './native';
+import { resetNetworkCondition } from './network';
 import { stopPerf } from './perf';
 import {
   PROTOCOL_VERSION,
@@ -177,6 +178,7 @@ export class TaplineClient {
     if (stopTouchWatch) this.safely(stopTouchWatch);
     const socket = this.socket;
     this.socket = null;
+    resetNetworkCondition();
     if (this.ready) this.status('disconnected');
     this.ready = false;
     setLogSink(null);
@@ -399,6 +401,8 @@ export class TaplineClient {
     this.pingTimer = null;
     setLogSink(null);
     setEventSink(null);
+    // The phone is never left offline or slow with nobody watching.
+    resetNetworkCondition();
     // Nobody can watch while disconnected; the host asks again after it reconnects.
     stopLiveFeed();
     stopPerf();

@@ -9,7 +9,7 @@ import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { alertNotes, networkLine, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -3189,6 +3189,12 @@ export class TaplineTools {
       { name, args: args.args ?? {} },
       (r) => {
         const result = typeof r === "object" && r !== null && "result" in r ? (r as { result: unknown }).result : null;
+        // Built in `network`: the same line every header carries while a condition is on (AGENT-TOOLS §16.4),
+        // then one sentence on what it reaches.
+        if (name === "network" && typeof result === "object" && result !== null && "mode" in result && typeof result.mode === "string") {
+          const covers = "covers" in result && typeof result.covers === "string" ? ` ${result.covers}` : "";
+          return `${networkLine(result.mode)}${covers}`;
+        }
         return result === null || result === undefined ? `Ran ${name}.` : `Ran ${name}: ${JSON.stringify(result)}`;
       },
       args.look,
