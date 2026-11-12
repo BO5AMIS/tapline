@@ -1,4 +1,4 @@
-import { audit, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
+import { audit, uxCheck, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
 import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
@@ -44,6 +44,7 @@ export const methods: Record<string, MethodFn> = {
   logs: (params) => getLogs(params),
   inspect: (params) => inspect(params),
   audit: (params) => audit(params),
+  uxCheck: (params) => uxCheck(params),
   reload: () => reload(),
   perfStart: () => perfStart(),
   perfStop: () => perfStop(),

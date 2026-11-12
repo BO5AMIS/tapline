@@ -40,6 +40,7 @@ import {
 import { sourcesOf, type ElementSource } from './source';
 import { closestMatches } from './closest';
 import { AUDIT_TYPES, auditScreen, type AuditFinding, type AuditType } from './checks';
+import { uxScreen, type UxAction, type UxCheckName, type UxKind } from './uxcheck';
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
@@ -2172,6 +2173,73 @@ export async function audit(rawParams: unknown): Promise<{ issues: AuditIssue[];
     });
   }
   return { issues, checked: [...types] };
+}
+
+export interface UxIssue {
+  kind: UxKind;
+  element: TaplineElement | null;
+  where?: AuditWhere;
+  problem: string;
+  basis: string;
+  at?: { file: string; line: number; direct: boolean };
+}
+
+/** `ux_check {wayBack?, earlier?}` (AGENT-TOOLS 1.12 §17.3): the screen against the usability basics. */
+export async function uxCheck(
+  rawParams: unknown,
+): Promise<{ issues: UxIssue[]; checked: UxCheckName[]; choices: number; actions: UxAction[] }> {
+  const params = paramsOf(rawParams);
+  if (params.wayBack !== undefined && typeof params.wayBack !== 'boolean') throw badParams('wayBack must be true or false');
+  const earlierRaw = params.earlier;
+  let earlier: UxAction[] | undefined;
+  if (earlierRaw !== undefined && earlierRaw !== null) {
+    if (!Array.isArray(earlierRaw)) throw badParams('earlier must be a list of {label, id?}');
+    earlier = [];
+    for (const item of earlierRaw as unknown[]) {
+      if (!isRecord(item) || typeof item.label !== 'string') throw badParams('earlier must be a list of {label, id?}');
+      earlier.push({ label: item.label, ...(typeof item.id === 'string' && item.id !== '' ? { id: item.id } : {}) });
+    }
+  }
+  const result = await uxScreen({
+    ...(params.wayBack === true ? { wayBack: true } : {}),
+    ...(earlier !== undefined ? { earlier } : {}),
+  });
+  let sources: ElementSource[] = [];
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    const fibers = result.findings.flatMap((f) => (f.entry !== null ? [f.entry.node.fiber] : []));
+    try {
+      sources = fibers.length > 0 ? await sourcesOf(fibers) : [];
+    } catch {
+      sources = []; // Metro unreachable: the report still stands, without lines
+    }
+  }
+  let next = 0;
+  const issues: UxIssue[] = [];
+  for (const finding of result.findings) {
+    const source = finding.entry !== null ? sources[next++] : undefined;
+    let element: TaplineElement | null = null;
+    if (finding.entry !== null) {
+      try {
+        element = (await elementFor(finding.entry, finding.frame)).element;
+      } catch {
+        element = null;
+      }
+    }
+    const where =
+      element === null && finding.entry !== null
+        ? whereOf({ type: 'description', entry: finding.entry, frame: finding.frame, problem: '', fix: '' })
+        : null;
+    const location = source?.location ?? null;
+    issues.push({
+      kind: finding.kind,
+      element,
+      ...(where !== null ? { where } : {}),
+      problem: finding.problem,
+      basis: finding.basis,
+      ...(location !== null ? { at: { file: location.file, line: location.line, direct: location.direct } } : {}),
+    });
+  }
+  return { issues, checked: result.checked, choices: result.choices, actions: result.actions };
 }
 
 export async function getLogs(rawParams: unknown): Promise<{ entries: LogEntry[] }> {

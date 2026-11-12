@@ -117,7 +117,7 @@ export function collectDeviceInfo(): DeviceInfo {
 }
 
 export function defaultCapabilities(): string[] {
-  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance'];
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck'];
   if (screenshotAvailable()) capabilities.push('screenshot', 'feed');
   if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload', 'inspect');
   return capabilities;
