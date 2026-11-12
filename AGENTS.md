@@ -145,7 +145,7 @@ Tapline on. Read its output, then go on with step 6. By hand:
    `Note: the app crashed: …` on any answer means a fatal JavaScript error ended the app: `crash` shows
    it with its stack (the app's own frames marked `*`) and the components it was in. `Note: the app
    disconnected during this call (it may have crashed …)` means it went away without a JavaScript error:
-   a native crash, which Tapline can't read (Tapwright's `crash` can). `performance` measures for
+   possibly a native crash, which Tapline can't read (Tapwright's `crash` can). `performance` measures for
    `seconds` (optionally after a `tap`): JS heap, JS frames (fps, the lowest second, drops over 50 ms),
    the longest JS stall and, in a development build, the slowest renders by component; `launch: true`
    times a JavaScript reload to the first settled screen (development builds). CPU and the app's whole

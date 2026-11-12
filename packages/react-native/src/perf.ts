@@ -144,6 +144,9 @@ export class PerfSampler {
   private away = false;
   /** The next frame follows a stretch away from the front: its interval is not a stall. */
   private skipGap = false;
+  /** Time spent away from the front so far, and when the current stretch away began: left out of fps and slots. */
+  private awayMs = 0;
+  private awaySince = 0;
   private readonly renders = new Map<string, { ms: number; count: number }>();
   /** React gave no timing for a render that did work (a build without the profiler). */
   private timingMissing = false;
@@ -168,17 +171,24 @@ export class PerfSampler {
     if (deps.dev) this.stopCommits = deps.onCommitRoot((root) => this.onCommit(root));
     this.away = false;
     this.skipGap = false;
+    this.awayMs = 0;
+    this.awaySince = 0;
     this.stopAppState = deps.onAppState((state) => this.onAppState(state));
   }
 
   /** requestAnimationFrame stops while the app is in the background: the pause is no frame interval. */
   private onAppState(state: string): void {
     if (!this.running) return;
+    const now = this.deps.now();
     if (state === 'active') {
+      if (this.away) this.awayMs += now - this.awaySince;
       this.away = false;
-      this.lastFrame = this.deps.now();
-    } else {
+      // The next frame measures from coming back: a late first frame after that is a stall like any other.
+      this.lastFrame = now;
+      this.skipGap = false;
+    } else if (!this.away) {
       this.away = true;
+      this.awaySince = now;
       this.skipGap = true;
     }
   }
@@ -202,7 +212,9 @@ export class PerfSampler {
       this.drops += 1;
       if (tail > this.busy) this.busy = tail;
     }
-    const elapsedMs = Math.max(1, end - this.startedAt);
+    // Only the time the app was in front counts (a background stretch has no frames to show).
+    const awayTotal = this.awayMs + (this.away ? end - this.awaySince : 0);
+    const elapsedMs = Math.max(1, end - this.startedAt - awayTotal);
     const fps = this.frames / (elapsedMs / 1000);
     const whole = Math.floor(elapsedMs / 1000);
     let lowest = fps;
@@ -247,6 +259,11 @@ export class PerfSampler {
 
   private readonly onFrame = (): void => {
     if (!this.running) return;
+    // A callback while the app is away (inactive) is no frame a person saw: it is not counted (Codex re-review 3).
+    if (this.away) {
+      this.frameHandle = this.deps.requestFrame(this.onFrame);
+      return;
+    }
     const t = this.deps.now();
     // The first frame after the app was away: its interval spans the pause, so it is not counted.
     const gap = this.skipGap ? 0 : t - this.lastFrame;
@@ -255,7 +272,7 @@ export class PerfSampler {
     this.frames += 1;
     if (gap > DROP_MS) this.drops += 1;
     if (gap > this.busy) this.busy = gap;
-    const slot = Math.floor((t - this.startedAt) / 1000);
+    const slot = Math.floor((t - this.startedAt - this.awayMs) / 1000);
     this.slots[slot] = (this.slots[slot] ?? 0) + 1;
     this.frameHandle = this.deps.requestFrame(this.onFrame);
   };
@@ -324,6 +341,9 @@ function actualDuration(fiber: Fiber): number | null {
 
 let current: PerfSampler | null = null;
 let guard: ReturnType<typeof setTimeout> | null = null;
+/** The running window's number: a stop names the window it ends, so two calls never take each other's numbers. */
+let currentId = 0;
+let nextId = 1;
 
 /** Ends any measurement without a result: the host is gone, so nobody will ask for it. */
 export function stopPerf(): void {
@@ -331,27 +351,41 @@ export function stopPerf(): void {
   guard = null;
   const sampler = current;
   current = null;
+  currentId = 0;
   if (sampler !== null) sampler.abort();
 }
 
-/** `perfStart`: begins a window (a measurement already running is dropped). */
-export async function perfStart(): Promise<{ started: true; dev: boolean; heap: boolean }> {
+/**
+ * `perfStart`: begins a window and answers its `id`. A window already running is not dropped: the start answers
+ * bad_params, so a second call can never reset the first one's numbers (Codex review of 1.3.0). A window nobody stops
+ * ends by itself after MAX_WINDOW_MS.
+ */
+export async function perfStart(): Promise<{ started: true; id: number; dev: boolean; heap: boolean }> {
+  if (current !== null && current.active) {
+    throw new TaplineError('bad_params', 'a performance measurement is already running; wait for it to end');
+  }
   stopPerf();
   const sampler = new PerfSampler();
   current = sampler;
+  currentId = nextId++;
   sampler.start();
   guard = setTimeout(stopPerf, MAX_WINDOW_MS);
-  return { started: true, dev: typeof __DEV__ !== 'undefined' && __DEV__, heap: hermesHeapMb() !== null };
+  return { started: true, id: currentId, dev: typeof __DEV__ !== 'undefined' && __DEV__, heap: hermesHeapMb() !== null };
 }
 
-/** `perfStop`: ends the window and answers its numbers. */
-export async function perfStop(): Promise<PerfResult> {
+/** `perfStop`: ends the window (`id`, when given, must be the running one) and answers its numbers. */
+export async function perfStop(params?: unknown): Promise<PerfResult> {
   const sampler = current;
   if (sampler === null || !sampler.active) {
     throw new TaplineError('bad_params', 'no performance measurement is running; start one first');
   }
+  const id = typeof params === 'object' && params !== null ? (params as { id?: unknown }).id : undefined;
+  if (id !== undefined && id !== currentId) {
+    throw new TaplineError('bad_params', 'that performance measurement is not the one running');
+  }
   if (guard !== null) clearTimeout(guard);
   guard = null;
   current = null;
+  currentId = 0;
   return sampler.stop();
 }

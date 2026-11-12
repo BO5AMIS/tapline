@@ -26,11 +26,23 @@ const SYMBOLICATE_WAIT_MS = 3000;
 let storage: TaplineStorage | null = null;
 /** The write in progress, so a delivery right after a crash reads what was written. */
 let saving: Promise<void> = Promise.resolve();
+/**
+ * Counts the saves. An acknowledgement removes the record only when no save started after it began reading, so it
+ * can never remove a newer crash (Codex review of 1.3.0). A save still starts at once: the app may die right after.
+ */
+let saves = 0;
+/** Writes not yet done: a new crash written while one is in flight waits for it, so an older one never lands last. */
+let writing = 0;
+/** The newest crash written, so one saved while an acknowledgement was removing the older one can be put back. */
+let lastJson: string | null = null;
 
 /** Where the crash is kept (null: nowhere). */
 export function configureCrash(next: TaplineStorage | null): void {
   storage = next;
   saving = Promise.resolve();
+  saves = 0;
+  writing = 0;
+  lastJson = null;
   delivery = Promise.resolve();
 }
 
@@ -83,10 +95,26 @@ export function saveCrash(record: CrashRecord): void {
   if (target === null) return;
   try {
     const json = fitRecord(record);
-    saving = target.setItem(CRASH_KEY, json).catch(() => undefined);
+    saves += 1;
+    lastJson = json;
+    queueWrite(target, () => json);
   } catch {
     // the crash is also sent live; losing the copy must not hide the app's own error
   }
+}
+
+/**
+ * One write of the kept crash, in call order: at once when nothing is being written (the app may die right after),
+ * after the write in flight otherwise. Saves and an acknowledgement's write-back share this order, so nothing
+ * older ever lands after something newer.
+ */
+function queueWrite(target: TaplineStorage, json: () => string): void {
+  const write = (): Promise<void> => target.setItem(CRASH_KEY, json()).catch(() => undefined);
+  writing += 1;
+  const done = (): void => {
+    writing -= 1;
+  };
+  saving = (writing === 1 ? write() : saving.then(write)).then(done, done);
 }
 
 function parseSaved(raw: string | null): CrashRecord | null {
@@ -133,8 +161,20 @@ export async function ackSavedCrash(ts: number): Promise<void> {
   if (target === null) return;
   try {
     await saving;
+    const before = saves;
     const record = parseSaved(await target.getItem(CRASH_KEY));
-    if (record !== null && record.ts === ts) await target.removeItem(CRASH_KEY);
+    // A crash saved while this was reading is newer than the one acknowledged: it stays.
+    if (saves !== before) return;
+    if (record !== null && record.ts === ts) {
+      await target.removeItem(CRASH_KEY);
+      // A crash saved while the removal was on its way may have been erased by it: it is written again.
+      // In the same order as the saves, with the newest record when its turn comes: a crash saved later still
+      // lands last (Codex re-review 3 of PR #4).
+      if (saves !== before && lastJson !== null) {
+        queueWrite(target, () => lastJson ?? "");
+        await saving;
+      }
+    }
   } catch {
     // never reaches the app
   }

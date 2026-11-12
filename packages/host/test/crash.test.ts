@@ -101,7 +101,7 @@ describe("the note when the app crashes during a call", () => {
 
 describe("a crash that reaches the host later", () => {
   // Saved by this run of the app (after the host started): the note gives the time only.
-  const AT = Date.now() + 1000;
+  // (AT is taken inside each test, after its host started, so a slow collection never makes it "an earlier run".)
   const two = (n: number): string => String(n).padStart(2, "0");
   const clock = (ts: number): string => {
     const d = new Date(ts);
@@ -114,6 +114,7 @@ describe("a crash that reaches the host later", () => {
 
   it("is told on the next answer with its time, once", async () => {
     const { host, app, tools } = await setup();
+    const AT = Date.now() + 1000;
     app.send({ type: "event", event: "crash", data: { name: "RangeError", message: "kept from last run", stack: "", ts: AT } });
     await until(() => host.crashMark() === 1);
     const first = textOf(await tools.look({ screenshot: false }));
