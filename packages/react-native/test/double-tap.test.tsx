@@ -77,6 +77,16 @@ describe('press with again', () => {
     expect(result.second).toEqual({ done: false, reason: 'disabled', afterMs: expect.any(Number) });
   });
 
+  test('a control that became another element (its text changed) takes no second tap: the safety check saw the first', async () => {
+    await mount(<Counter guard={false} />);
+    useFrames({ add: frame(0, 100, 400, 50) });
+    // Outside act: "Added 0" becomes "Added 1" before the second tap, as a recycled row can become "Delete account".
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const result = await press({ target: { testID: 'add' }, again: 80 });
+    expect(times).toHaveLength(1);
+    expect(result.second).toEqual({ done: false, reason: 'changed', afterMs: expect.any(Number) });
+  });
+
   test('again outside 20..1000 ms is bad_params, before anything is touched', async () => {
     await mount(<Counter guard={false} />);
     useFrames({ add: frame(0, 100, 400, 50) });

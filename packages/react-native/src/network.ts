@@ -591,8 +591,21 @@ function isOwned(init: unknown): boolean {
   return typeof init === 'object' && init !== null && (init as Record<symbol, unknown>)[FETCH_OWNED] === true;
 }
 
+/** The fetch options (RequestInit), read by property access: an init may carry them inherited or non-enumerable. */
+const REQUEST_INIT_KEYS = [
+  'method', 'headers', 'body', 'mode', 'credentials', 'cache', 'redirect', 'referrer', 'referrerPolicy', 'integrity',
+  'keepalive', 'signal', 'priority', 'window', 'duplex',
+] as const;
+
 function ownedInit(init: unknown): Record<string | symbol, unknown> {
-  const copy: Record<string | symbol, unknown> = typeof init === 'object' && init !== null ? { ...(init as Record<string, unknown>) } : {};
+  const copy: Record<string | symbol, unknown> = {};
+  if (typeof init === 'object' && init !== null) {
+    Object.assign(copy, init);
+    const source = init as Record<string, unknown>;
+    for (const key of REQUEST_INIT_KEYS) {
+      if (!(key in copy) && key in source) copy[key] = source[key];
+    }
+  }
   copy[FETCH_OWNED] = true;
   return copy;
 }

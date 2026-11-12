@@ -1129,11 +1129,14 @@ async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs
   const started = Date.now();
   await new Promise<void>((resolve) => setTimeout(resolve, afterMs));
   try {
-    const again = await reresolve(first, 'press', params.target);
+    const again = await reresolve(first, 'press', params.target, false);
     const found = findActionable(again.snapshot, again.entry, 'press', false);
     if (!found || found.info.disabled || again.entry.info.disabled) {
       return { done: false, reason: found ? 'disabled' : 'no_action', afterMs: Date.now() - started };
     }
+    // A control may change its own text after the first tap ("Added 1"); one that became another element (a list
+    // recycled the row) isn't the one the safety check saw: no second tap on it.
+    if (!sameTarget(first, again.entry)) return { done: false, reason: 'changed', afterMs: Date.now() - started };
     const handler = findHandler(found.node, 'onPress');
     if (!handler) return { done: false, reason: 'no_action', afterMs: Date.now() - started };
     const { frame } = await elementFor(found);
@@ -1844,7 +1847,7 @@ function refindTarget(entry: Entry, original: unknown): Record<string, unknown> 
  * The same element after a scroll, from a fresh snapshot (the list may have laid out other rows on the
  * way). When a list unmounted the row, the ref is gone: it is found again by the original target.
  */
-async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: unknown): Promise<Resolved> {
+async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: unknown, checkSame = true): Promise<Resolved> {
   let found: Resolved;
   try {
     found = await resolveTarget({ ref: refFor(entry.node.fiber) }, hint);
@@ -1854,8 +1857,13 @@ async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: 
     if (again === null) throw error;
     found = await resolveTarget(again, hint);
   }
-  assertSameTarget(entry, found.entry);
+  if (checkSame) assertSameTarget(entry, found.entry);
   return found;
+}
+
+/** The same element by id, label and text, each on its own (a row can keep its id and label while its text changes). */
+function sameTarget(before: Entry, after: Entry): boolean {
+  return before.info.testID === after.info.testID && before.info.label === after.info.label && before.info.text === after.info.text;
 }
 
 /**
@@ -1864,11 +1872,9 @@ async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: 
  * refused before anything is touched (Codex review of 1.4.0).
  */
 function assertSameTarget(before: Entry, after: Entry): void {
-  // id, label and text each on their own: a row can keep its id and accessibility label while its text changes
+  if (sameTarget(before, after)) return;
   const was = { id: before.info.testID, name: labelOf(before.info) };
   const now = { id: after.info.testID, name: labelOf(after.info) };
-  const same = was.id === now.id && before.info.label === after.info.label && before.info.text === after.info.text;
-  if (same) return;
   if (was.name === now.name) {
     was.name = before.info.text;
     now.name = after.info.text;

@@ -167,6 +167,19 @@ test('an interceptor cleaned up while its request waits: the request is still co
   off();
 });
 
+test('fetch options the app passes inherited or non-enumerable still reach its fetch', async () => {
+  const seen: unknown[] = [];
+  const target = makeTarget((_input, init) => {
+    seen.push(init);
+    return ok();
+  });
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const init: Record<string, unknown> = Object.create({ method: 'POST', body: 'payload', credentials: 'omit' });
+  Object.defineProperty(init, 'cache', { value: 'no-store', enumerable: false });
+  await (target.fetch as (input: unknown, init?: unknown) => Promise<unknown>)('https://api.example.com/x', init);
+  expect(seen[0]).toMatchObject({ method: 'POST', body: 'payload', credentials: 'omit', cache: 'no-store' });
+});
+
 test('offline fails a fetch without sending it, and the failure is reported', async () => {
   const sent: string[] = [];
   const target = makeTarget((input) => {
