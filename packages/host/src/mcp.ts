@@ -12,6 +12,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { ControlQueue } from "./control.js";
 import { Confirmations } from "./confirm.js";
@@ -304,8 +305,26 @@ function log(message: string): void {
 }
 
 /** Runs the host and serves MCP over stdio. stdout is reserved for the protocol; everything else goes to stderr. */
+/** Opens a link in the default browser of this computer; false when that couldn't start. */
+function openInBrowser(link: string): boolean {
+  try {
+    const [command, args] =
+      process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", link.replace(/&/g, "^&")]]
+        : process.platform === "darwin"
+          ? ["open", [link]]
+          : ["xdg-open", [link]];
+    const child = spawn(command as string, args as string[], { detached: true, stdio: "ignore", windowsHide: true });
+    child.on("error", () => undefined);
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runMcp(
-  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean } = {},
+  options: ResolveOptions & { screenshots?: string; viewer?: string; noLog?: boolean; policy?: string; noPolicy?: boolean; viewerLink?: boolean } = {},
 ): Promise<boolean> {
   let screenshots: ScreenshotMode;
   let viewer: ViewerMode;
@@ -376,6 +395,8 @@ export async function runMcp(
           control,
           onAction: (action) => hub?.pushAction(action),
           viewerLinks: () => viewerLinks,
+          openViewer: (link: string) => openInBrowser(link),
+          viewerLinkToAgent: options.viewerLink === true || process.env["TAPLINE_VIEWER_LINK"] === "1",
           viewerFeed: () => hub?.feed() ?? { on: false, quality: "balanced" },
         }),
   });
@@ -411,7 +432,9 @@ export async function runMcp(
     host.on("notAnswering", appStatus);
     host.on("answering", appStatus);
     appStatus();
-    log(`live viewer: ${remoteViewer ? "this computer and your Tailscale devices" : "this computer only"} (the viewer tool gives the link)`);
+    log(`live viewer: ${remoteViewer ? "this computer and your Tailscale devices" : "this computer only"} (the viewer tool opens it in a browser here)`);
+    // The link for the user's own devices: here in the log, never in an answer to the agent.
+    if (remoteViewer) for (const link of viewerLinks.slice(1)) log(`live viewer for your devices: ${link}`);
   }
   if (screenshots === "file") log(`screenshots are saved in ${join(configDir(), "shots")} (newest 50 kept)`);
   const server = createMcpServer(tools);

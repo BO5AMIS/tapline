@@ -315,6 +315,14 @@ export interface ToolsOptions {
   onAction?: (action: ViewerAction) => void;
   /** The live viewer's links (with its token), for the `viewer` tool. */
   viewerLinks?: () => string[];
+  /**
+   * Opens the live view on this computer (the default browser). When set, `viewer` opens it and never
+   * shows the agent the link: its key could approve a held-back touch. Unset (tests) or with
+   * `viewerLinkToAgent`, the link is in the answer.
+   */
+  openViewer?: (link: string) => boolean;
+  /** `--viewer-link`: give the agent the link (benchmarks and scripts that drive the viewer themselves). */
+  viewerLinkToAgent?: boolean;
   /** Whether the app's frames are on and at which quality, for the `viewer` tool's stats. */
   viewerFeed?: () => { on: boolean; quality: QualityPreset };
 }
@@ -1609,11 +1617,27 @@ export class TaplineTools {
   async viewer(_args: Shape<"viewer"> = {}): Promise<CallToolResult> {
     const links = this.options.viewerLinks?.() ?? [];
     if (links.length === 0) return fail("Error unsupported: this host has no live viewer.");
-    const lines = [
-      "Live viewer (watch the app, see what you do, and let the user tap and type too):",
-      ...links.map((link) => `- ${link}`),
-      "The link carries a key: give it to the user only. While they use the viewer, their touches go first and your actions wait.",
-    ];
+    const open = this.options.openViewer;
+    const local = links[0];
+    let lines: string[];
+    if (open !== undefined && this.options.viewerLinkToAgent !== true && local !== undefined) {
+      // The key in the link can approve a held-back touch: it goes to the browser, never to the agent.
+      const opened = open(local);
+      lines = [
+        opened
+          ? "Opened the live view in a browser on this computer: the user watches the app and what you do there, and can tap and type too."
+          : "Couldn't open a browser on this computer. Ask the user to start the MCP server with --viewer-link if they want the link.",
+        "The link isn't shown to you: its key can approve touches that need a person's OK.",
+        ...(links.length > 1 ? ["For their own devices on Tailscale, the user finds that link in this server's log."] : []),
+        "While the user acts in the live view, their touches go first and your actions wait.",
+      ];
+    } else {
+      lines = [
+        "Live viewer (watch the app, see what you do, and let the user tap and type too):",
+        ...links.map((link) => `- ${link}`),
+        "The link carries a key: give it to the user only. While they use the viewer, their touches go first and your actions wait.",
+      ];
+    }
     const feed = this.options.viewerFeed?.();
     const session = this.host.current();
     if (feed?.on === true && session !== undefined) {

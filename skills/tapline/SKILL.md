@@ -30,7 +30,7 @@ well. The tools describe themselves; what follows is what they can't tell you.
 - **Only this app.** System dialogs (permissions, the share sheet, Face ID), the keyboard,
   other apps and the home screen are out of reach. Say that you couldn't test them. Tapwright
   covers them.
-- **A person may be watching** in the live view (`viewer` gives the link) and can take over.
+- **A person may be watching** in the live view (`viewer` opens it in a browser on their computer) and can take over.
   Their input goes first.
 
 ## 2. The loop: look, act, read the answer

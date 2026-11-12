@@ -118,7 +118,7 @@ your agent at it.
 | `compare_screen` | compare the screen with a saved reference picture: what changed, where, marked in red |
 | `filmstrip` | several frames in one image, for animations and loading states |
 | `record`, `replay` | save a test run as a script (shared format, version 1) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml]` (exit 0 all held, 1 a step stopped, 2 couldn't start) |
-| `viewer` | a link to watch the app live in a browser, with what the agent does marked on it; you can tap, scroll and type there too |
+| `viewer` | opens the live view in a browser on your computer, with what the agent does marked on it; you can tap, scroll and type there too. The agent never sees its link |
 | `tap`, `long_press` | by `id` (the `testID` prop), label, visible text, ref from the last look, or x/y (`long_press` takes `seconds`, which Tapline ignores) |
 | `type_text` | into an input; replace or append; optionally submit; refused where a person couldn't type |
 | `scroll` | by a direction and a share of the scroll area (0.1 to 1, default 0.8), to the start or end, or to an element (`to: "target"`: one call brings it onto the screen, clear of the bars) |
@@ -181,7 +181,7 @@ images: a small, cheap vision model looks and reports in text, a mid-size model 
 reports, and the lead only reads the summary. [AGENTS.md](AGENTS.md#screenshots-and-tokens)
 has the recipe.
 
-**Watch live.** Ask your agent for the viewer link and open it in a browser on your
+**Watch live.** Ask your agent to open the live view; it opens in a browser on your
 computer. It shows the app's screen in a drawn phone, marks each tap and scroll the agent makes
 with a ripple, and names each step under the phone in plain words (`Tap "Save trip"`,
 `You tapped "Explore"`, or why a step was refused); **Steps** lists them all. **More** holds the

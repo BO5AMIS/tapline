@@ -37,7 +37,7 @@ the targets. It only labels the run: turn the Network Link Conditioner profile o
 ## Viewer suite (`--only viewer`)
 
 Measures V1-V5 and V7 through the tool's live viewer (docs/VIEWER-PROTOCOL.md): the link comes
-from the MCP tool `viewer` (the token is never printed or written), `/stream` and `/ws` are opened
+from the MCP tool `viewer` (for Tapline, start its server with `--viewer-link` so the tool gives it; the token is never printed or written), `/stream` and `/ws` are opened
 with `Authorization: Bearer`. Needs the lab screen with `lab-taps` and `lab-anim-toggle`. V6 and V8
 are rows with `pass: null` (they need the phone's CPU and a browser). Value rows carry `value` and
 `unit`; `pass: null` means report only and never fails the run. The "picture changed" rule is one

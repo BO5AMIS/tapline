@@ -58,7 +58,7 @@ export const CORE_TOOL_TEXT = {
   },
   "viewer": {
     "shared": "The link to the live view, where the user can watch the app as you work and take over. Their touches go first, and they can pause you. Give the link to the user only.",
-    "tapline": "Tapline: opens in a browser; also reports capture time and stutter while frames are on."
+    "tapline": "Tapline: opens the live view in a browser on this computer and keeps its link from you (the key in it approves held-back touches); also reports capture time and stutter while frames are on."
   },
   "swipe": {
     "shared": "Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35). For sliders, carousels, swipe actions and edge gestures; for lists, use `scroll`.",

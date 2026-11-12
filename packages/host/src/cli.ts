@@ -57,6 +57,9 @@ Options:
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
   --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
   --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
+  --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
+                 default it opens the live view in a browser here and keeps the link (its key) from the agent
+                 (or TAPLINE_VIEWER_LINK=1)
   --viewer <local|remote|off>
                  For mcp: the live viewer on this computer only (default), also on your
                  own Tailscale devices, or off (or TAPLINE_VIEWER)
@@ -242,6 +245,7 @@ async function main(argv: string[]): Promise<number> {
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
+      "viewer-link": { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
       app: { type: "boolean" },
@@ -269,6 +273,7 @@ async function main(argv: string[]): Promise<number> {
         ...(values["no-log"] === true ? { noLog: true } : {}),
         ...(values.policy !== undefined ? { policy: values.policy } : {}),
         ...(values["no-policy"] === true ? { noPolicy: true } : {}),
+        ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
       }))
         ? -1 // keep running
         : 1;

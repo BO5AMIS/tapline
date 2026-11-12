@@ -203,9 +203,10 @@ Tapline on. Read its output, then go on with step 6. By hand:
 
 ## Watching together
 
-- `viewer` gives a link the user opens in a browser on their computer: the app's screen as
-  it changes, with your taps and scrolls marked. The link carries a key: show it to the user
-  only. Offer it when they want to watch, or to do a step themselves (sign in with their own
+- `viewer` opens the live view in a browser on the user's computer: the app's screen as
+  it changes, with your taps and scrolls marked. You don't get the link: its key can approve
+  touches that need a person's OK (`--viewer-link` gives it, for benchmarks and scripts).
+  Offer it when they want to watch, or to do a step themselves (sign in with their own
   password, finish a step you can't). The page is at `/viewer` and `/`. In a build with
   Tapline's native module it shows about 15 frames a second while the screen changes (smaller
   frames while it moves on a slow link) and one a second when it's still; in an older build
