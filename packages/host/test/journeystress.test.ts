@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ControlQueue } from "../src/control.js";
 import type { PolicyFile } from "../src/policy.js";
+import type { SessionInfo } from "../src/server.js";
 import { HOME, reloadable, rig, textOf, type Rig, type RigOptions } from "./journeyhelpers.js";
 
 // AGENT-TOOLS 1.12 §17.4: stress moments during a journey, and what must survive them.
@@ -19,6 +20,12 @@ const make = async (options: RigOptions = {}): Promise<Rig> => {
 const begin = (r: Rig) => r.tools.journey({ start: true, goal: "log two eggs", persona: "a first-timer" });
 const networkCalls = (r: Rig): unknown[] => r.app.requests.filter((q) => q.method === "command").map((q) => q.params);
 const isDry = (params: unknown): boolean => (params as { dryRun?: boolean }).dryRun === true;
+/** The connected app's session, for events a person's moment leaves behind. */
+const sessionOf = (r: Rig): SessionInfo => {
+  const session = r.host.current();
+  if (session === undefined) throw new Error("no app connected");
+  return session;
+};
 
 describe("stress: network", () => {
   it("starts the 1.4 condition mid-flow and checks what must survive", async () => {
@@ -178,6 +185,10 @@ describe("stress: relaunch", () => {
     const asked = textOf(await r.tools.journey({ stress: { kind: "relaunch" }, survives: { text: "2 eggs" } }));
     expect(asked.split("\n")[0]).toBe("Stress: relaunch needs a person: close the app and open it again, then say done.");
     expect(r.tools.currentJourney()?.state.stress).toEqual([]);
+    // done is checked: no new connection yet, so it isn't counted
+    const early = await r.tools.journey({ stress: { kind: "relaunch" }, done: true });
+    expect(textOf(early)).toMatch(/^Error bad_params: The app hasn't started again since the moment was asked/);
+    r.host.emit("connect", sessionOf(r));
     const done = textOf(await r.tools.journey({ stress: { kind: "relaunch" }, done: true }));
     expect(done).toBe('Stress: relaunch; it survived: text "2 eggs" is still in the field.');
   });
@@ -191,6 +202,11 @@ describe("stress: background and rotate need a person", () => {
     expect(asked.split("\n")[0]).toBe("Stress: background needs a person: switch to another app and back, then say done.");
     expect(asked).toContain('journey { stress: { kind: "background" }, done: true }');
     expect(r.app.requests.filter((q) => q.method !== "tree" && q.method !== "screenshot")).toEqual([]); // nothing was faked in the app
+    // done on the agent's word alone isn't counted: the app never left the front
+    const early = await r.tools.journey({ stress: { kind: "background" }, done: true });
+    expect(textOf(early)).toBe("Error bad_params: The app never left the front since the moment was asked, so it can't be counted. Ask the person again, then say done.");
+    r.host.emit("appState", sessionOf(r), "background");
+    r.host.emit("appState", sessionOf(r), "active");
     const done = textOf(await r.tools.journey({ stress: { kind: "background" }, done: true }));
     expect(done).toBe('Stress: background; it survived: text "2 eggs" is still in the field.');
     expect(r.tools.currentJourney()?.state.stress).toMatchObject([{ kind: "background", survived: true }]);
@@ -199,7 +215,9 @@ describe("stress: background and rotate need a person", () => {
   it("rotate asks the same way, and done can bring its own survives", async () => {
     const r = await make();
     await begin(r);
-    expect(textOf(await r.tools.journey({ stress: { kind: "rotate" } })).split("\n")[0]).toBe("Stress: rotate needs a person: turn the phone, then say done.");
+    expect(textOf(await r.tools.journey({ stress: { kind: "rotate" } })).split("\n")[0]).toBe("Stress: rotate needs a person: turn the phone and keep it turned, then say done.");
+    expect(textOf(await r.tools.journey({ stress: { kind: "rotate" }, done: true }))).toMatch(/^Error bad_params: The screen is still 402x874 pt, as when the moment was asked: say done while the phone is turned\./);
+    r.world.rotated = true;
     const done = textOf(await r.tools.journey({ stress: { kind: "rotate" }, done: true, survives: { text: "0 eggs" } }));
     expect(done).toBe('Stress: rotate; it didn\'t survive: text "0 eggs" is not on screen any more.');
   });
@@ -240,6 +258,21 @@ describe("survives", () => {
     expect(HOME.length).toBeGreaterThan(0);
   });
 
+  it("text must be seen: a label only a screen reader hears doesn't count, and in a user's eyes the glass is asked", async () => {
+    const trees: unknown[] = [];
+    const r = await make({
+      onRequest: (req) => {
+        if (req.method !== "tree" || (req.params as { peek?: boolean } | undefined)?.peek !== true) return undefined;
+        trees.push(req.params);
+        return { ok: true, result: { screen: { width: 402, height: 874, scale: 3 }, elements: [{ ref: "e1", role: "button", label: "Saved 2 eggs" }], route: { names: ["home"] } } };
+      },
+    });
+    await begin(r);
+    const answer = textOf(await r.tools.journey({ stress: { kind: "network", mode: "normal" }, survives: { text: "2 eggs" } }));
+    expect(answer).toBe('Stress: network normal; it didn\'t survive: text "2 eggs" is not on screen any more.');
+    expect(trees.at(-1)).toMatchObject({ peek: true, glass: true });
+  });
+
   it("goal_step by number: the screen that step ended on", async () => {
     const r = await make();
     await begin(r);
@@ -274,6 +307,7 @@ describe("the report keeps every stress result", () => {
     await begin(r);
     await r.tools.journey({ stress: { kind: "network", mode: "offline" }, survives: { text: "2 eggs" } });
     await r.tools.journey({ stress: { kind: "rotate" } });
+    r.world.rotated = true;
     await r.tools.journey({ stress: { kind: "rotate" }, done: true, survives: { text: "2 eggs" } });
     const stopped = textOf(await r.tools.journey({ stop: true, reached: true }));
     const folder = /Report: (.+)$/m.exec(stopped)?.[1] ?? "";

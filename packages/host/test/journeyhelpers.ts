@@ -47,6 +47,8 @@ export interface JourneyWorld {
   route: string[];
   /** Picture colours by screen; noisy pictures make a big GIF. */
   noisy: boolean;
+  /** The phone is turned: the screen's width and height swap. */
+  rotated?: boolean;
 }
 
 export interface Rig {
@@ -86,7 +88,7 @@ export async function rig(options: RigOptions = {}): Promise<Rig> {
         const route = world.route.join("/");
         const sameRoute = route === lastRoute;
         if (params["peek"] !== true) lastRoute = route;
-        return { ok: true, result: { screen: SCREEN, elements: elementsFor(), route: { names: world.route }, ...(params["changes"] === true ? { changes: { sameRoute, added: [], removed: [], changed: [], moved: [] } } : {}) } };
+        return { ok: true, result: { screen: world.rotated === true ? { ...SCREEN, width: SCREEN.height, height: SCREEN.width } : SCREEN, elements: elementsFor(), route: { names: world.route }, ...(params["changes"] === true ? { changes: { sameRoute, added: [], removed: [], changed: [], moved: [] } } : {}) } };
       }
       case "screenshot": {
         const colour: [number, number, number] = world.route[0] === "settings" ? [30, 160, 90] : [40, 90, 200];

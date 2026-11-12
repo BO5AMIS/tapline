@@ -917,6 +917,12 @@ const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
   "look", "run", "inspect", "audit", "ux_check", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll",
   "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
 ]);
+/** A stress moment a person was asked to do: what must survive, when it was asked, and (rotate) the screen's size then. */
+interface StressWaiting {
+  survives: Survives | undefined;
+  askedAt: number;
+  size: { width: number; height: number } | null;
+}
 /** A stress double tap's two taps, this many ms apart (AGENT-TOOLS 1.12 §17.4): the app makes the second. */
 const DOUBLE_TAP_GAP_MS = 80;
 /** What the app says of a double tap's second tap. */
@@ -1042,7 +1048,10 @@ export class TaplineTools {
   /** Where the last touch of the call in flight was, for the frame's tap ring. */
   private lastTouch: Touch | undefined;
   /** Stress moments that wait for a person (§17.4), by kind: what must survive. */
-  private readonly stressWaiting = new Map<string, Survives | undefined>();
+  private readonly stressWaiting = new Map<string, StressWaiting>();
+  /** When the app last left the front or its link dropped, and when an app last connected (real time, for stress done). */
+  private appLeftAt = 0;
+  private appConnectedAt = 0;
   private readonly clock: () => number;
 
   constructor(
@@ -1061,6 +1070,16 @@ export class TaplineTools {
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
     host.on("touch", (session) => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
+    });
+    // What a stress moment a person does leaves behind, for `done` to check (AGENT-TOOLS 1.12 §17.4).
+    host.on("appState", (_session, state) => {
+      if (state !== "active") this.appLeftAt = Date.now();
+    });
+    host.on("disconnect", () => {
+      this.appLeftAt = Date.now();
+    });
+    host.on("connect", () => {
+      this.appConnectedAt = Date.now();
     });
     // Crashes before this agent's session began are not its news.
     this.crashBaseline = host.crashMark();
@@ -4166,13 +4185,17 @@ export class TaplineTools {
     if (stress.target !== undefined && kind !== "double_tap") return fail("Error bad_params: target goes with stress double_tap.");
     const survives = args.survives;
     if (args.done === true) {
-      if (!this.stressWaiting.has(kind)) {
+      const asked = this.stressWaiting.get(kind);
+      if (asked === undefined) {
         return fail(`Error bad_params: no ${kind} moment is waiting for a person; ask for it first with journey { stress: { kind: "${kind}" } }.`);
       }
-      const asked = this.stressWaiting.get(kind);
-      this.stressWaiting.delete(kind);
       await this.reconnected();
-      return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked));
+      // Done is checked, not taken on the agent's word: the app must show that the moment happened.
+      // An app that is gone by then is judged by survives (it did not survive), not by what it left behind.
+      const unseen = this.host.current() === undefined ? null : await this.stressUnseen(kind, asked);
+      if (unseen !== null) return fail(`Error bad_params: ${unseen} Ask the person again, then say done.`);
+      this.stressWaiting.delete(kind);
+      return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked.survives));
     }
     if (this.host.current() === undefined) return this.notConnected();
     switch (kind) {
@@ -4192,18 +4215,49 @@ export class TaplineTools {
       case "background":
         return this.waitForPerson(kind, "switch to another app and back", survives);
       case "rotate":
-        return this.waitForPerson(kind, "turn the phone", survives);
+        return this.waitForPerson(kind, "turn the phone and keep it turned", survives);
     }
   }
 
-  private waitForPerson(kind: string, what: string, survives: Survives | undefined): CallToolResult {
-    this.stressWaiting.set(kind, survives);
+  private async waitForPerson(kind: string, what: string, survives: Survives | undefined): Promise<CallToolResult> {
+    this.stressWaiting.set(kind, { survives, askedAt: Date.now(), size: kind === "rotate" ? await this.freshScreenSize() : null });
     return text(
       [
         `Stress: ${kind} needs a person: ${what}, then say done.`,
         `When they have, call journey { stress: { kind: "${kind}" }, done: true }${survives !== undefined ? " (it checks what you asked to survive then)" : ", with survives to say what must still be there"}.`,
       ].join("\n"),
     );
+  }
+
+  /** The screen's size in points from a read that touches nothing; null when the app doesn't answer. */
+  private async freshScreenSize(): Promise<{ width: number; height: number } | null> {
+    const session = this.host.current();
+    if (session === undefined) return null;
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const screen = tree.success ? tree.data.screen : null;
+    return screen ? { width: screen.width, height: screen.height } : null;
+  }
+
+  /**
+   * Why a person's stress moment can't be taken as done, or null when the app shows it happened: background left the
+   * front (or the link dropped) since it was asked; relaunch connected anew; rotate flipped the screen's size.
+   */
+  private async stressUnseen(kind: string, asked: StressWaiting): Promise<string | null> {
+    switch (kind) {
+      case "background":
+        return this.appLeftAt > asked.askedAt ? null : "The app never left the front since the moment was asked, so it can't be counted.";
+      case "relaunch":
+        return this.appConnectedAt > asked.askedAt ? null : "The app hasn't started again since the moment was asked (no new connection), so it can't be counted.";
+      case "rotate": {
+        const now = await this.freshScreenSize();
+        const was = asked.size;
+        if (now === null || was === null) return "The screen's size couldn't be read, so the turn can't be confirmed.";
+        const flipped = Math.round(now.width) === Math.round(was.height) && Math.round(now.height) === Math.round(was.width) && Math.round(now.width) !== Math.round(now.height);
+        return flipped ? null : `The screen is still ${Math.round(now.width)}x${Math.round(now.height)} pt, as when the moment was asked: say done while the phone is turned.`;
+      }
+      default:
+        return null;
+    }
   }
 
   /** Waits for an app after a reload or a person leaving it (a new session comes up), a few seconds at most. */
@@ -4286,13 +4340,16 @@ export class TaplineTools {
     }
     const session = this.host.current();
     if (session === undefined) return { survived: false, why: "the app isn't connected any more." };
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    // What a person sees (AGENT-TOOLS 1.12 §17.4): in a user's eyes the glass only; a label a screen reader hears is no proof.
+    const tree = treeResultSchema.safeParse(
+      await this.host.request("tree", { peek: true, ...(this.userEyes() ? { glass: true } : {}) }, { sessionId: session.id }).catch(() => null),
+    );
     if (!tree.success) return { survived: false, why: "the app didn't answer when asked what is on screen." };
     const parts: Array<{ ok: boolean; why: string }> = [];
     if (survives.text !== undefined) {
       const wanted = survives.text;
       const holds = (value: unknown): boolean => (typeof value === "string" || typeof value === "number") && String(value).includes(wanted);
-      const found = tree.data.elements.find((e) => holds(e.text) || holds(e.value) || holds(e.label));
+      const found = tree.data.elements.find((e) => holds(e.text) || holds(e.value));
       if (found === undefined) parts.push({ ok: false, why: `text ${JSON.stringify(wanted)} is not on screen any more.` });
       else {
         const field = found.role === "textfield" || found.role === "input" || (found.actions ?? []).includes("type");
