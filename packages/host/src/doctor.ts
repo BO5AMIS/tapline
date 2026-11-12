@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadAccounts, type GitProbe } from "./accounts.js";
+import { ACCOUNTS_WARNING, loadAccounts, type GitProbe } from "./accounts.js";
 import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
@@ -386,7 +386,7 @@ async function checkAccounts(file: string, probe: GitProbe | undefined): Promise
       return { name, status: "fail", detail: loaded.blocked, fix: "Move the file outside the repository, or add it to .gitignore." };
     }
     const names = loaded.store.names();
-    return { name, status: "pass", detail: `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}` };
+    return { name, status: "pass", detail: `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}. ${ACCOUNTS_WARNING}` };
   } catch (error) {
     return { name, status: "fail", detail: errorText(error), fix: "Fix the file, or leave out --accounts." };
   }

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -44,7 +44,7 @@ describe("the accounts file", () => {
   it("the schema accepts the spec's example file", () => {
     const parsed = accountsFileSchema.safeParse({
       version: 1,
-      accounts: { tester2: { username: "tester2@example.com", password: "x", apps: ["com.example.wayfare"] }, phone: { passcode: "1234" } },
+      accounts: { tester2: { username: "tester2@example.com", password: "fake-pass", apps: ["com.example.wayfare"] }, phone: { passcode: "1234" } },
     });
     expect(parsed.success).toBe(true);
   });
@@ -84,6 +84,30 @@ describe("the accounts file", () => {
     const wrong = await loadAccounts(file, clear).catch((e: unknown) => e);
     expect(String((wrong as Error).message)).toContain("isn't the right format");
     expect(String((wrong as Error).message)).not.toContain("5");
+  });
+
+  it("a file reached through a link into a repo is checked where it really is", async () => {
+    const repo = tmp();
+    const outside = tmp();
+    writeFileSync(join(repo, "accounts.json"), JSON.stringify(FILE));
+    const link = join(outside, "link");
+    try {
+      symlinkSync(repo, link, "junction");
+    } catch {
+      return; // no permission to link here: nothing to test
+    }
+    const real = realpathSync(repo);
+    const probe: GitProbe = { insideWorkTree: async (dir) => dir.startsWith(real), ignored: async () => false };
+    expect((await loadAccounts(join(link, "accounts.json"), probe)).store).toBeNull();
+  });
+
+  it("a path with a .git segment is refused, whatever git says", async () => {
+    const dir = join(tmp(), ".git");
+    mkdirSync(dir);
+    const file = join(dir, "accounts.json");
+    writeFileSync(file, JSON.stringify(FILE));
+    const loaded = await loadAccounts(file, { insideWorkTree: async () => false, ignored: async () => true });
+    expect(loaded.store).toBeNull();
   });
 
   it("the real git probe finds a work tree and honours .gitignore", async () => {
@@ -379,6 +403,54 @@ describe("values never reach what is written or shown", () => {
     expect(shown).toContain("signing in as");
     expect(shown).not.toContain(USER);
     expect(shown).not.toContain(PASS);
+  });
+
+  it("a password with quotes, a backslash, a percent and spaces is scrubbed in its escaped, encoded and normalized shapes", async () => {
+    // Two spaces: the app's tree text collapses them, so that shape differs from the raw one.
+    const hard = 'a"b\\c%d  e';
+    const odd = accountStore({ version: 1, accounts: { tester2: { username: "tester2@example.com", password: hard, apps: [APP] } } });
+    const shapes = [
+      hard,
+      JSON.stringify(hard).slice(1, -1),
+      encodeURIComponent(hard),
+      encodeURIComponent(hard).replace(/%20/g, "+"),
+      'a"b\\c%d e',
+    ];
+    for (const shape of shapes) {
+      const scrubbed = odd.redact(`before ${shape} after`);
+      expect(scrubbed).toBe("before <tester2's password> after");
+    }
+    // through the host: a log line, a network line and a tree text
+    const { host, port } = await startHost({ redact: odd.redact });
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "logs"] }, (req) => ({
+      ok: true,
+      result: { screen: SCREEN, elements: [{ ...EMAIL, text: 'a"b\\c%d e' }] , echo: req.method },
+    }));
+    apps.push(app);
+    app.send({ type: "event", event: "log", data: { level: "info", message: `body {"password":"${JSON.stringify(hard).slice(1, -1)}"}`, ts: Date.now() } });
+    app.send({ type: "event", event: "log", data: { level: "info", message: `[network] POST /login?p=${encodeURIComponent(hard)} form=${encodeURIComponent(hard).replace(/%20/g, "+")} 200`, ts: Date.now() } });
+    await new Promise((r) => setTimeout(r, 100));
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, accounts: { store: odd } });
+    const logs = textOf(await tools.logs({}));
+    const looked = textOf(await tools.look({ screenshot: false }));
+    for (const shown of [logs, looked]) {
+      expect(shown).not.toContain("a%22b");
+      expect(shown).not.toContain("c%25d");
+      expect(shown).not.toContain('a\\"b');
+      expect(shown).not.toContain('a"b');
+    }
+    expect(logs).toContain("<tester2's password>");
+    expect(looked).toContain("<tester2's password>");
+  });
+
+  it("a value under 3 characters is refused by the schema, without quoting it", () => {
+    const parsed = accountsFileSchema.safeParse({ version: 1, accounts: { a: { username: "ab", password: "xy" } } });
+    expect(parsed.success).toBe(false);
+    const why = JSON.stringify(parsed.error?.issues);
+    expect(why).toContain("at least 3 characters");
+    expect(why).not.toContain('"ab"');
+    expect(why).not.toContain('"xy"');
   });
 
   it("an app's error message never shows a value either", async () => {

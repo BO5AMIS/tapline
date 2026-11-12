@@ -72,7 +72,9 @@ Options:
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
   --accounts <file>  For mcp and host: test accounts (JSON; the tool types an account's username and password so the
-                 agent never sees them). The file must sit outside any git repo, or be ignored by it
+                 agent never sees them). The file must sit outside any git repo, or be ignored by it.
+                 A password stays out of pictures only while its field is secure (a "show password" toggle shows it).
+                 Keep the file outside the folders the agent may read
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
                  default it opens the live view in a browser here and keeps the link (its key) from the agent
                  (or TAPLINE_VIEWER_LINK=1)

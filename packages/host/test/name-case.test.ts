@@ -120,6 +120,22 @@ describe("a reference name", () => {
   });
 });
 
+describe("a reference name across two folders", () => {
+  it("the exact name in either folder wins over a twin in the other", async () => {
+    const { tools, root } = await setup();
+    const a = join(root, "a");
+    const b = join(root, "b");
+    mkdirSync(a);
+    mkdirSync(b);
+    writeFileSync(join(a, "Home.jpg"), "x");
+    writeFileSync(join(b, "home.jpg"), "x");
+    const clash = (name: string, dirs: string[]): string | null => (tools as unknown as { referenceClash(n: string, d: string[]): string | null }).referenceClash(name, dirs);
+    expect(clash("home", [a, b])).toBeNull();
+    expect(clash("Home", [a, b])).toBeNull();
+    expect(clash("HOME", [a, b])).toMatch(/differs only in case from the existing/);
+  });
+});
+
 describe("a script name", () => {
   it("record start refuses a name that differs only in case from a saved script", async () => {
     const { tools, scripts } = await setup();

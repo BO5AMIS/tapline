@@ -94,7 +94,10 @@ describe("doctor", () => {
 
   it("lists the names when the file loads, never a value", async () => {
     const check = accountsCheck(await runDoctor({ ...BASE, accountsFile: accountsFile(), gitProbe: OUTSIDE }));
-    expect(check).toMatchObject({ status: "pass", detail: "1 account: tester2" });
+    expect(check?.status).toBe("pass");
+    expect(check?.detail).toContain("1 account: tester2.");
+    expect(check?.detail).toContain("a \"show password\" toggle shows it");
+    expect(check?.detail).toContain("outside the folders the agent may read");
     expect(JSON.stringify(check)).not.toContain("fake-pass-9137");
   });
 
@@ -103,6 +106,15 @@ describe("doctor", () => {
     const check = accountsCheck(await runDoctor({ ...BASE, accountsFile: file, gitProbe: INSIDE }));
     expect(check?.status).toBe("fail");
     expect(check?.detail).toBe(`accounts file is inside the git repo at ${file} and not ignored; move it or add it to .gitignore.`);
+  });
+
+  it("fails on a value under 3 characters, without quoting it", async () => {
+    const file = join(tmp(), "accounts.json");
+    writeFileSync(file, JSON.stringify({ version: 1, accounts: { a: { username: "ab", password: "qz" } } }));
+    const check = accountsCheck(await runDoctor({ ...BASE, accountsFile: file, gitProbe: OUTSIDE }));
+    expect(check?.status).toBe("fail");
+    expect(check?.detail).toContain("at least 3 characters");
+    expect(check?.detail).not.toContain('"qz"');
   });
 
   it("fails on a file that is missing", async () => {

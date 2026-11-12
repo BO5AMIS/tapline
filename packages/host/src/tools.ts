@@ -135,7 +135,7 @@ const briefField = z.boolean().optional().describe("true: a short answer, as the
 const accountField = z
   .string()
   .optional()
-  .describe("A test account's name: the text is then `${account.username}` or `${account.password}` alone, typed by the tool (you never see the password)");
+  .describe("A test account's name: the text is then `${account.username}` or `${account.password}` alone, typed by the tool (you never see the password). A password stays out of pictures only while its field is secure; a \"show password\" toggle shows it. The accounts file belongs outside the folders you may read");
 
 const dryRunField = z
   .boolean()
@@ -2525,10 +2525,18 @@ export class TaplineTools {
     /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
     touch?: NoChangeAction,
     /** What goes only to the app: a test account's value and the kind of field it may go into. Nothing else sees it (§18.6). */
-    wire?: Record<string, unknown>,
+    wire?: { values: Record<string, unknown>; sessionId: string },
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    // The value was made for the app that was current when the account was checked; no other app gets it, and a
+    // placeholder never goes to any app as text (§18.6).
+    if (wire !== undefined && wire.sessionId !== session.id) {
+      return fail("Error not_connected: the app changed while the account's value was being prepared; try again.");
+    }
+    if (wire === undefined && method === "type" && typeof params === "object" && params !== null && String((params as { text?: unknown }).text ?? "").includes("${account.")) {
+      return fail("Error bad_params: an account value can't be typed as plain text; it needs a loaded account and a connected app.");
+    }
     const shortAnswer = this.briefOn(brief);
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
@@ -2542,7 +2550,7 @@ export class TaplineTools {
           if (stop !== null) throw new PolicyStop(stop);
         }
         // The app gets the value and the kind, not the account's name; the log, the viewer and a recording get `params`.
-        const sent = wire === undefined ? params : { ...(typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "account")) : {}), ...wire };
+        const sent = wire === undefined ? params : { ...(typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "account")) : {}), ...wire.values };
         return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
       };
       // With the live viewer, a person watching goes first.
@@ -2558,7 +2566,7 @@ export class TaplineTools {
         error instanceof TaplineError ? error.code : "internal",
         error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
       );
-      return fail(kindRefusal(error, wire?.["kind"]) ?? describeError(error));
+      return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
     }
     const line = describe(result);
     this.noteTouch(method, params, result);
@@ -3506,16 +3514,16 @@ export class TaplineTools {
 
   /** The same for a reference name: against the pictures in `dirs`, then the compare steps earlier in this recording. */
   private referenceClash(name: string, dirs: readonly string[]): string | null {
-    for (const dir of dirs) {
-      const twin = caseTwin(name, stemsIn(dir, ".jpg"));
-      if (twin !== null) return `Error bad_params: the reference "${name}" differs only in case from the existing "${twin}"; use that name.`;
-    }
-    if (this.recording !== null && !this.replaying) {
-      const earlier = this.recording.steps.flatMap((step) => (step.method === "compareScreen" && typeof step.params["name"] === "string" ? [step.params["name"]] : []));
-      const twin = caseTwin(name, earlier);
-      if (twin !== null) return `Error bad_params: the reference "${name}" differs only in case from "${twin}", used earlier in this recording; use that name.`;
-    }
-    return null;
+    // One list for every folder and the recording: the exact name anywhere is the one meant, so it wins over a twin elsewhere.
+    const inFolders = dirs.flatMap((dir) => stemsIn(dir, ".jpg"));
+    const earlier =
+      this.recording !== null && !this.replaying
+        ? this.recording.steps.flatMap((step) => (step.method === "compareScreen" && typeof step.params["name"] === "string" ? [step.params["name"]] : []))
+        : [];
+    const twin = caseTwin(name, [...inFolders, ...earlier]);
+    if (twin === null) return null;
+    if (inFolders.includes(twin)) return `Error bad_params: the reference "${name}" differs only in case from the existing "${twin}"; use that name.`;
+    return `Error bad_params: the reference "${name}" differs only in case from "${twin}", used earlier in this recording; use that name.`;
   }
 
   async record(args: Shape<"record">): Promise<CallToolResult> {
@@ -4048,12 +4056,19 @@ export class TaplineTools {
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
-    const wire = account !== null && account.ok ? { text: account.value, kind: account.kind } : undefined;
+    const wire =
+      account !== null && account.ok && session !== undefined
+        ? { values: { text: account.value, kind: account.kind }, sessionId: session.id }
+        : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) {
-      if (wire === undefined) return this.dryRun("type_text", "type", params);
+      if (wire === undefined) {
+        // A placeholder with no checked account is never sent, not even to be resolved.
+        if (args.text.includes("${account.")) return Promise.resolve(this.notConnected());
+        return this.dryRun("type_text", "type", params);
+      }
       const { account: _account, ...plain } = params;
-      return this.dryRun("type_text", "type", { ...plain, text: "", kind: wire.kind });
+      return this.dryRun("type_text", "type", { ...plain, text: "", kind: wire.values.kind });
     }
     return this.act(
       "type",

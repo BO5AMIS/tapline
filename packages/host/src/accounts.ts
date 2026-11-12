@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 import { z } from "zod";
 
@@ -11,9 +11,12 @@ import { z } from "zod";
 
 const ACCOUNT_NAME = /^[\w.-]{1,60}$/;
 
+// A shorter value would be scrubbed out of unrelated text. The message quotes no value.
+const SHORT = "must be at least 3 characters, so scrubbing it can't garble other text";
+
 const accountSchema = z.object({
-  username: z.string().min(1).optional(),
-  password: z.string().min(1).optional(),
+  username: z.string().min(3, SHORT).optional(),
+  password: z.string().min(3, SHORT).optional(),
   /** Tapwright's: the phone's passcode. Tapline loads it without complaint and never types it. */
   passcode: z.string().min(1).optional(),
   apps: z.array(z.string().min(1)).optional(),
@@ -80,17 +83,41 @@ export const realGitProbe: GitProbe = {
   },
 };
 
+/** What the user is told wherever the accounts option is described (the parameter text, `--help`, `doctor`). */
+export const ACCOUNTS_WARNING =
+  "A password stays out of pictures only while its field is secure; a \"show password\" toggle shows it. Keep the accounts file outside the folders the agent may read.";
+
 /** The refusal's words, for the first answer, `doctor` and every use. */
 export function blockedMessage(file: string): string {
   return `accounts file is inside the git repo at ${file} and not ignored; move it or add it to .gitignore.`;
 }
 
-/** Longest values first, so a value that holds another is scrubbed whole. */
+/** The invisible direction marks the app strips from text (react-native-tapline's `displayText`). */
+const DIRECTION_MARKS = /[‎‏‪-‮⁦-⁩]/g;
+
+/**
+ * The shapes a value can take on its way back: as it is, inside a JSON string, in a URL (percent or form encoded), and
+ * as the app's `normalizeText` leaves it (direction marks gone, whitespace collapsed and trimmed).
+ */
+function variantsOf(value: string): string[] {
+  const normalized = value.replace(DIRECTION_MARKS, "").replace(/\s+/g, " ").trim();
+  const forms = new Set<string>();
+  for (const base of [value, normalized]) {
+    forms.add(base);
+    forms.add(JSON.stringify(base).slice(1, -1));
+    const percent = encodeURIComponent(base);
+    forms.add(percent);
+    forms.add(percent.replace(/%20/g, "+"));
+  }
+  return [...forms].filter((form) => form !== "");
+}
+
+/** Longest variants first, so a value that holds another is scrubbed whole. */
 function scrubber(accounts: AccountsFile["accounts"]): (text: string) => string {
   const pairs: Array<[string, string]> = [];
   for (const [name, account] of Object.entries(accounts)) {
-    if (account.username !== undefined) pairs.push([account.username, `<${name}'s username>`]);
-    if (account.password !== undefined) pairs.push([account.password, `<${name}'s password>`]);
+    if (account.username !== undefined) for (const form of variantsOf(account.username)) pairs.push([form, `<${name}'s username>`]);
+    if (account.password !== undefined) for (const form of variantsOf(account.password)) pairs.push([form, `<${name}'s password>`]);
   }
   pairs.sort((a, b) => b[0].length - a[0].length);
   return (text) => {
@@ -128,10 +155,21 @@ export function accountStore(file: AccountsFile): AccountStore {
 export async function loadAccounts(file: string, probe: GitProbe = realGitProbe): Promise<AccountsLoad> {
   const path = resolve(file);
   if (!existsSync(path)) throw new Error(`the accounts file ${path} doesn't exist`);
-  if ((await probe.insideWorkTree(dirname(path))) && !(await probe.ignored(path))) return { store: null, blocked: blockedMessage(path) };
+  // Through a symlink or a junction the file may really sit in a repo: ask about where it is.
+  let real = path;
+  try {
+    real = realpathSync(path);
+  } catch {
+    // the path stands
+  }
+  // A `.git` folder in the path is a repo's own files, which no .gitignore covers.
+  const inGitDir = real.split(/[\\/]/).includes(".git");
+  if (inGitDir || ((await probe.insideWorkTree(dirname(real))) && !(await probe.ignored(real)))) {
+    return { store: null, blocked: blockedMessage(path) };
+  }
   let json: unknown;
   try {
-    json = JSON.parse(readFileSync(path, "utf8"));
+    json = JSON.parse(readFileSync(real, "utf8"));
   } catch {
     // Node's own message quotes part of the text, and this file holds passwords.
     throw new Error(`the accounts file ${path} isn't valid JSON`);
