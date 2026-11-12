@@ -1567,6 +1567,19 @@ describe("mcp server", () => {
     }
   });
 
+  it("ignores a step's own look and screenshot even on tools without them (§9.1)", async () => {
+    const { client, close } = await connected();
+    try {
+      const r = await client.callTool({
+        name: "run",
+        arguments: { steps: [{ tool: "wait", seconds: 0.1, look: true, screenshot: true }, { tool: "back", look: false }], look: false },
+      });
+      expect(answerText(r)).not.toContain("bad_params");
+    } finally {
+      await close();
+    }
+  });
+
   it("names the step for an unknown key inside a run step", async () => {
     const { client, close } = await connected();
     try {

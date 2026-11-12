@@ -1188,7 +1188,9 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, ...params } = step as Step & { route?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, ...given } = step as Step & { route?: unknown };
+      // §9.1: a step's own look and screenshot are ignored (the batch answers once), whether its tool has them or not.
+      const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot") || key in shape));
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
         return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
       }
