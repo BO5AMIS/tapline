@@ -1081,6 +1081,10 @@ export class TaplineTools {
     host.on("connect", () => {
       this.appConnectedAt = Date.now();
     });
+    // The app's picker used the armed test pictures: that is when a pick was "skipped" (1.5 review, finding 5).
+    host.on("pickerSkipped", (session, count) => {
+      this.mediaState.recordPickerSkipped(session.app.id, count);
+    });
     // Crashes before this agent's session began are not its news.
     this.crashBaseline = host.crashMark();
     for (const name of CRASH_NOTED_TOOLS) {
@@ -4089,6 +4093,11 @@ export class TaplineTools {
     const content: CallToolResult["content"] = [];
     try {
       await attempt("conditions could not be undone", () => this.undoConditions(state));
+      // A picker stub the journey armed and nobody used goes back, so a person's next pick is their own (finding 5).
+      await attempt("the photo picker could not be put back", async () => {
+        const live = this.host.current();
+        if (live !== undefined && live.capabilities.includes("media")) await this.host.request("media", { op: "disarm" }, { sessionId: live.id });
+      });
       const undoLines: string[] = [];
       // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
       if (state.networkStress && !state.conditionRecords.some((r) => r.name === "network" && r.applied)) {

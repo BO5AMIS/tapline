@@ -176,6 +176,14 @@ describe("the report folder", () => {
     expect(md).toContain("Eyes: agent.");
   });
 
+  it("puts an unused photo picker stub back at the stop (1.5 review, finding 5)", async () => {
+    const r = await rig({ capabilities: ["tree", "press", "screenshot", "media"] });
+    rigs.push(r);
+    await r.tools.journey({ start: true, goal: "add a photo", persona: "a first-timer" });
+    await r.tools.journey({ stop: true, reached: false });
+    expect(r.app.requests.filter((q) => q.method === "media").map((q) => q.params)).toEqual([{ op: "disarm" }]);
+  });
+
   it("a second journey in the same minute with the same goal gets its own folder", async () => {
     const r = await make();
     await start(r);

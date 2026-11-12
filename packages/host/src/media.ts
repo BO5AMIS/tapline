@@ -229,7 +229,7 @@ export async function runMedia(args: MediaArgs, ctx: MediaContext): Promise<Call
       }
       armed = parseOr(pickerResultSchema, raw)?.pictures ?? armed;
     }
-    ctx.state.recordPickerSkipped(app, files.length);
+    // Counted when the app uses the stub (its `pickerSkipped` event), not here: an armed stub may never be used.
     return ok(`The next photo pick returns ${plural(files.length, "picture")} without the OS picker (marked "picker skipped" in a journey report).`);
   }
 

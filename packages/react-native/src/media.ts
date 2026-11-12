@@ -489,7 +489,13 @@ export async function media(rawParams: unknown): Promise<unknown> {
       return removePictures(rawParams);
     case 'picker':
       return armPicker(rawParams);
+    case 'disarm': {
+      // The host's journey stopped: a stub nobody used goes back, so a person's next pick is their own.
+      const was = armed !== null || staged.length > 0;
+      resetMedia();
+      return { disarmed: was };
+    }
     default:
-      throw badParams('op must be "add", "remove" or "picker"');
+      throw badParams('op must be "add", "remove", "picker" or "disarm"');
   }
 }

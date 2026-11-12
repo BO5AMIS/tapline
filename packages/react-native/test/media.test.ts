@@ -293,6 +293,18 @@ describe('picker', () => {
     expect(result.assets[0]).toMatchObject({ uri: 'data:image/jpeg;base64,QUJD', type: 'image', fileName: 'breakfast.jpg', mimeType: 'image/jpeg', width: 640, height: 480 });
   });
 
+  test('disarm puts the picker back: the next pick is the OS picker again (1.5 review, finding 5)', async () => {
+    const { mod, library } = pickerModule();
+    setMediaModules(modules({ imagePicker: mod }));
+    await arm();
+    expect(pickerArmed()).toBe(true);
+    expect(await media({ op: 'disarm' })).toEqual({ disarmed: true });
+    expect(pickerArmed()).toBe(false);
+    await (mod.launchImageLibraryAsync as (o: unknown) => Promise<unknown>)({ mediaTypes: 'images' });
+    expect(library).toHaveBeenCalledTimes(1);
+    expect(await media({ op: 'disarm' })).toEqual({ disarmed: false });
+  });
+
   test('also answers launchCameraAsync, with several pictures staged one request at a time', async () => {
     const { mod } = pickerModule();
     setMediaModules(modules({ imagePicker: mod }));

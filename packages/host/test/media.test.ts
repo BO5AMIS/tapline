@@ -222,7 +222,7 @@ describe("the media tool", () => {
     expect(textOf(await tools.media({ remove: true }))).toBe("Nothing to remove: this session added no pictures.");
   });
 
-  it("arms the picker without confirm, answers in the shared words, and records picker skipped for the app", async () => {
+  it("arms the picker without confirm, answers in the shared words, and records picker skipped when the app uses it", async () => {
     const { a, b } = pictures();
     const { app, tools } = await connect((p) => ({ ok: true, result: { pictures: p.index } }));
     const seen: Array<[string, number]> = [];
@@ -234,6 +234,11 @@ describe("the media tool", () => {
       ["picker", 1, 2],
       ["picker", 2, 2],
     ]);
+    // Armed is not skipped: nothing counts until the app's picker hands the pictures over (1.5 review, finding 5).
+    expect(seen).toEqual([]);
+    expect(tools.mediaState.pickerSkips("com.example.demo")).toBe(0);
+    app.send({ type: "event", event: "pickerSkipped", data: { count: 2 } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(seen).toEqual([["com.example.demo", 2]]);
     expect(tools.mediaState.pickerSkips("com.example.demo")).toBe(1);
     expect(tools.mediaState.takePickerSkips("com.example.demo")).toBe(1);
