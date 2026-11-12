@@ -1,6 +1,7 @@
 import { AppState, Platform } from 'react-native';
 import { screenshotAvailable } from './actions';
 import { keepAwake } from './awake';
+import { deliverSavedCrash } from './crash';
 import { emitEvent, setEventSink } from './events';
 import { onRealTouch } from './touches';
 import { onFrameAck, setFrameAcks, stopLiveFeed } from './live';
@@ -351,6 +352,8 @@ export class TaplineClient {
     this.setAwake(true);
     setLogSink((event, payload) => this.send({ type: 'event', event, data: payload }));
     setEventSink((event, data) => this.send({ type: 'event', event, data }));
+    // A fatal error the app kept on the phone before it went away, not yet told to this computer.
+    void deliverSavedCrash();
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => this.safely(() => this.onPingTick()), PING_INTERVAL_MS);
   }

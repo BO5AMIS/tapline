@@ -11,6 +11,7 @@ import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult 
 import { alertNotes, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
+import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
@@ -270,6 +271,9 @@ export const toolShapes = {
     level: z.enum(["error", "warning", "info"]).optional().describe("That level and above (default info: everything)"),
     grep: z.string().optional().describe("Only lines containing this text (case-insensitive)"),
     limit: z.number().int().min(1).max(500).optional().describe("At most this many lines, the newest (1 to 500, default 100)"),
+  },
+  crash: {
+    all: z.boolean().optional().describe("The last 5 crashes instead of only the newest"),
   },
   reload: { look: lookField },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
@@ -754,6 +758,13 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 
 // ---- tool handlers ----------------------------------------------------------
 
+/** Every tool whose answer can end with a crash note (all but `crash`, which tells it in full). */
+const CRASH_NOTED_TOOLS = [
+  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "checkLayout", "viewer", "compareScreen", "filmstrip",
+  "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
+  "openUrl", "logs", "reload", "wait",
+] as const satisfies readonly (keyof TaplineTools)[];
+
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
   private readonly reloadWaitMs: number;
@@ -795,6 +806,9 @@ export class TaplineTools {
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
   private pairWrites = 0;
+  /** Crash events up to this one have been told to the agent. */
+  private notedCrashSeq = 0;
+  private noteDepth = 0;
 
   constructor(
     private readonly host: TaplineHost,
@@ -811,6 +825,63 @@ export class TaplineTools {
     host.on("touch", (session) => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
     });
+    // Crashes before this agent's session began are not its news.
+    this.notedCrashSeq = host.crashMark();
+    for (const name of CRASH_NOTED_TOOLS) {
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args)));
+    }
+  }
+
+  /**
+   * Runs a tool call and ends its answer with a note when the app stopped (AGENT-TOOLS 15.2): during this
+   * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
+   */
+  private noting(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+    if (this.noteDepth > 0) return run();
+    const mark = this.host.crashMark();
+    this.noteDepth += 1;
+    let result: CallToolResult | Promise<CallToolResult>;
+    try {
+      result = run();
+    } catch (error) {
+      this.noteDepth -= 1;
+      throw error;
+    }
+    if (result instanceof Promise) {
+      return result.then(
+        (answer) => {
+          this.noteDepth -= 1;
+          return this.withCrashNotes(answer, mark);
+        },
+        (error: unknown) => {
+          this.noteDepth -= 1;
+          throw error;
+        },
+      );
+    }
+    this.noteDepth -= 1;
+    return this.withCrashNotes(result, mark);
+  }
+
+  private withCrashNotes(answer: CallToolResult, mark: number): CallToolResult {
+    const events = this.host.crashEventsAfter(this.notedCrashSeq);
+    if (events.length === 0) return answer;
+    this.notedCrashSeq = this.host.crashMark();
+    let noted = answer;
+    for (const event of events) {
+      // During this call: no time. A crash the phone had kept and sent later says when it happened.
+      const during = event.seq > mark;
+      noted = appendNote(
+        noted,
+        event.kind === "crash"
+          ? crashNote(event.crash, !(during && event.crash.source === "live"))
+          : disconnectNote(during ? undefined : event.at),
+      );
+    }
+    return noted;
   }
 
   /** A person used the app: the next answer says so once, and `{ref}` targets are stale until the next full list. */
@@ -2925,15 +2996,29 @@ export class TaplineTools {
     return text(formatLogAnswer(filterLogs(entries, query), query, newest ?? args.since ?? Date.now()));
   }
 
+  /** The newest fatal JS error of the app (`all`: the last 5). Reading them tells the agent what the notes did. */
+  crash(args: Shape<"crash"> = {}): CallToolResult {
+    this.notedCrashSeq = this.host.crashMark();
+    const known = this.host.current() ?? this.host.lastDisconnect()?.session;
+    const crashes = this.host.crashes(known);
+    if (crashes.length === 0) return text(NO_CRASH_TEXT);
+    return text(crashes.slice(0, args.all === true ? 5 : 1).map(formatCrash).join("\n\n"));
+  }
+
   async reload(args: Shape<"reload">): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     try {
+      // The app goes away on purpose: that is no crash.
+      this.host.expectEnd(session.id);
       await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
     } catch (error) {
       // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
       const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
-      if (!worked) return fail(describeError(error));
+      if (!worked) {
+        this.host.expectEnd(session.id, false);
+        return fail(describeError(error));
+      }
     }
     if (args.look === false) return text("Reload requested.");
     const deadline = Date.now() + this.reloadWaitMs;

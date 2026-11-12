@@ -277,6 +277,17 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "crash",
+    {
+      title: "App crash",
+      description: toolDescription("crash"),
+      inputSchema: toolShapes.crash,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => tools.crash(args),
+  );
+
+  server.registerTool(
     "reload",
     {
       title: "Reload app",

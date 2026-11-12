@@ -11,7 +11,7 @@ export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", 
 export type RunTool = (typeof RUN_TOOLS)[number];
 
 /** Tools a step may not be (they read or manage, rather than act): `bad_params`. */
-export const NOT_IN_RUN = ["look", "run", "audit", "apps", "viewer", "record", "replay", "inspect", "check_layout", "pair", "open_app", "logs", "reload", "filmstrip"];
+export const NOT_IN_RUN = ["look", "run", "audit", "apps", "viewer", "record", "replay", "inspect", "check_layout", "pair", "open_app", "logs", "crash", "reload", "filmstrip"];
 
 export const expectSchema = z
   .object({

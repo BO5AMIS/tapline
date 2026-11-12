@@ -1,6 +1,7 @@
 import { AppState, Linking, NativeModules } from 'react-native';
 import { TaplineAgent, type DevOffer, type OfferSource } from './agent';
 import { installAlertTracking, nativeAlert, uninstallAlertTracking } from './alerts';
+import { configureCrash } from './crash';
 import { addLog, installLogs, originalLog, uninstallLogs } from './logs';
 import { inFlight, installNetworkTracking, onNetworkFailure, uninstallNetworkTracking } from './network';
 import { setNetworkIdleProvider } from './wait';
@@ -135,6 +136,7 @@ export function startTapline(options: TaplineOptions): void {
       originalLog('[tapline] expo-secure-store is not installed, so a pairing lasts until the app restarts (or pass `storage`)');
       storage = memoryStorage();
     }
+    configureCrash(storage);
     installLogs();
     installAlertTracking({ standIn: options.alerts === 'stand-in' });
     watchNetwork();
@@ -156,6 +158,7 @@ export function stopTapline(): void {
     current?.stop();
     if (current) {
       uninstallLogs();
+      configureCrash(null);
       uninstallAlertTracking();
       unwatchNetwork();
     }

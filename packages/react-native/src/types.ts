@@ -162,6 +162,9 @@ export interface ErrorEventData {
   stack: string;
   fatal: boolean;
   ts: number;
+  /** On a fatal error: the error type and React's component stack, when there is one. */
+  name?: string;
+  componentStack?: string;
 }
 
 export interface AppInfo {

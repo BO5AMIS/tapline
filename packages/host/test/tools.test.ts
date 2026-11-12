@@ -1491,7 +1491,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "reload", "wait"].sort(),
+        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "crash", "reload", "wait"].sort(),
       );
       const ok = await client.callTool({ name: "tap", arguments: { target: { id: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Tapped e3");

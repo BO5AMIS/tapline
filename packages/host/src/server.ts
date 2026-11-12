@@ -12,6 +12,7 @@ import {
   CLOSE_NOT_AUTHENTICATED,
   PROTOCOL_VERSION,
   appInfoSchema,
+  crashEventSchema,
   deviceInfoSchema,
   eventSchema,
   appFrameSchema,
@@ -69,6 +70,43 @@ export interface AppFrame {
   data: string;
   width?: number;
   height?: number;
+}
+
+/** A fatal JS error of an app (AGENT-TOOLS 15.2), kept per app so it outlives the app's session. */
+export interface CrashRecord {
+  /** When the app says it happened (the phone's clock, epoch ms). */
+  ts: number;
+  /** The error type, e.g. "TypeError". */
+  name: string;
+  message: string;
+  stack: string;
+  componentStack?: string;
+  /** `live`: the app sent it as it happened; `saved`: the app kept it on the phone and sent it on a later connection. */
+  source: "live" | "saved";
+}
+
+/** Something that stopped an app, in the order the host learned of it. `seq` counts up from 1. */
+export type CrashEvent =
+  | { seq: number; at: number; kind: "crash"; app: string; crash: CrashRecord }
+  | { seq: number; at: number; kind: "disconnect"; app: string };
+
+/** How many crashes are kept per app. */
+const MAX_CRASHES = 20;
+/** Close reasons that mean the app (or this host) ended the connection on purpose. */
+const ORDERLY_REASONS = new Set(["host closed", "replaced by a new connection", "stopped", "host silent", "replaced"]);
+
+function crashRecordOf(
+  data: { name?: string | undefined; message: string; stack?: string | undefined; componentStack?: string | undefined; ts?: number | undefined },
+  source: CrashRecord["source"],
+): CrashRecord {
+  return {
+    ts: data.ts ?? Date.now(),
+    name: data.name !== undefined && data.name !== "" ? data.name : "Error",
+    message: data.message,
+    stack: data.stack ?? "",
+    ...(data.componentStack !== undefined && data.componentStack !== "" ? { componentStack: data.componentStack } : {}),
+    source,
+  };
 }
 
 /** The most recent app that dropped, for explaining "no app is connected". */
@@ -223,6 +261,10 @@ interface Session {
   nextId: number;
   /** A request ended with `not_answering` and nothing has come back since. */
   notAnswering: boolean;
+  /** A fatal JS error arrived live in this session: its end is explained. */
+  fatalSeen?: boolean;
+  /** The agent asked for this end (a reload): it is no crash. */
+  expectedEnd?: boolean;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -276,6 +318,10 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly sessionMap = new Map<string, Session>();
   private selectedId: string | undefined;
   private lastDrop: LastDisconnect | undefined;
+  /** Fatal JS errors per app (by `identityOf`), newest last. */
+  private readonly crashMap = new Map<string, CrashRecord[]>();
+  private readonly crashLog: CrashEvent[] = [];
+  private crashSeq = 0;
   private httpExtension: HttpExtension | undefined;
   /** Open after `pair`: development builds on the local network may fetch this code (one use, 10 minutes). */
   private devOffer: DevOffer | undefined;
@@ -606,6 +652,53 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return session.events.filter((e) => since === undefined || (e.ts ?? 0) > since).map((e) => ({ ...e }));
   }
 
+  /** The agent is about to end the app's connection on purpose (a reload): that is no crash. */
+  expectEnd(sessionId: string, expected = true): void {
+    const session = this.sessionMap.get(sessionId);
+    if (session !== undefined) session.expectedEnd = expected;
+  }
+
+  /** The number of crash events so far; pass it to `crashEventsAfter` later. */
+  crashMark(): number {
+    return this.crashSeq;
+  }
+
+  /** Crash events after `seq`, oldest first. */
+  crashEventsAfter(seq: number): CrashEvent[] {
+    return this.crashLog.filter((event) => event.seq > seq);
+  }
+
+  /**
+   * Fatal JS errors of the app `of` (or of every app when it is undefined), newest first. They outlive the
+   * app's sessions, so a crash that ended the session can still be read.
+   */
+  crashes(of?: Pick<SessionInfo, "app" | "device">): CrashRecord[] {
+    const lists = of !== undefined ? [this.crashMap.get(identityOf(of)) ?? []] : [...this.crashMap.values()];
+    return lists.flat().sort((a, b) => b.ts - a.ts).map((c) => ({ ...c }));
+  }
+
+  private recordCrash(session: Session, crash: CrashRecord): void {
+    const key = identityOf(session.info);
+    const list = this.crashMap.get(key) ?? [];
+    // The same crash arrives twice: live, and again from the phone's storage on the next connection.
+    const known = list.find((c) => c.ts === crash.ts && c.message === crash.message);
+    if (known !== undefined) {
+      if (crash.stack !== "" && crash.source === "saved") known.stack = crash.stack;
+      if (known.componentStack === undefined && crash.componentStack !== undefined) known.componentStack = crash.componentStack;
+      return;
+    }
+    list.push(crash);
+    if (list.length > MAX_CRASHES) list.splice(0, list.length - MAX_CRASHES);
+    this.crashMap.set(key, list);
+    this.pushCrashEvent({ kind: "crash", app: session.info.app.name, crash });
+  }
+
+  private pushCrashEvent(event: { kind: "crash"; app: string; crash: CrashRecord } | { kind: "disconnect"; app: string }): void {
+    this.crashSeq += 1;
+    this.crashLog.push({ ...event, seq: this.crashSeq, at: Date.now() });
+    if (this.crashLog.length > 50) this.crashLog.splice(0, this.crashLog.length - 50);
+  }
+
   private describeIds(): string {
     const ids = [...this.sessionMap.keys()];
     return ids.length === 0 ? "none" : ids.join(", ");
@@ -716,8 +809,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       this.handleMessage(session, message);
     });
 
-    socket.on("close", (_code, reason) => {
+    socket.on("close", (code, reason) => {
       clearTimeout(helloTimer);
+      // A close with a normal code (1000, 1001, or 1005 for a bare close) is the app ending the connection
+      // itself (it unpaired, or was stopped); a crash or a lost network closes abnormally (1006).
+      if (session !== undefined && (code === 1000 || code === 1001 || code === 1005)) session.expectedEnd = true;
       if (session !== undefined) this.dropSession(session, reason.toString("utf8") || "disconnected");
     });
     socket.on("error", () => {
@@ -873,14 +969,25 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       this.safely(() => this.emit("appState", { ...session.info }, state));
       return;
     }
+    if (event === "crash") {
+      // A fatal error the app kept on the phone and sends after it connects again.
+      const saved = crashEventSchema.safeParse(data);
+      if (saved.success) this.recordCrash(session, crashRecordOf(saved.data, "saved"));
+      return;
+    }
     if (event !== "log" && event !== "error") return;
     const parsed = logEntrySchema.safeParse(data);
     if (!parsed.success) return;
+    const ts = parsed.data.ts ?? Date.now();
     this.pushEntry(session, {
       ...parsed.data,
       level: event === "error" ? "error" : (parsed.data.level ?? "log"),
-      ts: parsed.data.ts ?? Date.now(),
+      ts,
     });
+    if (event === "error" && parsed.data.fatal === true) {
+      session.fatalSeen = true;
+      this.recordCrash(session, crashRecordOf({ ...parsed.data, ts }, "live"));
+    }
   }
 
   private pushEntry(session: Session, entry: LogEntry): void {
@@ -902,6 +1009,19 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       ...(silentForMs !== undefined ? { silentForMs } : {}),
     };
     if (this.selectedId === session.info.id) this.selectedId = undefined;
+    // An app that went away while a request was in flight, with no JS error to explain it, may have crashed.
+    // Not when the agent asked for it (a reload), the app or host ended the connection on purpose, the app had
+    // gone to the background (iOS pauses it), or it merely went silent (that is `not_answering`, not a crash).
+    const appState = session.info.appState?.state;
+    const orderly =
+      session.expectedEnd === true ||
+      ORDERLY_REASONS.has(reason) ||
+      silentForMs !== undefined ||
+      appState === "background" ||
+      appState === "inactive";
+    if (!orderly && session.fatalSeen !== true && session.pending.size > 0) {
+      this.pushCrashEvent({ kind: "disconnect", app: session.info.app.name });
+    }
     for (const [id, pending] of session.pending) {
       clearTimeout(pending.timer);
       session.pending.delete(id);

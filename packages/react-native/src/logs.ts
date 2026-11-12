@@ -1,3 +1,4 @@
+import { crashFromError, deliverSavedCrash, saveCrash } from './crash';
 import { isRecord, type ErrorEventData, type LogEntry, type LogLevel } from './types';
 
 export const MAX_LOG_ENTRIES = 500;
@@ -86,7 +87,26 @@ export function recordError(error: unknown, fatal: boolean): void {
   const message = error instanceof Error ? error.message : stringify(error);
   const stack = error instanceof Error && typeof error.stack === 'string' ? error.stack : '';
   push({ level: 'error', message: stack || message, ts });
-  emit('error', { message, stack, fatal, ts });
+  if (!fatal) {
+    emit('error', { message, stack, fatal, ts });
+    return;
+  }
+  // The app may be gone a moment later: keep the crash on the phone first, then tell the computer now.
+  // (The computer counts the live report and the saved one as a single crash.)
+  const crash = crashFromError(error, ts);
+  saveCrash(crash);
+  emit('error', {
+    message,
+    stack,
+    fatal,
+    ts,
+    name: crash.name,
+    ...(crash.componentStack !== undefined ? { componentStack: crash.componentStack } : {}),
+  });
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    // A development build usually goes on after a fatal error (the red box): send the mapped version now.
+    void deliverSavedCrash();
+  }
 }
 
 /** Buffered entries, optionally only those newer than `since` (ms epoch). */
