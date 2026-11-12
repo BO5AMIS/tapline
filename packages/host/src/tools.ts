@@ -308,6 +308,23 @@ export const toolShapes = {
 
 type Shape<K extends keyof typeof toolShapes> = z.infer<z.ZodObject<(typeof toolShapes)[K]>>;
 
+/** The arguments of one tool, as its schema describes them. */
+export type ToolArgs<K extends keyof typeof toolShapes> = Shape<K>;
+
+/**
+ * The answer for a call that carries arguments the tool doesn't have (null when all are known). Zod strips unknown
+ * keys silently, so `audit {labels: true}` would run and ignore `labels`; this says so instead. Every way in to a
+ * tool (the MCP server, and through it the bench) goes through here; script steps are checked by `run` itself.
+ */
+export function unknownArgumentError(name: keyof typeof toolShapes, args: Record<string, unknown>): CallToolResult | null {
+  const known = Object.keys(toolShapes[name]);
+  const unknown = Object.keys(args).filter((key) => !known.includes(key));
+  if (unknown.length === 0) return null;
+  // AGENT-TOOLS 1.11 wording, shared with Tapwright: every unknown name in one sentence.
+  const takes = known.length === 0 ? "it takes no arguments" : `it takes ${known.join(", ")}`;
+  return fail(`Error bad_params: ${name} doesn't take ${unknown.join(", ")}; ${takes}.`);
+}
+
 // ---- compare_screen ---------------------------------------------------------
 
 const DEFAULT_MATCH_THRESHOLD = 0.5;
@@ -406,6 +423,11 @@ export interface ConnectInfo {
 
 export interface ToolsOptions {
   connect: ConnectInfo;
+  /**
+   * Whether a phone has ever connected to this computer's host. When set, the first answer of the session says what
+   * only a person can do (open the app, pair) if an app isn't connected: `Note: needs a person: …`, once.
+   */
+  pairedBefore?: () => boolean;
   /** Where the action log goes (AGENT-TOOLS 1.8 §12); none: no log. */
   logDir?: string;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
@@ -884,9 +906,30 @@ export class TaplineTools {
     const startedWith: AppIdentity | undefined = this.host.current();
     return this.noteScope.run(true, () => {
       const result = run();
-      if (result instanceof Promise) return result.then((answer) => this.withCrashNotes(answer, mark, startedWith));
-      return this.withCrashNotes(result, mark, startedWith);
+      if (result instanceof Promise) return result.then((answer) => this.withPersonNote(this.withCrashNotes(answer, mark, startedWith)));
+      return this.withPersonNote(this.withCrashNotes(result, mark, startedWith));
     });
+  }
+
+  /** The first call has been answered, so the "needs a person" note has had its turn. */
+  private personNoteDone = false;
+
+  /**
+   * The first answer of the session says what only a person can do, once, when something is pending: the app isn't
+   * connected (open it on the phone, same Wi-Fi), and the phone has never paired. Nothing pending: never.
+   */
+  private withPersonNote(answer: CallToolResult): CallToolResult {
+    if (this.personNoteDone || this.options.pairedBefore === undefined) return answer;
+    if (this.host.current() !== undefined) {
+      this.personNoteDone = true;
+      return answer;
+    }
+    if (answer.content[0]?.type !== "text") return answer; // nowhere to put it yet: the next answer says it
+    const items: string[] = [];
+    if (!this.options.pairedBefore()) items.push("the phone isn't paired yet (call `pair`, then the user scans the QR code or taps Connect)");
+    items.push("the app isn't connected (the user opens it on the phone, on the same Wi-Fi as this computer)");
+    this.personNoteDone = true;
+    return appendNote(answer, `Note: needs a person: ${items.join("; ")}.`);
   }
 
   /** What was told about this app's crashes so far: the crash events up to this number. */
@@ -980,6 +1023,7 @@ export class TaplineTools {
   // -- pair
 
   async pair(args: Shape<"pair">): Promise<CallToolResult> {
+    this.personNoteDone = true; // its answer says what the person does; no "call pair" note on it
     const { url, name } = this.options.connect;
     // Zero-QR pairing (Tapline 1.1): a development build whose JavaScript comes from this computer finds the
     // offer itself and asks its person to connect. Open for 10 minutes, one use, local network only.
@@ -1160,7 +1204,9 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, ...params } = step as Step & { route?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, ...given } = step as Step & { route?: unknown };
+      // §9.1: a step's own look and screenshot are ignored (the batch answers once), whether its tool has them or not.
+      const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot") || key in shape));
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
         return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
       }
@@ -1196,6 +1242,12 @@ export class TaplineTools {
         if (params["launch"] === true && params["tap"] !== undefined) {
           return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch reloads the app and tap taps in it; give one of them.`);
         }
+      }
+      // AGENT-TOOLS 1.11 §4: the shared wording, with the step first.
+      const known = Object.keys(shape);
+      const stray = Object.keys(params).filter((key) => !known.includes(key));
+      if (stray.length > 0) {
+        return fail(`Error bad_params: step ${i + 1}: ${step.tool} doesn't take ${stray.join(", ")}; ${known.length === 0 ? "it takes no arguments" : `it takes ${known.join(", ")}`}.`);
       }
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {

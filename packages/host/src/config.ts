@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 
@@ -120,6 +120,49 @@ export function configDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export function tokenFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return join(configDir(env), "token");
+}
+
+/** `~/.tapline/paired`: written when a phone first connects to this computer's host (no secret in it). */
+export function pairedMarkerPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(configDir(env), "paired");
+}
+
+/**
+ * Whether a phone has used this computer's host before: the marker (1.3.1 on), or what only a connected app leaves
+ * behind with an earlier version: screenshots, scripts or reference pictures, in a folder that isn't empty. Not the
+ * action log (the host makes its folder at startup, phone or not) and not a pairing offer (nobody may have taken it).
+ */
+export function pairedBefore(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+  list: (path: string) => string[] = (path) => readdirSync(path),
+): boolean {
+  const dir = configDir(env);
+  try {
+    if (exists(pairedMarkerPath(env))) return true;
+  } catch {
+    // fall through to what an earlier version left
+  }
+  return ["shots", "scripts", "baselines"].some((name) => {
+    const path = join(dir, name);
+    try {
+      return exists(path) && list(path).length > 0;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Notes that an app has connected to this computer's host. Never throws. */
+export function markPaired(env: NodeJS.ProcessEnv = process.env): void {
+  try {
+    const path = pairedMarkerPath(env);
+    if (existsSync(path)) return;
+    mkdirSync(configDir(env), { recursive: true });
+    writeFileSync(path, `${new Date().toISOString()}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // only a hint for "needs a person"
+  }
 }
 
 const MIN_TOKEN_LENGTH = 16;

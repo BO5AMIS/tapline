@@ -38,7 +38,7 @@ import {
   type TabFound,
 } from './inspect';
 import { sourcesOf, type ElementSource } from './source';
-import { AUDIT_TYPES, auditScreen, type AuditType } from './checks';
+import { AUDIT_TYPES, auditScreen, type AuditFinding, type AuditType } from './checks';
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
@@ -1804,13 +1804,36 @@ export async function inspect(rawParams: unknown): Promise<{ element: TaplineEle
   return { element, source: source ?? { components: [], location: null, props: {} } };
 }
 
+/** What is known about the element of an issue whose full element could not be built: where it is, and what it says. */
+export interface AuditWhere {
+  frame?: Frame;
+  text?: string;
+  label?: string;
+}
+
 export interface AuditIssue {
   type: AuditType;
   element: TaplineElement | null;
+  /** Set when `element` is null but something is known (its frame in points, its text or label). */
+  where?: AuditWhere;
   problem: string;
   fix: string;
   /** Where the app's code wrote the element (development builds), as Metro names the file. */
   at?: { file: string; line: number; direct: boolean };
+}
+
+/** The frame, text and label a finding knows when its element could not be built; null when it knows none. */
+function whereOf(finding: AuditFinding): AuditWhere | null {
+  const text = finding.entry?.info.text ?? '';
+  const label = finding.entry?.info.label ?? null;
+  const where: AuditWhere = {
+    ...(finding.frame !== null && [finding.frame.x, finding.frame.y, finding.frame.width, finding.frame.height].every(Number.isFinite)
+      ? { frame: finding.frame }
+      : {}),
+    ...(text !== '' ? { text: text.length > 80 ? `${text.slice(0, 79)}…` : text } : {}),
+    ...(label !== null && label !== '' ? { label: label.length > 80 ? `${label.slice(0, 79)}…` : label } : {}),
+  };
+  return Object.keys(where).length > 0 ? where : null;
 }
 
 /** `audit {types?}` (AGENT-TOOLS 1.8 §10): the screen's accessibility problems, each with its source line in development. */
@@ -1838,11 +1861,20 @@ export async function audit(rawParams: unknown): Promise<{ issues: AuditIssue[];
   const issues: AuditIssue[] = [];
   for (const finding of findings) {
     const source = finding.entry !== null ? sources[next++] : undefined;
-    const element = finding.entry !== null ? (await elementFor(finding.entry, finding.frame)).element : null;
+    let element: TaplineElement | null = null;
+    if (finding.entry !== null) {
+      try {
+        element = (await elementFor(finding.entry, finding.frame)).element;
+      } catch {
+        element = null; // the finding still says where it is, below
+      }
+    }
+    const where = element === null ? whereOf(finding) : null;
     const location = source?.location ?? null;
     issues.push({
       type: finding.type,
       element,
+      ...(where !== null ? { where } : {}),
       problem: finding.problem,
       fix: finding.fix,
       ...(location !== null ? { at: { file: location.file, line: location.line, direct: location.direct } } : {}),

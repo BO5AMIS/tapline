@@ -8,13 +8,14 @@ import {
   configDir,
   connectSnippet,
   hostUrl,
+  markPaired,
   nativeIntentSnippet,
   reachableHost,
   resolveConfig,
   type HostConfig,
 } from "./config.js";
 import { setUpDevServe } from "./dev.js";
-import { formatDoctor, runDoctor } from "./doctor.js";
+import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runInit } from "./init.js";
 import { runMcp } from "./mcp.js";
@@ -113,9 +114,11 @@ async function runHost(config: HostConfig, scheme: string | undefined): Promise<
     hosts: config.hosts,
   });
   const stamp = (): string => new Date().toISOString().slice(11, 19);
-  host.on("connect", (s) =>
-    console.log(`${stamp()} connected    ${s.id} ${s.app.name} ${s.app.version ?? ""} on ${s.device.name ?? s.device.platform}`),
-  );
+  host.on("connect", (s) => {
+    // A phone connected through this host is paired too, as with the MCP server and replay (CodeRabbit, PR #5).
+    markPaired();
+    console.log(`${stamp()} connected    ${s.id} ${s.app.name} ${s.app.version ?? ""} on ${s.device.name ?? s.device.platform}`);
+  });
   host.on("disconnect", (s, reason) => console.log(`${stamp()} disconnected ${s.id} ${s.app.name}: ${reason}`));
   host.on("log", (s, entry) => console.log(`${stamp()} [${s.app.name}] ${formatLogs([entry])}`));
   host.on("warning", (message) => console.warn(`${stamp()} warning: ${message}`));
@@ -194,6 +197,7 @@ async function runReplay(
     return 2;
   }
   const host = new TaplineHost({ token: config.token, port: config.port, portFallback: config.portFallback, hosts: config.hosts });
+  host.on("connect", () => markPaired());
   const result = await host.listen();
   const port = host.boundPort() ?? config.port;
   const url = hostUrl({ advertisedHost: reachableHost(config, result.listening) }, port);
@@ -306,7 +310,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case "doctor": {
       const results = await runDoctor();
-      process.stdout.write(`${formatDoctor(results)}\n`);
+      process.stdout.write(`${formatDoctor(results, needsAPerson(results))}\n`);
       let failed = results.some((r) => r.status === "fail");
       if (values.app === true) {
         // The app side, as `tapline init` sees it; nothing is changed.

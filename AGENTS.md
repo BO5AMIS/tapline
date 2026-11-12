@@ -20,6 +20,9 @@ needs their hands, their accounts or their decisions. Follow [docs/setup.md](doc
    instead: `npm install`, `npm run build`, then `npm install -g ./packages/host`, or use
    `node <clone>/packages/host/dist/cli.js`). `tapline doctor` checks the whole computer side
    and says what to fix.
+   QA or unattended runs use a pinned release, never a development clone: `npm install -g
+   tapline-host@<version>` here and `react-native-tapline@<version>` in the app. A clone
+   mid-change runs whatever is in the tree (`tapline doctor` warns about a dirty work tree).
 2. The computer and the phone must be on the same Wi-Fi (or the computer on a cable to the
    same router). `tapline doctor` fails when the computer has no Wi-Fi or LAN address; ask
    the user to join the phone's Wi-Fi. Tailscale is optional, only for a phone away from

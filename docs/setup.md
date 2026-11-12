@@ -40,6 +40,11 @@ npm run build                      # about 10 s
 npm install -g ./packages/host
 ```
 
+**QA and unattended runs use a pinned release, never a clone.** Install exactly one version,
+`npm install -g tapline-host@<version>` on the computer and `react-native-tapline@<version>` in
+the app. A clone in the middle of a change runs whatever is in its tree. `tapline doctor` warns
+when the host it runs is loaded from a git work tree with uncommitted changes.
+
 `npm install` in a clone ends with a few `deprecated` warnings and "low severity
 vulnerabilities". They come from the test tools (Jest), not from anything Tapline ships; ignore them.
 Or skip the global install and run `node /path/to/tapline/packages/host/dist/cli.js`

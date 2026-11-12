@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { tokenFilePath } from "../src/config.js";
-import { formatDoctor, runDoctor, type CheckResult, type DoctorDeps } from "../src/doctor.js";
+import { formatDoctor, needsAPerson, runDoctor, type CheckResult, type DoctorDeps } from "../src/doctor.js";
 
 interface Reply {
   code: number;
@@ -49,6 +49,8 @@ function deps(overrides: Partial<DoctorDeps> = {}, replies: Record<string, Reply
     fileExists: (path) => path === tokenFilePath(ENV),
     portFree: async () => true,
     lanIps: () => ["192.168.1.20"],
+    hostDir: null,
+    gitStatus: async () => null,
     ...overrides,
   };
 }
@@ -253,6 +255,49 @@ describe("runDoctor", () => {
     expect(byName(results, "Ports 7210-7219").detail).toContain("probe broke");
   });
 
+  it("warns when the host runs from a git work tree with uncommitted changes, and counts conflicts", async () => {
+    const results = await runDoctor(deps({ hostDir: "/work/tapline/packages/host/dist", gitStatus: async () => " M src/a.ts\nUU src/b.ts\n?? x\n" }));
+    const warning = byName(results, "Host version");
+    expect(warning.status).toBe("warn");
+    expect(warning.detail).toContain("3 uncommitted changes (1 in conflict)");
+    expect(warning.fix).toContain("npm install -g tapline-host@<version>");
+  });
+
+  it("says nothing for a clean tree, an installed copy, no git, or a git that fails", async () => {
+    const names = async (overrides: Partial<DoctorDeps>): Promise<string[]> => (await runDoctor(deps(overrides))).map((r) => r.name);
+    expect(await names({ hostDir: "/work/tapline/packages/host/dist", gitStatus: async () => "" })).not.toContain("Host version");
+    expect(await names({ hostDir: "/work/tapline/packages/host/dist", gitStatus: async () => null })).not.toContain("Host version");
+    expect(
+      await names({ hostDir: "/usr/lib/node_modules/tapline-host/dist", gitStatus: async () => " M dotfile\n" }),
+    ).not.toContain("Host version");
+    expect(
+      await names({
+        hostDir: "/work/dist",
+        gitStatus: async () => {
+          throw new Error("git broke");
+        },
+      }),
+    ).not.toContain("Host version");
+  });
+
+  it("lists what needs a person: pairing until a phone has connected, and the firewall rule when it is missing", async () => {
+    const unpaired = deps({ fileExists: (path) => path === tokenFilePath(ENV) });
+    const results = await runDoctor(unpaired);
+    const items = needsAPerson(results, unpaired);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toContain("Pair the phone");
+    expect(items[0]).toContain("EXPO_PUBLIC_TAPLINE_ENABLED=1");
+
+    const noRule = deps({ fileExists: () => true }, { ...HEALTHY, powershell: { code: 1, stderr: "no rule" } });
+    const missing = needsAPerson(await runDoctor(noRule), noRule);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain("firewall");
+
+    const settled = deps({ fileExists: () => true });
+    expect(needsAPerson(await runDoctor(settled), settled)).toEqual([]);
+    expect(JSON.stringify(items)).not.toMatch(/[0-9a-f]{32}/); // never a token
+  });
+
   it("works with real defaults without throwing", async () => {
     const results = await runDoctor();
     expect(results.length).toBeGreaterThanOrEqual(7);
@@ -286,6 +331,13 @@ describe("formatDoctor", () => {
       "✓ Node.js: v20",
       "1 problem, 2 warnings.",
     ]);
+  });
+
+  it("ends with a Needs a person block when something is pending, and has none otherwise", () => {
+    const results: CheckResult[] = [{ name: "Node.js", status: "pass", detail: "v20" }];
+    expect(formatDoctor(results, ["Pair the phone."])).toBe("✓ Node.js: v20\nAll good.\n\nNeeds a person:\n- Pair the phone.");
+    expect(formatDoctor(results)).not.toContain("Needs a person");
+    expect(formatDoctor(results, [])).not.toContain("Needs a person");
   });
 
   it("says 0 problems when there are only warnings", () => {
