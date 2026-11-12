@@ -180,6 +180,39 @@ describe('noScroll', () => {
     expect(result.element.testID).toBe('row-a');
     expect(scrolled).toEqual([]);
   });
+
+  test('an element on the screen but clipped by its scroll view is refused, not pressed (1.5 review, finding 11)', async () => {
+    await mountWorld();
+    // row-c (y 640..700) is on the screen, below the list's bottom edge (600): a person can't see it
+    let error: unknown;
+    await run(async () => {
+      try {
+        await press({ target: { testID: 'row-c' }, noScroll: true });
+      } catch (caught) {
+        error = caught;
+      }
+    });
+    expect((error as TaplineError).code).toBe('not_actionable');
+    expect(scrolled).toEqual([]);
+  });
+
+  test('visible text matches only what shows on the glass', async () => {
+    await mountWorld();
+    setKeyboardReader(() => ({ shown: true, top: 650 }));
+    // "Footer" (y 700..740) is under the keyboard: in a user's eyes there is no such text to tap
+    let error: unknown;
+    await run(async () => {
+      try {
+        await press({ target: { text: 'Footer' }, noScroll: true });
+      } catch (caught) {
+        error = caught;
+      }
+    });
+    expect((error as TaplineError).code).toBe('not_found');
+    // outside a journey the same text is found
+    const result = await run(() => press({ target: { text: 'Footer' }, force: true }));
+    expect(result.element.testID).toBe('footer');
+  });
 });
 
 describe('wait_for with glass', () => {

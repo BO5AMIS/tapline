@@ -39,6 +39,7 @@ import {
 } from './inspect';
 import { sourcesOf, type ElementSource } from './source';
 import { closestMatches } from './closest';
+import { measureScrollers, visiblePartOnGlass } from './glassclip';
 import { AUDIT_TYPES, auditScreen, type AuditFinding, type AuditType } from './checks';
 import { uxScreen, type UxAction, type UxCheckName, type UxKind } from './uxcheck';
 import { isOwnAlert, openAlerts } from './alerts';
@@ -543,7 +544,7 @@ function inFrontLayer(matches: Entry[]): Entry[] {
 }
 
 /** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
-export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Resolved> {
+export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
   const target = parseTarget(raw);
   const snapshot = takeSnapshot();
 
@@ -589,7 +590,14 @@ export async function resolveTarget(raw: unknown, hint?: ActionHint): Promise<Re
     return { snapshot, entry: hit };
   }
 
-  const matches = inFrontLayer(matchEntries(snapshot, target));
+  let matches = inFrontLayer(matchEntries(snapshot, target));
+  // A journey in a user's eyes (§17.1): visible text matches only what shows on the glass, not what a scroll view
+  // clips or the keyboard covers (1.5 review, finding 11).
+  if (glassOnly && target.kind === 'text' && matches.length > 0) {
+    const scrollers = await measureScrollers(snapshot);
+    const frames = await Promise.all(matches.map((entry) => measureFiber(entry.node.fiber)));
+    matches = matches.filter((entry, i) => visiblePartOnGlass(snapshot, entry, frames[i] ?? null, scrollers) !== null);
+  }
   if (matches.length === 0) await refuseBehindSheet(snapshot, target);
   if (target.index !== undefined) {
     const picked = matches[target.index];
@@ -1031,7 +1039,7 @@ async function pressLike(
 ): Promise<PressResult> {
   const params = paramsOf(rawParams);
   const afterMs = kind === 'press' ? againAfter(params.again) : undefined;
-  const { snapshot, entry } = await resolveTarget(params.target, kind);
+  const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
@@ -1308,9 +1316,9 @@ function keyboardNote(closed: boolean): { closedKeyboard?: true } {
   return closed ? { closedKeyboard: true } : {};
 }
 
-async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown): Promise<Resolved> {
+async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown, glassOnly = false): Promise<Resolved> {
   if (rawTarget !== undefined && rawTarget !== null) {
-    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type');
+    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type', glassOnly);
     const input = findActionable(snap, entry, 'type', true);
     if (!input) throw notActionable('no_action', `${describe(entry)} is not an input`);
     return { snapshot: snap, entry: input };
@@ -1360,7 +1368,7 @@ export async function typeText(
   // Deleting from the end edits what is there, so it never replaces the whole text.
   const replace = params.replace !== false && !deleting;
 
-  let { snapshot, entry } = await resolveInput(null, params.target);
+  let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true);
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
   // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2; the policy ran before this
   // call). The input that already has focus is typed into without touching it, so it is not scrolled to.
@@ -1734,7 +1742,8 @@ async function scrollIntoReach(snapshot: Snapshot, entry: Entry, dry: boolean, n
   if (frame === null) return {};
   // A journey in a user's eyes (`noScroll`, §17.1): nothing scrolls by itself. An element wholly off screen is refused.
   if (noScroll) {
-    if (visiblePart(frame, snapshot.screen) !== null) return {};
+    // On the glass, not just on screen: a scroll view clips it, the keyboard covers it (1.5 review, finding 11).
+    if (visiblePartOnGlass(snapshot, entry, frame, await measureScrollers(snapshot)) !== null) return {};
     throw notActionable(
       'off_screen',
       `${describe(entry)} is off screen; in a journey nothing scrolls by itself: scroll the way a person would, then try again.`,
@@ -2070,7 +2079,7 @@ export async function toggle(
 ): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
-  const first = await resolveTarget(params.target, 'toggle');
+  const first = await resolveTarget(params.target, 'toggle', params.noScroll === true);
   const plan = (snap: Snapshot, picked: Entry): { control: Entry; handler: NonNullable<ReturnType<typeof findHandler>> } => {
     const found = findActionable(snap, picked, 'toggle', true);
     if (!found) throw notActionable('no_action', `${describe(picked)} is not a switch`);
