@@ -2003,8 +2003,15 @@ export class TaplineTools {
       return fail("Error bad_params: media needs add (picture paths), or remove: true.");
     }
     if (args.picker === true && args.add === undefined) return fail("Error bad_params: media with picker: true needs add (picture paths).");
-    // Nothing touches the photo library with picker: true; adding to it needs the user's yes.
-    if (args.remove !== true && args.picker !== true && args.confirm !== true) return fail(CONFIRM_ERROR);
+    // Adding needs the user's yes, and so does picker: true (its pictures go into the app as if the person picked them;
+    // AGENT-TOOLS 1.12 §17.6: media with add needs confirm; 1.5 review, finding 10).
+    if (args.remove !== true && args.confirm !== true) {
+      return fail(
+        args.picker === true
+          ? "Error bad_params: media with picker hands pictures to the app as if the person picked them; ask your user first, then pass confirm: true."
+          : CONFIRM_ERROR,
+      );
+    }
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     return runMedia(args, {

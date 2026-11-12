@@ -13,6 +13,8 @@ import type { SessionInfo } from "./server.js";
 
 export const MEDIA_MAX_FILES = 10;
 export const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+/** All the pictures of one call together. */
+export const MEDIA_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 export const mediaShape = {
   add: z
@@ -20,7 +22,7 @@ export const mediaShape = {
     .min(1)
     .max(MEDIA_MAX_FILES)
     .optional()
-    .describe(`Paths of pictures on this computer (JPEG or PNG, at most ${MEDIA_MAX_FILES} per call, each at most 10 MB)`),
+    .describe(`Paths of pictures on this computer (JPEG or PNG, at most ${MEDIA_MAX_FILES} per call, each at most 10 MB, 20 MB in all)`),
   confirm: z.boolean().optional().describe("true: your user agreed that these pictures may be added to the phone's photo library"),
   remove: z.boolean().optional().describe("true: delete the pictures this session added (iOS asks the person to confirm)"),
   picker: z
@@ -92,6 +94,7 @@ export function readPictures(paths: readonly string[]): { files: MediaFile[] } |
     return { error: `Error bad_params: add takes at most ${MEDIA_MAX_FILES} pictures per call (got ${paths.length}).` };
   }
   const files: MediaFile[] = [];
+  let total = 0;
   for (const given of paths) {
     const path = resolve(given);
     let size: number;
@@ -104,6 +107,11 @@ export function readPictures(paths: readonly string[]): { files: MediaFile[] } |
     }
     if (size > MEDIA_MAX_BYTES) {
       return { error: `Error bad_params: ${given} is ${(size / (1024 * 1024)).toFixed(1)} MB; each picture may be at most 10 MB.` };
+    }
+    // The app holds what one call sends in memory: 20 MB in all per call (1.5 review, finding 10).
+    total += size;
+    if (total > MEDIA_MAX_TOTAL_BYTES) {
+      return { error: `Error bad_params: these pictures come to more than ${MEDIA_MAX_TOTAL_BYTES / (1024 * 1024)} MB; send at most 20 MB per call.` };
     }
     const bytes = readFileSync(path);
     const isPng = bytes.length > 8 && PNG_MAGIC.every((b, i) => bytes[i] === b);

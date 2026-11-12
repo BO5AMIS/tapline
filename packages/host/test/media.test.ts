@@ -222,12 +222,13 @@ describe("the media tool", () => {
     expect(textOf(await tools.media({ remove: true }))).toBe("Nothing to remove: this session added no pictures.");
   });
 
-  it("arms the picker without confirm, answers in the shared words, and records picker skipped when the app uses it", async () => {
+  it("arms the picker with confirm, answers in the shared words, and records picker skipped when the app uses it", async () => {
     const { a, b } = pictures();
     const { app, tools } = await connect((p) => ({ ok: true, result: { pictures: p.index } }));
     const seen: Array<[string, number]> = [];
     tools.mediaState.onPickerSkipped((appId, count) => seen.push([appId, count]));
-    const out = await tools.media({ add: [a, b], picker: true });
+    expect(textOf(await tools.media({ add: [a, b], picker: true }))).toMatch(/^Error bad_params: media with picker hands pictures to the app as if the person picked them/);
+    const out = await tools.media({ add: [a, b], picker: true, confirm: true });
     expect(out.isError).toBeUndefined();
     expect(textOf(out)).toBe('The next photo pick returns 2 pictures without the OS picker (marked "picker skipped" in a journey report).');
     expect(mediaRequests(app).map((p) => [p.op, p.index, p.total])).toEqual([
@@ -250,8 +251,28 @@ describe("the media tool", () => {
   it("says 1 picture in the singular and records nothing when the app can't arm the picker", async () => {
     const { a } = pictures();
     const { tools } = await connect(() => ({ ok: false, error: { code: "unsupported", message: "this app has no expo-image-picker" } }));
-    const out = await tools.media({ add: [a], picker: true });
+    const out = await tools.media({ add: [a], picker: true, confirm: true });
     expect(textOf(out)).toBe("Error unsupported: this app has no expo-image-picker");
     expect(tools.mediaState.pickerSkips("com.example.demo")).toBe(0);
+  });
+});
+
+describe("one call's pictures together (1.5 review, finding 10)", () => {
+  it("refuses more than 20 MB in all, before the app holds them", async () => {
+    const { mkdtempSync, openSync, writeSync, closeSync, ftruncateSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { readPictures } = await import("../src/media.js");
+    const dir = mkdtempSync(join(tmpdir(), "tapline-media-big-"));
+    const paths = [1, 2, 3].map((n) => {
+      const path = join(dir, `big${n}.jpg`);
+      const fd = openSync(path, "w");
+      writeSync(fd, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+      ftruncateSync(fd, 8 * 1024 * 1024);
+      closeSync(fd);
+      return path;
+    });
+    const read = readPictures(paths);
+    expect("error" in read && read.error).toMatch(/more than 20 MB; send at most 20 MB per call/);
   });
 });

@@ -356,15 +356,22 @@ export function registerTaplinePickerHook(hook: TaplinePickerHook): () => void {
 
 const WRAPPED = ['launchImageLibraryAsync', 'launchCameraAsync'] as const;
 
-let staged: TaplinePickerPicture[] = [];
-let armed: TaplinePickerPicture[] | null = null;
+/** A staged picture holds its bytes once, as base64; the data URI is made only when it is handed over (finding 10). */
+type Staged = Omit<TaplinePickerPicture, 'uri'>;
+
+let staged: Staged[] = [];
+let armed: Staged[] | null = null;
 let restoreOriginals: (() => void) | null = null;
 
-function pickerResult(pictures: readonly TaplinePickerPicture[]): unknown {
+function asPicture(p: Staged): TaplinePickerPicture {
+  return { ...p, uri: `data:${p.mimeType};base64,${p.base64}` };
+}
+
+function pickerResult(pictures: readonly Staged[]): unknown {
   return {
     canceled: false,
     assets: pictures.map((p) => ({
-      uri: p.uri,
+      uri: `data:${p.mimeType};base64,${p.base64}`,
       assetId: null,
       width: p.width,
       height: p.height,
@@ -428,7 +435,6 @@ async function armPicker(params: Record<string, unknown>): Promise<{ pictures: n
   const name = paramString(params, 'name');
   if (index === 1) staged = [];
   staged.push({
-    uri: `data:${mime};base64,${data}`,
     fileName: name,
     mimeType: mime,
     width: paramNumber(params, 'width') ?? 0,
@@ -451,9 +457,10 @@ async function armPicker(params: Record<string, unknown>): Promise<{ pictures: n
   }
   armed = wrapped ? pictures : null;
   let called = 0;
+  const forHooks = hooks.size > 0 ? pictures.map(asPicture) : [];
   for (const hook of [...hooks]) {
     try {
-      await hook(pictures);
+      await hook(forHooks);
       called += 1;
     } catch {
       // a broken hook must not break the run
