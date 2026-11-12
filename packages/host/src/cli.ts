@@ -119,9 +119,11 @@ async function runHost(config: HostConfig, scheme: string | undefined): Promise<
     hosts: config.hosts,
   });
   const stamp = (): string => new Date().toISOString().slice(11, 19);
-  host.on("connect", (s) =>
-    console.log(`${stamp()} connected    ${s.id} ${s.app.name} ${s.app.version ?? ""} on ${s.device.name ?? s.device.platform}`),
-  );
+  host.on("connect", (s) => {
+    // A phone connected through this host is paired too, as with the MCP server and replay (CodeRabbit, PR #5).
+    markPaired();
+    console.log(`${stamp()} connected    ${s.id} ${s.app.name} ${s.app.version ?? ""} on ${s.device.name ?? s.device.platform}`);
+  });
   host.on("disconnect", (s, reason) => console.log(`${stamp()} disconnected ${s.id} ${s.app.name}: ${reason}`));
   host.on("log", (s, entry) => console.log(`${stamp()} [${s.app.name}] ${formatLogs([entry])}`));
   host.on("warning", (message) => console.warn(`${stamp()} warning: ${message}`));

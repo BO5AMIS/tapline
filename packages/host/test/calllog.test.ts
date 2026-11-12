@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createMcpServer } from "../src/mcp.js";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -142,6 +145,27 @@ describe("the call log", () => {
     expect(answer).toContain("1 scroll hunt (maybe) of 3 or more scrolls");
   });
 
+  it("counts a call refused at the MCP boundary for an unknown argument, once", async () => {
+    const { dir, tools } = await setup();
+    const server = createMcpServer(tools);
+    const client = new Client({ name: "test", version: "0" });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    try {
+      const refused = await client.callTool({ name: "session_report", arguments: { foo: 1 } });
+      expect(refused.isError).toBe(true);
+      const logged = lines(dir).filter((l) => l["tool"] === "session_report");
+      expect(logged).toHaveLength(1);
+      expect(logged[0]?.["ok"]).toBe(false);
+      expect(logged[0]?.["code"]).toBe("bad_params");
+      expect(logged[0]?.["call"]).toBe(1);
+      expect(JSON.stringify(tools.sessionReport().content)).toContain("Failed: 1 (bad_params 1)");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("session_report reads this session only, and says so when the log is off", async () => {
     const { dir, tools } = await setup();
     writeFileSync(join(dir, "actions-2999-01-01.jsonl"), `${JSON.stringify(entry(1, "look", { kind: "read" }, "other"))}\n`);
@@ -163,6 +187,17 @@ describe("the call log", () => {
 
 describe("session_report waste flags", () => {
   const flagsOf = (entries: ActionLogEntry[]): string[] => analyze(buildCalls(entries)).flags.map((f) => f.text);
+
+  it("measures the time from the earliest call to the latest, also when sessions overlap", () => {
+    const at = (iso: string, call: number, session: string): ActionLogEntry => ({ t: iso, source: "tapline", by: "agent", tool: "look", kind: "read", ok: true, session, call });
+    const calls = buildCalls([
+      at("2026-11-12T10:00:00.000Z", 1, "a"),
+      at("2026-11-12T11:00:00.000Z", 2, "a"),
+      at("2026-11-12T10:05:00.000Z", 1, "b"),
+      at("2026-11-12T10:10:00.000Z", 2, "b"),
+    ]);
+    expect(analyze(calls).minutes).toBe(60);
+  });
 
   it("does not flag a look that asked for what the action's answer could not give: a screenshot, a width or labels", () => {
     const tap = entry(1, "tap", { ...TAP_SAVE, listed: true });
@@ -314,5 +349,25 @@ describe("tapline report", () => {
     expect(parseSince(String(now - 5), now)).toBe(now - 5);
     expect(parseSince("2026-11-12T11:00:00Z", now)).toBe(now - 3600000);
     expect(parseSince("soon", now)).toBeNull();
+  });
+});
+
+describe("a call that fails after its actions went through (Codex review of 1.4.0)", () => {
+  it("is logged and reported as failed when a run's expectation doesn't hold", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-calls-"));
+    dirs.push(dir);
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, handler);
+    apps.push(app);
+    // a picture check logs no action of its own: with no reference saved, the expectation fails after the tap
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, logDir: dir, baselinesDir: join(dir, "baselines") });
+    const answer = await tools.run({ steps: [{ tool: "tap", target: { id: "save" }, expect: { matches: "never-saved" } }] });
+    expect(answer.isError).toBe(true);
+    const logged = lines(dir).filter((l) => l["tool"] === "tap");
+    expect(logged[0]).toMatchObject({ ok: true, call_failed: "expect_failed" });
+    const calls = buildCalls(lines(dir) as unknown as ActionLogEntry[]);
+    expect(calls.find((c) => c.tool === "run")).toMatchObject({ ok: false, code: "expect_failed" });
+    expect(formatReport(analyze(calls))).toMatch(/Failed: 1/);
   });
 });

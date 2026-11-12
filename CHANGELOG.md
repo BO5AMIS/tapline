@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.5.0, "the Real User Update" (unreleased)
+## 1.5.0, "the Real User Update" (2026-11-12)
 
 Tests whether people can find, understand and finish a feature, not only whether it works. The interface
 is AGENT-TOOLS 1.12, shared with Tapwright.
@@ -22,9 +22,9 @@ is AGENT-TOOLS 1.12, shared with Tapwright.
 - The app needs none of the photo modules: `media` uses them when they are there, and an app without
   them bundles and runs as before.
 
-## 1.4.0, "the Fewer Steps Update" (unreleased)
+## 1.4.0, "the Fewer Steps Update" (2026-11-12)
 
-The same check now takes fewer calls. The JLD tester's iPhone runs needed about 1.5 times the calls of
+The same check now takes fewer calls. A tester's iPhone runs needed about 1.5 times the calls of
 Android; this release goes after where they went. The interface is AGENT-TOOLS 1.11, shared with Tapwright.
 
 - An action (`tap`, `long_press`, `toggle`, `type_text`) on an element that is in the list but off
@@ -42,7 +42,8 @@ Android; this release goes after where they went. The interface is AGENT-TOOLS 1
   Tapline's own connection is never slowed.
 - Language, region and text size without the phone's Settings: the standard `app_command` names
   `language`, `region` and `text_size`, with the values both tools share. The SDK checks the values,
-  `useTaplineFontScale()` lets an app follow `text_size`, a switch to or from a right-to-left language
+  `useTaplineFontScale()` lets an app follow `text_size` (the value holds the system scale, so that text
+  sets `allowFontScaling={false}`), a switch to or from a right-to-left language
   reloads a development build, and `tapline init` adds `language` and `region` for i18next and
   expo-localization. `size: "system"` restores the phone's text size, and text size and network both
   go back to normal when the session ends.
@@ -58,7 +59,7 @@ Fixed, from the phone checks:
   right after a tap that pushed a screen caught it sliding in, so the replay of a recorded flow always
   differed.
 
-## 1.3.1 (unreleased)
+## 1.3.1 (2026-11-12)
 
 Fixes only, from a tester's feedback on the sibling tool.
 
@@ -72,7 +73,7 @@ Fixes only, from a tester's feedback on the sibling tool.
 - An audit finding no longer names "the screen" when it knows more: it says `an element "Total" at @16,300 120x20` from the
   frame, text or label the app could still give.
 
-## 1.3.0, "the Diagnostics Update" (unreleased)
+## 1.3.0, "the Diagnostics Update" (2026-11-12)
 
 When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.10, shared with Tapwright.
 
@@ -95,7 +96,7 @@ When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.
 - A failed `run` or `replay` step adds `Logs (since step <n>):` with up to 20 warnings and errors since that
   step began. `tapline replay --junit` puts them, and the crash note, in the test case's `<system-out>`.
 
-## 1.2.0, "the Regression Update" (unreleased)
+## 1.2.0, "the Regression Update" (2026-11-12)
 
 A script now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
 Tapwright.

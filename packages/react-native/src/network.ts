@@ -69,9 +69,13 @@ let generation = 0;
 let condition: NetworkMode = 'normal';
 let random: () => number = Math.random;
 /** Requests whose send is delayed (or doomed), so abort() can cancel them. */
-const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null }>();
+const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null; cancel?: () => void }>();
 /** Finished 3g responses whose completion events are still held back; `cancel` drops them and says if any were held. */
 const responseHolds = new WeakMap<object, { cancel: () => boolean }>();
+/** Each response hold still open, as the function that lets it finish now: uninstalling releases them all. */
+const openHolds = new Set<() => void>();
+/** Each request a condition holds before its send, as the function that sends it now: uninstalling sends them all. */
+const heldSends = new Set<() => void>();
 
 /** scheme://host[:port]/path, query replaced by "?…", no fragment or credentials. */
 export function redactUrl(raw: string): string {
@@ -238,8 +242,9 @@ function patchedAbort(original: AnyFn): AnyFn {
           // never really sent: cancel it here and end it the way React Native does on abort
           clearTimeout(entry.timer);
           held.delete(this);
+          if (entry.cancel) heldSends.delete(entry.cancel);
           entry.settle?.();
-          abortHeld(this);
+          abortHeld(this, original, args);
           return undefined;
         }
         const hold = responseHolds.get(this);
@@ -261,11 +266,32 @@ function patchedAbort(original: AnyFn): AnyFn {
   };
 }
 
-/** Ends a request that was held (never sent) with readyState 4, status 0, then readystatechange, abort, loadend. */
-function abortHeld(xhr: object): void {
+/**
+ * Ends a request that was held (never really sent) as React Native ends an aborted one: readyState 4 and status 0,
+ * then readystatechange, abort and loadend, at once; then the XHR's own abort, which resets it to UNSENT so the app
+ * can open it again (Codex review of 1.4.0: before, a reused XHR threw "Cannot open, already sending").
+ */
+function abortHeld(xhr: object, original: AnyFn, args: unknown[]): void {
+  // React Native's XHR (it has `_sent`) ends an aborted request itself: marked as sent, its abort fires
+  // readystatechange, abort and loadend through its own event path and resets to UNSENT.
+  if ('_sent' in xhr) {
+    assign(xhr, '_sent', true);
+    try {
+      original.apply(xhr, args);
+      return;
+    } catch {
+      // fall back to ending it here
+    }
+  }
   assign(xhr, 'readyState', 4);
   assign(xhr, 'status', 0);
-  setTimeout(() => dispatchNow(xhr, ['readystatechange', 'abort', 'loadend']), 0);
+  dispatchNow(xhr, ['readystatechange', 'abort', 'loadend']);
+  try {
+    // readyState is DONE now, so React Native's abort sends no second set of events; it only resets.
+    original.apply(xhr, args);
+  } catch {
+    // the request is over either way
+  }
 }
 
 function dispatchNow(xhr: object, types: readonly string[]): void {
@@ -384,6 +410,58 @@ function eventType(event: unknown): string {
  * completion at once.
  */
 function holdResponse(xhr: object): void {
+  // React Native's own XMLHttpRequest finishes through __didCompleteResponse and fires its events through an inner
+  // path, not dispatchEvent (0.8x), so the transfer time is held there: the completion comes that much later. An
+  // abort meanwhile ends the request as usual, and the late completion finds no request to finish (Codex review).
+  // React Native sends every completion to every XHR that listens, so one for another request passes straight
+  // through and leaves this hold in place; an abort removes the hold and its timer, so a reused XHR isn't held.
+  const native = xhr as { __didCompleteResponse?: unknown; _requestId?: unknown };
+  if (isFn(native.__didCompleteResponse)) {
+    const complete = native.__didCompleteResponse as (...args: unknown[]) => unknown;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let waiting: unknown[] | null = null;
+    const restore = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      waiting = null;
+      assign(xhr, '__didCompleteResponse', complete);
+      responseHolds.delete(xhr);
+      openHolds.delete(release);
+    };
+    // Tapline stopping: the method goes back, and a completion it was holding is delivered now.
+    const release = (): void => {
+      const args = waiting;
+      restore();
+      if (!args) return;
+      try {
+        complete.apply(xhr, args);
+      } catch {
+        // a handler's error stays the app's
+      }
+    };
+    openHolds.add(release);
+    // false: nothing was dropped, so React Native's own abort ends the request and fires its events
+    responseHolds.set(xhr, {
+      cancel: () => {
+        restore();
+        return false;
+      },
+    });
+    assign(xhr, '__didCompleteResponse', function __didCompleteResponse(this: unknown, ...args: unknown[]): unknown {
+      if (args[0] !== native._requestId) return complete.apply(xhr, args);
+      if (timer !== null) return undefined; // already waiting out this request's transfer
+      const error = args[1];
+      const delay = typeof error === 'string' && error !== '' ? 0 : Math.min(MAX_TRANSFER_MS, Math.ceil(sizeOf(xhr) / THREE_G_BYTES_PER_MS));
+      if (delay <= 0) {
+        restore();
+        return complete.apply(xhr, args);
+      }
+      waiting = args;
+      timer = setTimeout(release, delay);
+      return undefined;
+    });
+    return;
+  }
   const target = xhr as { dispatchEvent?: unknown };
   if (!isFn(target.dispatchEvent)) return;
   const dispatch = target.dispatchEvent as (event: unknown) => unknown;
@@ -397,8 +475,19 @@ function holdResponse(xhr: object): void {
     timer = null;
     released = true;
     responseHolds.delete(xhr);
+    openHolds.delete(release);
     return dropped;
   };
+  const release = (): void => {
+    for (const queued of drop()) {
+      try {
+        dispatch.call(xhr, queued);
+      } catch {
+        // a handler's error stays the app's
+      }
+    }
+  };
+  openHolds.add(release);
   responseHolds.set(xhr, { cancel: () => drop().length > 0 });
   assign(xhr, 'dispatchEvent', function dispatchEvent(this: unknown, event: unknown): unknown {
     if (released) return dispatch.call(xhr, event);
@@ -429,20 +518,12 @@ function holdResponse(xhr: object): void {
     if (delay > 0) {
       const events: unknown[] = [event];
       queue = events;
-      timer = setTimeout(() => {
-        drop();
-        for (const queued of events) {
-          try {
-            dispatch.call(xhr, queued);
-          } catch {
-            // a handler's error stays the app's
-          }
-        }
-      }, delay);
+      timer = setTimeout(release, delay);
       return true;
     }
     released = true;
     responseHolds.delete(xhr);
+    openHolds.delete(release);
     return dispatch.call(xhr, event);
   });
 }
@@ -455,9 +536,12 @@ function applyCondition(
   args: unknown[],
   settle: (() => void) | null,
 ): boolean {
-  const realSend = (): void => {
+  const forGeneration = generation;
+  const send = (hold: boolean): void => {
     held.delete(xhr);
-    if (mode === '3g') holdResponse(xhr);
+    heldSends.delete(sendNow);
+    // a timer from an earlier install never puts a hold on the request: nothing would take it off again
+    if (hold && mode === '3g' && installed && forGeneration === generation) holdResponse(xhr);
     try {
       original.apply(xhr, args);
     } catch {
@@ -465,8 +549,15 @@ function applyCondition(
       failRequest(xhr);
     }
   };
+  const realSend = (): void => send(true);
+  // Tapline stopping: the request goes out now, as it would with no condition
+  const sendNow = (): void => {
+    clearTimeout(timer);
+    send(false);
+  };
   const fail = (): void => {
     held.delete(xhr);
+    heldSends.delete(sendNow);
     failRequest(xhr);
   };
   let timer: ReturnType<typeof setTimeout>;
@@ -480,7 +571,8 @@ function applyCondition(
   } else {
     timer = setTimeout(realSend, between(LOSSY_SLOW_DELAY_MS));
   }
-  held.set(xhr, { timer, settle });
+  held.set(xhr, { timer, settle, cancel: sendNow });
+  heldSends.add(sendNow);
   return true;
 }
 
@@ -489,14 +581,88 @@ function applyCondition(
 // is wrapped too, whatever it is, and wrapped again when the app replaces it after Tapline started.
 
 const FETCH_MARK = Symbol.for('tapline.fetch');
+/**
+ * On the init a counting wrapper passes on: the request is already counted and conditioned. Another Tapline wrapper
+ * further in (an app's interceptor in between, maybe after an await) passes it straight through. Spreads keep it.
+ */
+const FETCH_OWNED = Symbol.for('tapline.fetch.owned');
+
+function isOwned(init: unknown): boolean {
+  return typeof init === 'object' && init !== null && (init as Record<symbol, unknown>)[FETCH_OWNED] === true;
+}
+
+function ownedInit(init: unknown): Record<string | symbol, unknown> {
+  const copy: Record<string | symbol, unknown> = typeof init === 'object' && init !== null ? { ...(init as Record<string, unknown>) } : {};
+  copy[FETCH_OWNED] = true;
+  return copy;
+}
 /** While a wrapped fetch calls the app's own fetch: XHRs opened in that moment belong to that fetch. */
 let insideFetch = 0;
 let fetchInstalled: { target: Record<string, unknown>; original: AnyFn } | null = null;
+/**
+ * The one fetch wrapper that counts and conditions requests: the newest. An app's wrapper around an older one (it
+ * may call it after an await, so `insideFetch` can't tell) and one left after uninstall pass straight through.
+ */
+let activeFetchWrapper: AnyFn | null = null;
+/** Each wrapper's own fetch, so the one that is active again can be undone at uninstall. */
+const wrapperOriginals = new WeakMap<AnyFn, AnyFn>();
 /** Where the global fetch lives: the install target (globalThis in an app). */
 let fetchTarget: Record<string, unknown> | null = null;
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+interface SignalLike {
+  aborted?: unknown;
+  reason?: unknown;
+  addEventListener?: unknown;
+  removeEventListener?: unknown;
+}
+
+/** The request's abort signal: init.signal, else the Request's own. */
+function signalOf(input: unknown, init: unknown): SignalLike | null {
+  const fromInit = typeof init === 'object' && init !== null ? (init as { signal?: unknown }).signal : undefined;
+  const fromInput = typeof input === 'object' && input !== null ? (input as { signal?: unknown }).signal : undefined;
+  const signal = fromInit ?? fromInput;
+  return typeof signal === 'object' && signal !== null ? (signal as SignalLike) : null;
+}
+
+/** What an aborted fetch rejects with: the signal's reason, else an AbortError. */
+function abortError(signal: SignalLike): unknown {
+  if (signal.reason !== undefined) return signal.reason;
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+/**
+ * Waits `ms`, or rejects at once when the request is aborted (also when it already was): a held request never
+ * outlives its cancel, and a response held back is not delivered after it (Codex review of 1.4.0).
+ */
+/** A fetch's condition waits still running, as the function that ends each now: uninstalling ends them all. */
+const fetchWaits = new Set<() => void>();
+
+function wait(ms: number, signal: SignalLike | null = null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal !== null && signal.aborted === true) {
+      reject(abortError(signal));
+      return;
+    }
+    let onAbort: (() => void) | null = null;
+    const finish = (): void => {
+      clearTimeout(timer);
+      fetchWaits.delete(finish);
+      if (onAbort !== null && signal !== null && isFn(signal.removeEventListener)) (signal.removeEventListener as AnyFn).call(signal, 'abort', onAbort);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(0, ms));
+    fetchWaits.add(finish);
+    if (signal !== null && isFn(signal.addEventListener)) {
+      onAbort = () => {
+        clearTimeout(timer);
+        fetchWaits.delete(finish);
+        reject(abortError(signal));
+      };
+      (signal.addEventListener as AnyFn).call(signal, 'abort', onAbort);
+    }
+  });
 }
 
 function fetchUrl(input: unknown): string {
@@ -545,16 +711,20 @@ function wrapFetch(original: AnyFn): AnyFn {
     } catch {
       rawUrl = '';
     }
-    const call = (): unknown => {
+    const call = (forward: unknown = init): unknown => {
       insideFetch += 1;
       try {
-        return original.call(this, input, init);
+        return original.call(this, input, forward);
       } finally {
         insideFetch -= 1;
       }
     };
-    if (rawUrl === '' || isIgnored(rawUrl)) return call();
+    // The global fetch may be an earlier wrapper again; the wrapper that is global then counts. Called from inside
+    // another Tapline-wrapped fetch (an app's wrapper in between), or not the active wrapper: it passes through.
+    followGlobalWrapper();
+    if (isOwned(init) || wrapped !== activeFetchWrapper || insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
     const devServer = defaultIgnore(rawUrl);
+    const signal = signalOf(input, init);
     const method = fetchMethod(input, init);
     const url = redactUrl(rawUrl);
     const startedAt = Date.now();
@@ -570,27 +740,30 @@ function wrapFetch(original: AnyFn): AnyFn {
       const at = Date.now();
       notify({ method, url, status, error, ms: Math.max(0, at - startedAt), at });
     };
+    // Tapline stopped since the request started: no more delays or made-up failures, it goes out as normal
+    const live = (): boolean => forGeneration === generation;
     try {
       const mode = devServer ? 'normal' : condition;
       if (mode === 'offline' || (mode === 'lossy' && random() < LOSSY_FAIL_SHARE)) {
-        await wait(mode === 'offline' ? 0 : between(LOSSY_FAIL_DELAY_MS));
-        failed(null, 'network error');
-        throw new TypeError('Network request failed');
-      }
-      if (mode === '3g') {
+        await wait(mode === 'offline' ? 0 : between(LOSSY_FAIL_DELAY_MS), signal);
+        if (live()) {
+          failed(null, 'network error');
+          throw new TypeError('Network request failed');
+        }
+      } else if (mode === '3g') {
         const body = typeof init === 'object' && init !== null ? (init as { body?: unknown }).body : undefined;
-        await wait(Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + bodyBytes(body) / THREE_G_BYTES_PER_MS));
+        await wait(Math.min(MAX_TRANSFER_MS, THREE_G_LATENCY_MS + bodyBytes(body) / THREE_G_BYTES_PER_MS), signal);
       } else if (mode === 'lossy') {
-        await wait(between(LOSSY_SLOW_DELAY_MS));
+        await wait(between(LOSSY_SLOW_DELAY_MS), signal);
       }
       let response: unknown;
       try {
-        response = await call();
+        response = await call(ownedInit(init));
       } catch (error) {
         if (!isAbort(error)) failed(null, 'network error');
         throw error;
       }
-      if (mode === '3g') await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS));
+      if (mode === '3g' && live()) await wait(Math.min(MAX_TRANSFER_MS, responseLength(response) / THREE_G_BYTES_PER_MS), signal);
       const status = responseStatus(response);
       if (status !== null && status >= 400) failed(status, null);
       return response;
@@ -600,6 +773,29 @@ function wrapFetch(original: AnyFn): AnyFn {
   };
   (wrapped as unknown as Record<symbol, boolean>)[FETCH_MARK] = true;
   return wrapped as AnyFn;
+}
+
+function isFetchWrapper(fn: unknown): fn is AnyFn {
+  return isFn(fn) && (fn as unknown as Record<symbol, unknown>)[FETCH_MARK] === true;
+}
+
+/** The app put an earlier wrapper back as the global fetch (an interceptor cleaning up): that one counts again. */
+function reactivate(target: Record<string, unknown>, wrapper: AnyFn): void {
+  const original = wrapperOriginals.get(wrapper);
+  if (wrapper === activeFetchWrapper || original === undefined) return;
+  activeFetchWrapper = wrapper;
+  fetchInstalled = { target, original };
+}
+
+/** At each fetch: when the global fetch is a Tapline wrapper again, it is the active one. Wraps nothing new. */
+function followGlobalWrapper(): void {
+  if (!installed || fetchTarget === null) return;
+  try {
+    const current = fetchTarget.fetch;
+    if (isFetchWrapper(current)) reactivate(fetchTarget, current);
+  } catch {
+    // never throw into the app
+  }
 }
 
 /**
@@ -613,8 +809,15 @@ export function ensureFetchWrapped(given?: Record<string, unknown>): void {
   if (target === null) return;
   try {
     const current = target.fetch;
-    if (!isFn(current) || (current as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) return;
-    target.fetch = wrapFetch(current);
+    if (!isFn(current)) return;
+    if (isFetchWrapper(current)) {
+      reactivate(target, current);
+      return;
+    }
+    const wrapper = wrapFetch(current);
+    wrapperOriginals.set(wrapper, current);
+    target.fetch = wrapper;
+    activeFetchWrapper = wrapper;
     fetchInstalled = { target, original: current };
   } catch {
     // never throw into the app
@@ -696,13 +899,27 @@ export function uninstallNetworkTracking(): void {
   pending = 0;
   generation += 1;
   condition = 'normal';
+  // Held responses finish now and their wrappers come off: once the patched abort is gone, nothing else would clean
+  // them up, and a reused XHR would stay held (Codex review of 1.4.0).
+  for (const release of [...heldSends, ...openHolds, ...fetchWaits]) {
+    try {
+      release();
+    } catch {
+      // ignore
+    }
+  }
+  heldSends.clear();
+  openHolds.clear();
+  fetchWaits.clear();
+  activeFetchWrapper = null;
   const wrappedFetch = fetchInstalled;
   fetchInstalled = null;
   fetchTarget = null;
   try {
-    // Put the app's fetch back, unless the app replaced it again since.
+    // Put the app's fetch back, unless the app replaced it again since: the own fetch of whichever wrapper is global
+    // now (an interceptor may have put an earlier one back since the last fetch).
     const now = wrappedFetch?.target.fetch;
-    if (wrappedFetch && isFn(now) && (now as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) wrappedFetch.target.fetch = wrappedFetch.original;
+    if (wrappedFetch && isFetchWrapper(now)) wrappedFetch.target.fetch = wrapperOriginals.get(now) ?? wrappedFetch.original;
   } catch {
     // ignore
   }

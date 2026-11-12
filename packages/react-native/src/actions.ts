@@ -1386,6 +1386,7 @@ export async function typeText(
         if (refind === null) throw error;
         again = await resolveInput(null, refind);
       }
+      assertSameTarget(entry, again.entry);
       snapshot = again.snapshot;
       entry = again.entry;
       if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
@@ -1844,14 +1845,38 @@ function refindTarget(entry: Entry, original: unknown): Record<string, unknown> 
  * way). When a list unmounted the row, the ref is gone: it is found again by the original target.
  */
 async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: unknown): Promise<Resolved> {
+  let found: Resolved;
   try {
-    return await resolveTarget({ ref: refFor(entry.node.fiber) }, hint);
+    found = await resolveTarget({ ref: refFor(entry.node.fiber) }, hint);
   } catch (error) {
     if (!(error instanceof TaplineError) || error.code !== 'not_found') throw error;
     const again = refindTarget(entry, original);
     if (again === null) throw error;
-    return resolveTarget(again, hint);
+    found = await resolveTarget(again, hint);
   }
+  assertSameTarget(entry, found.entry);
+  return found;
+}
+
+/**
+ * After a scroll the element found again must still be the one the safety check saw: a list that recycles its rows
+ * can hand the same component another row ("Continue" becomes "Delete account"). A changed id, label or text is
+ * refused before anything is touched (Codex review of 1.4.0).
+ */
+function assertSameTarget(before: Entry, after: Entry): void {
+  // id, label and text each on their own: a row can keep its id and accessibility label while its text changes
+  const was = { id: before.info.testID, name: labelOf(before.info) };
+  const now = { id: after.info.testID, name: labelOf(after.info) };
+  const same = was.id === now.id && before.info.label === after.info.label && before.info.text === after.info.text;
+  if (same) return;
+  if (was.name === now.name) {
+    was.name = before.info.text;
+    now.name = after.info.text;
+  }
+  throw new TaplineError(
+    'not_found',
+    `the element changed while the list scrolled (it was ${JSON.stringify(was.name || was.id || "?")}, now ${JSON.stringify(now.name || now.id || "?")}); nothing was touched: look, then try again`,
+  );
 }
 
 /** After an element was found again because it could not be measured: it must now be on screen. */

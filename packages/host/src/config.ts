@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 
@@ -128,14 +128,25 @@ export function pairedMarkerPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * Whether a phone has used this computer's host before: the marker (1.3.1 on), or what an earlier version left
- * after a phone connected (its action log, screenshots, pairing offers, scripts or reference pictures).
+ * Whether a phone has used this computer's host before: the marker (1.3.1 on), or what only a connected app leaves
+ * behind with an earlier version: screenshots, scripts or reference pictures, in a folder that isn't empty. Not the
+ * action log (the host makes its folder at startup, phone or not) and not a pairing offer (nobody may have taken it).
  */
-export function pairedBefore(env: NodeJS.ProcessEnv = process.env, exists: (path: string) => boolean = existsSync): boolean {
+export function pairedBefore(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+  list: (path: string) => string[] = (path) => readdirSync(path),
+): boolean {
   const dir = configDir(env);
-  return [pairedMarkerPath(env), ...["log", "shots", "offers", "scripts", "baselines"].map((name) => join(dir, name))].some((path) => {
+  try {
+    if (exists(pairedMarkerPath(env))) return true;
+  } catch {
+    // fall through to what an earlier version left
+  }
+  return ["shots", "scripts", "baselines"].some((name) => {
+    const path = join(dir, name);
     try {
-      return exists(path);
+      return exists(path) && list(path).length > 0;
     } catch {
       return false;
     }

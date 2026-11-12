@@ -72,14 +72,16 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     const first = group[0];
     if (first === undefined) continue;
     const failedEntry = group.find((e) => !e.ok);
+    // A call whose actions went through but which failed as a whole (an expectation): failed, with its code.
+    const callFailed = failedEntry === undefined ? group.find((e) => e.call_failed !== undefined)?.call_failed : undefined;
     const tool = first.of ?? (group.some((e) => e.batch !== undefined) ? "run" : first.tool);
     const single = group.length === 1 && first.batch === undefined && tool !== "run";
     calls.push({
       n: 0,
       session: first.session ?? "legacy",
       tool,
-      ok: failedEntry === undefined,
-      ...(failedEntry?.code !== undefined ? { code: failedEntry.code } : {}),
+      ok: failedEntry === undefined && callFailed === undefined,
+      ...(failedEntry?.code !== undefined ? { code: failedEntry.code } : callFailed !== undefined ? { code: callFailed } : {}),
       t: Date.parse(first.t),
       listed: group.some((e) => e.listed === true),
       dryRun: group.some((e) => e.dry_run === true),
@@ -156,8 +158,10 @@ export function analyze(calls: readonly CallRecord[]): Report {
     }
   }
   const byCount = (a: [string, number], b: [string, number]): number => b[1] - a[1] || a[0].localeCompare(b[0]);
-  const first = calls[0]?.t;
-  const last = calls[calls.length - 1]?.t;
+  // the earliest and the latest call: with several sessions the list is in session order, not time order
+  const times = calls.map((c) => c.t);
+  const first = times.length > 0 ? times.reduce((a, b) => Math.min(a, b)) : undefined;
+  const last = times.length > 0 ? times.reduce((a, b) => Math.max(a, b)) : undefined;
   const minutes = first !== undefined && last !== undefined ? Math.max(1, Math.round((last - first) / 60000)) : 0;
 
   const looks: number[] = [];

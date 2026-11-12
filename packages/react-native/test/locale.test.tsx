@@ -3,7 +3,7 @@ import { I18nManager, PixelRatio } from 'react-native';
 import { act, create } from 'react-test-renderer';
 import * as actions from '../src/actions';
 import { listCommands, registerLanguageCommand, registerRegionCommand, registerTaplineCommand, resetCommands, runCommand } from '../src/commands';
-import { TEXT_SIZES, TEXT_SIZE_SCALES, getTaplineFontScale, resetFontScale, resetTaplineTextSize, useTaplineFontScale } from '../src/locale';
+import { TEXT_SIZES, TEXT_SIZE_SCALES, getTaplineFontScale, resetFontScale, resetTaplineTextSize, subscribeTaplineFontScale, useTaplineFontScale } from '../src/locale';
 import { TaplineError } from '../src/types';
 
 async function failure(promise: Promise<unknown>): Promise<TaplineError> {
@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 describe('language and region validation', () => {
-  test.each(['', 'a', 'english', 'en_GB', 'en-', 'ar sa', 7])('language %p is bad_params', async (language) => {
+  test.each(['', 'a', 'english', 'en_GB', 'en-', 'ar sa', 7, 'en-u', 'en-x-', 'en-u-', 'en-u-a', 'en-u-ca-x', 'en-x-123456789', 'en-u-ca--gregory'])('language %p is bad_params', async (language) => {
     const handler = jest.fn();
     registerLanguageCommand(handler);
     expect((await failure(runCommand({ name: 'language', args: { language } }))).code).toBe('bad_params');
@@ -47,12 +47,23 @@ describe('language and region validation', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  test.each(['ar', 'en', 'en-GB', 'zh-Hant-TW', 'fil'])('language %p reaches the handler', async (language) => {
+  test.each(['ar', 'en', 'en-GB', 'zh-Hant-TW', 'fil', 'en-US-u-ca-gregory', 'de-x-test', 'en-a-bbb-x-a-ccc'])('language %p reaches the handler', async (language) => {
+    // a change of direction reloads a development build: never for real in a test (it outlives the test run)
+    jest.spyOn(actions, 'reload').mockResolvedValue({});
     const handler = jest.fn();
     registerLanguageCommand(handler);
     const answer = await run('language', { language });
     expect(handler).toHaveBeenCalledWith(language);
     expect(answer.result?.language).toBe(language);
+  });
+
+  test('a long bad tag is refused at once (the check is linear)', async () => {
+    const handler = jest.fn();
+    registerLanguageCommand(handler);
+    const started = Date.now();
+    const error = await failure(runCommand({ name: 'language', args: { language: `en${'-a'.repeat(42)}!` } }));
+    expect(error.code).toBe('bad_params');
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   test.each(['', 'Q', 'QAT', '12', 'q1', 5])('region %p is bad_params', async (region) => {
@@ -212,6 +223,33 @@ describe('text_size and the font-scale helper', () => {
     });
     act(() => tree?.unmount());
     expect((await failure(runCommand({ name: 'text_size', args: { size: 'l' } }))).code).toBe('unsupported');
+  });
+
+  test('"system" clears an override also after the screens that used the helper are gone', async () => {
+    jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(1.1);
+    let tree: ReturnType<typeof create> | undefined;
+    act(() => {
+      tree = create(<Probe seen={[]} />);
+    });
+    await act(async () => {
+      await run('text_size', { size: 'xl' });
+    });
+    act(() => tree?.unmount());
+    const answer = await run('text_size', { size: 'system' });
+    expect(answer.result?.size).toBe('system');
+    expect(getTaplineFontScale()).toBe(1.1);
+  });
+
+  test('a subscriber that throws does not stop the others', async () => {
+    const seen: string[] = [];
+    const stopBad = subscribeTaplineFontScale(() => {
+      throw new Error('broken subscriber');
+    });
+    const stopGood = subscribeTaplineFontScale(() => seen.push('good'));
+    expect((await run('text_size', { size: 'xl' })).result?.size).toBe('xl');
+    expect(seen).toEqual(['good']);
+    stopBad();
+    stopGood();
   });
 
   test('an app that only calls the getter counts as using the helper until the session ends', async () => {

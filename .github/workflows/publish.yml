@@ -1,0 +1,160 @@
+# Publishes tapline-host and react-native-tapline to npm with trusted publishing (no token stored anywhere).
+# npmjs.com → each package → Settings → Trusted Publisher: GitHub Actions, BO5AMIS / tapline, publish.yml.
+# Runs when a release is published; run it by hand (workflow_dispatch) with a tag to publish that release again.
+# A hand run started on the tag itself (gh workflow run publish.yml --ref v1.2.0 -f tag=v1.2.0) publishes with
+# provenance; one started on main for an older tag (v1.1.0, from before this workflow) publishes without it.
+#
+# Two jobs, so no dependency's install script ever runs where an npm publishing token can be had:
+# - build: installs, builds, tests, checks the tag and packs the two tarballs, with no OIDC permission;
+# - publish: a clean runner with id-token: write that installs nothing and runs no package script; it only publishes
+#   the tarballs the build job packed.
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag to publish, e.g. v1.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # The tag travels as an environment variable, never pasted into a script.
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    outputs:
+      provenance: ${{ steps.source.outputs.provenance }}
+    steps:
+      # Always the tag: an unqualified ref would take a branch of the same name first.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      # npm's provenance records this run's commit (GITHUB_SHA). It is true only when that commit is the one built:
+      # a release event, or a hand run started on the tag itself. A hand run from main for an older tag (one from
+      # before this workflow existed) publishes without provenance, and says so. A release run on another commit stops.
+      - name: The built commit and the run's commit
+        id: source
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo "provenance=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            echo "The tag $TAG is at $head, but this release run is for $GITHUB_SHA"; exit 1
+          else
+            echo "::warning::Publishing $TAG ($head) from a run on $GITHUB_SHA: without provenance, since npm would attest the wrong commit."
+            echo "provenance=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm ci
+      - run: npm run build
+      - name: Test
+        run: |
+          npm test --workspace packages/host
+          npm test --workspace packages/react-native
+
+      - name: The tag matches both versions
+        run: |
+          tag="$TAG"
+          for pkg in packages/host packages/react-native; do
+            v="v$(node -p "require('./$pkg/package.json').version")"
+            [ "$v" = "$tag" ] || { echo "$pkg is $v, the tag is $tag"; exit 1; }
+          done
+
+      # npm's provenance check compares repository.url with this repository's exact name.
+      - name: Repository URL as GitHub names it
+        run: |
+          for pkg in packages/host packages/react-native; do
+            npm pkg set repository.url="git+https://github.com/$GITHUB_REPOSITORY.git" --workspace "$pkg"
+          done
+
+      - name: Pack both packages
+        run: |
+          mkdir -p packed
+          npm pack --workspace packages/react-native --pack-destination packed
+          npm pack --workspace packages/host --pack-destination packed
+          ls -l packed
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packed/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROVENANCE: ${{ needs.build.outputs.provenance }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # npm itself only: trusted publishing needs npm 11.5.1 or newer. No project dependency is installed here.
+      - name: npm 11.5.1 or newer (trusted publishing)
+        run: npm install -g npm@latest --ignore-scripts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packed
+
+      # Each version once, the SDK first, with an explicit dist-tag: `next` for a prerelease, `latest` for a version
+      # above the current latest, `backport` for an older one (npm refuses to guess for either of the last two).
+      - name: Publish
+        run: |
+          # ./ first: npm reads "packed/x.tgz" as the GitHub repository packed/x.tgz, not as a file.
+          for tarball in ./packed/react-native-tapline-*.tgz ./packed/tapline-host-*.tgz; do
+            [ -f "$tarball" ] || { echo "missing $tarball"; exit 1; }
+            manifest=$(tar -xzOf "$tarball" package/package.json)
+            name=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).name))')
+            version=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
+            # npm view answers nothing (and succeeds) for a version a package doesn't have, and E404 when the package
+            # itself is new: only the version printed back means it is there. Any other failure stops the run.
+            if seen=$(npm view "$name@$version" version 2>view.err); then
+              if [ "$seen" = "$version" ]; then
+                echo "$name@$version is already on npm"
+                continue
+              fi
+            elif ! grep -q "E404" view.err; then
+              echo "Couldn't ask npm whether $name@$version is there:"; cat view.err; exit 1
+            fi
+            # Only a package npm says isn't there (E404) has no latest; any other failure stops the run, so a lookup
+            # that failed can never make a backport the new latest.
+            if latest=$(npm view "$name" dist-tags.latest 2>lookup.err); then
+              :
+            elif grep -q "E404" lookup.err; then
+              latest=""
+            else
+              echo "Couldn't read $name's latest version from npm:"; cat lookup.err; exit 1
+            fi
+            tag=$(VERSION="$version" LATEST="$latest" node -e '
+              const v = process.env.VERSION, l = process.env.LATEST;
+              if (v.includes("-")) { process.stdout.write("next"); process.exit(0); }
+              if (!l) { process.stdout.write("latest"); process.exit(0); }
+              const n = (s) => s.split("-")[0].split(".").map(Number);
+              const [a, b] = [n(v), n(l)];
+              for (let i = 0; i < 3; i++) if (a[i] !== b[i]) { process.stdout.write(a[i] > b[i] ? "latest" : "backport"); process.exit(0); }
+              process.stdout.write("latest");')
+            echo "Publishing $name@$version as $tag (provenance: $PROVENANCE)"
+            npm publish "$tarball" --access public --ignore-scripts --tag "$tag" --provenance="$PROVENANCE"
+          done

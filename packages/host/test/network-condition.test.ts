@@ -3,6 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { TaplineHost } from "../src/server.js";
 import { TaplineTools } from "../src/tools.js";
 import { formatChanges, formatTree, networkLine } from "../src/format.js";
+import { treeResultSchema } from "../src/protocol.js";
 import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
 import type { PolicyFile } from "../src/policy.js";
 
@@ -50,6 +51,12 @@ async function setup(policy?: PolicyFile) {
 }
 
 describe("network line", () => {
+  it("reads a tree whose condition is a mode this host doesn't know (a newer SDK), and still shows it", () => {
+    const parsed = treeResultSchema.safeParse({ screen: SCREEN, elements: [SAVE], network: { condition: "edge" } });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(formatTree(parsed.data).split("\n")).toContain("Network: edge (Tapline).");
+  });
+
   it("is the spec's line", () => {
     expect(networkLine("3g")).toBe("Network: 3g (Tapline).");
   });

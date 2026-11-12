@@ -408,6 +408,14 @@ function describeIgnore(item: Target): string {
 }
 
 /** The pixel rectangles to paint out for `ignore`, from a fresh element list; targets not on the screen give a note. */
+/**
+ * An element as a {label} target matches it: its accessibility label, else its text, as the app's SDK matches
+ * (labelOf in the SDK). The ignore masks, recorded indexes and expectations use the same rule as the targets.
+ */
+function labelOfElement(e: { label?: string | null; text?: string | null }): string {
+  return e.label ?? e.text ?? "";
+}
+
 function ignoreRects(
   ignore: IgnoreItem[],
   elements: TreeResult["elements"],
@@ -433,7 +441,7 @@ function ignoreRects(
     else if (item.id !== undefined) found = elements.filter((e) => e.testID === item.id);
     else if (item.label !== undefined) {
       const wanted = item.label.toLowerCase();
-      found = elements.filter((e) => (e.label ?? "").toLowerCase() === wanted);
+      found = elements.filter((e) => labelOfElement(e).toLowerCase() === wanted);
     } else if (item.text !== undefined) {
       const wanted = item.text.toLowerCase();
       found = elements.filter((e) => (e.text ?? "").toLowerCase() === wanted);
@@ -555,6 +563,8 @@ const TAP_SLOP = 10;
 const LONG_PRESS_MS = 500;
 
 const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
+/** The answer to a reference name that isn't one: no slashes, so no way out of the references folder. */
+const BAD_REFERENCE_NAME = "Error bad_params: name the reference with letters, digits, '.', '_' and '-'.";
 
 /** One recorded request; `route` is the screen it ended on, `fragile` marks a target that only worked that run (a ref). */
 interface ScriptStep {
@@ -1029,6 +1039,8 @@ export class TaplineTools {
   private diffSaved: string | null = null;
   /** What the last `performance` call measured, for the `under` limits of a `run` step. */
   private lastPerf: PerfMeasure | undefined;
+  /** The elements the latest comparison painted its ignore list from: a recording saves its mask from the same list. */
+  private lastMaskElements: TreeResult["elements"] | undefined;
   /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
@@ -1234,6 +1246,12 @@ export class TaplineTools {
     this.clientIdFn = read;
   }
 
+  /** A call refused before it reached its tool (an unknown argument): numbered and logged like any other, so the report counts it. */
+  rejectedCall(tool: string, args: unknown, answer: CallToolResult): CallToolResult {
+    const result = this.loggedCall(tool, args, () => answer);
+    return result instanceof Promise ? answer : result;
+  }
+
   /** Numbers a call of the agent and logs it when its answer is known (§16.1). Calls within a call (`run`'s steps) are part of it. */
   private loggedCall(
     tool: string,
@@ -1284,12 +1302,15 @@ export class TaplineTools {
       ...(client !== undefined && client !== "" ? { client } : {}),
       size,
     };
+    const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     if (state.entries.length > 0) {
-      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...(listed ? { listed: true } : {}) }, at);
+      // Actions that went through, in a call that failed after them (an expectation that didn't hold): the call's
+      // own outcome goes with them, so the report doesn't count it as a success (Codex review of 1.4.0).
+      const callFailed = failed && state.entries.every(({ entry }) => entry.ok) ? { call_failed: code ?? "internal" } : {};
+      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, at);
       return;
     }
     // A call that logged no action: a read, or an action refused before it began (then without `kind`).
-    const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     const session = this.host.current();
     const lookArgs = state.tool === "look" ? pictureArgs(input) : undefined;
     this.actionLog.write(
@@ -1382,7 +1403,11 @@ export class TaplineTools {
    */
   private withCrashNotes(answer: CallToolResult, mark: number, startedWith: AppIdentity | undefined): CallToolResult {
     const apps = new Map<string, AppIdentity>();
-    const endedWith: AppIdentity | undefined = this.host.current() ?? (startedWith === undefined ? this.host.lastDisconnect()?.session : undefined);
+    const current = this.host.current();
+    // A call that started on an app answers for that app only: another app that became current meanwhile (the first
+    // one dropped) keeps its crashes pending until it is the one being driven (Codex review of 1.3.0).
+    const endedWith: AppIdentity | undefined =
+      startedWith === undefined ? (current ?? this.host.lastDisconnect()?.session) : current !== undefined && identityOf(current) === identityOf(startedWith) ? current : undefined;
     for (const app of [startedWith, endedWith]) if (app !== undefined) apps.set(identityOf(app), app);
     const events = [...apps.values()]
       .flatMap((app) => this.host.crashEventsAfter(this.notedSeqOf(app), app))
@@ -1673,6 +1698,10 @@ export class TaplineTools {
       if (step.tool === "performance") {
         delete params["look"];
         delete params["screenshot"];
+        // Checked before any step runs (and in a dry run), not when this step's turn comes.
+        if (params["launch"] === true && params["tap"] !== undefined) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch reloads the app and tap taps in it; give one of them.`);
+        }
       }
       // AGENT-TOOLS 1.11 §4: the shared wording, with the step first.
       const known = Object.keys(shape);
@@ -1683,6 +1712,11 @@ export class TaplineTools {
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
+      }
+      // Every reference name is checked before any step runs: a name with a path in it never reaches the disk.
+      const names = [step.tool === "compare_screen" ? (params as { name?: unknown }).name : undefined, step.expect?.matches];
+      if (names.some((name) => typeof name === "string" && !SCRIPT_NAME.test(name.trim()))) {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): name the reference with letters, digits, '.', '_' and '-'.`);
       }
       if (step.expect?.ignore !== undefined) {
         const ignored = ignoreListSchema.safeParse(step.expect.ignore);
@@ -1743,6 +1777,19 @@ export class TaplineTools {
           stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
           break;
         }
+        // A picture check that held is kept in a recording, as compare_screen's is: right after the action, the
+        // script makes it that step's `matches` again (AGENT-TOOLS 1.9 §14.2).
+        if (step.expect.matches !== undefined) {
+          const recorded = await this.recordCompare({
+            name: step.expect.matches,
+            ...(step.expect.threshold !== undefined ? { threshold: step.expect.threshold } : {}),
+            ...(step.expect.ignore !== undefined ? { ignore: ignoreListSchema.parse(step.expect.ignore) } : {}),
+          });
+          if (recorded !== null) {
+            stop = { index: i, ...parseError(recorded) };
+            break;
+          }
+        }
       }
       const route = (step as { route?: unknown }).route;
       if (Array.isArray(route) && route.every((part) => typeof part === "string")) {
@@ -1786,17 +1833,20 @@ export class TaplineTools {
     return this.sessionLogs(sessionId).reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
   }
 
-  /** A session's buffered lines; when it is gone (the app went away and came back), the current session's. */
+  /**
+   * A session's buffered lines, also when it has ended. When the same app on the same phone came back as a new
+   * session, that session's lines follow. Another app's lines never stand in for it (Codex review of 1.3.0).
+   */
   private sessionLogs(sessionId: string): LogEntry[] {
-    const ids = [sessionId, this.host.current()?.id].filter((id): id is string => id !== undefined);
-    for (const id of ids) {
-      try {
-        return this.host.logs(id);
-      } catch {
-        // that session is gone; try the next
-      }
+    const record = this.host.sessionRecord(sessionId);
+    if (record === undefined) return [];
+    const now = this.host.current();
+    if (now === undefined || now.id === sessionId || identityOf(now) !== record.identity) return record.events;
+    try {
+      return [...record.events, ...this.host.logs(now.id)];
+    } catch {
+      return record.events;
     }
-    return [];
   }
 
   /** AGENT-TOOLS §15.4: `Logs (since step <n>):` and up to 20 lines at warning or above since the step began. */
@@ -1901,7 +1951,7 @@ export class TaplineTools {
     for (;;) {
       const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
       const element = tree.success
-        ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : (el.label ?? "").toLowerCase() === (e.label ?? "").toLowerCase()))
+        ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : labelOfElement(el).toLowerCase() === (e.label ?? "").toLowerCase()))
         : undefined;
       if (element !== undefined) {
         actual = typeof element.checked === "boolean" ? (element.checked ? "on" : "off") : typeof element.value === "string" ? element.value : undefined;
@@ -2339,7 +2389,7 @@ export class TaplineTools {
       typeof t.testID === "string"
         ? el.testID === t.testID
         : typeof t.label === "string"
-          ? (el.label ?? "").toLowerCase() === t.label.toLowerCase()
+          ? labelOfElement(el).toLowerCase() === t.label.toLowerCase()
           : typeof t.text === "string"
             ? el.text === t.text
             : false,
@@ -2670,9 +2720,17 @@ export class TaplineTools {
     } catch (error) {
       return { kind: "error", line: describeError(error) };
     }
+    this.lastMaskElements = undefined;
+    if (!SCRIPT_NAME.test(name)) return { kind: "error", line: BAD_REFERENCE_NAME };
     const path = options.referencesDirs.map((dir) => join(dir, `${name}.jpg`)).find((candidate) => existsSync(candidate));
     if (path === undefined) return { kind: "missing", shot };
-    const reference: ShotImage = { mime: "image/jpeg", data: readFileSync(path).toString("base64") };
+    let reference: ShotImage;
+    try {
+      reference = { mime: "image/jpeg", data: readFileSync(path).toString("base64") };
+    } catch (error) {
+      // A reference that can't be read (no permission, a folder in its place) is a failed check, never a crash.
+      return { kind: "error", line: `Error bad_params: the reference "${name}" can't be read (${error instanceof Error ? error.message : String(error)}). To start over, use update: true.` };
+    }
     let refSize: { width: number; height: number };
     let shotSize: { width: number; height: number };
     try {
@@ -2693,6 +2751,7 @@ export class TaplineTools {
     const mask: DiffBox[] = [];
     if (options.ignore.length > 0) {
       seen = await this.peekElements(session.id);
+      this.lastMaskElements = seen.elements;
       if (seen.scaleBase === undefined) {
         return { kind: "error", line: "Error internal: couldn't read the screen's elements to paint out what ignore names." };
       }
@@ -2706,7 +2765,9 @@ export class TaplineTools {
     } catch (error) {
       return { kind: "error", line: `Error bad_params: ${error instanceof Error ? error.message : String(error)} To start over, use update: true.` };
     }
-    if (diff.changedPixels === 0 || diff.changedPercent <= options.threshold) {
+    // The pass bar compares the exact share; the rounded percent is only for showing (a few pixels round to 0%).
+    const exactPercent = (diff.changedPixels / Math.max(1, diff.width * diff.height)) * 100;
+    if (diff.changedPixels === 0 || exactPercent <= options.threshold) {
       return { kind: "match", percent: diff.changedPercent, notes };
     }
 
@@ -2759,6 +2820,8 @@ export class TaplineTools {
 
   /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
   private async matchMissed(name: string, threshold: number, ignore: IgnoreItem[]): Promise<string | null> {
+    this.lastMaskElements = undefined;
+    if (!SCRIPT_NAME.test(name)) return parseError(BAD_REFERENCE_NAME).message;
     const session = this.host.current();
     if (session === undefined) return "the app isn't connected";
     const folder = this.referenceFolder(session);
@@ -2785,7 +2848,7 @@ export class TaplineTools {
 
   /** In a replay, a failed check leaves its red picture at `<script>.diff/<name>.jpg`. */
   private keepDiff(check: ReferenceCheck, name: string): void {
-    if (this.replayContext === null || check.kind !== "differs") return;
+    if (this.replayContext === null || check.kind !== "differs" || !SCRIPT_NAME.test(name)) return;
     const path = join(this.replayContext.diffDir, `${name}.jpg`);
     try {
       mkdirSync(dirname(path), { recursive: true });
@@ -2829,6 +2892,8 @@ export class TaplineTools {
   }
 
   private writeReference(folder: string, name: string, shot: ShotImage): CallToolResult {
+    // Every write checks the name itself, whatever the caller checked: no way out of the references folder.
+    if (!SCRIPT_NAME.test(name)) return fail(BAD_REFERENCE_NAME);
     const path = join(folder, `${name}.jpg`);
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -2848,6 +2913,7 @@ export class TaplineTools {
 
   /** A `compare_screen` step of `run`: it never saves; it holds on a match and stops the batch otherwise. */
   private async compareStep(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    this.lastMaskElements = undefined;
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const name = args.name.trim();
@@ -2867,16 +2933,52 @@ export class TaplineTools {
     const why = this.referenceReason(check, name);
     if (why !== null) return fail(`Error ${why.code}: ${why.message}`);
     if (check.kind !== "match") return fail("Error internal: the comparison gave no answer.");
+    // A check that held inside `run` is kept in a recording too, with its options.
+    const recorded = await this.recordCompare({
+      name,
+      ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+      ...(args.ignore !== undefined ? { ignore: args.ignore } : {}),
+      ...(args.width !== undefined ? { width: args.width } : {}),
+    });
+    if (recorded !== null) return fail(recorded);
     return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+  }
+
+  /**
+   * Saves a visual check that held as a `compareScreen` step of the recording, when one is running: the name, and the
+   * threshold, the ignore list (refs made stable) and the width when given. `update` is never written. Answers an
+   * error line when an ignore ref can't be kept in a script, else null (also when nothing is recording).
+   */
+  private async recordCompare(check: { name: string; threshold?: number; ignore?: IgnoreItem[]; width?: number }): Promise<string | null> {
+    if (this.recording === null || this.replaying) return null;
+    const session = this.host.current();
+    let kept = check.ignore;
+    if (session !== undefined && kept !== undefined && kept.length > 0) {
+      const stable = await this.stableIgnore(session.id, kept, this.lastMaskElements);
+      if (typeof stable === "string") return stable;
+      kept = stable;
+    }
+    if (this.recording === null) return null;
+    this.recording.steps.push({
+      method: "compareScreen",
+      params: {
+        name: check.name.trim(),
+        ...(check.threshold !== undefined ? { threshold: check.threshold } : {}),
+        ...(kept !== undefined && kept.length > 0 ? { ignore: kept } : {}),
+        ...(check.width !== undefined ? { width: check.width } : {}),
+      },
+    });
+    return null;
   }
 
   /**
    * `ignore` as a script keeps it (AGENT-TOOLS 1.9 §14.2): a ref becomes the element's id, else label, else text,
    * read from the list now. A string is the error answer when a ref can't be kept.
    */
-  private async stableIgnore(sessionId: string, ignore: IgnoreItem[]): Promise<IgnoreItem[] | string> {
+  private async stableIgnore(sessionId: string, ignore: IgnoreItem[], known?: TreeResult["elements"]): Promise<IgnoreItem[] | string> {
     if (!ignore.some((item) => !("width" in item) && item.ref !== undefined)) return ignore;
-    const seen = await this.peekElements(sessionId);
+    // The elements the comparison painted out when it had them, so the script keeps exactly that mask.
+    const seen = known !== undefined ? { elements: known } : await this.peekElements(sessionId);
     const kept: IgnoreItem[] = [];
     for (const item of ignore) {
       if ("width" in item || item.ref === undefined) {
@@ -2885,10 +2987,24 @@ export class TaplineTools {
       }
       const element = seen.elements.find((e) => e.ref === item.ref);
       if (element === undefined) return `Error bad_params: ignore ${item.ref} isn't on the screen, so it can't be saved in a script.`;
-      if (typeof element.testID === "string" && element.testID !== "") kept.push({ id: element.testID });
-      else if (typeof element.label === "string" && element.label !== "") kept.push({ label: element.label });
-      else if (typeof element.text === "string" && element.text !== "") kept.push({ text: element.text });
-      else {
+      // When several elements share the name, the saved item keeps which one it was (`index`, counted as ignoreRects
+      // counts: elements with a frame, in list order), so a replay paints out that one and not all of them.
+      const framed = seen.elements.filter((e) => e.frame !== undefined);
+      const withIndex = (saved: Target, same: (e: TreeResult["elements"][number]) => boolean): IgnoreItem => {
+        const matching = framed.filter(same);
+        const at = matching.indexOf(element);
+        return matching.length > 1 && at >= 0 ? { ...saved, index: at } : saved;
+      };
+      if (typeof element.testID === "string" && element.testID !== "") {
+        const id = element.testID;
+        kept.push(withIndex({ id }, (e) => e.testID === id));
+      } else if (typeof element.label === "string" && element.label !== "") {
+        const label = element.label.toLowerCase();
+        kept.push(withIndex({ label: element.label }, (e) => labelOfElement(e).toLowerCase() === label));
+      } else if (typeof element.text === "string" && element.text !== "") {
+        const text = element.text.toLowerCase();
+        kept.push(withIndex({ text: element.text }, (e) => (e.text ?? "").toLowerCase() === text));
+      } else {
         return `Error bad_params: ignore ${describeElement(element)} has no id, label or text, so a script couldn't find it again; give it a testID, or ignore a rect {x, y, width, height}.`;
       }
     }
@@ -2896,26 +3012,25 @@ export class TaplineTools {
   }
 
   async compareScreen(args: Shape<"compare_screen">): Promise<CallToolResult> {
+    // Each check starts with no mask list: an update, or a first save, never records from an earlier comparison.
+    this.lastMaskElements = undefined;
     const recording = this.recording !== null && !this.replaying;
     const session = this.host.current();
-    let kept: IgnoreItem[] | undefined = args.ignore;
-    if (recording && session !== undefined && kept !== undefined && kept.length > 0) {
-      const stable = await this.stableIgnore(session.id, kept);
+    // An ignore ref that a script couldn't find again is refused before anything is compared.
+    if (recording && session !== undefined && args.ignore !== undefined && args.ignore.length > 0) {
+      const stable = await this.stableIgnore(session.id, args.ignore);
       if (typeof stable === "string") return fail(stable);
-      kept = stable;
     }
     const answer = await this.compareScreenNow(args);
-    if (recording && this.recording !== null && answer.isError !== true) {
+    if (recording && answer.isError !== true) {
       // `update` is never written: the script checks against the reference it carries.
-      this.recording.steps.push({
-        method: "compareScreen",
-        params: {
-          name: args.name.trim(),
-          ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
-          ...(kept !== undefined && kept.length > 0 ? { ignore: kept } : {}),
-          ...(args.width !== undefined ? { width: args.width } : {}),
-        },
+      const recorded = await this.recordCompare({
+        name: args.name,
+        ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+        ...(args.ignore !== undefined ? { ignore: args.ignore } : {}),
+        ...(args.width !== undefined ? { width: args.width } : {}),
       });
+      if (recorded !== null) return fail(recorded);
     }
     return answer;
   }
@@ -2976,10 +3091,17 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap) };
-        const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
-        if ("stop" in gate) return gate.stop;
-        frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-        await this.host.request("press", pressParams, { sessionId: session.id });
+        // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
+        // it, a person's input goes first, and the screen can't change between the check and the tap (PR #4 review).
+        const turn = async (): Promise<CallToolResult | null> => {
+          const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
+          if ("stop" in gate) return gate.stop;
+          frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+          await this.host.request("press", pressParams, { sessionId: session.id });
+          return null;
+        };
+        const stopped = this.options.control ? await this.options.control.runAgent(turn) : await turn();
+        if (stopped !== null) return stopped;
       }
       for (let i = frames.length; i < count; i++) {
         const at = Date.now();
@@ -3091,8 +3213,8 @@ export class TaplineTools {
     const names = new Set<string>();
     for (const step of steps) {
       const p = step as Record<string, unknown>;
-      if (step.tool === "compare_screen" && typeof p["name"] === "string") names.add(p["name"]);
-      if (step.expect?.matches !== undefined) names.add(step.expect.matches);
+      if (step.tool === "compare_screen" && typeof p["name"] === "string" && SCRIPT_NAME.test(p["name"])) names.add(p["name"]);
+      if (step.expect?.matches !== undefined && SCRIPT_NAME.test(step.expect.matches)) names.add(step.expect.matches);
     }
     const store = join(dir, (app.id ?? app.name).replace(/[^\w.-]/g, "_"));
     const folder = this.scriptSideFolder(scriptPath, "references");
@@ -3852,10 +3974,16 @@ export class TaplineTools {
         }
       }
       const deadline = Date.now() + this.reloadWaitMs;
+      // Only the same app on the same phone, back as a new session, counts: another connected app that became
+      // current meanwhile is never measured as the reload (Codex review of 1.3.0).
+      const same = identityOf(session);
       while (fresh === undefined) {
-        const now = this.host.current();
-        if (now !== undefined && now.id !== session.id) fresh = now;
-        else if (Date.now() > deadline) {
+        const back = this.host.sessions().find((s) => s.id !== session.id && identityOf(s) === same);
+        if (back !== undefined) {
+          fresh = back;
+          // and the agent goes on driving it, not whichever app the host picked when the old session dropped
+          if (this.host.current()?.id !== back.id) this.host.select(back.id);
+        } else if (Date.now() > deadline) {
           return { stop: fail(`Error timeout: the app hadn't reconnected ${Number((this.reloadWaitMs / 1000).toFixed(1))} s after the reload; try look in a few seconds.`) };
         } else await sleep(100);
       }
@@ -3865,15 +3993,24 @@ export class TaplineTools {
       this.host.expectEnd(session.id, false);
     }
     // The first settled screen: the app waits until React hasn't committed for a moment (§6).
-    await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 }).catch(() => undefined);
+    // The first settled screen: a launch time is only reported when the app said it settled.
+    try {
+      await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
+    } catch (error) {
+      return { stop: fail(describeError(error)) };
+    }
     return { session: fresh, seconds: (Date.now() - started) / 1000 };
   }
 
   /** One measuring window in the app: start, (the tap,) wait out `seconds`, stop. */
   private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>): Promise<PerfResult> {
     const id = { sessionId: session.id };
+    // The window's number: the stop names it, so a call never takes another call's numbers (an older SDK has none).
+    let stopParams: Record<string, unknown> = {};
     try {
-      await this.host.request("perfStart", {}, id);
+      const started = await this.host.request("perfStart", {}, id);
+      const windowId = typeof started === "object" && started !== null ? (started as { id?: unknown }).id : undefined;
+      if (typeof windowId === "number") stopParams = { id: windowId };
     } catch (error) {
       if (error instanceof TaplineError && error.code === "unsupported") {
         throw new TaplineError("unsupported", "this app's Tapline is too old for performance; update react-native-tapline.");
@@ -3882,14 +4019,15 @@ export class TaplineTools {
     }
     const started = Date.now();
     try {
+      // The caller holds the live view's queue for the whole window when there is a tap (see performance).
       if (press !== undefined) await this.host.request("press", press, id);
       const rest = seconds * 1000 - (Date.now() - started);
       if (rest > 0) await sleep(rest);
     } catch (error) {
-      await this.host.request("perfStop", {}, id).catch(() => undefined);
+      await this.host.request("perfStop", stopParams, id).catch(() => undefined);
       throw error;
     }
-    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", {}, id));
+    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", stopParams, id));
     if (!parsed.success) throw new TaplineError("internal", "the app returned performance numbers the host could not read.");
     return parsed.data;
   }
@@ -3917,10 +4055,21 @@ export class TaplineTools {
           press = { target: toWireTarget(args.tap) };
           const stale = this.staleRef(press);
           if (stale !== null) return stale;
-          const gate = await this.policyGate(session, "tap", "press", press, listsFor(this.policy, session.app));
-          if ("stop" in gate) return gate.stop;
         }
-        measure = { result: await this.measureWindow(session, seconds, press) };
+        // With a tap, the policy check and the whole window are one turn of the live view's queue: a pause refuses
+        // it, a person's input goes first and waits for the window, and the screen can't change between the check
+        // and the tap (Codex and CodeRabbit reviews of 1.3.0).
+        const tapped = press;
+        const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
+          if (tapped !== undefined) {
+            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app));
+            if ("stop" in gate) return { stop: gate.stop };
+          }
+          return { result: await this.measureWindow(session, seconds, tapped) };
+        };
+        const outcome = tapped !== undefined && this.options.control ? await this.options.control.runAgent(window) : await window();
+        if ("stop" in outcome) return outcome.stop;
+        measure = { result: outcome.result };
       }
       this.lastPerf = measure;
       if (this.recording !== null && !this.replaying) {

@@ -43,6 +43,11 @@ export interface ActionLogEntry {
   in_list?: boolean;
   /** For a `look`: the picture arguments it was given (booleans and numbers only), so a look that asked for more than the action's answer had isn't called waste. */
   look_args?: { screenshot?: boolean; width?: number; labels?: boolean };
+  /**
+   * The whole call failed although its actions went through (a run whose expectation didn't hold): its error code.
+   * Set on the call's action entries, so a report counts the call as failed (Codex review of 1.4.0).
+   */
+  call_failed?: string;
 }
 
 export const LOG_KEEP_DAYS = 14;

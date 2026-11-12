@@ -36,7 +36,42 @@ export const RESERVED_COMMANDS: readonly string[] = ['network', 'text_size'];
 
 // --- validation ---------------------------------------------------------------------------------------------
 
-const LANGUAGE_TAG = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
+const LANGUAGE = /^[A-Za-z]{2,3}$/;
+const SUBTAG = /^[A-Za-z0-9]{2,8}$/;
+const PRIVATE_SUBTAG = /^[A-Za-z0-9]{1,8}$/;
+const SINGLETON = /^[A-Za-z0-9]$/;
+const MAX_LANGUAGE_TAG = 128;
+
+/**
+ * BCP 47, read subtag by subtag (linear: a regex with nested repeats can take seconds on a long bad tag): a language
+ * of 2-3 letters, then subtags of 2-8. A singleton starts an extension (`u-ca-gregory`), which needs one or more
+ * subtags of 2-8; `x` starts the private-use part (`x-a`), which needs one or more of 1-8 and runs to the end.
+ */
+function isLanguageTag(value: string): boolean {
+  if (value.length > MAX_LANGUAGE_TAG) return false;
+  const parts = value.split('-');
+  if (!LANGUAGE.test(parts[0] ?? '')) return false;
+  let i = 1;
+  while (i < parts.length) {
+    const part = parts[i] as string;
+    if (!SINGLETON.test(part)) {
+      if (!SUBTAG.test(part)) return false;
+      i++;
+      continue;
+    }
+    const privateUse = part.toLowerCase() === 'x';
+    const fits = privateUse ? PRIVATE_SUBTAG : SUBTAG;
+    let n = 0;
+    i++;
+    while (i < parts.length && (privateUse || !SINGLETON.test(parts[i] as string))) {
+      if (!fits.test(parts[i] as string)) return false;
+      n++;
+      i++;
+    }
+    if (n === 0) return false;
+  }
+  return true;
+}
 const REGION_CODE = /^[A-Za-z]{2}$/;
 
 function badParams(message: string): TaplineError {
@@ -46,7 +81,7 @@ function badParams(message: string): TaplineError {
 /** A BCP 47 code such as `ar` or `en-GB`. */
 export function parseLanguage(args: Record<string, unknown>): string {
   const value = args.language;
-  if (typeof value !== 'string' || !LANGUAGE_TAG.test(value)) {
+  if (typeof value !== 'string' || !isLanguageTag(value)) {
     throw badParams('language must be a BCP 47 code such as "ar" or "en-GB"');
   }
   return value;
@@ -90,14 +125,24 @@ let getterUsed = false;
 const listeners = new Set<() => void>();
 
 function emit(): void {
-  for (const listener of [...listeners]) listener();
+  for (const listener of [...listeners]) {
+    try {
+      listener();
+    } catch {
+      // one failing subscriber must not stop the others, or the session reset
+    }
+  }
 }
 
 function currentScale(): number {
   return override ?? PixelRatio.getFontScale();
 }
 
-/** The font scale to use: the one an agent set with `text_size`, else the system's. Calling it counts as using the helper. */
+/**
+ * The font scale to use: the one an agent set with `text_size`, else the system's. Calling it counts as using the helper.
+ * It already holds the system's scale, so text sized with it sets `allowFontScaling={false}` (else the system scale
+ * applies twice).
+ */
 export function getTaplineFontScale(): number {
   getterUsed = true;
   return currentScale();
@@ -114,7 +159,11 @@ export function subscribeTaplineFontScale(listener: () => void): () => void {
 /**
  * The font scale the app should apply to its text: the size an agent set with the `text_size`
  * command, else the system's. React Native reads the system scale natively, so Tapline cannot
- * change it; an app that multiplies its font sizes by this value opts in to `text_size`.
+ * change it; an app that multiplies its font sizes by this value opts in to `text_size`. The value already
+ * holds the system's scale: that text sets `allowFontScaling={false}`, so the system scale applies once.
+ *
+ *     const scale = useTaplineFontScale();
+ *     <Text allowFontScaling={false} style={{ fontSize: 16 * scale }}>…</Text>
  */
 export function useTaplineFontScale(): number {
   const [scale, setScale] = useState(currentScale);
@@ -169,7 +218,8 @@ export const TEXT_SIZE_UNSUPPORTED =
 /** The built-in `text_size` run: validates, then sets the override. */
 export function runTextSize(args: Record<string, unknown>): { size: TextSize | typeof SYSTEM_TEXT_SIZE; scale: number; say: string } {
   const size = parseTextSize(args);
-  if (!fontScaleHelperUsed()) throw new TaplineError('unsupported', TEXT_SIZE_UNSUPPORTED);
+  // "system" always clears an override, also once the screens that used the helper are gone
+  if (size !== SYSTEM_TEXT_SIZE && !fontScaleHelperUsed()) throw new TaplineError('unsupported', TEXT_SIZE_UNSUPPORTED);
   if (size === SYSTEM_TEXT_SIZE) {
     setTaplineFontScale(null);
     const scale = PixelRatio.getFontScale();
