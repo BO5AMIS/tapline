@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0, "the Diagnostics Update" (unreleased)
+## 1.3.0, "the Diagnostics Update" (2026-11-12)
 
 When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.10, shared with Tapwright.
 
@@ -23,7 +23,7 @@ When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.
 - A failed `run` or `replay` step adds `Logs (since step <n>):` with up to 20 warnings and errors since that
   step began. `tapline replay --junit` puts them, and the crash note, in the test case's `<system-out>`.
 
-## 1.2.0, "the Regression Update" (unreleased)
+## 1.2.0, "the Regression Update" (2026-11-12)
 
 A script now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
 Tapwright.

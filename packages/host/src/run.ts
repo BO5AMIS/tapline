@@ -25,7 +25,8 @@ export const expectSchema = z
     label: z.string().optional(),
     gone: z.boolean().optional(),
     value: z.string().optional(),
-    matches: z.string().optional(),
+    // A reference name: no slash or dot first, so it can never reach outside the references folder (checked before any step runs).
+    matches: z.string().regex(/^[A-Za-z0-9][\w.-]{0,60}$/, "matches names a reference with letters, digits, '.', '_' and '-'").optional(),
     threshold: z.number().min(0).max(100).optional(),
     /** Targets or rects painted out before the picture check (the shape of compare_screen's ignore); checked by the executor. */
     ignore: z.array(z.record(z.string(), z.unknown())).optional(),
