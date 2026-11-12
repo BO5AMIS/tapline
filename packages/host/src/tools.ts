@@ -344,6 +344,8 @@ interface ScriptStep {
   params: Record<string, unknown>;
   route?: string[];
   fragile?: boolean;
+  /** Typed into a password field: its text wasn't saved (never written to the file). */
+  secret?: boolean;
 }
 
 const scriptSchema = z.object({
@@ -1361,7 +1363,10 @@ export class TaplineTools {
       const { params: chosen, fragile } = stableParams(params, result);
       // A ref saved as a label or text that several elements share needs its index (AGENT-TOOLS 1.8 §9.4).
       const stable = await this.withIndexIfShared(params, chosen, result, session.id);
-      const step: ScriptStep = { method, params: stable };
+      // A password field's text is never saved in a script (Tapwright's review, M4).
+      const secret = method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
+      const step: ScriptStep = { method, params: secret ? { ...stable, text: "" } : stable };
+      if (secret) step.secret = true;
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
@@ -1859,8 +1864,14 @@ export class TaplineTools {
             `Note: step ${ref + 1} targets a ref, which won't exist on a new run, so replay refuses the script. Give that element a testID, or record it again by its text or label.`,
           );
         }
-        if (script.steps.some((step) => step.tool === "type_text")) {
-          lines.push("The script keeps the text typed in it (test passwords too): keep it private.");
+        const secrets = recording.steps.filter((step) => step.secret === true).length;
+        if (secrets > 0) {
+          lines.push(
+            `${secrets} step${secrets === 1 ? " types" : "s type"} into a password field: that text isn't saved. Put a test password into the script before you replay it.`,
+          );
+        }
+        if (recording.steps.some((step) => step.method === "type" && step.secret !== true)) {
+          lines.push("The script keeps the other text typed in it: keep it private.");
         }
         return text(lines.join("\n"));
       }
@@ -2034,7 +2045,8 @@ export class TaplineTools {
     if (verdict.kind === "none") return { granted: false };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    const check = this.confirmations.check(`${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
+    // An OK is for this app, this tool and this element only (Tapwright's review, M1).
+    const check = this.confirmations.check(`${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
     if (check.granted) return { granted: true };
     const where =
       this.options.canConfirm === false

@@ -121,3 +121,33 @@ describe("tapline init after the review", () => {
     expect(readFileSync(join(dir, "index.js"), "utf8")).toBe("module.exports = { helper: true };\n");
   });
 });
+
+describe("recordings after Tapwright's review", () => {
+  it("never save a password field's text, and say so", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-rec-"));
+    dirs.push(dir);
+    const PASSWORD = { ref: "e5", type: "TextInput", role: "textfield", testID: "password", label: "Password", text: "", value: "•••••••", frame: { x: 0, y: 200, width: 300, height: 44 }, actions: ["press", "type"] };
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, {}, (req) => {
+      if (req.method === "type") {
+        const target = (req.params as { target?: { testID?: string } }).target;
+        return target?.testID === "password"
+          ? { ok: true, result: { element: PASSWORD, value: "•••••••", secure: true } }
+          : { ok: true, result: { element: EMAIL, value: "me@example.com" } };
+      }
+      return { ok: true, result: {} };
+    });
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, scriptsDir: dir });
+    await tools.record({ start: true, name: "login" });
+    await tools.typeText({ target: { id: "email" }, text: "me@example.com", look: false });
+    await tools.typeText({ target: { id: "password" }, text: "hunter22", look: false });
+    const stopped = textOf(await tools.record({ stop: true }));
+    const saved = readFileSync(join(dir, "login.json"), "utf8");
+    expect(saved).not.toContain("hunter22");
+    expect(saved).toContain("me@example.com");
+    expect(stopped).toContain("1 step types into a password field: that text isn't saved.");
+    expect(stopped).toContain("The script keeps the other text typed in it");
+  });
+});
