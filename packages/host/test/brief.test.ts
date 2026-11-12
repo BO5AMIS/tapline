@@ -1,8 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { BRIEF_MAX_LINES, briefLines, briefScreen, isActionable, orderForCut } from "../src/brief.js";
+import { parseCli, runtimeOptionsOf } from "../src/cli.js";
 import { callTool } from "../src/dispatch.js";
 import type { TreeElement } from "../src/protocol.js";
+import { createRuntime, type Runtime } from "../src/runtime.js";
 import type { TaplineHost } from "../src/server.js";
 import { TaplineTools, type ToolsOptions } from "../src/tools.js";
 import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
@@ -11,9 +16,13 @@ import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.
 
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
+const runtimes: Runtime[] = [];
+const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
+  await Promise.all(runtimes.splice(0).map((r) => r.close()));
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 const textOf = (result: CallToolResult): string => result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
@@ -325,5 +334,97 @@ describe("tool text", () => {
       expect(Object.keys(toolShapes[name])).toContain("brief");
     }
     expect(Object.keys(toolShapes.look)).not.toContain("brief");
+  });
+});
+
+describe("a new screen in brief keeps the off-screen count", () => {
+  async function newScreen(extra: Record<string, unknown>, options: Partial<ToolsOptions> = {}): Promise<string[]> {
+    let phase = 0;
+    const { tools } = await setup(
+      () =>
+        phase === 0
+          ? { list: [SAVE] }
+          : {
+              list: [{ ref: "e2", type: "Text", role: "header", text: "Log in", frame: { x: 0, y: 0, width: 100, height: 20 }, actions: [] }, BUTTON(3)],
+              changes: { ...SAME, sameRoute: false },
+              extra,
+            },
+      options,
+    );
+    phase = 1;
+    return textOf(await tools.tap({ target: { id: "save" }, brief: true })).split("\n");
+  }
+
+  it("says (+N below) when there is more below, and (+N above) when above", async () => {
+    const rows = await newScreen({ offScreen: { below: 41, above: 2 } });
+    expect(rows).toContain("(+41 below, +2 above)");
+    // It stands above the element lines, with the other never-cut lines.
+    expect(rows.indexOf("(+41 below, +2 above)")).toBeLessThan(rows.findIndex((r) => r.startsWith("e2 header")));
+  });
+
+  it("leaves it out when both counts are zero or unknown", async () => {
+    expect((await newScreen({ offScreen: { below: 0, above: 0 } })).some((r) => r.startsWith("(+"))).toBe(false);
+    expect((await newScreen({})).some((r) => r.startsWith("(+"))).toBe(false);
+  });
+
+  it("is never cut, even when the new screen is", async () => {
+    const buttons = lines(30, (i) => String(i + 10)).map((n) => BUTTON(Number(n)));
+    let phase = 0;
+    const { tools } = await setup(() =>
+      phase === 0 ? { list: [SAVE] } : { list: buttons, changes: { ...SAME, sameRoute: false }, extra: { offScreen: { below: 7, above: 0 } } },
+    );
+    phase = 1;
+    const rows = textOf(await tools.tap({ target: { id: "save" }, brief: true })).split("\n");
+    expect(rows).toContain("(+7 below)");
+    expect(rows).toContain("…18 more: look shows them.");
+  });
+});
+
+describe("the first action after connecting, with 12 or more texts", () => {
+  it("shows 12 lines of new text, then the count, and leaves the buttons to look", async () => {
+    // No look first: the agent has no list, so every text is new and new text goes ahead of the rest.
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const texts = lines(15, (i) => `Line ${i}`).map((t, i) => ({ ref: `e${i + 10}`, type: "Text", role: "text", text: t, frame: { x: 0, y: 20 * i, width: 100, height: 18 }, actions: [] }));
+    const { app } = await FakeApp.connect(port, {}, (req) => (req.method === "tree" ? { ok: true, result: { screen: SCREEN, elements: [...texts, SAVE, BUTTON(30)] } } : { ok: true, result: { element: SAVE, settledMs: 50 } }));
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" } });
+    const rows = textOf(await tools.tap({ target: { id: "save" }, brief: true })).split("\n");
+    expect(rows[0]).toBe('Tapped e1 button "Save" id=save.');
+    expect(rows.filter((r) => /^e\d+ text /.test(r))).toHaveLength(12);
+    expect(rows.filter((r) => /^e\d+ button /.test(r))).toHaveLength(0);
+    expect(rows.at(-1)).toBe("…5 more: look shows them.");
+  });
+});
+
+describe("the --brief flag path", () => {
+  it("parses --brief for mcp and for host, and leaves it out otherwise", () => {
+    for (const command of ["mcp", "host"]) {
+      expect(runtimeOptionsOf(parseCli([command, "--brief"]).values, {})).toMatchObject({ brief: true });
+      expect(runtimeOptionsOf(parseCli([command]).values, {})).not.toHaveProperty("brief");
+    }
+  });
+
+  it("createRuntime({ brief: true }) makes every client's actions brief, and brief: false still beats it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "tapline-brief-"));
+    dirs.push(home);
+    const answers: Record<string, string> = {};
+    for (const brief of [true, false]) {
+      const runtime = await createRuntime({ port: 0, host: "127.0.0.1", env: { TAPLINE_HOME: home }, log: () => undefined, ...(brief ? { brief: true } : {}) });
+      runtimes.push(runtime);
+      const { app } = await FakeApp.connect(
+        runtime.port,
+        { token: runtime.config.token },
+        (req) => (req.method === "tree" ? { ok: true, result: { screen: SCREEN, elements: [SAVE] } } : { ok: true, result: { element: SAVE, settledMs: 120 } }),
+      );
+      apps.push(app);
+      const tools = runtime.toolsFor("agent");
+      await tools.look({ screenshot: false });
+      answers[`default ${brief}`] = textOf(await tools.tap({ target: { id: "save" } }));
+      if (brief) answers["override"] = textOf(await tools.tap({ target: { id: "save" }, brief: false }));
+    }
+    expect(answers["default true"]).not.toMatch(/Settled in/);
+    expect(answers["default false"]).toMatch(/Settled in/);
+    expect(answers["override"]).toMatch(/Settled in/);
   });
 });

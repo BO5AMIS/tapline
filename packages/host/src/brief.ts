@@ -15,12 +15,12 @@ export interface BriefInput {
   changes: string[];
   /** A new screen: its lines replace the change block. */
   screen?: { headers: string[]; actionable: string[]; newText: string[] };
-  /** Never cut: `Alert:`, `Network:`, `Keyboard:`, `Place:`, `Note:`, `Error`, `Reflex:` lines. */
+  /** Never cut: `Alert:`, `Network:`, `Keyboard:`, `Place:`, `Note:`, `Error`, `Reflex:` lines and the off-screen count. */
   fixed: string[];
 }
 
-/** Lines that close an answer; the others (`Alert:`, `Keyboard:`, `Network:`, `Place:`) stand above the block. */
-const TAIL = /^(Note\b|Error\b|Reflex:|Screenshot:|Logs\b)/;
+/** Lines that close an answer; the others (`Alert:`, `Keyboard:`, `Network:`, `Place:`, the off-screen count) stand above the block. */
+const TAIL = /^(Note\b|Error\b|Reflex:)/;
 
 /** A `+` line for a text element: `+ e12 text "Wrong password" …`. */
 const ADDED_TEXT = /^\+ (?:e\d+ )?text(?: |$)/;

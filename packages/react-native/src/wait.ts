@@ -28,6 +28,8 @@ interface Condition {
   /** Only elements that show on the glass count (a journey in a user's eyes, AGENT-TOOLS 1.12 §17.1). */
   glass: boolean;
   networkIdle: boolean;
+  /** One read, no poll and no timeout: the check behind `if` and `optional` (AGENT-TOOLS 1.13 §9.1). */
+  once: boolean;
   timeoutMs: number;
 }
 
@@ -49,6 +51,7 @@ function parse(raw: unknown): Condition {
     throw new TaplineError('bad_params', `timeout is in seconds, above 0 and at most ${MAX_TIMEOUT_S}`);
   }
   return {
+    once: raw.once === true,
     ...(text !== undefined ? { text } : {}),
     ...(testID !== undefined ? { testID } : {}),
     ...(label !== undefined ? { label } : {}),
@@ -121,8 +124,12 @@ function describe(condition: Condition): string {
   return [element, condition.networkIdle ? 'the network to be quiet' : null].filter((part) => part !== null).join(' and ');
 }
 
-export async function waitFor(raw: unknown): Promise<{ met: true; waitedMs: number }> {
+export async function waitFor(raw: { once: true } & Record<string, unknown>): Promise<{ found: boolean }>;
+export async function waitFor(raw: unknown): Promise<{ met: true; waitedMs: number }>;
+export async function waitFor(raw: unknown): Promise<{ met: true; waitedMs: number } | { found: boolean }> {
   const condition = parse(raw);
+  // Same matching as the polling path below, so the two never disagree about one screen.
+  if (condition.once) return { found: await satisfied(condition) };
   const started = Date.now();
   for (;;) {
     if (await satisfied(condition)) return { met: true, waitedMs: Date.now() - started };

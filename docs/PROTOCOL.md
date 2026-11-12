@@ -69,7 +69,7 @@ in Expo Go, whose own build isn't the app's, the config's version and build numb
 
 Optional capabilities added in 1.6 (a host checks for them and does without when they're absent):
 `place` (the `place` request and event, and `tree.place`), `places` (the `places` request) and `move` (the
-`move` request).
+`move` request) and `waitOnce` (`waitFor` with `once`, below). A host without it reads one `tree` instead.
 
 ### Host → app: `welcome`
 
@@ -313,6 +313,11 @@ params: `{ "text" | "testID" | "label": "…", "gone": false, "networkIdle": fal
 250 ms until an element matches (text contains, case-insensitive; testID equal; label
 equal, case-insensitive), or none does with `gone`, and, with `networkIdle`, no request is in
 flight. → `{ "met": true, "waitedMs": 1240 }`, or error `timeout`.
+
+`once: true` (1.6, capability `waitOnce`; AGENT-TOOLS 1.13 §9.1) makes it one read for the host's `if` and
+`optional` steps: no poll, no timeout, the same matching (the whole element list counts, so an element below
+the fold is there). → `{ "found": true }`: the condition holds (with `gone`, the element is gone).
+`timeout` is still checked if given; `once` with `networkIdle` only reads the network once.
 
 ### Status in `tree`
 

@@ -48,10 +48,35 @@ export const expectSchema = z
   .refine((e) => e.value === undefined || e.text === undefined, { message: "expect.value goes with id or label" });
 export type Expect = z.infer<typeof expectSchema>;
 
+/** AGENT-TOOLS 1.13 §9.1: a step's `if`, one of text, id or label (as in `expect`), `gone: true` for when it isn't there. */
+export const ifSchema = z
+  .object({
+    text: z.string().optional(),
+    id: z.string().optional(),
+    label: z.string().optional(),
+    gone: z.boolean().optional(),
+  })
+  .strict()
+  .refine((c) => [c.text, c.id, c.label].filter((v) => v !== undefined).length === 1, { message: "if needs exactly one of text, id or label" });
+export type If = z.infer<typeof ifSchema>;
+
 export const stepSchema = z
-  .object({ tool: z.string(), expect: expectSchema.optional() })
+  .object({ tool: z.string(), expect: expectSchema.optional(), if: ifSchema.optional(), optional: z.boolean().optional() })
   .passthrough();
 export type Step = z.infer<typeof stepSchema>;
+
+/** How a probe reads in the skipped line: `"Not now"` for a text or a label, `id=save`, or a ref as it is. */
+export function describeProbe(probe: { text: string } | { testID: string } | { label: string } | { ref: string }): string {
+  if ("text" in probe) return JSON.stringify(probe.text);
+  if ("testID" in probe) return `id=${probe.testID}`;
+  if ("label" in probe) return JSON.stringify(probe.label);
+  return probe.ref;
+}
+
+/** The line that says a step didn't run (AGENT-TOOLS 1.13 §9.1): `  3. skipped (if: "Not now" isn't on screen).` */
+export function skippedLine(index: number, kind: "if" | "optional", what: string, gone?: boolean): string {
+  return `  ${index}. skipped (${kind}: ${what} ${gone === true ? "is still on screen" : "isn't on screen"}).`;
+}
 
 export const MAX_STEPS = 50;
 export const RUN_TIMEOUT_MS = 120_000;

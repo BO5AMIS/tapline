@@ -244,6 +244,12 @@ function formatOffScreen(offScreen: TreeResult["offScreen"]): string {
   return parts.length > 0 ? ` (${parts.join(", ")})` : "";
 }
 
+/** The off-screen count as a line of its own, for a brief new-screen answer: `(+41 below, +2 above)`; none when there is nothing off screen. */
+export function offScreenLine(tree: TreeResult, eyes = false): string[] {
+  const counts = (eyes ? formatGlassMore(tree.glass) : formatOffScreen(tree.offScreen)).trim();
+  return counts === "" ? [] : [counts];
+}
+
 /** A gone element as `<role> "<name>"`. It omits the ref and position on purpose: neither means anything now. */
 function describeGone(element: TreeElement, eyes = false): string {
   const kind = roleOf(element);

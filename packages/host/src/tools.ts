@@ -10,7 +10,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
-import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree } from "./format.js";
+import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -41,6 +41,7 @@ import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
+import { conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -51,7 +52,9 @@ import {
   UNDER_KEYS,
   describeRunStep,
   expectFailure,
+  ifSchema,
   parseError,
+  skippedLine,
   stepNotes,
   stepSchema,
   type Expect,
@@ -1283,7 +1286,7 @@ export class TaplineTools {
     const hidden = (value: unknown): boolean =>
       typeof value === "object" && value !== null && ("id" in value || "label" in value);
     const expect = s["expect"];
-    if (hidden(s["target"]) || hidden(s["tap"]) || hidden(expect) || (step.tool === "wait_for" && ("id" in s || "label" in s))) {
+    if (hidden(s["target"]) || hidden(s["tap"]) || hidden(expect) || hidden(s["if"]) || (step.tool === "wait_for" && ("id" in s || "label" in s))) {
       return IDS_HIDDEN.replace("Error bad_params: ", `Error bad_params: step ${index + 1}: `);
     }
     if (step.tool === "scroll" && s["to"] === "target") return TaplineTools.SCROLL_TO_TARGET_OFF.replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
@@ -1720,7 +1723,14 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, ...given } = step as Step & { route?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown };
+      // §9.1: `if` needs exactly one of text, id or label.
+      if (given_if !== undefined) {
+        const checked = ifSchema.safeParse(given_if);
+        if (!checked.success) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${checked.error.issues.map((issue) => issue.message).join("; ")}.`);
+        }
+      }
       // §9.1: a step's own look, screenshot and brief are ignored (the batch answers once), whether its tool has them or not.
       const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot" || key === "brief") || key in shape));
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
@@ -1803,6 +1813,13 @@ export class TaplineTools {
         break;
       }
       const at = Date.now();
+      // §9.1: one look, right after the step before settled; a skipped step counts as passed and its expect isn't checked.
+      const skipped = await this.skipReason(session, step, i + 1);
+      if (skipped !== null) {
+        trace.push(skipped);
+        ran++;
+        continue;
+      }
       stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
       const answer = await this.runStep(step).finally(() => {
@@ -1885,6 +1902,31 @@ export class TaplineTools {
     return failed ? { ...response, isError: true } : response;
   }
 
+  /**
+   * AGENT-TOOLS 1.13 §9.1: the skipped line when a step's `if` or `optional` doesn't hold, else null. One look per
+   * check, no wait. The app answers a `waitFor` with `once`; an older app, or a `ref`, is read from one list.
+   */
+  private async skipReason(session: SessionInfo, step: Step, number: number): Promise<string | null> {
+    for (const condition of conditionsOf(step)) {
+      const params = waitParams(condition, this.userEyes());
+      let holds: boolean;
+      if (params !== null && session.capabilities.includes("waitOnce")) {
+        try {
+          const raw = await this.host.request("waitFor", params, { sessionId: session.id });
+          holds = typeof raw === "object" && raw !== null && (raw as { found?: unknown }).found === true;
+        } catch {
+          // A check that couldn't be made doesn't hide the step: it runs and says what is wrong itself.
+          holds = true;
+        }
+      } else {
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        holds = tree.success ? holdsIn(tree.data.elements, condition) : true;
+      }
+      if (!holds) return skippedLine(number, condition.kind, condition.label, condition.gone);
+    }
+    return null;
+  }
+
   /** The newest log time of a session (or of the app's current session), undefined without lines. */
   private newestLogTs(sessionId: string): number | undefined {
     return this.sessionLogs(sessionId).reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
@@ -1944,7 +1986,7 @@ export class TaplineTools {
   }
 
   private runStepNow(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, route: _route, ...rest } = step as Step & { route?: unknown };
+    const { tool, expect: _expect, route: _route, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown };
     const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
@@ -2247,7 +2289,8 @@ export class TaplineTools {
               first: briefFirst,
               changes: [],
               screen: briefScreen(tree.elements, previousElements, { eyes }),
-              fixed: formatStatus(tree),
+              // The off-screen count stays: what lies below or above is what an agent scrolls for.
+              fixed: [...formatStatus(tree), ...offScreenLine(tree, eyes)],
             });
     // A journey keeps the first full list of each screen (and counts the screens entered) for its report.
     if (changesText === null) this.journeyRun?.noteFullList({ route: tree.route?.names ?? [], text: lines[0] ?? "", fromAction: onlyChanges });

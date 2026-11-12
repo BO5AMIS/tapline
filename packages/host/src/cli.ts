@@ -246,13 +246,9 @@ async function runReplay(
   }
 }
 
-export async function main(argv: string[]): Promise<number> {
-  // The thin call has its own light entry (bin.ts); this keeps "node dist/cli.js call" working too.
-  if (argv[0] === "call") {
-    const { runThinCall } = await import("./thincall.js");
-    return runThinCall(argv.slice(1));
-  }
-  const { values, positionals } = parseArgs({
+/** The command line's words and options, in one place so a test can read them without starting a host. */
+export function parseCli(argv: string[]) {
+  return parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
@@ -281,6 +277,30 @@ export async function main(argv: string[]): Promise<number> {
       help: { type: "boolean", short: "h" },
     },
   });
+}
+
+/** What `mcp` and the standalone host both take, from the parsed options (`--brief` and the rest). */
+export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], options: { port?: string; host?: string }): RuntimeOptions {
+  return {
+    ...options,
+    ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}),
+    ...(values.viewer !== undefined ? { viewer: values.viewer } : {}),
+    ...(values["no-log"] === true ? { noLog: true } : {}),
+    ...(values.policy !== undefined ? { policy: values.policy } : {}),
+    ...(values["no-policy"] === true ? { noPolicy: true } : {}),
+    ...(values.brief === true ? { brief: true } : {}),
+    ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
+    ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
+  };
+}
+
+export async function main(argv: string[]): Promise<number> {
+  // The thin call has its own light entry (bin.ts); this keeps "node dist/cli.js call" working too.
+  if (argv[0] === "call") {
+    const { runThinCall } = await import("./thincall.js");
+    return runThinCall(argv.slice(1));
+  }
+  const { values, positionals } = parseCli(argv);
   const command = positionals[0];
   if (values.help === true || command === undefined || command === "help") {
     process.stdout.write(HELP);
@@ -292,18 +312,7 @@ export async function main(argv: string[]): Promise<number> {
     ...(values.host !== undefined ? { host: values.host } : {}),
   };
 
-  // What mcp and the standalone host both take.
-  const runtimeOptions: RuntimeOptions = {
-    ...options,
-    ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}),
-    ...(values.viewer !== undefined ? { viewer: values.viewer } : {}),
-    ...(values["no-log"] === true ? { noLog: true } : {}),
-    ...(values.policy !== undefined ? { policy: values.policy } : {}),
-    ...(values["no-policy"] === true ? { noPolicy: true } : {}),
-    ...(values.brief === true ? { brief: true } : {}),
-    ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
-    ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
-  };
+  const runtimeOptions = runtimeOptionsOf(values, options);
 
   switch (command) {
     case "mcp":
