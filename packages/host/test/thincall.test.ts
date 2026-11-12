@@ -1,4 +1,5 @@
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,6 +36,14 @@ async function stub(respond: (seen: Seen) => { status: number; body: string }): 
     req.setEncoding("utf8");
     req.on("data", (chunk: string) => (body += chunk));
     req.on("end", () => {
+      // The probe (a GET): a Tapline host says "POST only"; an MCP host and other answers pass through.
+      if (req.method === "GET") {
+        const asked = respond({ path: req.url ?? "", headers: req.headers, body });
+        const status = asked.status === 404 && asked.body.includes("MCP server") ? 404 : 405;
+        res.writeHead(status);
+        res.end(status === 405 ? "POST only.\n" : asked.body);
+        return;
+      }
       const entry: Seen = { path: req.url ?? "", headers: req.headers, body };
       seen.push(entry);
       const answer = respond(entry);
@@ -146,7 +155,7 @@ describe("tapline call", () => {
     expect(await runThinCall(["look"], run.io)).toBe(0);
     const lines = run.out.join("").trimEnd().split("\n");
     expect(lines[0]).toBe("a look");
-    expect(lines[1]).toMatch(/shots[\\/]thin-\d+\.png$/);
+    expect(lines[1]).toMatch(/shots[\\/]thin-\d+-[0-9a-f]{8}\.png$/);
     expect(existsSync(lines[1] ?? "")).toBe(true);
   });
 
@@ -227,5 +236,78 @@ describe("tapline call", () => {
       all.push(...run.out, ...run.err);
     }
     for (const text of all) expect(text).not.toContain(FAKE_TOKEN);
+  });
+
+  it("--host accepts only this computer; another name answers bad_params before the token is read", async () => {
+    const s = await stub(() => answer("ok"));
+    for (const name of ["192.168.1.20", "example.com", "0.0.0.0"]) {
+      const run = io([s.port]);
+      rmSync(join(run.home, "token")); // an unread token file would otherwise show up as exit 3
+      expect(await runThinCall(["look", "--host", name], run.io)).toBe(2);
+      expect(run.err.join("")).toMatch(/^Error bad_params: --host must be 127.0.0.1, localhost or ::1/);
+      expect(run.err.join("")).not.toContain(FAKE_TOKEN);
+    }
+    const ok = io([s.port]);
+    expect(await runThinCall(["look", "--host", "localhost"], ok.io)).toBe(0);
+    expect(s.seen).toHaveLength(1);
+  });
+
+  it("a process that accepts and never answers doesn't hang the search", async () => {
+    const mute = createNetServer(() => undefined); // accepts, says nothing
+    await new Promise<void>((resolve) => mute.listen(0, "127.0.0.1", resolve));
+    const address = mute.address();
+    const mutePort = typeof address === "object" && address !== null ? address.port : 0;
+    const live = await stub(() => answer("from live"));
+    try {
+      const started = Date.now();
+      const run = io([mutePort, live.port]);
+      expect(await runThinCall(["apps"], run.io)).toBe(0);
+      expect(run.out.join("")).toBe("from live\n");
+      expect(Date.now() - started).toBeLessThan(3000);
+      const alone = io([mutePort]);
+      expect(await runThinCall(["apps"], alone.io)).toBe(3);
+    } finally {
+      mute.close();
+    }
+  });
+
+  it("a confirmed host's answer may take longer than the probe", async () => {
+    const delayed = createServer((req, res) => {
+      if (req.method === "GET") {
+        res.writeHead(405);
+        res.end("POST only.\n");
+        return;
+      }
+      req.resume();
+      req.on("end", () =>
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ text: "held for a person", isError: false }));
+        }, 700),
+      );
+    });
+    await new Promise<void>((resolve) => delayed.listen(0, "127.0.0.1", resolve));
+    servers.push(delayed);
+    const a = delayed.address();
+    const run = io([typeof a === "object" && a !== null ? a.port : 0]);
+    expect(await runThinCall(["tap", "{}"], run.io)).toBe(0);
+    expect(run.out.join("")).toBe("held for a person\n");
+  });
+
+  it("picture file names differ even within one millisecond", async () => {
+    const s = await stub(() => answer("a look", false, { mimeType: "image/png", dataBase64: "QUJD" }));
+    const names = new Set<string>();
+    const realNow = Date.now;
+    Date.now = () => 1_700_000_000_000;
+    try {
+      for (let i = 0; i < 3; i++) {
+        const run = io([s.port]);
+        await runThinCall(["look", "--json"], run.io);
+        names.add((JSON.parse(run.out.join("")) as { image_path: string }).image_path);
+      }
+    } finally {
+      Date.now = realNow;
+    }
+    expect(names.size).toBe(3);
   });
 });

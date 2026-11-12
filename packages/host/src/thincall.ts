@@ -1,5 +1,6 @@
 // The thin call (AGENT-TOOLS 1.13 §18.10): `tapline call <tool> '<json>'`.
 // It imports only node: modules, so it starts in a few milliseconds; a test checks that.
+import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
@@ -8,6 +9,9 @@ import { parseArgs } from "node:util";
 
 const FIRST_PORT = 7210;
 const LAST_PORT = 7219;
+/** How long a port gets to show it is a Tapline host before the search moves on. */
+const PROBE_MS = 400;
+const LOOPBACK_NAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 /** Flags that fix what the host may do. A call can't widen them: they are set when the host starts. */
 const FIXED_AT_START = ["policy", "no-policy", "no-dialog", "accounts", "maps", "ux-rules"] as const;
@@ -80,6 +84,40 @@ function post(address: string, port: number, tool: string, body: string, token: 
     );
     req.on("error", reject);
     req.end(body);
+  });
+}
+
+type Probe = "host" | "mcp" | "none";
+
+/**
+ * Asks a port who it is with a GET (no token, no side effect), bounded by PROBE_MS: a process that accepts and never
+ * answers can't hang the search. A Tapline host answers 405 "POST only"; one inside an MCP server answers 404 with
+ * its own text. The real call that follows waits without a limit, since it may be held for a person's OK.
+ */
+function probe(address: string, port: number): Promise<Probe> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (result: Probe): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      req.destroy();
+      resolve(result);
+    };
+    const req = request({ host: address, port, path: "/api/", method: "GET", agent: false }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (res.statusCode === 405 && text.startsWith("POST only")) finish("host");
+        else if (res.statusCode === 404 && text.includes("MCP server")) finish("mcp");
+        else finish("none");
+      });
+      res.on("error", () => finish("none"));
+    });
+    const timer = setTimeout(() => finish("none"), PROBE_MS);
+    req.on("error", () => finish("none"));
+    req.end();
   });
 }
 
@@ -175,6 +213,11 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     ports = [port];
   }
   const address = values.host ?? io.address;
+  // The token goes over plain http, so only this computer may be named.
+  if (!LOOPBACK_NAMES.has(address.toLowerCase())) {
+    io.err(`Error bad_params: --host must be 127.0.0.1, localhost or ::1; the token never leaves this computer.\n`);
+    return 2;
+  }
   const client = values.client ?? String(io.ppid);
   const body = JSON.stringify(args);
 
@@ -194,6 +237,12 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
   let mcpHostSeen = false;
   let tokenRefused = false;
   for (const port of ports) {
+    const who = await probe(address, port);
+    if (who === "mcp") {
+      mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls
+      continue;
+    }
+    if (who === "none") continue; // nothing here, or not a Tapline host
     let reply: Reply;
     try {
       reply = await post(address, port, tool, body, token, client);
@@ -238,7 +287,7 @@ function finish(answer: Answer, asJson: boolean, home: string, io: ThinCallIO): 
   if (answer.image !== undefined) {
     const dir = join(home, "shots");
     mkdirSync(dir, { recursive: true });
-    imagePath = join(dir, `thin-${Date.now()}.${extensionFor(answer.image.mimeType)}`);
+    imagePath = join(dir, `thin-${Date.now()}-${randomBytes(4).toString("hex")}.${extensionFor(answer.image.mimeType)}`);
     writeFileSync(imagePath, Buffer.from(answer.image.dataBase64, "base64"));
   }
   const firstLine = answer.text.split("\n")[0] ?? "";

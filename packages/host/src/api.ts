@@ -88,12 +88,22 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
   const chunks: Buffer[] = [];
   let size = 0;
   let tooLong = false;
+  let gone = false;
+  // A peer that drops mid-body or resets: stop quietly, never throw an unhandled error event.
+  req.on("error", () => {
+    gone = true;
+    if (!res.writableEnded) res.destroy();
+  });
+  req.on("aborted", () => {
+    gone = true;
+  });
   req.on("data", (chunk: Buffer) => {
     size += chunk.length;
     if (size > MAX_API_BODY) tooLong = true;
     else chunks.push(chunk);
   });
   req.on("end", () => {
+    if (gone || (req.destroyed && !req.complete)) return;
     let args: Record<string, unknown> | undefined;
     try {
       const text = Buffer.concat(chunks).toString("utf8").trim();

@@ -3452,7 +3452,9 @@ export class TaplineTools {
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
     // An OK is for this app, this tool and this element only (Tapwright's review, M1).
-    const check = this.confirmations.check(`${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
+    // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
+    const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
+    const check = this.confirmations.check(`${client}|${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
     if (check.granted) return { granted: true };
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
