@@ -377,4 +377,16 @@ describe('the perf methods', () => {
     stopPerf();
     await expect(perfStop()).rejects.toMatchObject({ code: 'bad_params' });
   });
+
+  test('a second start while one runs is refused, and the first window keeps its numbers (Codex review of 1.3.0)', async () => {
+    const first = await perfStart();
+    await expect(perfStart()).rejects.toMatchObject({ code: 'bad_params', message: expect.stringContaining('already running') });
+    // a stop that names another window doesn't end this one
+    await expect(perfStop({ id: first.id + 1 })).rejects.toMatchObject({ code: 'bad_params' });
+    const result = await perfStop({ id: first.id });
+    expect(typeof result.fps).toBe('number');
+    // and a new window can start after it ended
+    const next = await perfStart();
+    expect(next.id).toBeGreaterThan(first.id);
+  });
 });

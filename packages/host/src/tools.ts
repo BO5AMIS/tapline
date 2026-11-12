@@ -900,7 +900,11 @@ export class TaplineTools {
    */
   private withCrashNotes(answer: CallToolResult, mark: number, startedWith: AppIdentity | undefined): CallToolResult {
     const apps = new Map<string, AppIdentity>();
-    const endedWith: AppIdentity | undefined = this.host.current() ?? (startedWith === undefined ? this.host.lastDisconnect()?.session : undefined);
+    const current = this.host.current();
+    // A call that started on an app answers for that app only: another app that became current meanwhile (the first
+    // one dropped) keeps its crashes pending until it is the one being driven (Codex review of 1.3.0).
+    const endedWith: AppIdentity | undefined =
+      startedWith === undefined ? (current ?? this.host.lastDisconnect()?.session) : current !== undefined && identityOf(current) === identityOf(startedWith) ? current : undefined;
     for (const app of [startedWith, endedWith]) if (app !== undefined) apps.set(identityOf(app), app);
     const events = [...apps.values()]
       .flatMap((app) => this.host.crashEventsAfter(this.notedSeqOf(app), app))
@@ -1308,17 +1312,20 @@ export class TaplineTools {
     return this.sessionLogs(sessionId).reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
   }
 
-  /** A session's buffered lines; when it is gone (the app went away and came back), the current session's. */
+  /**
+   * A session's buffered lines, also when it has ended. When the same app on the same phone came back as a new
+   * session, that session's lines follow. Another app's lines never stand in for it (Codex review of 1.3.0).
+   */
   private sessionLogs(sessionId: string): LogEntry[] {
-    const ids = [sessionId, this.host.current()?.id].filter((id): id is string => id !== undefined);
-    for (const id of ids) {
-      try {
-        return this.host.logs(id);
-      } catch {
-        // that session is gone; try the next
-      }
+    const record = this.host.sessionRecord(sessionId);
+    if (record === undefined) return [];
+    const now = this.host.current();
+    if (now === undefined || now.id === sessionId || identityOf(now) !== record.identity) return record.events;
+    try {
+      return [...record.events, ...this.host.logs(now.id)];
+    } catch {
+      return record.events;
     }
-    return [];
   }
 
   /** AGENT-TOOLS §15.4: `Logs (since step <n>):` and up to 20 lines at warning or above since the step began. */
@@ -3238,10 +3245,16 @@ export class TaplineTools {
         }
       }
       const deadline = Date.now() + this.reloadWaitMs;
+      // Only the same app on the same phone, back as a new session, counts: another connected app that became
+      // current meanwhile is never measured as the reload (Codex review of 1.3.0).
+      const same = identityOf(session);
       while (fresh === undefined) {
-        const now = this.host.current();
-        if (now !== undefined && now.id !== session.id) fresh = now;
-        else if (Date.now() > deadline) {
+        const back = this.host.sessions().find((s) => s.id !== session.id && identityOf(s) === same);
+        if (back !== undefined) {
+          fresh = back;
+          // and the agent goes on driving it, not whichever app the host picked when the old session dropped
+          if (this.host.current()?.id !== back.id) this.host.select(back.id);
+        } else if (Date.now() > deadline) {
           return { stop: fail(`Error timeout: the app hadn't reconnected ${Number((this.reloadWaitMs / 1000).toFixed(1))} s after the reload; try look in a few seconds.`) };
         } else await sleep(100);
       }
@@ -3258,8 +3271,12 @@ export class TaplineTools {
   /** One measuring window in the app: start, (the tap,) wait out `seconds`, stop. */
   private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>): Promise<PerfResult> {
     const id = { sessionId: session.id };
+    // The window's number: the stop names it, so a call never takes another call's numbers (an older SDK has none).
+    let stopParams: Record<string, unknown> = {};
     try {
-      await this.host.request("perfStart", {}, id);
+      const started = await this.host.request("perfStart", {}, id);
+      const windowId = typeof started === "object" && started !== null ? (started as { id?: unknown }).id : undefined;
+      if (typeof windowId === "number") stopParams = { id: windowId };
     } catch (error) {
       if (error instanceof TaplineError && error.code === "unsupported") {
         throw new TaplineError("unsupported", "this app's Tapline is too old for performance; update react-native-tapline.");
@@ -3268,14 +3285,19 @@ export class TaplineTools {
     }
     const started = Date.now();
     try {
-      if (press !== undefined) await this.host.request("press", press, id);
+      // The tap goes through the live view's queue like any agent touch: a person's input goes first, and a pause
+      // refuses it (Codex review of 1.3.0).
+      if (press !== undefined) {
+        const send = (): Promise<unknown> => this.host.request("press", press, id);
+        await (this.options.control ? this.options.control.runAgent(send) : send());
+      }
       const rest = seconds * 1000 - (Date.now() - started);
       if (rest > 0) await sleep(rest);
     } catch (error) {
-      await this.host.request("perfStop", {}, id).catch(() => undefined);
+      await this.host.request("perfStop", stopParams, id).catch(() => undefined);
       throw error;
     }
-    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", {}, id));
+    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", stopParams, id));
     if (!parsed.success) throw new TaplineError("internal", "the app returned performance numbers the host could not read.");
     return parsed.data;
   }

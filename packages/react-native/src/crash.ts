@@ -26,11 +26,17 @@ const SYMBOLICATE_WAIT_MS = 3000;
 let storage: TaplineStorage | null = null;
 /** The write in progress, so a delivery right after a crash reads what was written. */
 let saving: Promise<void> = Promise.resolve();
+/**
+ * Counts the saves. An acknowledgement removes the record only when no save started after it began reading, so it
+ * can never remove a newer crash (Codex review of 1.3.0). A save still starts at once: the app may die right after.
+ */
+let saves = 0;
 
 /** Where the crash is kept (null: nowhere). */
 export function configureCrash(next: TaplineStorage | null): void {
   storage = next;
   saving = Promise.resolve();
+  saves = 0;
   delivery = Promise.resolve();
 }
 
@@ -83,6 +89,7 @@ export function saveCrash(record: CrashRecord): void {
   if (target === null) return;
   try {
     const json = fitRecord(record);
+    saves += 1;
     saving = target.setItem(CRASH_KEY, json).catch(() => undefined);
   } catch {
     // the crash is also sent live; losing the copy must not hide the app's own error
@@ -133,7 +140,10 @@ export async function ackSavedCrash(ts: number): Promise<void> {
   if (target === null) return;
   try {
     await saving;
+    const before = saves;
     const record = parseSaved(await target.getItem(CRASH_KEY));
+    // A crash saved while this was reading is newer than the one acknowledged: it stays.
+    if (saves !== before) return;
     if (record !== null && record.ts === ts) await target.removeItem(CRASH_KEY);
   } catch {
     // never reaches the app

@@ -156,6 +156,33 @@ describe('sending the saved crash', () => {
     expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'second', ts: 2000 });
   });
 
+  test('a crash saved while an older acknowledgement is reading survives it (Codex review of 1.3.0)', async () => {
+    const inner = memoryStorage();
+    let releaseRead: () => void = () => undefined;
+    let firstRead = true;
+    configureCrash({
+      getItem: async (key) => {
+        // the first read takes what is stored now (crash A) and answers only later, after B was saved
+        const value = await inner.getItem(key);
+        if (firstRead) {
+          firstRead = false;
+          await new Promise<void>((resolve) => (releaseRead = resolve));
+        }
+        return value;
+      },
+      setItem: (key, value) => inner.setItem(key, value),
+      removeItem: (key) => inner.removeItem(key),
+    });
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'A', stack: '', ts: 1000 }));
+    const ack = ackSavedCrash(1000); // reads A, and waits
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    recordError(Object.assign(new Error('B'), {}), true); // crash B is saved meanwhile
+    releaseRead();
+    await ack;
+    await deliverSavedCrash();
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
+  });
+
   test('keeps it while no computer is connected', async () => {
     recordError(fail(), true);
     await deliverSavedCrash();

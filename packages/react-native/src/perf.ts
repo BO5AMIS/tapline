@@ -324,6 +324,9 @@ function actualDuration(fiber: Fiber): number | null {
 
 let current: PerfSampler | null = null;
 let guard: ReturnType<typeof setTimeout> | null = null;
+/** The running window's number: a stop names the window it ends, so two calls never take each other's numbers. */
+let currentId = 0;
+let nextId = 1;
 
 /** Ends any measurement without a result: the host is gone, so nobody will ask for it. */
 export function stopPerf(): void {
@@ -331,27 +334,41 @@ export function stopPerf(): void {
   guard = null;
   const sampler = current;
   current = null;
+  currentId = 0;
   if (sampler !== null) sampler.abort();
 }
 
-/** `perfStart`: begins a window (a measurement already running is dropped). */
-export async function perfStart(): Promise<{ started: true; dev: boolean; heap: boolean }> {
+/**
+ * `perfStart`: begins a window and answers its `id`. A window already running is not dropped: the start answers
+ * bad_params, so a second call can never reset the first one's numbers (Codex review of 1.3.0). A window nobody stops
+ * ends by itself after MAX_WINDOW_MS.
+ */
+export async function perfStart(): Promise<{ started: true; id: number; dev: boolean; heap: boolean }> {
+  if (current !== null && current.active) {
+    throw new TaplineError('bad_params', 'a performance measurement is already running; wait for it to end');
+  }
   stopPerf();
   const sampler = new PerfSampler();
   current = sampler;
+  currentId = nextId++;
   sampler.start();
   guard = setTimeout(stopPerf, MAX_WINDOW_MS);
-  return { started: true, dev: typeof __DEV__ !== 'undefined' && __DEV__, heap: hermesHeapMb() !== null };
+  return { started: true, id: currentId, dev: typeof __DEV__ !== 'undefined' && __DEV__, heap: hermesHeapMb() !== null };
 }
 
-/** `perfStop`: ends the window and answers its numbers. */
-export async function perfStop(): Promise<PerfResult> {
+/** `perfStop`: ends the window (`id`, when given, must be the running one) and answers its numbers. */
+export async function perfStop(params?: unknown): Promise<PerfResult> {
   const sampler = current;
   if (sampler === null || !sampler.active) {
     throw new TaplineError('bad_params', 'no performance measurement is running; start one first');
   }
+  const id = typeof params === 'object' && params !== null ? (params as { id?: unknown }).id : undefined;
+  if (id !== undefined && id !== currentId) {
+    throw new TaplineError('bad_params', 'that performance measurement is not the one running');
+  }
   if (guard !== null) clearTimeout(guard);
   guard = null;
   current = null;
+  currentId = 0;
   return sampler.stop();
 }
