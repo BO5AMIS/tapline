@@ -70,6 +70,8 @@ in Expo Go, whose own build isn't the app's, the config's version and build numb
 Optional capabilities added in 1.6 (a host checks for them and does without when they're absent):
 `place` (the `place` request and event, and `tree.place`), `places` (the `places` request) and `move` (the
 `move` request) and `waitOnce` (`waitFor` with `once`, below). A host without it reads one `tree` instead.
+`pressFacts` (the `handler` and `startedRequests` fields of a `press` or `longPress` result, below): a host without it
+says a tap that changed nothing without a clause about the handler (AGENT-TOOLS 1.13 §3).
 
 ### Host → app: `welcome`
 
@@ -252,8 +254,17 @@ target's `onPress` / `onLongPress` with a synthetic press event (`nativeEvent` w
 `locationX/Y`, `pageX/Y`, `timestamp`; `persist()`, `preventDefault()`,
 `stopPropagation()` no-ops). A disabled element: `not_actionable`.
 
-Real-touch check (unless `force`): an element entirely off screen is `not_actionable`
-("scroll to it first"). Otherwise the app hit-tests the centre of the element's visible
+With `pressFacts`, the result also says what the touch did (AGENT-TOOLS 1.13 §3; not on a dry run):
+`"handler": { "kind": "own" }` when the touched element's own handler took it, `{ "kind": "own", "threw": "<message>" }`
+when that handler threw (the press still answers, the message is also logged as `[tapline] onPress threw: …`), and
+`{ "kind": "parent", "element": <element> }` when the element has none and an ancestor's took the touch (`threw` may be there
+too). `"startedRequests": 2` counts the requests that began during the action (a counter next to the in-flight one; dev-server
+traffic excluded). The host turns these into the clause of the "tap that changed nothing" note.
+
+Real-touch check (unless `force`): an element entirely off screen is `not_actionable` (`off_screen`). The action scrolls an
+element into view itself (§16.2), so `off_screen` means no scroll can bring it on screen, and the message says so: it lies in
+a part of the screen that nothing scrolls (behind a fixed bar, or outside every list), so look at the screen, then target
+something else or report it (AGENT-TOOLS 1.13.1 item 3). Otherwise the app hit-tests the centre of the element's visible
 part with Fabric's `findNodeAtPoint` (as React Native's element inspector does); when the
 touch would land on something that is neither inside the element nor one of its ancestors,
 it's `not_actionable` and the message names what covers it. An open React Native `Modal` is

@@ -65,6 +65,8 @@ const requests = new WeakMap<object, RequestInfo>();
 let installed: Installed | null = null;
 let customIgnore: ((url: string) => boolean) | null = null;
 let pending = 0;
+/** Requests begun so far; the difference across an action is what the action started. */
+let began = 0;
 let generation = 0;
 let condition: NetworkMode = 'normal';
 let random: () => number = Math.random;
@@ -131,6 +133,7 @@ function track(xhr: XhrLike & object): (() => void) | null {
   let aborted = false;
   let timedOut = false;
   pending += 1;
+  began += 1;
 
   /** Stop counting this request; returns false if it was already finished. */
   const settle = (): boolean => {
@@ -748,6 +751,7 @@ function wrapFetch(original: AnyFn): AnyFn {
     const startedAt = Date.now();
     const forGeneration = generation;
     pending += 1;
+    began += 1;
     let done = false;
     const settle = (): void => {
       if (done) return;
@@ -960,6 +964,12 @@ export function uninstallNetworkTracking(): void {
 export function inFlight(): number {
   ensureFetchWrapped();
   return pending;
+}
+
+/** How many requests have begun (dev-server traffic excluded). Two reads around an action tell what it started. */
+export function startedRequests(): number {
+  ensureFetchWrapped();
+  return began;
 }
 
 /** Be told about every failed request. Returns the unsubscribe function. */

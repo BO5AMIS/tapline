@@ -128,7 +128,7 @@ describe("Note: changes are since your last list", () => {
     await tools.tap({ target: { id: "open-sheet" }, look: false });
     const lines = textOf(await tools.tap({ target: { id: "open-sheet" } })).split("\n");
     expect(lines).toContain("No visible change.");
-    expect(lines.at(-1)).toBe("Note: changes are since your last list, 2 actions ago.");
+    expect(lines).toContain("Note: changes are since your last list, 2 actions ago.");
     // Said once: the next answer is measured from this one.
     expect(noteOf(textOf(await tools.tap({ target: { id: "open-sheet" } })))).toBeUndefined();
   });

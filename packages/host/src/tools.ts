@@ -8,8 +8,9 @@ import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
-import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
+import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
+import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, type NoChangeAction } from "./nochange.js";
 import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
@@ -412,8 +413,29 @@ type ReferenceCheck =
   | { kind: "missing"; shot: ShotImage }
   | { kind: "size"; message: string }
   | { kind: "error"; line: string }
-  | { kind: "match"; percent: number; notes: string[] }
+  | { kind: "match"; percent: number; notes: string[]; threshold: number; names: string[] }
   | { kind: "differs"; percent: number; lines: string[]; reason: string; image: ShotImage; notes: string[] };
+
+/** The first line of a match: today's, or with the clusters that changed under the threshold (1.13.1 item 2). */
+function matchLine(name: string, check: { percent: number; threshold: number; names: string[] }): string {
+  if (check.names.length === 0) return `Matches the reference "${name}": ${check.percent}% changed.`;
+  return `Matches the reference "${name}" (${check.percent}% changed, under the ${check.threshold}% threshold): changed at ${check.names.join(", ")}`;
+}
+
+/** Changed clusters of this size or more are named under the threshold, in percent of the screen (1.13.1 item 2). */
+const NAMED_CLUSTER_PERCENT = 0.1;
+
+/** The smallest named elements under a box in points: a page-sized container overlaps every change. */
+function elementsUnder(b: { x: number; y: number; width: number; height: number }, elements: TreeResult["elements"]): TreeResult["elements"] {
+  return elements
+    .filter((e) => e.frame && e.frame.x < b.x + b.width && e.frame.x + e.frame.width > b.x && e.frame.y < b.y + b.height && e.frame.y + e.frame.height > b.y)
+    .filter((e) => (e.text ?? "") !== "" || (e.label ?? "") !== "" || (e.testID ?? "") !== "")
+    .map((e) => ({ e, area: (e.frame?.width ?? 0) * (e.frame?.height ?? 0) }))
+    .filter(({ area }) => area <= Math.max(b.width * b.height * 4, 2500))
+    .sort((x, y) => x.area - y.area)
+    .slice(0, 2)
+    .map(({ e }) => e);
+}
 
 function describeIgnore(item: Target): string {
   if (item.id !== undefined) return `id=${item.id}`;
@@ -555,6 +577,8 @@ export interface ToolsOptions {
   viewerFeed?: () => { on: boolean; quality: QualityPreset };
   /** The clock a journey measures with, in ms (tests pass their own). Default: Date.now. */
   clock?: () => number;
+  /** Waits this many ms (tests pass one that moves their clock). Default: a timer. */
+  sleep?: (ms: number) => Promise<void>;
   /**
    * Called when a journey stops (AGENT-TOOLS 1.12 §17.5), with its state: the report writer's hook. The lines it
    * returns follow the summary in the answer (`Findings: …`, `Report: <folder>`).
@@ -898,6 +922,11 @@ function scrolledFirst(result: unknown): boolean {
 }
 
 /** `Scrolled to it, then tapped …` when the action scrolled first: the sentence goes on after a lead-in. */
+/** The text of an answer: its text blocks, joined. */
+function answerText(answer: CallToolResult): string {
+  return answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+}
+
 function afterScroll(result: unknown, sentence: string): string {
   return scrolledFirst(result) ? `Scrolled to it, then ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}` : sentence;
 }
@@ -1005,6 +1034,8 @@ export class TaplineTools {
   private batch: { id: string; step: number } | undefined;
   /** Extra fields for the next log line (a dry run, a confirmed touch). */
   private logExtra: Partial<ActionLogEntry> | undefined;
+  /** The clusters the latest `expect.matches` check named under its threshold (1.13.1 item 2). */
+  private matchedNames: string[] = [];
   /** The call log (AGENT-TOOLS 1.11 §16.1): this run's id, when it began, and how many calls the agent has made. */
   private readonly sessionTag = randomBytes(4).toString("hex");
   private readonly startedAt = Date.now();
@@ -1109,6 +1140,7 @@ export class TaplineTools {
   /** "starting" until a journey's set-up is done, "stopping" until its clean-up is done: no other start meanwhile. */
   private journeyBusy: "starting" | "stopping" | undefined;
   private readonly clock: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(
     private readonly host: TaplineHost,
@@ -1116,6 +1148,7 @@ export class TaplineTools {
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.clock = options.clock ?? Date.now;
+    this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.confirmations = options.confirmations ?? new Confirmations();
     this.policy = options.policy ?? DEFAULT_POLICY;
     this.uxRules = options.uxRules ?? NO_UX_RULES;
@@ -1386,6 +1419,8 @@ export class TaplineTools {
         ...common,
         ...(listed ? { listed: true } : {}),
         ...(lookArgs !== undefined ? { look_args: lookArgs } : {}),
+        // A compare_screen that matched with named changes: the report asks the agent to look at them (1.13.1 item 2).
+        ...(state.tool === "compare_screen" && !failed && /^Matches the reference ".*" \([\d.]+% changed, under the /.test(said.join("\n")) ? { matched_with_changes: true } : {}),
       },
       began,
     );
@@ -1856,10 +1891,14 @@ export class TaplineTools {
           break;
         }
       } else if (step.expect !== undefined) {
+        this.matchedNames = [];
         const missed = await this.expectMissed(step.expect);
         if (missed !== null) {
           stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
           break;
+        }
+        if (step.expect.matches !== undefined && this.matchedNames.length > 0) {
+          notes.push(`Note (step ${i + 1}): the screen matches "${step.expect.matches}" with changes: changed at ${this.matchedNames.join(", ")}`);
         }
         // A picture check that held is kept in a recording, as compare_screen's is: right after the action, the
         // script makes it that step's `matches` again (AGENT-TOOLS 1.9 §14.2).
@@ -2409,6 +2448,8 @@ export class TaplineTools {
     preflight?: () => Promise<CallToolResult | null>,
     /** The call's `brief` (else the server's `--brief`): a short answer, and no `Settled in` line (AGENT-TOOLS 1.13 §13.4). */
     brief?: boolean,
+    /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
+    touch?: NoChangeAction,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -2449,6 +2490,7 @@ export class TaplineTools {
     }
     this.showAction("agent", method, result, params);
     let response: CallToolResult;
+    const extra = [...(extraNotes?.(result) ?? [])];
     this.lastLookRoute = undefined;
     const settledMs =
       typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
@@ -2461,20 +2503,48 @@ export class TaplineTools {
       response = text([line, ...this.takePersonNote()].join("\n"));
     } else {
       // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
-      response = await this.withLook(session, line, screenshot === true, shortAnswer);
-      if (settled !== undefined && !shortAnswer) {
-        const [first, ...rest] = response.content;
-        if (first !== undefined && first.type === "text") {
-          // `Settled in` is the last line that isn't a note: it goes before the trailing `Note:` lines.
-          const all = first.text.trimEnd().split("\n");
-          let end = all.length;
-          while (end > 1 && all[end - 1]?.startsWith("Note: ") === true) end--;
-          all.splice(end, 0, settled);
-          response = { ...response, content: [{ type: "text", text: all.join("\n") }, ...rest] };
+      const lookAgain = async (shot: boolean): Promise<CallToolResult> => {
+        const looked = await this.withLook(session, line, shot, shortAnswer);
+        if (settled === undefined || shortAnswer) return looked;
+        const [first, ...rest] = looked.content;
+        if (first === undefined || first.type !== "text") return looked;
+        // `Settled in` is the last line that isn't a note: it goes before the trailing `Note:` lines.
+        const all = first.text.trimEnd().split("\n");
+        let end = all.length;
+        while (end > 1 && all[end - 1]?.startsWith("Note: ") === true) end--;
+        all.splice(end, 0, settled);
+        return { ...looked, content: [{ type: "text", text: all.join("\n") }, ...rest] };
+      };
+      // The app waited until it was still (AGENT-TOOLS §6), so the list is fresh.
+      response = await lookAgain(screenshot === true);
+      // A touch that changed nothing is watched a little longer before it is said so (§3). Not inside `run`
+      // (a batch answers once), and the app has to have answered with a list.
+      if (touch !== undefined && this.batch === undefined && !this.replaying && response.isError !== true && saysNoVisibleChange(answerText(response))) {
+        const touchedAt = this.clock() - (typeof settledMs === "number" && Number.isFinite(settledMs) ? settledMs : 0);
+        const wait = NO_CHANGE_WATCH_MS - (this.clock() - touchedAt);
+        if (wait > 0) await this.sleep(wait);
+        const later = await lookAgain(screenshot === true);
+        if (later.isError !== true && !saysNoVisibleChange(answerText(later))) {
+          // Something changed meanwhile: the normal answer, and no note. What the first look said once stays said.
+          const carried = answerText(response).split("\n").filter((row) => /^Note: (changes are since your last list|a person used the app)/.test(row));
+          const body = answerText(later);
+          const missing = carried.filter((row) => !body.includes(row));
+          const [top, ...rest] = later.content;
+          response = missing.length > 0 && top !== undefined && top.type === "text"
+            ? { ...later, content: [{ type: "text", text: [top.text.trimEnd(), ...missing].join("\n") }, ...rest] }
+            : later;
+        } else {
+          const seconds = Math.max(this.clock() - touchedAt, 0) / 1000;
+          const clause = noChangeClause(
+            touch,
+            session.capabilities.includes("pressFacts") ? readPressFacts(result) : null,
+            saysRequestsRunning(answerText(later)),
+            (element) => this.shortName(element, true),
+          );
+          extra.push(`${noChangeNote(touch, seconds)}${clause !== null ? ` ${clause}` : ""}`);
         }
       }
     }
-    const extra = [...(extraNotes?.(result) ?? [])];
     const capMs = typeof result === "object" && result !== null && "settleCapMs" in result ? (result as { settleCapMs: unknown }).settleCapMs : undefined;
     if (typeof capMs === "number" && Number.isFinite(capMs) && capMs > 0) {
       extra.push(`Note: the screen was still changing after ${Number((capMs / 1000).toFixed(3))} s (an animation or video); positions may be mid-change.`);
@@ -2912,7 +2982,8 @@ export class TaplineTools {
     // The pass bar compares the exact share; the rounded percent is only for showing (a few pixels round to 0%).
     const exactPercent = (diff.changedPixels / Math.max(1, diff.width * diff.height)) * 100;
     if (diff.changedPixels === 0 || exactPercent <= options.threshold) {
-      return { kind: "match", percent: diff.changedPercent, notes };
+      const names = diff.changedPixels === 0 ? [] : await this.changedClusterNames(session.id, diff, seen);
+      return { kind: "match", percent: diff.changedPercent, notes, threshold: options.threshold, names };
     }
 
     // Name the regions in points, with the elements they touch.
@@ -2921,15 +2992,7 @@ export class TaplineTools {
     const unit = scale === 1 ? "pixels" : "points";
     const regions = diff.boxes.map((box) => {
       const b = { x: box.x / scale, y: box.y / scale, width: box.width / scale, height: box.height / scale };
-      // The smallest named elements there: a page-sized container overlaps every change.
-      const near = found.elements
-        .filter((e) => e.frame && e.frame.x < b.x + b.width && e.frame.x + e.frame.width > b.x && e.frame.y < b.y + b.height && e.frame.y + e.frame.height > b.y)
-        .filter((e) => (e.text ?? "") !== "" || (e.label ?? "") !== "" || (e.testID ?? "") !== "")
-        .map((e) => ({ e, area: (e.frame?.width ?? 0) * (e.frame?.height ?? 0) }))
-        .filter(({ area }) => area <= Math.max(b.width * b.height * 4, 2500))
-        .sort((x, y) => x.area - y.area)
-        .slice(0, 2)
-        .map(({ e }) => describeElement(e));
+      const near = elementsUnder(b, found.elements).map((e) => describeElement(e));
       return { at: `@${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`, near };
     });
     const count = regions.length;
@@ -2942,6 +3005,29 @@ export class TaplineTools {
     const listed = regions.slice(0, MAX_REGION_LINES).map((region) => region.at).join(", ");
     const reason = `${diff.changedPercent}% changed from the reference "${name}" (threshold ${options.threshold}%), ${where}: ${listed}${count > MAX_REGION_LINES ? `, +${count - MAX_REGION_LINES} more` : ""}.`;
     return { kind: "differs", percent: diff.changedPercent, lines, reason, image: diff.image, notes };
+  }
+
+  /**
+   * The changed clusters of a match to name (1.13.1 item 2): each one that is at least 0.1% of the screen, and every
+   * one that overlaps a text element, whatever its size. An element's name, else the place in points. Never fails.
+   */
+  private async changedClusterNames(
+    sessionId: string,
+    diff: DiffResult,
+    seen: { scaleBase: number | undefined; elements: TreeResult["elements"] } | undefined,
+  ): Promise<string[]> {
+    const found = seen ?? (await this.peekElements(sessionId));
+    const scale = found.scaleBase === undefined ? 1 : diff.width / found.scaleBase;
+    const names: string[] = [];
+    for (const cluster of diff.clusters) {
+      const b = { x: cluster.x / scale, y: cluster.y / scale, width: cluster.width / scale, height: cluster.height / scale };
+      const near = elementsUnder(b, found.elements);
+      const overText = near.some((e) => (e.text ?? "") !== "");
+      if (!overText && clusterPercent(cluster, diff.width, diff.height) < NAMED_CLUSTER_PERCENT) continue;
+      names.push(near.length > 0 ? near.map((e) => describeElement(e)).join(", ") : `@${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`);
+    }
+    if (names.length <= MAX_REGION_LINES) return names;
+    return [...names.slice(0, MAX_REGION_LINES), `+${names.length - MAX_REGION_LINES} more`];
   }
 
   /** Why a check does not hold (for `run`, as a step or as `matches`), or null when it matches. */
@@ -2965,6 +3051,7 @@ export class TaplineTools {
   /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
   private async matchMissed(name: string, threshold: number, ignore: IgnoreItem[]): Promise<string | null> {
     this.lastMaskElements = undefined;
+    this.matchedNames = [];
     if (!SCRIPT_NAME.test(name)) return parseError(BAD_REFERENCE_NAME).message;
     const session = this.host.current();
     if (session === undefined) return "the app isn't connected";
@@ -2982,6 +3069,7 @@ export class TaplineTools {
       referencesDirs: this.referencesDirs(folder),
     });
     this.keepDiff(check, name);
+    if (check.kind === "match") this.matchedNames = check.names;
     return this.referenceReason(check, name)?.message ?? null;
   }
 
@@ -3085,7 +3173,7 @@ export class TaplineTools {
       ...(args.width !== undefined ? { width: args.width } : {}),
     });
     if (recorded !== null) return fail(recorded);
-    return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+    return text([matchLine(name, check), ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
   }
 
   /**
@@ -3209,7 +3297,7 @@ export class TaplineTools {
       case "size":
         return fail(`Error bad_params: ${check.message}`);
       case "match":
-        return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+        return text([matchLine(name, check), ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
       case "differs": {
         const lines = [...check.lines, "The image shows the screen now, faded, with the changed pixels in red.", ...check.notes.map((n) => `Note: ${n}`)];
         const content: CallToolResult["content"] = [];
@@ -3764,7 +3852,7 @@ export class TaplineTools {
     if (hiddenTap !== null) return Promise.resolve(hiddenTap);
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
-      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief),
+      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief, "tap"),
     );
   }
 
@@ -3774,7 +3862,7 @@ export class TaplineTools {
     if (hiddenPress !== null) return Promise.resolve(hiddenPress);
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
-      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief),
+      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief, "long_press"),
     );
   }
 

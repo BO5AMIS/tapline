@@ -116,8 +116,8 @@ and `y` only for things with no element.
   changed as well, it follows the list under `Changes off screen:`.
 - **The header counts what you can't see:**
   `Screen 430x932 pt @3x · 26 elements (+41 below, +2 above)`. Those 41 are reached by
-  scrolling. They are not in the list: acting on one answers `off_screen` and names the call
-  that brings it up. `Route:` names the screen you are on, and `Network:` says requests are still
+  scrolling. They are not in the list, but `tap`, `long_press`, `toggle` and `type_text` scroll to one
+  themselves. `off_screen` means no scroll can bring it on screen: look at the screen, then target something else or report it. `Route:` names the screen you are on, and `Network:` says requests are still
   running.
 - **A change out of view has its own line, without a ref:**
   ```
@@ -148,7 +148,7 @@ and `y` only for things with no element.
 
 | To | Call |
 |---|---|
-| reach an element that is off screen | `scroll` with it as `target` and `to: "target"`. One call; don't scroll by guess |
+| reach an element that is off screen | `tap`, `long_press`, `toggle` and `type_text` scroll to it themselves. To only bring it into view: `scroll` with it as `target` and `to: "target"`. Don't scroll by guess |
 | wait for a load, a spinner or a new screen | `wait_for` with `text`, `id` or `label` (`gone: true` for a spinner; `network_idle` for requests), not `wait` |
 | set a switch, or read it | `toggle` with `value: true` or `false`. It does nothing if the switch is already there, and its answer says the switch's state either way |
 | fill a field and send it | `type_text` with `submit: true` |
@@ -184,7 +184,7 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 |---|---|
 | `not_found` | `look`, then pick another target |
 | `ambiguous` | use one of the listed refs, or add `index` |
-| `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: `scroll` with `to: "target"`, close what is in front, answer the alert |
+| `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: close what is in front, answer the alert; for `off_screen`, target something else or report it (nothing scrolls there) |
 | `stale` | a person changed the screen since your list: `look` again |
 | `busy` | a person is using the app: wait a few seconds, retry |
 | `paused`, `in_background` | ask the user (to resume; to open the app again) |

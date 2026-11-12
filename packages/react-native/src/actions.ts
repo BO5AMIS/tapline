@@ -1,5 +1,6 @@
 import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
 import { keyboardState } from './keyboard';
+import { startedRequests } from './network';
 import { nativeModule } from './native';
 import {
   closingModalHosts,
@@ -239,6 +240,22 @@ function callHandler(name: string, handler: (...args: unknown[]) => unknown, arg
       console.error(`[tapline] ${name} rejected:`, error);
     });
   }
+}
+
+/**
+ * Calls a press handler as `callHandler` does, but a throw is not an error of the action: a person's tap
+ * on a button whose handler throws still happened. The message goes to the logs and to the answer's facts
+ * (AGENT-TOOLS 1.13 §3). Returns the message, or undefined when the handler didn't throw.
+ */
+function callHandlerCaught(name: string, handler: (...args: unknown[]) => unknown, args: unknown[]): string | undefined {
+  try {
+    callHandler(name, handler, args);
+  } catch (error) {
+    const message = error instanceof TaplineError ? error.message.replace(/^[^:]*threw: /, '') : String(error);
+    console.error(`[tapline] ${name} threw: ${message}`);
+    return message.slice(0, 500);
+  }
+  return undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -818,7 +835,8 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
     throw notActionable(
       'off_screen',
       `${name} is off screen (at ${Math.round(frame.x)},${Math.round(frame.y)}; the screen is ${width}x${height}). ` +
-        `Scroll to it first ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
+        'It lies in a part of the screen that nothing scrolls (behind a fixed bar, or outside every list); look at the screen, then target something else or report it. ' +
+        'Pass force: true to call its handler anyway.',
     );
   }
   const bar = nativeTabBar(snapshot);
@@ -1071,6 +1089,8 @@ async function pressLike(
     return { actor: found, handler: own, focusing: isInput };
   };
   let planned = plan(snapshot, entry);
+  // The element the agent named; a scroll may find it again.
+  let touched = entry;
   // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2). The policy ran before this call.
   let reach: Reach = {};
   let current = snapshot;
@@ -1081,33 +1101,43 @@ async function pressLike(
     if (reach.scrolled) {
       const again = await reresolve(planned.actor, kind, params.target);
       current = again.snapshot;
+      touched = again.entry;
       planned = plan(again.snapshot, again.entry);
       await assertRefoundOnScreen(current, planned.actor, reach);
     }
   }
-  const { actor, handler, focusing } = planned;
+  const { actor, handler } = planned;
   const { element, frame } = await elementFor(actor);
   if (reach.scrolls) return { element, dryRun: true, scrolls: true, ...(reach.point ? { point: reach.point } : {}), settledMs: 0 };
   const forced = await checkedAfterScroll(params.force === true, reach, () => assertReachable(current, actor, frame));
   // A dry run (AGENT-TOOLS 1.8 §11.4): every check ran; nothing is touched.
   if (params.dryRun === true) return { element, dryRun: true, ...pointOf(frame), ...forced, settledMs: 0 };
   const closedKeyboard = closeKeyboardFor(actor);
-  if (handler) callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
+  const requestsBefore = startedRequests();
+  let threw: string | undefined;
+  if (handler) threw = callHandlerCaught(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
   else {
     // A finger focuses the input and also fires the input's own onPress (not an ancestor's: the
     // input takes the touch).
     focusInput(actor, frame);
     const own = appHandler(actor, 'onPress');
-    if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
+    if (own) threw = callHandlerCaught('onPress', own, [pressEvent(actor.node.fiber, frame)]);
   }
+  // Whose handler it was: the touched element's own, or an ancestor's that took the touch (§3).
+  const facts: HandlerFacts = sameFiber(actor.node.fiber, touched.node.fiber)
+    ? { kind: 'own', ...(threw !== undefined ? { threw } : {}) }
+    : { kind: 'parent', element, ...(threw !== undefined ? { threw } : {}) };
   const second = afterMs === undefined ? undefined : await pressAgain(actor, params, afterMs);
+  const settled = await settleOutcome();
   return {
+    handler: facts,
+    startedRequests: Math.max(0, startedRequests() - requestsBefore),
     element,
     ...(reach.scrolled ? { scrolled: true as const } : {}),
     ...keyboardNote(closedKeyboard),
     ...forced,
     ...(second !== undefined ? { second } : {}),
-    ...(await settleOutcome()),
+    ...settled,
   };
 }
 
@@ -1174,7 +1204,14 @@ export type PressResult = {
   point?: { x: number; y: number };
   /** With `again`: the second tap of a double tap. */
   second?: PressSecond;
+  /** Whose handler took the touch, and its message if it threw (AGENT-TOOLS 1.13 §3). Absent on a dry run. */
+  handler?: HandlerFacts;
+  /** Requests that began during the action. Absent on a dry run. */
+  startedRequests?: number;
 } & SettleOutcome;
+
+/** An own handler (`threw`: its message), or an ancestor's (`element`: that ancestor) that took the touch. */
+export type HandlerFacts = { kind: 'own'; threw?: string } | { kind: 'parent'; element: TaplineElement; threw?: string };
 
 /** Where a finger would land: the middle of the element (points, rounded). */
 function pointOf(frame: Frame | null): { point?: { x: number; y: number } } {

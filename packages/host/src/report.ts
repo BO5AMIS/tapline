@@ -33,6 +33,8 @@ export interface CallRecord {
   target?: unknown;
   /** After scrolls: true (target was in the list before), false (it wasn't), absent (unknown). */
   inList?: boolean;
+  /** A compare_screen that matched with named changes (1.13.1 item 2). */
+  matchedWithChanges?: boolean;
   /** For a look: it asked for a screenshot, a width or labels, which the answer of the action before it could not give. */
   askedPicture?: boolean;
 }
@@ -89,6 +91,7 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
       ...(single && first.target !== undefined ? { target: first.target } : {}),
       ...(single && first.in_list !== undefined ? { inList: first.in_list } : {}),
       ...(single && askedPicture(first) ? { askedPicture: true } : {}),
+      ...(first.matched_with_changes === true ? { matchedWithChanges: true } : {}),
     });
   }
   // Sessions in the order they began; inside one, the call numbers (legacy: the order read).
@@ -166,6 +169,8 @@ export function analyze(calls: readonly CallRecord[]): Report {
 
   const looks: number[] = [];
   const retries: number[] = [];
+  /** Retries whose failed target was itself an id: "use its id first" doesn't help them (1.13.1 item 4). */
+  const idRetries: number[] = [];
   const hunts: Array<{ from: number; to: number; exact: boolean }> = [];
   const chains: Array<{ from: number; to: number }> = [];
   for (const seq of splitBySession(calls)) {
@@ -181,7 +186,9 @@ export function analyze(calls: readonly CallRecord[]): Report {
         for (let j = i + 1; j <= i + 3 && j < seq.length; j++) {
           const r = seq[j] as CallRecord;
           if (r.tool !== c.tool || !r.ok) continue;
-          if (JSON.stringify(r.target) !== JSON.stringify(c.target) && sameElement(c.target, r.element)) retries.push(r.n);
+          if (JSON.stringify(r.target) !== JSON.stringify(c.target) && sameElement(c.target, r.element)) {
+            (stringField(c.target, "id") !== undefined ? idRetries : retries).push(r.n);
+          }
           break;
         }
       }
@@ -218,6 +225,7 @@ export function analyze(calls: readonly CallRecord[]): Report {
     }
   }
 
+  const withChanges = calls.filter((c) => c.matchedWithChanges === true).map((c) => String(c.n));
   const flags: Flag[] = [];
   const numbers = (items: string[]): string => `${items.slice(0, REPORT_MAX_NUMBERS).join(", ")}${items.length > REPORT_MAX_NUMBERS ? ", …" : ""}`;
   const range = (r: { from: number; to: number }): string => (r.from === r.to ? String(r.from) : `${r.from}–${r.to}`);
@@ -229,6 +237,14 @@ export function analyze(calls: readonly CallRecord[]): Report {
   if (retries.length > 0) {
     flags.push({
       text: `${retries.length} ${retries.length === 1 ? "retry" : "retries"} after not_found that found the same element by another target (calls ${numbers(retries.map(String))}): use its id first`,
+    });
+  }
+  if (withChanges.length > 0) {
+    flags.push({ text: `${withChanges.length} compare_screen ${withChanges.length === 1 ? "match" : "matches"} with text changes (calls ${numbers(withChanges)}): look at them` });
+  }
+  if (idRetries.length > 0) {
+    flags.push({
+      text: `${idRetries.length} ${idRetries.length === 1 ? "retry" : "retries"} after not_found that found the same element by another target (calls ${numbers(idRetries.map(String))}): target what the latest look shows (its id there, when it has one)`,
     });
   }
   if (hunts.length > 0) {

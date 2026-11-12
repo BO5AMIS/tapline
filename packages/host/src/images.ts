@@ -14,6 +14,8 @@ export interface DiffBox {
   y: number;
   width: number;
   height: number;
+  /** For a changed region: how many pixels in it changed (the box is cut to whole cells, so it is larger). */
+  pixels?: number;
 }
 
 export interface OutputImage {
@@ -29,6 +31,8 @@ export interface DiffResult {
   changedPixels: number;
   changedPercent: number;
   boxes: DiffBox[];
+  /** Every changed region, largest first (`boxes` is the first 10), each with its changed pixel count. */
+  clusters: DiffBox[];
   image: OutputImage;
 }
 
@@ -197,15 +201,25 @@ function regionsFromMask(mask: Uint8Array, width: number, height: number): DiffB
     }
     const x = minC * CELL;
     const y = minR * CELL;
-    boxes.push({
+    const box = {
       x,
       y,
       width: Math.min(width, (maxC + 1) * CELL) - x,
       height: Math.min(height, (maxR + 1) * CELL) - y,
-    });
+    };
+    let pixels = 0;
+    for (let py = box.y; py < box.y + box.height; py++) {
+      for (let px = box.x; px < box.x + box.width; px++) if (mask[py * width + px]) pixels++;
+    }
+    boxes.push({ ...box, pixels });
   }
   boxes.sort((a, b) => b.width * b.height - a.width * a.height);
-  return boxes.slice(0, MAX_BOXES);
+  return boxes;
+}
+
+/** The share of the picture, in percent, that a changed region's own changed pixels make. */
+export function clusterPercent(cluster: DiffBox, width: number, height: number): number {
+  return ((cluster.pixels ?? cluster.width * cluster.height) / Math.max(1, width * height)) * 100;
 }
 
 export function diffImages(before: ShotImage, after: ShotImage, options: DiffOptions = {}): DiffResult {
@@ -238,7 +252,8 @@ export function diffImages(before: ShotImage, after: ShotImage, options: DiffOpt
     }
   }
   const changedPercent = Math.round((changedPixels / total) * 100 * 100) / 100;
-  const boxes = regionsFromMask(mask, width, height);
+  const clusters = regionsFromMask(mask, width, height);
+  const boxes = clusters.slice(0, MAX_BOXES);
 
   // The "after" picture, dimmed, with changes tinted red: the new content stays readable under it.
   const out: Decoded = { width, height, data: new Uint8Array(total * 4) };
@@ -259,7 +274,7 @@ export function diffImages(before: ShotImage, after: ShotImage, options: DiffOpt
   }
   for (const box of boxes) strokeRect(out, box.x, box.y, box.width, box.height, OUTLINE, RED);
 
-  return { width, height, changedPixels, changedPercent, boxes, image: encodeJpeg(out) };
+  return { width, height, changedPixels, changedPercent, boxes, clusters, image: encodeJpeg(out) };
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -48,6 +48,8 @@ export interface ActionLogEntry {
    * Set on the call's action entries, so a report counts the call as failed (Codex review of 1.4.0).
    */
   call_failed?: string;
+  /** A `compare_screen` that matched under its threshold but named changed clusters (AGENT-TOOLS 1.13.1 item 2). */
+  matched_with_changes?: boolean;
 }
 
 export const LOG_KEEP_DAYS = 14;

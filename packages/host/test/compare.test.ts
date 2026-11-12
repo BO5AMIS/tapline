@@ -105,7 +105,7 @@ describe("compare_screen", () => {
     await tools.compareScreen({ name: "home" });
     state.shot = picture(BIG); // 2% changed
     const result = await tools.compareScreen({ name: "home", threshold: 2.5 });
-    expect(textOf(result)).toBe('Matches the reference "home": 2% changed.');
+    expect(textOf(result)).toBe('Matches the reference "home" (2% changed, under the 2.5% threshold): changed at e2 text "12:00"');
     expect(hasImage(result)).toBe(false);
     expect(result.isError).not.toBe(true);
   });

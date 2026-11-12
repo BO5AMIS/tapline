@@ -158,7 +158,9 @@ describe("press", () => {
     await tools.look({ screenshot: false });
     const text = textOf(await tools.tap({ target: { id: "login-button" } }));
     const lines = text.split("\n");
-    expect(lines.at(-1)).toBe("Settled in 0.31 s.");
+    // The no-change note closes the answer, after the Settled line (AGENT-TOOLS 1.13 §3).
+    expect(lines.at(-2)).toBe("Settled in 0.31 s.");
+    expect(lines.at(-1)).toMatch(/^Note: the tap was delivered, and nothing on screen changed within 0.5 s./);
     expect(text).not.toContain("\n\n");
     expect(textOf(await tools.tap({ target: { id: "login-button" }, look: false })).split("\n")).toHaveLength(1);
     expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button.');
