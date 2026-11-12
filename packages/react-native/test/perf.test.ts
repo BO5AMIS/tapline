@@ -142,6 +142,20 @@ describe('PerfSampler maths', () => {
     expect(r.seconds).toBeLessThan(2.1);
   });
 
+  test('a callback while the app is inactive is not counted as a frame (Codex re-review 3, PR #4)', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.frame(16);
+    t.appState('inactive');
+    t.frame(500); // delivered while away
+    t.appState('active');
+    t.frame(16);
+    const r = s.stop();
+    expect(r.frames).toBe(2);
+    expect(r.fps).toBeCloseTo(62.5, 0);
+  });
+
   test('a late first frame after coming back is a stall (CodeRabbit, PR #4)', () => {
     const t = fakeTime();
     const s = new PerfSampler({ ...t.deps, dev: false });

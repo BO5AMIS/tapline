@@ -207,6 +207,37 @@ describe('sending the saved crash', () => {
     expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
   });
 
+  test('the write-back after a removal never lands after a still newer crash (Codex re-review 3, PR #4)', async () => {
+    const inner = memoryStorage();
+    let releaseRemove: () => void = () => undefined;
+    let removing = false;
+    const writes: Array<() => Promise<void>> = [];
+    configureCrash({
+      getItem: (key) => inner.getItem(key),
+      setItem: (key, value) => new Promise<void>((resolve) => writes.push(() => inner.setItem(key, value).then(resolve))),
+      removeItem: (key) => {
+        removing = true;
+        return new Promise<void>((resolve) => (releaseRemove = () => void inner.removeItem(key).then(resolve)));
+      },
+    });
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'A', stack: '', ts: 1000 }));
+    const ack = ackSavedCrash(1000);
+    while (!removing) await new Promise((resolve) => setTimeout(resolve, 0));
+    installLogs();
+    currentHandler?.(new Error('B'), true); // B while A is being removed
+    await writes.shift()?.();
+    releaseRemove();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    currentHandler?.(new Error('C'), true); // C while B is being written back
+    // the storage finishes the newest pending write first: only writes the code itself keeps in order land right
+    for (let i = 0; i < 10 && writes.length > 0; i++) {
+      await writes.pop()?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await ack;
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'C' });
+  });
+
   test('a newer crash is never overwritten by an older write that finishes late (CodeRabbit, PR #4)', async () => {
     const inner = memoryStorage();
     const writes: Array<() => Promise<void>> = [];

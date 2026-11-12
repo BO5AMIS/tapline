@@ -259,6 +259,11 @@ export class PerfSampler {
 
   private readonly onFrame = (): void => {
     if (!this.running) return;
+    // A callback while the app is away (inactive) is no frame a person saw: it is not counted (Codex re-review 3).
+    if (this.away) {
+      this.frameHandle = this.deps.requestFrame(this.onFrame);
+      return;
+    }
     const t = this.deps.now();
     // The first frame after the app was away: its interval spans the pause, so it is not counted.
     const gap = this.skipGap ? 0 : t - this.lastFrame;
