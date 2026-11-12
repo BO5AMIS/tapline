@@ -22,9 +22,9 @@ afterEach(async () => {
   jest.resetModules();
   // Virtual mocks stay registered after a reset; a later test that wants no store registers one that is not found.
   jest.doMock(
-    'expo-router/build/global-state/router-store',
+    'expo-router/build/global-state/router-store.js',
     () => {
-      throw new Error("Cannot find module 'expo-router/build/global-state/router-store'");
+      throw new Error("Cannot find module 'expo-router/build/global-state/router-store.js'");
     },
     { virtual: true },
   );
@@ -54,7 +54,7 @@ describe('Expo Router', () => {
   });
 
   test('a store that is there gives source expo-router with the scheme from the app config', () => {
-    jest.doMock('expo-router/build/global-state/router-store', () => ({ store: { routeNode: TREE } }), { virtual: true });
+    jest.doMock('expo-router/build/global-state/router-store.js', () => ({ store: { routeNode: TREE } }), { virtual: true });
     jest.doMock('expo-constants', () => ({ __esModule: true, default: { expoConfig: { scheme: ['wayfare', 'wf'] } } }), { virtual: true });
     jest.isolateModules(() => {
       const fresh = require('../src/routetree') as typeof import('../src/routetree');
@@ -69,14 +69,14 @@ describe('Expo Router', () => {
   });
 
   test('a store of another shape, or one that throws, gives source none', () => {
-    jest.doMock('expo-router/build/global-state/router-store', () => ({ store: { routeNode: 'nope' } }), { virtual: true });
+    jest.doMock('expo-router/build/global-state/router-store.js', () => ({ store: { routeNode: 'nope' } }), { virtual: true });
     jest.isolateModules(() => {
       const fresh = require('../src/routetree') as typeof import('../src/routetree');
       expect(fresh.knownPlaces().source).toBe('none');
     });
     jest.resetModules();
     jest.doMock(
-      'expo-router/build/global-state/router-store',
+      'expo-router/build/global-state/router-store.js',
       () => {
         throw new Error('internal API changed');
       },
@@ -87,11 +87,41 @@ describe('Expo Router', () => {
       expect(fresh.knownPlaces()).toEqual({ source: 'none', places: [] });
     });
     jest.resetModules();
-    jest.doMock('expo-router/build/global-state/router-store', () => ({ store: { get routeNode(): unknown { throw new Error('getter threw'); } } }), { virtual: true });
+    jest.doMock('expo-router/build/global-state/router-store.js', () => ({ store: { get routeNode(): unknown { throw new Error('getter threw'); } } }), { virtual: true });
     jest.isolateModules(() => {
       const fresh = require('../src/routetree') as typeof import('../src/routetree');
       expect(fresh.knownPlaces().source).toBe('none');
     });
+  });
+});
+
+describe('Expo Router 58 (route tree from the router config context)', () => {
+  const RouterConfigContext = React.createContext<unknown>(null);
+
+  test('reads routeNode from the context provider through the fibers', async () => {
+    jest.spyOn(AppRegistry, 'setWrapperComponentProvider').mockImplementation(() => undefined);
+    await mount(
+      <RouterConfigContext.Provider value={{ routeNode: TREE, linking: { prefixes: [] } }}>
+        <View />
+      </RouterConfigContext.Provider>,
+    );
+    const known = knownPlaces();
+    expect(known.source).toBe('expo-router');
+    expect(known.places.map((p) => p.route)).toContainEqual(['(tabs)', 'trips', '[id]']);
+  });
+
+  test('a context value without a route tree is not mistaken for one', async () => {
+    await mount(
+      <RouterConfigContext.Provider value={{ routeNode: null }}>
+        <View />
+      </RouterConfigContext.Provider>,
+    );
+    expect(knownPlaces().source).toBe('none');
+  });
+
+  test('api, redirect and rewrite nodes are not places', () => {
+    const tree = node('', [node('home'), node('hook', [], { type: 'api' }), node('old', [], { type: 'redirect' }), node('x', [], { type: 'rewrite' })]);
+    expect(placesFromExpoTree(tree, undefined).map((p) => p.route)).toEqual([['home']]);
   });
 });
 

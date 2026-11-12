@@ -52,7 +52,7 @@ export function placesFromExpoTree(root: unknown, scheme: string | undefined): K
   const visit = (node: unknown, names: string[], depth: number): void => {
     if (!isRecord(node) || depth > MAX_DEPTH || places.length >= MAX_PLACES) return;
     const name = typeof node.route === 'string' ? node.route : '';
-    if (isSpecial(name)) return;
+    if (isSpecial(name) || node.type === 'api' || node.type === 'redirect' || node.type === 'rewrite') return;
     const here = name === '' ? names : [...names, name];
     const children = Array.isArray(node.children) ? node.children : [];
     if (children.length > 0) {
@@ -75,10 +75,22 @@ export function placesFromExpoTree(root: unknown, scheme: string | undefined): K
   return places;
 }
 
-/** Expo Router's `routeNode` from its store, or null. Any failure (not installed, another version) is null. */
-function expoRouteNode(): unknown {
+/**
+ * Expo Router 58: the route tree is `routerConfig.routeNode`, the value of `RouterConfigContext`'s provider, which sits
+ * above the navigation container. Found through the fibers, the way the linking prop is.
+ */
+function findRouterConfigNode(): unknown {
+  return findInFibers((props) => {
+    const value = props.value;
+    return isRecord(value) && isRecord(value.routeNode) && Array.isArray(value.routeNode.children) ? value.routeNode : undefined;
+  });
+}
+
+/** Expo Router 55: `routeNode` from its store, or null. Any failure (not installed, another version) is null. */
+function expoStoreRouteNode(): unknown {
   try {
-    const loaded: unknown = require('expo-router/build/global-state/router-store');
+    // The `.js` matters: the package's exports map refuses an extensionless deep path.
+    const loaded: unknown = require('expo-router/build/global-state/router-store.js');
     const store = isRecord(loaded) ? loaded.store : undefined;
     if (!isRecord(store)) return null;
     return store.routeNode ?? null;
@@ -155,21 +167,25 @@ export function placesFromLinking(linking: unknown): KnownPlace[] {
   return places;
 }
 
-/** The `linking` prop of the app's `NavigationContainer`, found through the fibers. */
-function findLinking(): unknown {
+/** The first thing `pick` returns for a fiber's props, walking the tree from the root, child first; null when none. */
+function findInFibers(pick: (props: UnknownRecord) => unknown): unknown {
   for (const root of getRoots()) {
     const stack: Fiber[] = root.current.child ? [root.current.child] : [];
     let visited = 0;
     for (let fiber = stack.pop(); fiber && visited < 5000; fiber = stack.pop()) {
       visited += 1;
-      const props: UnknownRecord = propsOf(fiber);
-      const linking = props.linking;
-      if (isRecord(linking) && isRecord(linking.config)) return linking;
+      const found = pick(propsOf(fiber));
+      if (found !== undefined) return found;
       if (fiber.sibling) stack.push(fiber.sibling);
       if (fiber.child) stack.push(fiber.child);
     }
   }
   return null;
+}
+
+/** The `linking` prop of the app's `NavigationContainer`, found through the fibers. */
+function findLinking(): unknown {
+  return findInFibers((props) => (isRecord(props.linking) && isRecord(props.linking.config) ? props.linking : undefined));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -179,13 +195,20 @@ function findLinking(): unknown {
 /** The `places` request: what the app's own route tree says it has, before any visit. Never throws. */
 export function knownPlaces(): KnownPlaces {
   try {
-    const node = expoRouteNode();
-    if (node !== null) {
-      const places = placesFromExpoTree(node, appScheme());
+    const scheme = appScheme();
+    for (const read of [findRouterConfigNode, expoStoreRouteNode]) {
+      let node: unknown = null;
+      try {
+        node = read();
+      } catch {
+        node = null; // an internal API that changed: try the next way
+      }
+      if (node === null) continue;
+      const places = placesFromExpoTree(node, scheme);
       if (places.length > 0) return { source: 'expo-router', places };
     }
   } catch {
-    // an internal API that changed: fall through
+    // fall through
   }
   try {
     const places = placesFromLinking(findLinking());

@@ -1,8 +1,10 @@
 import { frame, mount, unmountAll, useFrames } from './helpers';
 import React, { useState } from 'react';
-import { AppRegistry, Dimensions, FlatList, PixelRatio, Pressable, Text, View } from 'react-native';
+import { AppRegistry, Dimensions, FlatList, Linking, PixelRatio, Pressable, Text, View } from 'react-native';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { act } from 'react-test-renderer';
-import { configureActions, press } from '../src/actions';
+import { back, configureActions, openURL, press } from '../src/actions';
 import { propsOf, type Fiber } from '../src/fiber';
 import { collectNodes, resetRefs, setHitTester, setMeasurer, tree } from '../src/inspect';
 import { methods } from '../src/methods';
@@ -193,6 +195,33 @@ describe('move', () => {
     expect(onGo).not.toHaveBeenCalled();
   });
 
+  test('a guard on a long text compares with the text the host saw (cut at the kept-text limit)', async () => {
+    const onGo = jest.fn();
+    const long = 'x'.repeat(2500);
+    await mount(
+      <Text testID="long" onPress={onGo}>
+        {long}
+      </Text>,
+    );
+    useFrames({ long: frame(20, 100, 200, 40) });
+    resetRefs();
+    const seen = (await tree({})).elements.find((element) => element.testID === 'long');
+    expect(seen?.text.length).toBeLessThan(2500);
+    expect(seen?.textMore).toBeGreaterThan(0);
+    await run(() => move({ method: 'press', params: { target: { testID: 'long' } }, guard: { text: seen?.text } }));
+    expect(onGo).toHaveBeenCalledTimes(1);
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'long' } }, guard: { text: long } })));
+    expect(error.code).toBe('stale');
+    expect(onGo).toHaveBeenCalledTimes(1);
+  });
+
+  test('a target that is not there is the plain method\'s not_found, not a skipped guard', async () => {
+    await mount(<Two onGo={() => undefined} />);
+    useFrames({ go: frame(20, 100, 200, 40), next: frame(20, 200, 200, 40) });
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'gone' } }, guard: { id: 'gone' } })));
+    expect(error.code).toBe('not_found');
+  });
+
   test('a matching guard lets the move through', async () => {
     const onGo = jest.fn();
     await mount(<Two onGo={onGo} />);
@@ -258,7 +287,39 @@ describe('move', () => {
     expect(result.next?.state).toBe('ready');
   });
 
+  test('result parity with the plain back and openURL', async () => {
+    const goBack = jest.fn();
+    const nav = { isFocused: () => true, canGoBack: () => true, goBack, navigate: jest.fn(), getState: () => ({ routes: [] }) };
+    function Screen({ children }: { route: { key: string; name: string }; navigation: typeof nav; children?: React.ReactNode }) {
+      return <View>{children}</View>;
+    }
+    await mount(
+      <Screen route={{ key: 'a-1', name: 'a' }} navigation={nav}>
+        <Text>A</Text>
+      </Screen>,
+    );
+    const plainBack = await run(() => back({}));
+    const movedBack = await run(() => move({ method: 'back', params: {} }));
+    expect(movedBack.done).toEqual(plainBack);
+    expect(goBack).toHaveBeenCalledTimes(2);
+
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
+    const plainOpen = await run(() => openURL({ url: 'myapp://settings' }));
+    const movedOpen = await run(() => move({ method: 'openURL', params: { url: 'myapp://settings' } }));
+    expect(movedOpen.done).toEqual(plainOpen);
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
+  test('move.ts and place.ts never navigate by themselves (a source scan)', () => {
+    for (const file of ['move.ts', 'place.ts']) {
+      const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
+      expect(source).not.toMatch(/navigate\(/);
+      expect(source).not.toMatch(/goBack\(/);
+    }
+  });
+
   test('bad shapes are bad_params', async () => {
+    expect((await failure(move({ method: 'press', params: {}, guard: {} }))).code).toBe('bad_params');
     expect((await failure(move({ method: 'teleport', params: {} }))).code).toBe('bad_params');
     expect((await failure(move({ method: 'press', params: {}, next: { target: { testID: 'a' }, capMs: -1 } }))).code).toBe('bad_params');
     expect((await failure(move({ method: 'press', params: {}, next: { target: {}, capMs: 100 } }))).code).toBe('bad_params');

@@ -400,7 +400,10 @@ params: `{}` → `{ "source": "expo-router" | "react-navigation" | "none", "plac
 The places the app's route tree lists, before any visit (AGENT-TOOLS 1.13 §18.1, "Known before any visit"). `params` are
 names only. `link` is `<scheme>://<path>` with `[id]` where a param goes, from the app's own scheme (a custom scheme
 beats an `https` prefix); absent when the app has no scheme or the screen has no path. Expo Router's route tree is read
-from its internal store behind a guard: any failure answers `source: "none"`. React Navigation's comes from the
+from its internal API behind a guard: any failure answers `source: "none"`. Supported: Expo Router 58, whose route tree
+is `routerConfig.routeNode`, the value of the `RouterConfigContext` provider (read through the fibers); and Expo Router 55,
+whose store (`expo-router/build/global-state/router-store.js`, with the `.js`) has `routeNode`. Other versions may answer
+`none`, and then the `linking` route below is tried. React Navigation's comes from the
 `linking` prop of the `NavigationContainer`, found through the fibers. Never throws.
 
 ### `move` (capability `move`)

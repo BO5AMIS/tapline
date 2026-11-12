@@ -37,6 +37,15 @@ function focusedRoute(routes: RouteFound[]): RouteFound | null {
   return best;
 }
 
+/**
+ * A native tab's route name from its `screenKey`. React Navigation keys are `<route name>-<21-character id>`, so the
+ * id is cut only when it is there; a key such as "home-tab" is a name with no id (and a name may hold a hyphen).
+ */
+export function tabNameFromKey(key: string): string {
+  const match = /^(.+)-[A-Za-z0-9_-]{21}$/.exec(key);
+  return match?.[1] ?? key;
+}
+
 /** Whether `chain` starts with `prefix`. */
 function startsWith(chain: string[], prefix: string[]): boolean {
   return prefix.length <= chain.length && prefix.every((name, i) => chain[i] === name);
@@ -76,10 +85,7 @@ export function placeFrom(parts: PlaceParts): PlaceState {
   }
   if (place.tab === undefined) {
     const selected = parts.tabs.find((tab) => tab.selected && tab.screenKey !== null);
-    if (selected?.screenKey) {
-      const key = selected.screenKey;
-      place.tab = key.includes('-') ? key.slice(0, key.lastIndexOf('-')) : key;
-    }
+    if (selected?.screenKey) place.tab = tabNameFromKey(selected.screenKey);
   }
 
   // What lies on top: an alert, else a modal or sheet (a navigation route's name, else a bare Modal's root testID).

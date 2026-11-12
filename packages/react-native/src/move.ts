@@ -1,4 +1,5 @@
 import { back, longPress, openURL, parseTarget, press, resolveTarget, swipe, toggle } from './actions';
+import { toElement } from './inspect';
 import { currentPlace } from './place';
 import { TaplineError, isRecord, type PlaceState, type TaplineElement, type Target } from './types';
 
@@ -71,6 +72,7 @@ function parseMove(raw: unknown): MoveParams {
   if (raw.guard !== undefined) {
     if (!isRecord(raw.guard)) throw bad('guard must be an object with id, label or text');
     const guard: NonNullable<MoveParams['guard']> = {};
+    if (Object.keys(raw.guard).length === 0) throw bad('guard needs at least one of id, label or text');
     const id = optionalString(raw.guard.id, 'guard.id');
     const label = optionalString(raw.guard.label, 'guard.label');
     const text = optionalString(raw.guard.text, 'guard.text');
@@ -91,19 +93,16 @@ function parseMove(raw: unknown): MoveParams {
 
 /**
  * The host's policy ran against an element the agent named; refuse when the target resolves to another one now (a list
- * recycled a row, a screen changed under it). Nothing is done then. Resolution errors are left to the plain method.
+ * recycled a row, a screen changed under it). Nothing is done then.
  */
 async function assertGuard(move: MoveParams): Promise<void> {
   const hint = TARGETED[move.method];
   const guard = move.guard;
   if (hint === undefined || guard === undefined || move.params.target === undefined) return;
-  let info: { testID: string | null; label: string | null; text: string };
-  try {
-    const { entry } = await resolveTarget(move.params.target, hint);
-    info = entry.info;
-  } catch {
-    return;
-  }
+  // A resolution error is the plain method's own answer (not_found, ambiguous, covered): let it travel, never skip the guard.
+  const { entry } = await resolveTarget(move.params.target, hint);
+  // What the host saw is `toElement`'s text (cut, display-normalised), so that is what the guard is compared with.
+  const info = toElement(entry, null, '');
   const same =
     (guard.id === undefined || guard.id === info.testID) &&
     (guard.label === undefined || guard.label === info.label) &&

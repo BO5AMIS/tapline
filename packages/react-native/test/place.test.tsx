@@ -7,6 +7,7 @@ import { installAlertTracking, uninstallAlertTracking } from '../src/alerts';
 import { setEventSink } from '../src/events';
 import { resetRefs, setMeasurer, tree } from '../src/inspect';
 import { currentPlace, placeData, routePattern, startPlaceEvents } from '../src/place';
+import { tabNameFromKey } from '../src/placekey';
 
 // AGENT-TOOLS 1.13 §18.1 and §18.11: where the app is, as a key. Pattern names only: no param's value, no screen text.
 
@@ -117,6 +118,27 @@ describe('currentPlace', () => {
       renderer.update(<App index={1} />);
     });
     expect(currentPlace()).toEqual({ route: ['(tabs)', 'settings'], tab: 'settings' });
+  });
+
+  test('a native tab bar gives the selected tab from the tabs list, by its key and never its title', async () => {
+    await mount(
+      <Screen route={{ key: 'root-1', name: 'root' }} navigation={navigation()}>
+        <Native type="RNSBottomTabsHost">
+          <Native type="RNSBottomTabsScreen" title="Heute" isFocused={false} screenKey={`today-${'a'.repeat(21)}`} />
+          <Native type="RNSBottomTabsScreen" title="Einstellungen" screenKey={`my-settings-${'Ab-_9'.repeat(4)}x`} isFocused />
+        </Native>
+      </Screen>,
+    );
+    const place = currentPlace();
+    expect(place?.tab).toBe('my-settings');
+    expect(JSON.stringify(place)).not.toContain('Einstellungen');
+  });
+
+  test('tabNameFromKey cuts a 21-character id only, so "home-tab" stays whole', () => {
+    expect(tabNameFromKey('home-tab')).toBe('home-tab');
+    expect(tabNameFromKey('home')).toBe('home');
+    expect(tabNameFromKey(`home-${'z'.repeat(21)}`)).toBe('home');
+    expect(tabNameFromKey(`my-tab-${'Q-_a'.repeat(5)}1`)).toBe('my-tab');
   });
 
   test('an open alert makes layer "alert"', async () => {
