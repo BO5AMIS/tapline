@@ -36,9 +36,42 @@ export const RESERVED_COMMANDS: readonly string[] = ['network', 'text_size'];
 
 // --- validation ---------------------------------------------------------------------------------------------
 
-// BCP 47: language, then subtags of 2-8; a one-letter singleton (`u`, `x`) starts an extension or private-use part
-// and needs at least one subtag of 1-8 after it (`en-US-u-ca-gregory`, `de-x-test`).
-const LANGUAGE_TAG = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*(?:-[A-Za-z0-9](?:-[A-Za-z0-9]{1,8})+)*$/;
+const LANGUAGE = /^[A-Za-z]{2,3}$/;
+const SUBTAG = /^[A-Za-z0-9]{2,8}$/;
+const PRIVATE_SUBTAG = /^[A-Za-z0-9]{1,8}$/;
+const SINGLETON = /^[A-Za-z0-9]$/;
+const MAX_LANGUAGE_TAG = 128;
+
+/**
+ * BCP 47, read subtag by subtag (linear: a regex with nested repeats can take seconds on a long bad tag): a language
+ * of 2-3 letters, then subtags of 2-8. A singleton starts an extension (`u-ca-gregory`), which needs one or more
+ * subtags of 2-8; `x` starts the private-use part (`x-a`), which needs one or more of 1-8 and runs to the end.
+ */
+function isLanguageTag(value: string): boolean {
+  if (value.length > MAX_LANGUAGE_TAG) return false;
+  const parts = value.split('-');
+  if (!LANGUAGE.test(parts[0] ?? '')) return false;
+  let i = 1;
+  while (i < parts.length) {
+    const part = parts[i] as string;
+    if (!SINGLETON.test(part)) {
+      if (!SUBTAG.test(part)) return false;
+      i++;
+      continue;
+    }
+    const privateUse = part.toLowerCase() === 'x';
+    const fits = privateUse ? PRIVATE_SUBTAG : SUBTAG;
+    let n = 0;
+    i++;
+    while (i < parts.length && (privateUse || !SINGLETON.test(parts[i] as string))) {
+      if (!fits.test(parts[i] as string)) return false;
+      n++;
+      i++;
+    }
+    if (n === 0) return false;
+  }
+  return true;
+}
 const REGION_CODE = /^[A-Za-z]{2}$/;
 
 function badParams(message: string): TaplineError {
@@ -48,7 +81,7 @@ function badParams(message: string): TaplineError {
 /** A BCP 47 code such as `ar` or `en-GB`. */
 export function parseLanguage(args: Record<string, unknown>): string {
   const value = args.language;
-  if (typeof value !== 'string' || !LANGUAGE_TAG.test(value)) {
+  if (typeof value !== 'string' || !isLanguageTag(value)) {
     throw badParams('language must be a BCP 47 code such as "ar" or "en-GB"');
   }
   return value;

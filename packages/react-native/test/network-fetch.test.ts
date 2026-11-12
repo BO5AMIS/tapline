@@ -53,6 +53,35 @@ test('an app wrapper around Tapline\'s fetch, wrapped again, counts and reports 
   off();
 });
 
+test('an app wrapper that awaits before calling Tapline\'s older fetch: counted and reported once; nothing after uninstall', async () => {
+  let release: (value: unknown) => void = () => undefined;
+  const target = makeTarget(() => new Promise((resolve) => (release = resolve)));
+  installNetworkTracking({ target: target as unknown as { XMLHttpRequest?: unknown } });
+  const failures: NetworkFailure[] = [];
+  const off = onNetworkFailure((f) => failures.push(f));
+  const previous = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  target.fetch = async (input: unknown, init?: unknown) => {
+    await Promise.resolve(); // e.g. reads a token first
+    return previous(input, init);
+  };
+  ensureFetchWrapped();
+  const app = target.fetch as (input: unknown, init?: unknown) => Promise<unknown>;
+  const pending = app('https://api.example.com/trips');
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  expect(inFlight()).toBe(1);
+  release({ status: 500, headers: { get: () => null } });
+  await pending;
+  expect(inFlight()).toBe(0);
+  expect(failures).toHaveLength(1);
+  uninstallNetworkTracking();
+  const after = (target.fetch as (input: unknown) => Promise<unknown>)('https://api.example.com/later');
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  release({ status: 500, headers: { get: () => null } });
+  await after;
+  expect(failures).toHaveLength(1);
+  off();
+});
+
 test('offline fails a fetch without sending it, and the failure is reported', async () => {
   const sent: string[] = [];
   const target = makeTarget((input) => {

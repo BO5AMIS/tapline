@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 describe('language and region validation', () => {
-  test.each(['', 'a', 'english', 'en_GB', 'en-', 'ar sa', 7, 'en-u', 'en-x-', 'en-u-'])('language %p is bad_params', async (language) => {
+  test.each(['', 'a', 'english', 'en_GB', 'en-', 'ar sa', 7, 'en-u', 'en-x-', 'en-u-', 'en-u-a', 'en-u-ca-x', 'en-x-123456789', 'en-u-ca--gregory'])('language %p is bad_params', async (language) => {
     const handler = jest.fn();
     registerLanguageCommand(handler);
     expect((await failure(runCommand({ name: 'language', args: { language } }))).code).toBe('bad_params');
@@ -55,6 +55,15 @@ describe('language and region validation', () => {
     const answer = await run('language', { language });
     expect(handler).toHaveBeenCalledWith(language);
     expect(answer.result?.language).toBe(language);
+  });
+
+  test('a long bad tag is refused at once (the check is linear)', async () => {
+    const handler = jest.fn();
+    registerLanguageCommand(handler);
+    const started = Date.now();
+    const error = await failure(runCommand({ name: 'language', args: { language: `en${'-a'.repeat(42)}!` } }));
+    expect(error.code).toBe('bad_params');
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   test.each(['', 'Q', 'QAT', '12', 'q1', 5])('region %p is bad_params', async (region) => {

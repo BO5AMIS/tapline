@@ -177,6 +177,30 @@ test('stopping Tapline delivers a held completion at once, and the reused XHR fi
   expect(first.xhr.status).toBe(200);
 });
 
+test('stopping Tapline during the 3G send delay sends the request now, with no hold left behind', () => {
+  jest.useFakeTimers();
+  setNetworkCondition('3g');
+  const first = started('https://api.example.com/a');
+  expect(mockSent).toHaveLength(0);
+  uninstallNetworkTracking(); // the held send goes out now
+  expect(mockSent).toHaveLength(1);
+  jest.advanceTimersByTime(1_000); // the old send timer must do nothing
+  expect(mockSent).toHaveLength(1);
+  answer(1, 'https://api.example.com/a');
+  first.xhr.abort();
+  let ended = false;
+  first.xhr.addEventListener('loadend', () => {
+    ended = true;
+  });
+  first.xhr.open('GET', 'https://api.example.com/again');
+  first.xhr.send();
+  expect(mockSent).toHaveLength(2);
+  answer(2, 'https://api.example.com/again');
+  emit('didCompleteNetworkResponse', [2, '', false]);
+  expect(ended).toBe(true);
+  expect(first.xhr.status).toBe(200);
+});
+
 describe('fetch under a condition honours abort', () => {
   const aborted = () => {
     const controller = new AbortController();

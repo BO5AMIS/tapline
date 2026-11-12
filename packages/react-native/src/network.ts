@@ -69,11 +69,13 @@ let generation = 0;
 let condition: NetworkMode = 'normal';
 let random: () => number = Math.random;
 /** Requests whose send is delayed (or doomed), so abort() can cancel them. */
-const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null }>();
+const held = new WeakMap<object, { timer: ReturnType<typeof setTimeout>; settle: (() => void) | null; cancel?: () => void }>();
 /** Finished 3g responses whose completion events are still held back; `cancel` drops them and says if any were held. */
 const responseHolds = new WeakMap<object, { cancel: () => boolean }>();
 /** Each response hold still open, as the function that lets it finish now: uninstalling releases them all. */
 const openHolds = new Set<() => void>();
+/** Each request a condition holds before its send, as the function that sends it now: uninstalling sends them all. */
+const heldSends = new Set<() => void>();
 
 /** scheme://host[:port]/path, query replaced by "?…", no fragment or credentials. */
 export function redactUrl(raw: string): string {
@@ -240,6 +242,7 @@ function patchedAbort(original: AnyFn): AnyFn {
           // never really sent: cancel it here and end it the way React Native does on abort
           clearTimeout(entry.timer);
           held.delete(this);
+          if (entry.cancel) heldSends.delete(entry.cancel);
           entry.settle?.();
           abortHeld(this, original, args);
           return undefined;
@@ -533,9 +536,12 @@ function applyCondition(
   args: unknown[],
   settle: (() => void) | null,
 ): boolean {
-  const realSend = (): void => {
+  const forGeneration = generation;
+  const send = (hold: boolean): void => {
     held.delete(xhr);
-    if (mode === '3g') holdResponse(xhr);
+    heldSends.delete(sendNow);
+    // a timer from an earlier install never puts a hold on the request: nothing would take it off again
+    if (hold && mode === '3g' && installed && forGeneration === generation) holdResponse(xhr);
     try {
       original.apply(xhr, args);
     } catch {
@@ -543,8 +549,15 @@ function applyCondition(
       failRequest(xhr);
     }
   };
+  const realSend = (): void => send(true);
+  // Tapline stopping: the request goes out now, as it would with no condition
+  const sendNow = (): void => {
+    clearTimeout(timer);
+    send(false);
+  };
   const fail = (): void => {
     held.delete(xhr);
+    heldSends.delete(sendNow);
     failRequest(xhr);
   };
   let timer: ReturnType<typeof setTimeout>;
@@ -558,7 +571,8 @@ function applyCondition(
   } else {
     timer = setTimeout(realSend, between(LOSSY_SLOW_DELAY_MS));
   }
-  held.set(xhr, { timer, settle });
+  held.set(xhr, { timer, settle, cancel: sendNow });
+  heldSends.add(sendNow);
   return true;
 }
 
@@ -570,6 +584,11 @@ const FETCH_MARK = Symbol.for('tapline.fetch');
 /** While a wrapped fetch calls the app's own fetch: XHRs opened in that moment belong to that fetch. */
 let insideFetch = 0;
 let fetchInstalled: { target: Record<string, unknown>; original: AnyFn } | null = null;
+/**
+ * The one fetch wrapper that counts and conditions requests: the newest. An app's wrapper around an older one (it
+ * may call it after an await, so `insideFetch` can't tell) and one left after uninstall pass straight through.
+ */
+let activeFetchWrapper: AnyFn | null = null;
 /** Where the global fetch lives: the install target (globalThis in an app). */
 let fetchTarget: Record<string, unknown> | null = null;
 
@@ -676,7 +695,7 @@ function wrapFetch(original: AnyFn): AnyFn {
       }
     };
     // Called from inside another Tapline-wrapped fetch (an app's wrapper in between): that one counts and conditions it.
-    if (insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
+    if (wrapped !== activeFetchWrapper || insideFetch > 0 || rawUrl === '' || isIgnored(rawUrl)) return call();
     const devServer = defaultIgnore(rawUrl);
     const signal = signalOf(input, init);
     const method = fetchMethod(input, init);
@@ -738,7 +757,9 @@ export function ensureFetchWrapped(given?: Record<string, unknown>): void {
   try {
     const current = target.fetch;
     if (!isFn(current) || (current as unknown as Record<symbol, unknown>)[FETCH_MARK] === true) return;
-    target.fetch = wrapFetch(current);
+    const wrapper = wrapFetch(current);
+    target.fetch = wrapper;
+    activeFetchWrapper = wrapper;
     fetchInstalled = { target, original: current };
   } catch {
     // never throw into the app
@@ -822,14 +843,16 @@ export function uninstallNetworkTracking(): void {
   condition = 'normal';
   // Held responses finish now and their wrappers come off: once the patched abort is gone, nothing else would clean
   // them up, and a reused XHR would stay held (Codex review of 1.4.0).
-  for (const release of [...openHolds]) {
+  for (const release of [...heldSends, ...openHolds]) {
     try {
       release();
     } catch {
       // ignore
     }
   }
+  heldSends.clear();
   openHolds.clear();
+  activeFetchWrapper = null;
   const wrappedFetch = fetchInstalled;
   fetchInstalled = null;
   fetchTarget = null;
