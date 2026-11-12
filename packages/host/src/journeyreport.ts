@@ -90,8 +90,6 @@ export class JourneyRecorder {
   private queue: Promise<void> = Promise.resolve();
   private lastSignature: string | undefined;
   private uxCount = 0;
-  /** A network condition a stress moment turned on, to put back at the stop. */
-  networkStress = false;
   /** Times the app's photo picker was skipped (`media` with `picker`) during the journey. */
   pickerSkips = 0;
   pickerPictures = 0;

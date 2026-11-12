@@ -4091,7 +4091,7 @@ export class TaplineTools {
       await attempt("conditions could not be undone", () => this.undoConditions(state));
       const undoLines: string[] = [];
       // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
-      if (recorder?.networkStress === true && !state.conditionRecords.some((r) => r.name === "network" && r.applied)) {
+      if (state.networkStress && !state.conditionRecords.some((r) => r.name === "network" && r.applied)) {
         const done = await attempt("the network condition a stress moment set was not undone", async () => {
           const live = this.host.current();
           return live === undefined ? undefined : this.runCondition(live, "network", "normal");
@@ -4273,7 +4273,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     const done = await this.runCondition(session, "network", mode);
     if (!done.ok) return fail(`Error not_allowed: network ${mode} wasn't applied: ${done.failure}.`);
-    if (this.recorder !== undefined) this.recorder.networkStress = mode !== "normal";
+    running.state.networkStress = mode !== "normal";
     return this.stressDone(running, "network", ` ${mode}`, await this.survivalOf(running, survives));
   }
 

@@ -170,6 +170,8 @@ export interface JourneyState {
   conditionRecords: ConditionRecord[];
   /** The stress moments (§17.4) and how the app took them. */
   stress: StressResult[];
+  /** A network condition a stress moment set and that is still on: undone at the stop, report or not. */
+  networkStress: boolean;
   /** The route key of the screen the agent is on now. */
   currentScreen: number | undefined;
 }
@@ -228,6 +230,7 @@ export class Journey {
       shortcuts: [],
       conditionRecords: [],
       stress: [],
+      networkStress: false,
       currentScreen: undefined,
     };
   }

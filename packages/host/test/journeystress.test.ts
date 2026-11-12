@@ -1,4 +1,5 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ControlQueue } from "../src/control.js";
@@ -68,6 +69,25 @@ describe("stress: network", () => {
     expect(textOf(blocked)).toMatch(/^Error not_allowed: network offline wasn't applied: blocked: the safety policy blocks network here/);
     expect(networkCalls(r)).toEqual([]);
     expect(r.tools.currentJourney()?.state.stress).toEqual([]);
+  });
+
+  it("puts the network back to normal at the stop even when the report folder couldn't be made", async () => {
+    // A file where the journeys folder should be: the recorder can't start, the journey still runs.
+    const blocker = join(tmpdir(), `tapline-not-a-folder-${process.pid}-${Date.now()}`);
+    writeFileSync(blocker, "x");
+    try {
+      const r = await make({ tools: { journeysDir: join(blocker, "journeys") } });
+      await begin(r);
+      await r.tools.journey({ stress: { kind: "network", mode: "offline" } });
+      const stopped = textOf(await r.tools.journey({ stop: true, reached: true }));
+      expect(stopped).toContain("Undone: network is normal again.");
+      expect(networkCalls(r)).toEqual([
+        { name: "network", args: { mode: "offline" } },
+        { name: "network", args: { mode: "normal" } },
+      ]);
+    } finally {
+      rmSync(blocker, { force: true });
+    }
   });
 
   it("puts the network back to normal at the stop", async () => {
