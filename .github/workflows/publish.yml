@@ -127,9 +127,15 @@ jobs:
             manifest=$(tar -xzOf "$tarball" package/package.json)
             name=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).name))')
             version=$(printf '%s' "$manifest" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "$name@$version is already on npm"
-              continue
+            # npm view answers nothing (and succeeds) for a version a package doesn't have, and E404 when the package
+            # itself is new: only the version printed back means it is there. Any other failure stops the run.
+            if seen=$(npm view "$name@$version" version 2>view.err); then
+              if [ "$seen" = "$version" ]; then
+                echo "$name@$version is already on npm"
+                continue
+              fi
+            elif ! grep -q "E404" view.err; then
+              echo "Couldn't ask npm whether $name@$version is there:"; cat view.err; exit 1
             fi
             # Only a package npm says isn't there (E404) has no latest; any other failure stops the run, so a lookup
             # that failed can never make a backport the new latest.
