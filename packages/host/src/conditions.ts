@@ -7,6 +7,9 @@ import { describeProbe } from "./run.js";
  * step before settled, with no wait of its own; `wait_for` is the step that waits.
  */
 
+/** The app cuts an element's text at this many characters on the wire (`…(+57)`); a longer probe can't be matched by the host. */
+export const WIRE_TEXT_MAX = 200;
+
 /** What to look for. `ref` is read against the app's current list; the others go to the app as one `waitFor`. */
 export type Probe = { text: string } | { testID: string } | { label: string } | { ref: string };
 
@@ -45,7 +48,7 @@ export function conditionsOf(step: Step): Condition[] {
   }
   if ((step as Record<string, unknown>)["optional"] === true) {
     const target = (step as Record<string, unknown>)["target"];
-    // A point target, or a step with no target (`back`, `wait`), has nothing to look for: it always counts as there.
+    // `target.index` is ignored: the check is "any match is there". A point target, or a step with no target (`back`, `wait`), has nothing to look for: it always counts as there.
     const probe = typeof target === "object" && target !== null ? probeOf(target as Record<string, unknown>) : null;
     if (probe !== null) found.push({ kind: "optional", probe, gone: false, label: describeProbe(probe) });
   }

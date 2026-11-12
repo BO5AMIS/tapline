@@ -51,9 +51,9 @@ export type Expect = z.infer<typeof expectSchema>;
 /** AGENT-TOOLS 1.13 §9.1: a step's `if`, one of text, id or label (as in `expect`), `gone: true` for when it isn't there. */
 export const ifSchema = z
   .object({
-    text: z.string().optional(),
-    id: z.string().optional(),
-    label: z.string().optional(),
+    text: z.string().min(1, "if text can't be empty").optional(),
+    id: z.string().min(1, "if id can't be empty").optional(),
+    label: z.string().min(1, "if label can't be empty").optional(),
     gone: z.boolean().optional(),
   })
   .strict()

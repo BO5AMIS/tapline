@@ -41,7 +41,7 @@ import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
-import { conditionsOf, holdsIn, waitParams } from "./conditions.js";
+import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -1725,6 +1725,12 @@ export class TaplineTools {
       const shape = toolShapes[step.tool as RunTool];
       const { tool: _tool, expect: _expect, route: _route, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown };
       // §9.1: `if` needs exactly one of text, id or label.
+      if (given_if !== undefined && (typeof given_if !== "object" || given_if === null || Array.isArray(given_if))) {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): if is an object with one of text, id or label (and gone), not ${JSON.stringify(given_if)}.`);
+      }
+      if (_optional !== undefined && typeof _optional !== "boolean") {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): optional is true or false, not ${JSON.stringify(_optional)}.`);
+      }
       if (given_if !== undefined) {
         const checked = ifSchema.safeParse(given_if);
         if (!checked.success) {
@@ -1815,6 +1821,10 @@ export class TaplineTools {
       const at = Date.now();
       // §9.1: one look, right after the step before settled; a skipped step counts as passed and its expect isn't checked.
       const skipped = await this.skipReason(session, step, i + 1);
+      if (typeof skipped === "object" && skipped !== null) {
+        stop = { index: i, code: "bad_params", message: skipped.error, rest: [] };
+        break;
+      }
       if (skipped !== null) {
         trace.push(skipped);
         ran++;
@@ -1906,11 +1916,16 @@ export class TaplineTools {
    * AGENT-TOOLS 1.13 §9.1: the skipped line when a step's `if` or `optional` doesn't hold, else null. One look per
    * check, no wait. The app answers a `waitFor` with `once`; an older app, or a `ref`, is read from one list.
    */
-  private async skipReason(session: SessionInfo, step: Step, number: number): Promise<string | null> {
+  private async skipReason(session: SessionInfo, step: Step, number: number): Promise<string | { error: string } | null> {
     for (const condition of conditionsOf(step)) {
       const params = waitParams(condition, this.userEyes());
+      const once = params !== null && session.capabilities.includes("waitOnce");
+      // The list cuts a long text on the wire (`…(+57)`), so the host can't match one longer than the cut itself.
+      if (!once && params !== null && "text" in condition.probe && condition.probe.text.length > WIRE_TEXT_MAX) {
+        return { error: `its ${condition.kind} text is longer than the app's list shows, and this app can't check it once; use a shorter text, or a wait_for first.` };
+      }
       let holds: boolean;
-      if (params !== null && session.capabilities.includes("waitOnce")) {
+      if (once) {
         try {
           const raw = await this.host.request("waitFor", params, { sessionId: session.id });
           holds = typeof raw === "object" && raw !== null && (raw as { found?: unknown }).found === true;
@@ -1959,6 +1974,11 @@ export class TaplineTools {
     const total = steps.length;
     const first = steps[0] as Step;
     const head = `Would run ${total} step${total === 1 ? "" : "s"}`;
+    // §11.4: a dry run runs every check, the step's own if and optional too.
+    const live = this.host.current();
+    const skipped = live === undefined ? null : await this.skipReason(live, first, 1);
+    if (typeof skipped === "string") return text(`${head}; step 1 would be skipped (${skipped.replace(/^ {2}1\. skipped \(/, "").replace(/\)\.$/, "")}).`);
+    if (skipped !== null) return fail(`Error bad_params: ${head}; step 1 (${describeRunStep(first)}): ${skipped.error}`);
     // A performance step with a tap: the tap resolves like any touch; nothing is measured (AGENT-TOOLS §15.3).
     const perfTap = first.tool === "performance" ? (first as Record<string, unknown>)["tap"] : undefined;
     const probe = perfTap !== undefined ? ({ tool: "tap", target: perfTap } as Step) : first;
