@@ -156,6 +156,109 @@ describe('sending the saved crash', () => {
     expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'second', ts: 2000 });
   });
 
+  test('a crash saved while an older acknowledgement is reading survives it (Codex review of 1.3.0)', async () => {
+    const inner = memoryStorage();
+    let releaseRead: () => void = () => undefined;
+    let firstRead = true;
+    configureCrash({
+      getItem: async (key) => {
+        // the first read takes what is stored now (crash A) and answers only later, after B was saved
+        const value = await inner.getItem(key);
+        if (firstRead) {
+          firstRead = false;
+          await new Promise<void>((resolve) => (releaseRead = resolve));
+        }
+        return value;
+      },
+      setItem: (key, value) => inner.setItem(key, value),
+      removeItem: (key) => inner.removeItem(key),
+    });
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'A', stack: '', ts: 1000 }));
+    const ack = ackSavedCrash(1000); // reads A, and waits
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    recordError(Object.assign(new Error('B'), {}), true); // crash B is saved meanwhile
+    releaseRead();
+    await ack;
+    await deliverSavedCrash();
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
+  });
+
+  test('a crash saved while the older one is being removed is written back (Codex re-review, PR #4)', async () => {
+    const inner = memoryStorage();
+    let releaseRemove: () => void = () => undefined;
+    let removing = false;
+    configureCrash({
+      getItem: (key) => inner.getItem(key),
+      setItem: (key, value) => inner.setItem(key, value),
+      // the removal lands only when the test says so, after B was saved
+      removeItem: (key) => {
+        removing = true;
+        return new Promise<void>((resolve) => (releaseRemove = () => void inner.removeItem(key).then(resolve)));
+      },
+    });
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'A', stack: '', ts: 1000 }));
+    const ack = ackSavedCrash(1000);
+    while (!removing) await new Promise((resolve) => setTimeout(resolve, 0));
+    installLogs();
+    currentHandler?.(new Error('B'), true); // B is saved while A's removal is on its way
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseRemove();
+    await ack;
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
+  });
+
+  test('the write-back after a removal never lands after a still newer crash (Codex re-review 3, PR #4)', async () => {
+    const inner = memoryStorage();
+    let releaseRemove: () => void = () => undefined;
+    let removing = false;
+    const writes: Array<() => Promise<void>> = [];
+    configureCrash({
+      getItem: (key) => inner.getItem(key),
+      setItem: (key, value) => new Promise<void>((resolve) => writes.push(() => inner.setItem(key, value).then(resolve))),
+      removeItem: (key) => {
+        removing = true;
+        return new Promise<void>((resolve) => (releaseRemove = () => void inner.removeItem(key).then(resolve)));
+      },
+    });
+    await inner.setItem(CRASH_KEY, JSON.stringify({ name: 'Error', message: 'A', stack: '', ts: 1000 }));
+    const ack = ackSavedCrash(1000);
+    while (!removing) await new Promise((resolve) => setTimeout(resolve, 0));
+    installLogs();
+    currentHandler?.(new Error('B'), true); // B while A is being removed
+    await writes.shift()?.();
+    releaseRemove();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    currentHandler?.(new Error('C'), true); // C while B is being written back
+    // the storage finishes the newest pending write first: only writes the code itself keeps in order land right
+    for (let i = 0; i < 10 && writes.length > 0; i++) {
+      await writes.pop()?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await ack;
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'C' });
+  });
+
+  test('a newer crash is never overwritten by an older write that finishes late (CodeRabbit, PR #4)', async () => {
+    const inner = memoryStorage();
+    const writes: Array<() => Promise<void>> = [];
+    configureCrash({
+      getItem: (key) => inner.getItem(key),
+      // every write waits until the test lets it finish
+      setItem: (key, value) => new Promise<void>((resolve) => writes.push(() => inner.setItem(key, value).then(resolve))),
+      removeItem: (key) => inner.removeItem(key),
+    });
+    installLogs();
+    currentHandler?.(new Error('A'), true);
+    currentHandler?.(new Error('B'), true);
+    expect(writes).toHaveLength(1); // B waits for A
+    await writes[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(writes).toHaveLength(2);
+    await writes[1]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(JSON.parse((await inner.getItem(CRASH_KEY)) ?? 'null')).toMatchObject({ message: 'B' });
+  });
+
   test('keeps it while no computer is connected', async () => {
     recordError(fail(), true);
     await deliverSavedCrash();

@@ -127,6 +127,49 @@ describe('PerfSampler maths', () => {
     expect(r.busyMs).toBeLessThanOrEqual(16);
   });
 
+  test('a second in the background lowers neither fps nor the lowest second (CodeRabbit, PR #4)', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    for (let i = 0; i < 60; i++) t.frame(1000 / 60);
+    t.appState('background');
+    t.idle(1000);
+    t.appState('active');
+    for (let i = 0; i < 60; i++) t.frame(1000 / 60);
+    const r = s.stop();
+    expect(r.fps).toBeGreaterThanOrEqual(59);
+    expect(r.fpsLowest).toBeGreaterThanOrEqual(59);
+    expect(r.seconds).toBeLessThan(2.1);
+  });
+
+  test('a callback while the app is inactive is not counted as a frame (Codex re-review 3, PR #4)', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.frame(16);
+    t.appState('inactive');
+    t.frame(500); // delivered while away
+    t.appState('active');
+    t.frame(16);
+    const r = s.stop();
+    expect(r.frames).toBe(2);
+    expect(r.fps).toBeCloseTo(62.5, 0);
+  });
+
+  test('a late first frame after coming back is a stall (CodeRabbit, PR #4)', () => {
+    const t = fakeTime();
+    const s = new PerfSampler({ ...t.deps, dev: false });
+    s.start();
+    t.frame(16);
+    t.appState('background');
+    t.idle(2000);
+    t.appState('active');
+    t.frame(500);
+    const r = s.stop();
+    expect(r.drops).toBe(1);
+    expect(r.busyMs).toBe(500);
+  });
+
   test('a real stall after coming back is still a drop', () => {
     const t = fakeTime();
     const s = new PerfSampler({ ...t.deps, dev: false });
@@ -376,5 +419,17 @@ describe('the perf methods', () => {
     await perfStart();
     stopPerf();
     await expect(perfStop()).rejects.toMatchObject({ code: 'bad_params' });
+  });
+
+  test('a second start while one runs is refused, and the first window keeps its numbers (Codex review of 1.3.0)', async () => {
+    const first = await perfStart();
+    await expect(perfStart()).rejects.toMatchObject({ code: 'bad_params', message: expect.stringContaining('already running') });
+    // a stop that names another window doesn't end this one
+    await expect(perfStop({ id: first.id + 1 })).rejects.toMatchObject({ code: 'bad_params' });
+    const result = await perfStop({ id: first.id });
+    expect(typeof result.fps).toBe('number');
+    // and a new window can start after it ended
+    const next = await perfStart();
+    expect(next.id).toBeGreaterThan(first.id);
   });
 });

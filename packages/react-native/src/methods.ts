@@ -46,7 +46,7 @@ export const methods: Record<string, MethodFn> = {
   audit: (params) => audit(params),
   reload: () => reload(),
   perfStart: () => perfStart(),
-  perfStop: () => perfStop(),
+  perfStop: (params) => perfStop(params),
   perfSettle: () => settleOutcome(),
   // The computer has the crash saved at `ts`: the phone may forget that one (and no other).
   crashAck: (params) => crashAck(params),

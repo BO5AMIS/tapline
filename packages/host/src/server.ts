@@ -297,9 +297,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Identity of "the same app on the same phone", used to replace stale sessions. */
+/** How many ended sessions' logs the host keeps. */
+const GONE_LOGS_KEPT = 8;
+
 export function identityOf(info: AppIdentity): string {
   const device = info.device.id ?? info.device.name ?? info.device.model ?? "";
-  return `${info.app.id}\u0000${info.device.platform}\u0000${device}`;
+  // An app that sends no id (the default "unknown") is told apart by its name, so two such apps never share crashes.
+  const app = info.app.id === "unknown" || info.app.id === "" ? `name:${info.app.name}` : info.app.id;
+  return `${app}\u0000${info.device.platform}\u0000${device}`;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -327,6 +332,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
 
   private readonly servers: Array<{ http: HttpServer; wss: WebSocketServer; host: string; port: number }> = [];
   private readonly sessionMap = new Map<string, Session>();
+  /** The logs of the last few sessions that ended, so a failure that ended its app still reports that app's lines. */
+  private readonly goneLogs = new Map<string, { identity: string; events: LogEntry[] }>();
   private selectedId: string | undefined;
   private lastDrop: LastDisconnect | undefined;
   /** When this host process started (this computer's clock), to tell a crash from an earlier run. */
@@ -663,6 +670,17 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       throw new TaplineError("not_connected", `No connected session "${sessionId}".`);
     }
     return session.events.filter((e) => since === undefined || (e.ts ?? 0) > since).map((e) => ({ ...e }));
+  }
+
+  /**
+   * A session's lines whether it is connected or ended (the last few ended ones are kept), and its app and device
+   * identity; undefined when nothing is known of it.
+   */
+  sessionRecord(sessionId: string): { identity: string; events: LogEntry[] } | undefined {
+    const live = this.sessionMap.get(sessionId);
+    if (live !== undefined) return { identity: identityOf(live.info), events: live.events.map((e) => ({ ...e })) };
+    const gone = this.goneLogs.get(sessionId);
+    return gone === undefined ? undefined : { identity: gone.identity, events: gone.events.map((e) => ({ ...e })) };
   }
 
   /** The agent is about to end the app's connection on purpose (a reload): that is no crash. */
@@ -1032,6 +1050,12 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private dropSession(session: Session, reason: string, silentForMs?: number): void {
     if (this.sessionMap.get(session.info.id) !== session) return;
     this.sessionMap.delete(session.info.id);
+    this.goneLogs.set(session.info.id, { identity: identityOf(session.info), events: session.events.map((e) => ({ ...e })) });
+    while (this.goneLogs.size > GONE_LOGS_KEPT) {
+      const oldest = this.goneLogs.keys().next().value;
+      if (oldest === undefined) break;
+      this.goneLogs.delete(oldest);
+    }
     this.lastDrop = {
       session: { ...session.info },
       reason,

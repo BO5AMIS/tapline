@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0, "the Fewer Steps Update" (unreleased)
+## 1.4.0, "the Fewer Steps Update" (2026-11-12)
 
 The same check now takes fewer calls. The JLD tester's iPhone runs needed about 1.5 times the calls of
 Android; this release goes after where they went. The interface is AGENT-TOOLS 1.11, shared with Tapwright.
@@ -36,7 +36,7 @@ Fixed, from the phone checks:
   right after a tap that pushed a screen caught it sliding in, so the replay of a recorded flow always
   differed.
 
-## 1.3.1 (unreleased)
+## 1.3.1 (2026-11-12)
 
 Fixes only, from a tester's feedback on the sibling tool.
 
@@ -50,7 +50,7 @@ Fixes only, from a tester's feedback on the sibling tool.
 - An audit finding no longer names "the screen" when it knows more: it says `an element "Total" at @16,300 120x20` from the
   frame, text or label the app could still give.
 
-## 1.3.0, "the Diagnostics Update" (unreleased)
+## 1.3.0, "the Diagnostics Update" (2026-11-12)
 
 When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.10, shared with Tapwright.
 
@@ -73,7 +73,7 @@ When an agent finds a bug, it now also says why. The interface is AGENT-TOOLS 1.
 - A failed `run` or `replay` step adds `Logs (since step <n>):` with up to 20 warnings and errors since that
   step began. `tapline replay --junit` puts them, and the crash note, in the test case's `<system-out>`.
 
-## 1.2.0, "the Regression Update" (unreleased)
+## 1.2.0, "the Regression Update" (2026-11-12)
 
 A script now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
 Tapwright.

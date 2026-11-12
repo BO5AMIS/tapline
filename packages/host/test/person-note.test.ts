@@ -69,15 +69,39 @@ describe("needs a person: review fixes (1.3.1)", () => {
     expect(textOf(await tools.apps())).not.toContain("needs a person");
   });
 
-  it("counts what an earlier version left in ~/.tapline as paired", async () => {
+  it("counts the marker, or what only a connected app leaves in ~/.tapline, as paired", async () => {
     const { pairedBefore } = await import("../src/config.js");
     const env = { TAPLINE_HOME: "/fake/tapline" };
     const only = (name: string) => (path: string) => path.split("\\").join("/").endsWith(`/fake/tapline/${name}`);
+    const files = (n: number) => () => Array.from({ length: n }, (_, i) => `f${i}`);
     expect(pairedBefore(env, () => false)).toBe(false);
     expect(pairedBefore(env, only("paired"))).toBe(true);
-    expect(pairedBefore(env, only("log"))).toBe(true);
-    expect(pairedBefore(env, only("offers"))).toBe(true);
+    expect(pairedBefore(env, only("shots"), files(2))).toBe(true);
+    expect(pairedBefore(env, only("scripts"), files(1))).toBe(true);
+    // an empty folder is no sign of a phone
+    expect(pairedBefore(env, only("shots"), files(0))).toBe(false);
+    // the action log's folder is made at startup, and an offer may never have been taken (Codex review of 1.3.1)
+    expect(pairedBefore(env, only("log"), files(3))).toBe(false);
+    expect(pairedBefore(env, only("offers"), files(1))).toBe(false);
     expect(pairedBefore(env, only("token"))).toBe(false);
     expect(pairedBefore(env, () => { throw new Error("EACCES"); })).toBe(false);
+  });
+
+  it("a fresh home is still unpaired after the host starts with its action log", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { pairedBefore } = await import("../src/config.js");
+    const { TaplineTools } = await import("../src/tools.js");
+    const { startHost } = await import("./helpers.js");
+    const home = mkdtempSync(join(tmpdir(), "tapline-fresh-home-"));
+    const env = { TAPLINE_HOME: home };
+    const { host } = await startHost();
+    try {
+      new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, logDir: join(home, "log") });
+      expect(pairedBefore(env)).toBe(false);
+    } finally {
+      await host.close();
+    }
   });
 });

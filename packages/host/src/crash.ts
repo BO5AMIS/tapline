@@ -41,7 +41,8 @@ export function parseFrames(stack: string): StackFrame[] {
 export function isAppFrame(frame: StackFrame): boolean {
   const file = frame.file;
   if (file === "" || file === "native" || file === "[native code]") return false;
-  return !/[\\/]node_modules[\\/]/.test(file) && !/^https?:/.test(file);
+  // A bundle (index.bundle, main.jsbundle) is the packed JavaScript, not a file of the app: never a source frame.
+  return !/[\\/]node_modules[\\/]/.test(file) && !/^https?:/.test(file) && !/\.(?:js)?bundle(?:[?#]|$)/.test(file);
 }
 
 function oneLine(text: string, max: number): string {

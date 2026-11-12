@@ -1,0 +1,38 @@
+# Builds and tests both packages on every pull request and every push to main, on Linux and Windows.
+# main is protected (changes only through a pull request), so this run can be made a required check.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Test the host
+        run: npm test --workspace packages/host
+      - name: Test the React Native SDK
+        run: npm test --workspace packages/react-native
