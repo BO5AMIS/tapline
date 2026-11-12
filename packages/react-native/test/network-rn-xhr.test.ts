@@ -3,7 +3,8 @@
 // events through an inner path, not dispatchEvent. And fetch's held waits must honour the abort signal.
 
 type Listener = (args: unknown[]) => void;
-const mockListeners = new Map<string, Listener>();
+// React Native sends each native event to every XHR that listens: several listeners per name.
+const mockListeners = new Map<string, Set<Listener>>();
 const mockSent: unknown[][] = [];
 
 jest.mock('react-native/Libraries/Network/RCTNetworking', () => ({
@@ -17,8 +18,10 @@ jest.mock('react-native/Libraries/Network/RCTNetworking', () => ({
     abortRequest: () => undefined,
     clearCookies: () => undefined,
     addListener: (name: string, fn: (args: unknown[]) => void) => {
-      mockListeners.set(name, fn);
-      return { remove: () => mockListeners.delete(name) };
+      const set = mockListeners.get(name) ?? new Set<Listener>();
+      set.add(fn);
+      mockListeners.set(name, set);
+      return { remove: () => set.delete(fn) };
     },
   },
 }));
@@ -34,6 +37,10 @@ interface RNXhr {
 }
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const XMLHttpRequest = (require('react-native/Libraries/Network/XMLHttpRequest') as { default: new () => RNXhr }).default;
+function emit(name: string, args: unknown[]): void {
+  for (const fn of [...(mockListeners.get(name) ?? [])]) fn(args);
+}
+
 import { inFlight, installNetworkTracking, setNetworkCondition, uninstallNetworkTracking } from '../src/network';
 
 beforeEach(() => {
@@ -75,15 +82,73 @@ test('3g holds the download for its transfer time on React Native\'s XHR', () =>
   expect(mockSent).toHaveLength(1);
   const id = mockSent.length;
   const body = 'x'.repeat(937_500); // 10 s at 750 kbit/s
-  mockListeners.get('didReceiveNetworkResponse')?.([id, 200, { 'Content-Length': String(body.length) }, 'https://api.example.com/big']);
-  mockListeners.get('didReceiveNetworkData')?.([id, body]);
-  mockListeners.get('didCompleteNetworkResponse')?.([id, '', false]);
+  emit('didReceiveNetworkResponse', [id, 200, { 'Content-Length': String(body.length) }, 'https://api.example.com/big']);
+  emit('didReceiveNetworkData', [id, body]);
+  emit('didCompleteNetworkResponse', [id, '', false]);
   expect(ended).toBe(false);
   jest.advanceTimersByTime(5_000);
   expect(ended).toBe(false);
   jest.advanceTimersByTime(5_100);
   expect(ended).toBe(true);
   expect(xhr.status).toBe(200);
+});
+
+const BIG = 'x'.repeat(937_500); // 10 s at 750 kbit/s
+
+function answer(id: number, url: string): void {
+  emit('didReceiveNetworkResponse', [id, 200, { 'Content-Length': String(BIG.length) }, url]);
+  emit('didReceiveNetworkData', [id, BIG]);
+}
+
+function started(url: string): { xhr: RNXhr; ended: () => boolean } {
+  const xhr = new XMLHttpRequest();
+  let done = false;
+  xhr.addEventListener('loadend', () => {
+    done = true;
+  });
+  xhr.open('GET', url);
+  xhr.send();
+  return { xhr, ended: () => done };
+}
+
+test("another request's completion leaves this request's download hold in place", () => {
+  jest.useFakeTimers();
+  setNetworkCondition('3g');
+  const a = started('https://api.example.com/a');
+  const b = started('https://api.example.com/b');
+  jest.advanceTimersByTime(500);
+  expect(mockSent).toHaveLength(2);
+  answer(1, 'https://api.example.com/a');
+  answer(2, 'https://api.example.com/b');
+  emit('didCompleteNetworkResponse', [1, '', false]); // reaches B's listener too
+  emit('didCompleteNetworkResponse', [2, '', false]);
+  expect(a.ended()).toBe(false);
+  expect(b.ended()).toBe(false);
+  jest.advanceTimersByTime(10_100);
+  expect(a.ended()).toBe(true);
+  expect(b.ended()).toBe(true);
+});
+
+test("an abort after the real send removes the hold, so the reused XHR isn't held under normal", () => {
+  jest.useFakeTimers();
+  setNetworkCondition('3g');
+  const first = started('https://api.example.com/a');
+  jest.advanceTimersByTime(500);
+  answer(1, 'https://api.example.com/a');
+  first.xhr.abort();
+  expect(first.ended()).toBe(true);
+  setNetworkCondition('normal');
+  let ended = false;
+  first.xhr.addEventListener('loadend', () => {
+    ended = true;
+  });
+  first.xhr.open('GET', 'https://api.example.com/again');
+  first.xhr.send();
+  expect(mockSent).toHaveLength(2);
+  answer(2, 'https://api.example.com/again');
+  emit('didCompleteNetworkResponse', [2, '', false]);
+  expect(ended).toBe(true);
+  expect(first.xhr.status).toBe(200);
 });
 
 describe('fetch under a condition honours abort', () => {

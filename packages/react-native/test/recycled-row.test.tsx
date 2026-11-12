@@ -22,11 +22,11 @@ let offset = 0;
 let recycle: (title: string) => void = () => undefined;
 const onContinue = jest.fn();
 
-function Row() {
+function Row({ label }: { label?: string }) {
   const [title, setTitle] = useState('Continue');
   recycle = setTitle;
   return (
-    <Pressable testID="row" onPress={onContinue}>
+    <Pressable testID="row" accessibilityLabel={label} onPress={onContinue}>
       <Text>{title}</Text>
     </Pressable>
   );
@@ -48,12 +48,10 @@ afterEach(async () => {
   jest.restoreAllMocks();
 });
 
-test('a row recycled into another while scrolling is refused, not pressed', async () => {
+async function pressWhileRecycling(row: React.ReactElement, target: Record<string, string>): Promise<unknown> {
   await mount(
     <View>
-      <ScrollView testID="list">
-        <Row />
-      </ScrollView>
+      <ScrollView testID="list">{row}</ScrollView>
     </View>,
   );
   const list = collectNodes().find((n) => isRecord(n.fiber.memoizedProps) && n.fiber.memoizedProps.testID === 'list')?.fiber.stateNode;
@@ -70,12 +68,23 @@ test('a row recycled into another while scrolling is refused, not pressed', asyn
   });
   // Outside act: React commits the recycled row during the scroll, as it does in an app.
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
-  let error: unknown;
   try {
-    await press({ target: { text: 'Continue' } });
+    await press({ target });
   } catch (caught) {
-    error = caught;
+    return caught;
   }
+  return undefined;
+}
+
+test('a row recycled into another while scrolling is refused, not pressed', async () => {
+  const error = await pressWhileRecycling(<Row />, { text: 'Continue' });
+  expect(error).toBeInstanceOf(TaplineError);
+  expect((error as TaplineError).message).toMatch(/the element changed while the list scrolled \(it was "Continue", now "Delete account"\)/);
+  expect(onContinue).not.toHaveBeenCalled();
+});
+
+test('a recycled row that keeps its id and accessibility label but changes its text is refused too', async () => {
+  const error = await pressWhileRecycling(<Row label="Row action" />, { testID: 'row' });
   expect(error).toBeInstanceOf(TaplineError);
   expect((error as TaplineError).message).toMatch(/the element changed while the list scrolled \(it was "Continue", now "Delete account"\)/);
   expect(onContinue).not.toHaveBeenCalled();

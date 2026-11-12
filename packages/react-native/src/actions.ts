@@ -1791,9 +1791,15 @@ async function reresolve(entry: Entry, hint: ActionHint | undefined, original?: 
  * refused before anything is touched (Codex review of 1.4.0).
  */
 function assertSameTarget(before: Entry, after: Entry): void {
+  // id, label and text each on their own: a row can keep its id and accessibility label while its text changes
   const was = { id: before.info.testID, name: labelOf(before.info) };
   const now = { id: after.info.testID, name: labelOf(after.info) };
-  if (was.id === now.id && was.name === now.name) return;
+  const same = was.id === now.id && before.info.label === after.info.label && before.info.text === after.info.text;
+  if (same) return;
+  if (was.name === now.name) {
+    was.name = before.info.text;
+    now.name = after.info.text;
+  }
   throw new TaplineError(
     'not_found',
     `the element changed while the list scrolled (it was ${JSON.stringify(was.name || was.id || "?")}, now ${JSON.stringify(now.name || now.id || "?")}); nothing was touched: look, then try again`,

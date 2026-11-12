@@ -408,15 +408,36 @@ function holdResponse(xhr: object): void {
   // React Native's own XMLHttpRequest finishes through __didCompleteResponse and fires its events through an inner
   // path, not dispatchEvent (0.8x), so the transfer time is held there: the completion comes that much later. An
   // abort meanwhile ends the request as usual, and the late completion finds no request to finish (Codex review).
-  const native = xhr as { __didCompleteResponse?: unknown };
+  // React Native sends every completion to every XHR that listens, so one for another request passes straight
+  // through and leaves this hold in place; an abort removes the hold and its timer, so a reused XHR isn't held.
+  const native = xhr as { __didCompleteResponse?: unknown; _requestId?: unknown };
   if (isFn(native.__didCompleteResponse)) {
     const complete = native.__didCompleteResponse as (...args: unknown[]) => unknown;
-    assign(xhr, '__didCompleteResponse', function __didCompleteResponse(this: unknown, ...args: unknown[]): unknown {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const restore = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
       assign(xhr, '__didCompleteResponse', complete);
+      responseHolds.delete(xhr);
+    };
+    // false: nothing was dropped, so React Native's own abort ends the request and fires its events
+    responseHolds.set(xhr, {
+      cancel: () => {
+        restore();
+        return false;
+      },
+    });
+    assign(xhr, '__didCompleteResponse', function __didCompleteResponse(this: unknown, ...args: unknown[]): unknown {
+      if (args[0] !== native._requestId) return complete.apply(xhr, args);
+      if (timer !== null) return undefined; // already waiting out this request's transfer
       const error = args[1];
       const delay = typeof error === 'string' && error !== '' ? 0 : Math.min(MAX_TRANSFER_MS, Math.ceil(sizeOf(xhr) / THREE_G_BYTES_PER_MS));
-      if (delay <= 0) return complete.apply(xhr, args);
-      setTimeout(() => {
+      if (delay <= 0) {
+        restore();
+        return complete.apply(xhr, args);
+      }
+      timer = setTimeout(() => {
+        restore();
         try {
           complete.apply(xhr, args);
         } catch {
