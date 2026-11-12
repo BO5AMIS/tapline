@@ -320,9 +320,9 @@ export function unknownArgumentError(name: keyof typeof toolShapes, args: Record
   const known = Object.keys(toolShapes[name]);
   const unknown = Object.keys(args).filter((key) => !known.includes(key));
   if (unknown.length === 0) return null;
-  const quoted = unknown.map((key) => JSON.stringify(key)).join(", ");
-  const takes = known.length === 0 ? `${name} takes no arguments` : `${name} takes: ${known.join(", ")}`;
-  return fail(`Error bad_params: unknown argument${unknown.length === 1 ? "" : "s"} ${quoted}; ${takes}.`);
+  // AGENT-TOOLS 1.11 wording, shared with Tapwright: every unknown name in one sentence.
+  const takes = known.length === 0 ? "it takes no arguments" : `it takes ${known.join(", ")}`;
+  return fail(`Error bad_params: ${name} doesn't take ${unknown.join(", ")}; ${takes}.`);
 }
 
 // ---- compare_screen ---------------------------------------------------------

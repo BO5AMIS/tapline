@@ -49,7 +49,7 @@ function whereWords(where: AuditResult["issues"][number]["where"]): string {
   const f = where.frame;
   const at = f !== undefined ? ` at @${Math.round(f.x)},${Math.round(f.y)} ${Math.round(f.width)}x${Math.round(f.height)}` : "";
   const called = name !== undefined && name !== "" ? ` ${JSON.stringify(name)}` : "";
-  return at === "" && called === "" ? "the screen" : `an element${at}${called}`;
+  return at === "" && called === "" ? "the screen" : `an element${called}${at}`;
 }
 
 /** The report: header, numbered issues (each `at` on its own line when known), then what was checked. */

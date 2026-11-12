@@ -1530,15 +1530,15 @@ describe("mcp server", () => {
     try {
       const r = await client.callTool({ name: "audit", arguments: { labels: true } });
       expect(r.isError).toBe(true);
-      expect(answerText(r)).toContain('Error bad_params: unknown argument \\"labels\\"; audit takes: types.');
+      expect(answerText(r)).toContain('Error bad_params: audit doesn\'t take labels; it takes types.');
       const two = await client.callTool({ name: "look", arguments: { screenshot: false, foo: 1, bar: 2 } });
       expect(two.isError).toBe(true);
-      expect(answerText(two)).toContain('unknown arguments \\"foo\\", \\"bar\\"; look takes: screenshot, width, labels.');
+      expect(answerText(two)).toContain("look doesn't take foo, bar; it takes screenshot, width, labels.");
       const none = await client.callTool({ name: "apps", arguments: { x: 1 } });
       expect(none.isError).toBe(true);
-      expect(answerText(none)).toContain("apps takes no arguments");
+      expect(answerText(none)).toContain("apps doesn't take x; it takes no arguments.");
       const withRequired = await client.callTool({ name: "open_app", arguments: { app: "x", nme: "y" } });
-      expect(answerText(withRequired)).toContain('unknown argument \\"nme\\"; open_app takes: app.');
+      expect(answerText(withRequired)).toContain("open_app doesn't take nme; it takes app.");
       const fine = await client.callTool({ name: "look", arguments: { screenshot: false } });
       expect(fine.isError).not.toBe(true);
     } finally {
@@ -1559,7 +1559,7 @@ describe("mcp server", () => {
         expect(r.isError, tool.name).toBe(true);
         // A missing required argument is reported first (the SDK's own validation runs before the check).
         if ((tool.inputSchema.required ?? []).length === 0) {
-          expect(answerText(r), tool.name).toContain('unknown argument \\"not_a_real_key\\"');
+          expect(answerText(r), tool.name).toContain("doesn't take not_a_real_key; it takes");
         }
       }
     } finally {
