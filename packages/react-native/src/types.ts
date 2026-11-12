@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'unsupported'
   | 'bad_params'
   | 'timeout'
+  | 'stale'
   | 'internal';
 
 export interface WireError {
@@ -72,6 +73,8 @@ export interface TaplineElement {
   selected: boolean;
   /** true / false / 'mixed' for checkable controls (Switch, checkbox role), else null. */
   checked: boolean | 'mixed' | null;
+  /** Inside a virtualized list's item: its text is content, so the host never saves it (AGENT-TOOLS 1.13 §18.2). */
+  row?: true;
 }
 
 export interface ScreenInfo {
@@ -142,6 +145,15 @@ export interface TreeResult {
   route?: RouteInfo;
   /** With `changes: true` and a previous tree: what changed since then. */
   changes?: TreeChanges;
+  /** Where the app is: route pattern, tab and layer, never params (AGENT-TOOLS 1.13 §18.1). Absent without a router, tab or layer. */
+  place?: PlaceState;
+}
+
+/** A place as a route key: route patterns only, never a param's value or any screen text. */
+export interface PlaceState {
+  route: string[];
+  tab?: string;
+  layer?: string;
 }
 
 export type Target =

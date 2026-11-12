@@ -5,6 +5,9 @@ import { listCommands, runCommand } from './commands';
 import { glassTree } from './glass';
 import { overlay, tree } from './inspect';
 import { media } from './media';
+import { move } from './move';
+import { placeData } from './place';
+import { knownPlaces } from './routetree';
 import { isRecord } from './types';
 import { feedMethod, frameAfterAction } from './live';
 import { perfStart, perfStop } from './perf';
@@ -58,4 +61,8 @@ export const methods: Record<string, MethodFn> = {
   screenshot: (params) => screenshot(params),
   feed: (params) => feedMethod(params),
   overlay: () => overlay(),
+  // AGENT-TOOLS 1.13 §18: where the app is, the places its route tree lists, and one move with the next target waited for.
+  place: async () => placeData(),
+  places: async () => knownPlaces(),
+  move: action((params) => move(params)),
 };

@@ -61,6 +61,16 @@ One of `token` and `pairCode` (with both, the host checks `pairCode`). `device.i
 install and keeps; it tells apart phones that send no `name` or `model` (iOS sends
 neither). Android may also send `model`.
 
+`app.id` is the app's own id, never its container's (AGENT-TOOLS 1.13 §18.9): what the app passes to
+`startTapline`, else, from the app's config (`expo-constants`), `expoConfig.ios.bundleIdentifier ??
+expoConfig.android.package ?? expoConfig.slug`, so an app in Expo Go has its own id and not Expo Go's. `app.build` is
+`<version> (<build number>)`, the native version and build number (`CFBundleShortVersionString (CFBundleVersion)`);
+in Expo Go, whose own build isn't the app's, the config's version and build number. A JavaScript reload is not a new build.
+
+Optional capabilities added in 1.6 (a host checks for them and does without when they're absent):
+`place` (the `place` request and event, and `tree.place`), `places` (the `places` request) and `move` (the
+`move` request).
+
 ### Host → app: `welcome`
 
 ```json
@@ -85,8 +95,9 @@ it for every later connection.
 ```
 
 Error codes: `not_found`, `ambiguous`, `not_actionable`, `unsupported`, `bad_params`,
-`timeout`, `internal`. The host adds its own codes for the agent (`stale`, `busy`,
-`paused`, `in_background`, `reconnecting`, `not_connected`); they don't travel on this wire.
+`timeout`, `stale` (only from `move`, when its guard doesn't hold), `internal`. The host adds its own codes for the
+agent (`busy`, `paused`, `in_background`, `reconnecting`, `not_connected`; it also says `stale` for a ref);
+they don't travel on this wire.
 A `not_actionable` message starts with a reason word: `disabled`, `off_screen`, `covered`,
 `under_tab_bar`, `behind_alert` or `no_action` (for example `covered: e47 … is covered by …`).
 A `{x, y}` target where nothing takes the action is `not_actionable` with
@@ -213,6 +224,10 @@ result:
 - `route` (only in apps using React Navigation, Expo Router included): the focused screen's
   route names from the outermost navigator in, and its simple params (strings, numbers,
   booleans, null).
+- `place` (1.6, capability `place`): where the app is, as a route key (see `place` below): `{ "route": ["(tabs)",
+  "settings"], "tab": "settings", "layer": "sheet:Filters" }`. Always present; `route` is `[]` without a router.
+- `row` (1.6): `true` on an element inside a virtualized list's item (React Native's cell renderer, FlashList's cell
+  container). Its text is content, so a host never saves what a row said (AGENT-TOOLS 1.13 §18.2).
 - `changes: true` asks for the difference from the previous `tree` call (on this
   connection). Refs of elements still on screen are kept, new ones get new numbers, and the
   result adds `"changes": { "sameRoute": true, "added": ["e58"], "removed": [<element as it
@@ -353,3 +368,72 @@ the entries with `ts` after `since` (epoch milliseconds; all of them without `si
 ### `reload`
 
 Development builds only (`__DEV__`): `DevSettings.reload()`. Otherwise `unsupported`.
+
+### `place` (request and event; capability `place`)
+
+AGENT-TOOLS 1.13 §18.1 and §18.11. Where the app is, as a route key. Names are route *patterns*, never params; nothing from
+the screen's text is in it.
+
+```json
+{ "route": ["(tabs)", "settings", "language"], "tab": "settings", "layer": "sheet:Filters", "seenAt": 1731500000000 }
+```
+
+- `route`: the focused screen's route names from the outermost navigator in, each split on `/` (so `trips/[id]` is
+  `["trips", "[id]"]`). `[]` when the app has no router or no screen yet. `/user/123` and `/user/456` are one place.
+- `tab`: the selected tab's route name (a tab navigator's selected route, else a native tab bar's selected tab by its
+  key, never its title); absent when there are no tabs.
+- `layer`: what lies on top. `alert` for an open alert; `modal:<name>` or `sheet:<name>` for a navigation route
+  presented as a modal or sheet (`<name>` is its route name; `stackPresentation` `formSheet`, `pageSheet` and `sheet` are
+  sheets); for a bare `Modal`, `modal:<testID of its root>` or just `modal`. Never text from the screen. Absent when
+  nothing lies on top.
+- `seenAt`: epoch milliseconds when it was read.
+
+The request `place` (params `{}`) answers it now. The event `place` is sent once right after `welcome`, then whenever the
+route, the tab or the layer changes (about 40 ms after the commit, one per burst, never on a repeat; an alert opening or
+closing counts). It is not sent while the app is disconnected. The host keeps the latest and answers `GET /place`
+from memory (§18.11).
+
+### `places` (capability `places`)
+
+params: `{}` → `{ "source": "expo-router" | "react-navigation" | "none", "places": [ { "route": [...], "link": "wayfare://trips/[id]", "params": ["id"] } ] }`.
+
+The places the app's route tree lists, before any visit (AGENT-TOOLS 1.13 §18.1, "Known before any visit"). `params` are
+names only. `link` is `<scheme>://<path>` with `[id]` where a param goes, from the app's own scheme (a custom scheme
+beats an `https` prefix); absent when the app has no scheme or the screen has no path. Expo Router's route tree is read
+from its internal store behind a guard: any failure answers `source: "none"`. React Navigation's comes from the
+`linking` prop of the `NavigationContainer`, found through the fibers. Never throws.
+
+### `move` (capability `move`)
+
+AGENT-TOOLS 1.13 §18.4 (F7). Act, then wait until the next move's target is ready, in one request. The host checks its
+policy and confirmation against what comes back before it sends the next move, so the app never decides what a person must
+OK, and a move never navigates by itself: it is the ordinary `press`, `longPress`, `toggle`, `back`, `openURL` or
+`swipe`.
+
+params:
+```json
+{ "method": "press", "params": { "target": { "testID": "language-row" } },
+  "guard": { "id": "language-row", "label": "Language", "text": "Language" },
+  "next": { "target": { "testID": "language-list" }, "capMs": 1500 } }
+```
+
+- `method` and `params`: exactly what the plain method takes (`dryRun` passes through; nothing is waited for then).
+- `guard` (optional): the host's policy check was made against this element. Before acting, the `target` is resolved again;
+  if its `id`, `label` or `text` is not what the guard says, nothing is done and the answer is `stale`. Only for
+  methods with a `target`.
+- `next` (optional): wait up to `capMs` (at most 10 000) until this target is on screen, steady (the same frame on two
+  looks 40 ms apart) and touchable (the `press` dry run's checks pass; a switch is looked at with a `toggle` dry run). A
+  target below the fold that a scroll reaches counts as on screen.
+
+result:
+```json
+{ "done": { "element": { … }, "settledMs": 120 },
+  "place": { "route": ["(tabs)", "settings", "language"] },
+  "next": { "state": "ready", "element": { … }, "waitedMs": 80 } }
+```
+
+- `done`: what the plain method returns, settle fields included.
+- `place`: the place after the move (`null` only when it can't be read).
+- `next.state`: `ready`; `missing` (not there at the cap, or refused for another reason); `covered` (covered by something,
+  under the tab bar or behind an alert); `moving` (there but its frame still changing at the cap, with `element`).
+  `element` is present for `ready` and `moving`. `waitedMs` is how long the wait took.

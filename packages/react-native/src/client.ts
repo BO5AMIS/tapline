@@ -1,6 +1,7 @@
 import { AppState, Platform } from 'react-native';
 import { screenshotAvailable } from './actions';
 import { keepAwake } from './awake';
+import { detectedApp } from './appinfo';
 import { deliverSavedCrash } from './crash';
 import { emitEvent, setEventSink } from './events';
 import { resetMedia } from './media';
@@ -13,6 +14,7 @@ import { refreshCover } from './native';
 import { resetTaplineTextSize } from './locale';
 import { resetNetworkCondition } from './network';
 import { stopPerf } from './perf';
+import { startPlaceEvents } from './place';
 import {
   PROTOCOL_VERSION,
   TaplineError,
@@ -118,7 +120,7 @@ export function collectDeviceInfo(): DeviceInfo {
 }
 
 export function defaultCapabilities(): string[] {
-  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck', 'media'];
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck', 'media', 'place', 'places', 'move'];
   if (screenshotAvailable()) capabilities.push('screenshot', 'feed');
   if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload', 'inspect');
   return capabilities;
@@ -150,6 +152,7 @@ export class TaplineClient {
   private pairCode: string | undefined;
   private appStateSubscription: { remove: () => void } | null = null;
   private stopTouchWatch: (() => void) | null = null;
+  private stopPlaceWatch: (() => void) | null = null;
 
   constructor(options: ClientOptions, deps: ClientDeps = {}) {
     this.options = options;
@@ -185,6 +188,7 @@ export class TaplineClient {
     resetMedia();
     if (this.ready) this.status('disconnected');
     this.ready = false;
+    this.endPlaceWatch();
     setLogSink(null);
     setEventSink(null);
     stopLiveFeed();
@@ -307,7 +311,8 @@ export class TaplineClient {
       type: 'hello',
       protocol: PROTOCOL_VERSION,
       ...(this.pairCode !== undefined ? { pairCode: this.pairCode } : { token: this.token ?? '' }),
-      app: { name: 'App', ...this.options.app },
+      // The app's own id and build from its config (never Expo Go's); what the app passed wins.
+      app: { name: 'App', ...detectedApp(), ...this.options.app },
       device: deviceId === undefined ? device : { ...device, id: deviceId },
       capabilities: this.deps.capabilities ?? defaultCapabilities(),
     });
@@ -360,10 +365,19 @@ export class TaplineClient {
     this.setAwake(true);
     setLogSink((event, payload) => this.send({ type: 'event', event, data: payload }));
     setEventSink((event, data) => this.send({ type: 'event', event, data }));
+    // The place event (§18.11): the first one now, then one per change.
+    this.endPlaceWatch();
+    this.stopPlaceWatch = startPlaceEvents();
     // A fatal error the app kept on the phone before it went away, not yet told to this computer.
     void deliverSavedCrash();
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => this.safely(() => this.onPingTick()), PING_INTERVAL_MS);
+  }
+
+  private endPlaceWatch(): void {
+    const stop = this.stopPlaceWatch;
+    this.stopPlaceWatch = null;
+    if (stop) this.safely(stop);
   }
 
   private onPingTick(): void {
@@ -403,6 +417,7 @@ export class TaplineClient {
     this.socket = null;
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = null;
+    this.endPlaceWatch();
     setLogSink(null);
     setEventSink(null);
     // The phone is never left offline or slow with nobody watching.
