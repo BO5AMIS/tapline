@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Finding } from "./journeyreport.js";
 import type { JourneyExport } from "./journey.js";
 
@@ -56,7 +56,8 @@ export interface ExportInput {
 
 export type ExportOutcome = { ok: true; lines: string[] } | { ok: false; message: string };
 
-const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** owner/name as GitHub allows them: no leading dash or dot, no `..` (1.5 review, finding 7). */
+const REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 const QA_BRANCH = "qa-reports";
 
 /** Tokens never reach a message. */
@@ -90,12 +91,23 @@ function rawUrl(repo: string, branch: string, path: string): string {
   return `https://github.com/${repo}/raw/${encode(branch)}/${encode(path)}`;
 }
 
+/**
+ * App text made inert in a GitHub comment: no @mention that pings, no picture, link or HTML it can add (finding 7).
+ * Markdown's own escapes, a zero-width space after `@`, and links broken so they don't render.
+ */
+export function inert(text: string): string {
+  return text
+    .replace(/[\\`*_[\]<>|!]/g, (c) => `\\${c}`)
+    .replace(/@/g, "@\u200b")
+    .replace(/(https?):\/\//gi, "$1\u200b://");
+}
+
 function bodyOf(input: ExportInput, pictureUrl: (relative: string) => string, reportUrl: string, all: boolean): string {
-  const lines: string[] = [input.summary, "", input.findingsLine, ""];
+  const lines: string[] = [inert(input.summary), "", input.findingsLine, ""];
   if (input.headline !== undefined) lines.push(`![The journey](${pictureUrl(input.headline)})`, "");
   const shown = all ? input.findings : input.findings.slice(0, 8);
   shown.forEach((f, i) => {
-    lines.push(`${i + 1}. **${f.severity}** ${f.kind}: ${f.title}`);
+    lines.push(`${i + 1}. **${f.severity}** ${f.kind}: ${inert(f.title)}`);
     if (all && f.shot !== undefined) lines.push("", `![Finding ${i + 1}](${pictureUrl(f.shot)})`, "");
   });
   if (!all && input.findings.length > shown.length) lines.push(`(+${input.findings.length - shown.length} more in the report.)`);
@@ -104,7 +116,7 @@ function bodyOf(input: ExportInput, pictureUrl: (relative: string) => string, re
 }
 
 function validTarget(target: JourneyExport): string | null {
-  if (!REPO.test(target.repo)) return `export repo ${JSON.stringify(target.repo)} isn't owner/name`;
+  if (!REPO.test(target.repo) || target.repo.includes("..")) return `export repo ${JSON.stringify(target.repo)} isn't owner/name`;
   if (target.to === "pr" && (target.pr === undefined || !Number.isInteger(target.pr) || target.pr < 1)) return "export to a pull request needs its number";
   return null;
 }
@@ -115,10 +127,16 @@ function safeBranch(branch: string): boolean {
 
 /** The files, and only them, into `into` (made if need be), keeping their folders. */
 function copyReport(folder: string, into: string, files: readonly string[]): void {
+  const root = resolve(folder);
   for (const file of files) {
+    // Never outside the report folder, whatever a list holds (1.5 review, finding 7).
+    const from = resolve(root, file);
+    if (isAbsolute(file) || file.split(/[\\/]/).includes("..") || (from !== root && !from.startsWith(root + sep))) {
+      throw new Error(`the report lists a file outside its folder (${JSON.stringify(file)}); nothing was exported`);
+    }
     const to = join(into, file);
     mkdirSync(dirname(to), { recursive: true });
-    copyFileSync(join(folder, file), to);
+    copyFileSync(from, to);
   }
 }
 
@@ -158,7 +176,12 @@ export async function exportReport(input: ExportInput, run: Runner, makeTemp: ()
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   } finally {
-    rmSync(tmp, { recursive: true, force: true });
+    // A temporary folder that won't go away must not turn a done export into a failure (finding 12).
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // left for the system to clean up
+    }
   }
 }
 

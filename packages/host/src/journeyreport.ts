@@ -643,10 +643,18 @@ export async function writeReport(options: WriteOptions): Promise<ReportResult> 
   writeFileSync(join(folder, "report.md"), markdown, "utf8");
   writeFileSync(join(folder, "report.html"), renderHtml(ctx), "utf8");
   // An export uploads the report, its GIF and the pictures the report uses, not every raw frame.
-  const used = [...markdown.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)].map((m) => m[1] ?? "").filter((p) => p !== "" && existsSync(join(folder, p)));
+  // Only the report's own pictures: app text in the report can't name another file (1.5 review, finding 7).
+  const used = [...markdown.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)]
+    .map((m) => m[1] ?? "")
+    .filter((p) => isReportPicture(p) && existsSync(join(folder, p)));
   const exportFiles = [...new Set(["report.md", "report.html", ...used])].sort();
   const firstPicture = used.find((p) => p.startsWith("frames/"));
   return { folder, name: rec.name, findings, counts, files: listFiles(folder), exportFiles, firstPicture, omitted, gif, keys, notes };
+}
+
+/** A picture inside the report folder: a relative path of plain names, no `..`, ending .png, .jpg or .gif. */
+export function isReportPicture(path: string): boolean {
+  return /^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*\.(?:png|jpe?g|gif)$/.test(path) && !path.split("/").includes("..");
 }
 
 function listFiles(root: string, rel = ""): string[] {
