@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadAccounts, type GitProbe } from "./accounts.js";
 import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
@@ -28,6 +29,10 @@ export interface DoctorDeps {
   hostDir: string | null;
   /** `git status --porcelain` of a folder; null when it isn't a git work tree, git is missing or it took too long. */
   gitStatus: (dir: string) => Promise<string | null>;
+  /** `--accounts FILE`: checked when given (AGENT-TOOLS 1.13 §18.6). */
+  accountsFile?: string;
+  /** The git questions the accounts file is checked with; default: the user's own git. */
+  gitProbe?: GitProbe;
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -372,6 +377,21 @@ async function checkMetro(deps: DoctorDeps, binary: string | null): Promise<Chec
   return { name, status: "pass", detail: `Metro is served at ${url}` };
 }
 
+/** The accounts file: loaded, refused for sitting in a git repo, or not usable. Names only, never a value. */
+async function checkAccounts(file: string, probe: GitProbe | undefined): Promise<CheckResult> {
+  const name = "Test accounts";
+  try {
+    const loaded = await loadAccounts(file, probe);
+    if (loaded.store === null) {
+      return { name, status: "fail", detail: loaded.blocked, fix: "Move the file outside the repository, or add it to .gitignore." };
+    }
+    const names = loaded.store.names();
+    return { name, status: "pass", detail: `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}` };
+  } catch (error) {
+    return { name, status: "fail", detail: errorText(error), fix: "Fix the file, or leave out --accounts." };
+  }
+}
+
 /** Checks the setup in order. Never throws: a check that breaks becomes a warning or failure. */
 export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<CheckResult[]> {
   const deps: DoctorDeps = { ...defaultDeps(), ...overrides };
@@ -397,6 +417,10 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
   results.push(await guard("Metro over https", "warn", () => checkMetro(deps, lookup.binary)));
   const tree = await guard("Host version", "warn", async () => (await checkWorkTree(deps)) ?? { name: "Host version", status: "pass", detail: "" });
   if (tree.status !== "pass") results.push(tree);
+  if (deps.accountsFile !== undefined) {
+    const file = deps.accountsFile;
+    results.push(await guard("Test accounts", "fail", () => checkAccounts(file, deps.gitProbe)));
+  }
   return results;
 }
 

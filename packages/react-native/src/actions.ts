@@ -1413,7 +1413,22 @@ export async function typeText(
   // Deleting from the end edits what is there, so it never replaces the whole text.
   const replace = params.replace !== false && !deleting;
 
+  const kind = params.kind;
+  if (kind !== undefined && kind !== 'secure' && kind !== 'plain') throw badParams('kind is "secure" or "plain"');
+
   let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true);
+  // A test account's value goes only into the kind of field it is for (AGENT-TOOLS 1.13 §18.6). The refusal
+  // comes before anything is typed or scrolled, and says only whether the field is secure, never its text.
+  const isSecure = isSecureInput(entry.node);
+  if (kind !== undefined && (kind === 'secure') !== isSecure) {
+    throw new TaplineError(
+      'bad_params',
+      `${describe(entry)} is ${isSecure ? 'a secure field' : 'not a secure field'}, not a ${kind} field`,
+      undefined,
+      undefined,
+      { secure: isSecure },
+    );
+  }
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
   // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2; the policy ran before this
   // call). The input that already has focus is typed into without touching it, so it is not scrolled to.

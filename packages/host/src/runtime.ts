@@ -15,6 +15,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
+import { loadAccounts, type GitProbe } from "./accounts.js";
 import { Confirmations } from "./confirm.js";
 import { ControlQueue } from "./control.js";
 import { isToolName, callTool } from "./dispatch.js";
@@ -37,6 +38,10 @@ export interface RuntimeOptions extends ResolveOptions {
   noPolicy?: boolean;
   viewerLink?: boolean;
   uxRules?: string;
+  /** `--accounts FILE`: test accounts (AGENT-TOOLS 1.13 §18.6). A file inside a git work tree that doesn't ignore it loads nothing. */
+  accounts?: string;
+  /** Tests: the git questions the accounts file is checked with. */
+  gitProbe?: GitProbe;
   /** `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). */
   brief?: boolean;
   /** Serve `POST /api/<tool>`: set by a standalone `tapline host`, never by an agent's MCP server (AGENT-TOOLS 1.13 §18.10). */
@@ -108,10 +113,14 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   viewer = viewerMode(options.viewer, options.env);
   policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
   if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
+  // The test accounts (AGENT-TOOLS 1.13 §18.6). A refused file still starts the server, with no accounts and the reason.
+  const accounts = options.accounts !== undefined ? await loadAccounts(options.accounts, options.gitProbe) : undefined;
+  if (accounts !== undefined && accounts.store === null) log(accounts.blocked);
 
   const config = await resolveConfig(options);
   const clients = new Map<string, { tools: TaplineTools; lastUsed: number }>();
   const host = new TaplineHost({
+    ...(accounts?.store != null ? { redact: accounts.store.redact } : {}),
     token: config.token,
     port: config.port,
     portFallback: config.portFallback,
@@ -163,6 +172,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     ...(options.brief === true ? { brief: true } : {}),
     policy,
     uxRules,
+    ...(accounts !== undefined ? { accounts } : {}),
     confirmations,
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },

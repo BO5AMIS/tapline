@@ -72,6 +72,7 @@ Optional capabilities added in 1.6 (a host checks for them and does without when
 `move` request) and `waitOnce` (`waitFor` with `once`, below). A host without it reads one `tree` instead.
 `pressFacts` (the `handler` and `startedRequests` fields of a `press` or `longPress` result, below): a host without it
 says a tap that changed nothing without a clause about the handler (AGENT-TOOLS 1.13 §3).
+`typeKind` (the `kind` param of `type`, below): a host without it never sends a test account's value, since an older app would type it into any field (AGENT-TOOLS 1.13 §18.6).
 
 ### Host → app: `welcome`
 
@@ -286,6 +287,8 @@ inputs, and with `submit` calls `onSubmitEditing` / `onEndEditing`.
 `backspace: n` (a whole number) first deletes the last n characters (code points, so 😀 is
 one) and then appends `text`, if any; it never replaces. The live viewer's backspace key
 sends `{ "backspace": 1 }`.
+`kind` (capability `typeKind`): `"secure"` or `"plain"`. The app resolves the input first and refuses before it types or scrolls
+when the field is the other kind: `bad_params` with `data: { "secure": true | false }` (whether the field is secure; no text).
 → result: `{ "element": <element>, "value": "hello" }`.
 
 ### `scroll`

@@ -17,6 +17,7 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
+import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -43,7 +44,7 @@ import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
-import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -130,6 +131,12 @@ const screenshotField = z.boolean().optional().describe("Add a screenshot (defau
 /** AGENT-TOOLS 1.13 §13.4. What it does is in the instructions' Answers list (TOOL-TEXT, core answers). */
 const briefField = z.boolean().optional().describe("true: a short answer, as the instructions describe; false: the whole answer, also when the server runs with --brief");
 
+/** A test account's name (AGENT-TOOLS 1.13 §18.6); in `run` it is the default for its steps. */
+const accountField = z
+  .string()
+  .optional()
+  .describe("A test account's name: the text is then `${account.username}` or `${account.password}` alone, typed by the tool (you never see the password)");
+
 const dryRunField = z
   .boolean()
   .optional()
@@ -199,6 +206,7 @@ export const toolShapes = {
     index: indexField,
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
+    account: accountField,
     force: forceField,
     dry_run: dryRunField,
     look: lookField,
@@ -363,6 +371,7 @@ export const toolShapes = {
         'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves), performance. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold; on a performance step, under: limits such as {"launch_s": 2, "drops": 0, "fps_min": 50, "busy_ms": 200, "js_heap_mb": 80}.',
       ),
     trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
+    account: accountField,
     dry_run: z
       .boolean()
       .optional()
@@ -526,6 +535,8 @@ export interface ToolsOptions {
   policy?: PolicyFile;
   /** The user's UX house rules (`--ux-rules FILE`, AGENT-TOOLS 1.12 §17.3). Default: none. */
   uxRules?: UxRules;
+  /** The test accounts (`--accounts FILE`, AGENT-TOOLS 1.13 §18.6): loaded, or refused with the reason. Default: none. */
+  accounts?: AccountsLoad;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
@@ -606,7 +617,16 @@ const LONG_PRESS_MS = 500;
 
 const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
 /** The answer to a reference name that isn't one: no slashes, so no way out of the references folder. */
-const BAD_REFERENCE_NAME = "Error bad_params: name the reference with letters, digits, '.', '_' and '-'.";
+/** The names (file names without `extension`) in a folder; none when it isn't there. */
+function stemsIn(dir: string, extension: string): string[] {
+  try {
+    return readdirSync(dir).filter((file) => file.endsWith(extension)).map((file) => file.slice(0, -extension.length));
+  } catch {
+    return [];
+  }
+}
+
+const BAD_REFERENCE_NAME ="Error bad_params: name the reference with letters, digits, '.', '_' and '-'.";
 
 /** One recorded request; `route` is the screen it ended on, `fragile` marks a target that only worked that run (a ref). */
 interface ScriptStep {
@@ -658,6 +678,30 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
   const kept = copy["target"];
   const fragile = typeof kept === "object" && kept !== null && "ref" in kept;
   return { params: copy, fragile };
+}
+
+/** A step that types an account's value: its text is a placeholder, kept in the script (the value never is). */
+function isAccountStep(step: ScriptStep): boolean {
+  return step.method === "type" && typeof step.params["text"] === "string" && step.params["text"].includes("${account.");
+}
+
+/**
+ * The app refused an account's value because of the kind of field (capability `typeKind`; its `data.secure` says
+ * which kind the field is). The answer says it in the words of AGENT-TOOLS 1.13 §18.6, with the field's ref and
+ * never anything the app wrote about its text.
+ */
+function kindRefusal(error: unknown, kind: unknown): string | null {
+  if (kind !== "secure" && kind !== "plain") return null;
+  if (!(error instanceof TaplineError) || error.code !== "bad_params") return null;
+  const details = error.details;
+  const data = typeof details === "object" && details !== null ? (details as { data?: unknown }).data : undefined;
+  const secure = typeof data === "object" && data !== null ? (data as { secure?: unknown }).secure : undefined;
+  if (typeof secure !== "boolean") return null;
+  const ref = /^(e\d+)\b/.exec(error.message)?.[1] ?? "the field";
+  const is = secure ? "a password field" : "a text field";
+  return kind === "secure"
+    ? `Error bad_params: an account's password goes only into a password field; ${ref} is ${is}.`
+    : `Error bad_params: an account's username goes only into a text field; ${ref} is ${is}.`;
 }
 
 /** A short description of a step, e.g. `press id=save` or `type "Ann" into label="Name"`. */
@@ -1460,9 +1504,22 @@ export class TaplineTools {
     const startedWith: AppIdentity | undefined = this.host.current();
     return this.noteScope.run(true, () => {
       const result = run();
-      if (result instanceof Promise) return result.then((answer) => this.withPersonNote(this.withCrashNotes(answer, mark, startedWith)));
-      return this.withPersonNote(this.withCrashNotes(result, mark, startedWith));
+      if (result instanceof Promise) return result.then((answer) => this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))));
+      return this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith)));
     });
+  }
+
+  private accountsNoteDone = false;
+
+  /** The first answer of the session says an accounts file was refused (it sits in a git repo), once (AGENT-TOOLS 1.13 §18.6). */
+  private withAccountsNote(answer: CallToolResult): CallToolResult {
+    const loaded = this.options.accounts;
+    if (this.accountsNoteDone || loaded === undefined || loaded.store !== null) return answer;
+    if (answer.content[0]?.type !== "text") return answer;
+    this.accountsNoteDone = true;
+    // An answer that is the refusal itself already says it.
+    if (answer.content[0].text.includes(loaded.blocked)) return answer;
+    return appendNote(answer, `Note: ${loaded.blocked}`);
   }
 
   /** The first call has been answered, so the "needs a person" note has had its turn. */
@@ -1750,6 +1807,16 @@ export class TaplineTools {
   // -- run (AGENT-TOOLS 1.8 §9): a batch of steps, answered once
 
   async run(args: Shape<"run">): Promise<CallToolResult> {
+    const before = this.runAccount;
+    this.runAccount = args.account;
+    try {
+      return await this.runBatch(args);
+    } finally {
+      this.runAccount = before;
+    }
+  }
+
+  private async runBatch(args: Shape<"run">): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const steps = args.steps as Step[];
@@ -1820,6 +1887,13 @@ export class TaplineTools {
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
+      }
+      // A test account's value is checked before any step runs too (§18.6): whole text, a known account for this app.
+      if (step.tool === "type_text") {
+        const typed = (params as { text?: unknown }).text;
+        const named = (params as { account?: unknown }).account;
+        const used = typeof typed === "string" ? this.accountText(typed, typeof named === "string" ? named : undefined, session) : null;
+        if (used !== null && !used.ok) return fail(`Error ${used.code}: step ${i + 1} (${describeRunStep(step)}): ${used.message}`);
       }
       // Every reference name is checked before any step runs: a name with a path in it never reaches the disk.
       const names = [step.tool === "compare_screen" ? (params as { name?: unknown }).name : undefined, step.expect?.matches];
@@ -2450,6 +2524,8 @@ export class TaplineTools {
     brief?: boolean,
     /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
     touch?: NoChangeAction,
+    /** What goes only to the app: a test account's value and the kind of field it may go into. Nothing else sees it (§18.6). */
+    wire?: Record<string, unknown>,
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -2465,7 +2541,9 @@ export class TaplineTools {
           const stop = await preflight();
           if (stop !== null) throw new PolicyStop(stop);
         }
-        return this.host.request(method, params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        // The app gets the value and the kind, not the account's name; the log, the viewer and a recording get `params`.
+        const sent = wire === undefined ? params : { ...(typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "account")) : {}), ...wire };
+        return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
       };
       // With the live viewer, a person watching goes first.
       result = this.options.control ? await this.options.control.runAgent(run) : await run();
@@ -2480,7 +2558,7 @@ export class TaplineTools {
         error instanceof TaplineError ? error.code : "internal",
         error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
       );
-      return fail(describeError(error));
+      return fail(kindRefusal(error, wire?.["kind"]) ?? describeError(error));
     }
     const line = describe(result);
     this.noteTouch(method, params, result);
@@ -2585,8 +2663,9 @@ export class TaplineTools {
       const { params: chosen, fragile } = stableParams(params, result);
       // A ref saved as a label or text that several elements share needs its index (AGENT-TOOLS 1.8 §9.4).
       const stable = await this.withIndexIfShared(params, chosen, result, session.id);
-      // A password field's text is never saved in a script (Tapwright's review, M4).
-      const secret = method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
+      // A password field's text is never saved in a script (Tapwright's review, M4). An account's value is a
+      // placeholder in `params`, so the script keeps it and replays with the account.
+      const secret = wire === undefined && method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
       const step: ScriptStep = { method, params: secret ? { ...stable, text: "" } : stable };
       if (secret) step.secret = true;
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
@@ -2988,6 +3067,8 @@ export class TaplineTools {
     }
     this.lastMaskElements = undefined;
     if (!SCRIPT_NAME.test(name)) return { kind: "error", line: BAD_REFERENCE_NAME };
+    const clash = this.referenceClash(name, options.referencesDirs);
+    if (clash !== null) return { kind: "error", line: clash };
     const path = options.referencesDirs.map((dir) => join(dir, `${name}.jpg`)).find((candidate) => existsSync(candidate));
     if (path === undefined) return { kind: "missing", shot };
     let reference: ShotImage;
@@ -3178,6 +3259,8 @@ export class TaplineTools {
   private writeReference(folder: string, name: string, shot: ShotImage): CallToolResult {
     // Every write checks the name itself, whatever the caller checked: no way out of the references folder.
     if (!SCRIPT_NAME.test(name)) return fail(BAD_REFERENCE_NAME);
+    const clash = this.referenceClash(name, [folder]);
+    if (clash !== null) return fail(clash);
     const path = join(folder, `${name}.jpg`);
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -3413,6 +3496,28 @@ export class TaplineTools {
     return dir === undefined || !SCRIPT_NAME.test(name) ? null : join(dir, `${name}.json`);
   }
 
+  /** `home` and `HOME` are one file on Windows and macOS: an error line when a saved script differs from `name` only in case. */
+  private scriptClash(name: string): string | null {
+    const dir = this.options.scriptsDir;
+    if (dir === undefined) return null;
+    const twin = caseTwin(name, stemsIn(dir, ".json"));
+    return twin === null ? null : `Error bad_params: the script "${name}" differs only in case from the existing "${twin}"; use that name.`;
+  }
+
+  /** The same for a reference name: against the pictures in `dirs`, then the compare steps earlier in this recording. */
+  private referenceClash(name: string, dirs: readonly string[]): string | null {
+    for (const dir of dirs) {
+      const twin = caseTwin(name, stemsIn(dir, ".jpg"));
+      if (twin !== null) return `Error bad_params: the reference "${name}" differs only in case from the existing "${twin}"; use that name.`;
+    }
+    if (this.recording !== null && !this.replaying) {
+      const earlier = this.recording.steps.flatMap((step) => (step.method === "compareScreen" && typeof step.params["name"] === "string" ? [step.params["name"]] : []));
+      const twin = caseTwin(name, earlier);
+      if (twin !== null) return `Error bad_params: the reference "${name}" differs only in case from "${twin}", used earlier in this recording; use that name.`;
+    }
+    return null;
+  }
+
   async record(args: Shape<"record">): Promise<CallToolResult> {
     const op = args.action ?? (args.start === true ? "start" : args.stop === true ? "stop" : "status");
     switch (op) {
@@ -3422,6 +3527,8 @@ export class TaplineTools {
           return fail("Error bad_params: give the script a name of letters, digits, '.', '_' and '-' (e.g. \"checkout\").");
         }
         if (this.recording !== null) return fail(`Error bad_params: already recording "${this.recording.name}"; stop it first.`);
+        const scriptClash = this.scriptClash(name);
+        if (scriptClash !== null) return fail(scriptClash);
         const session = this.host.current();
         if (session === undefined) return this.notConnected();
         this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [] };
@@ -3445,6 +3552,9 @@ export class TaplineTools {
         if (recording === null) return fail("Error bad_params: not recording; start with record { start: true, name }.");
         const path = args.path !== undefined && args.path.trim() !== "" ? args.path.trim() : this.scriptPath(recording.name);
         if (path === null) return fail("Error internal: no scripts folder is configured; give a path.");
+        // A twin may have appeared while recording; nothing is written then, and the recording stays to stop again.
+        const stopClash = args.path !== undefined && args.path.trim() !== "" ? null : this.scriptClash(recording.name);
+        if (stopClash !== null) return fail(stopClash);
         const script: SharedScript = {
           format: "agent-tools-script",
           version: 1,
@@ -3477,7 +3587,7 @@ export class TaplineTools {
             `${secrets} step${secrets === 1 ? " types" : "s type"} into a password field: that text isn't saved. Put a test password into the script before you replay it.`,
           );
         }
-        if (recording.steps.some((step) => step.method === "type" && step.secret !== true)) {
+        if (recording.steps.some((step) => step.method === "type" && step.secret !== true && !isAccountStep(step))) {
           lines.push("The script keeps the other text typed in it: keep it private.");
         }
         return text(lines.join("\n"));
@@ -3538,6 +3648,9 @@ export class TaplineTools {
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
     if (this.recording !== null) return fail(`Error bad_params: stop recording "${this.recording.name}" before replaying.`);
+    // On Windows and macOS a twin in another case would be found as if it were this name, and on Linux not: refuse it everywhere.
+    const scriptClash = given === "" ? this.scriptClash(name) : null;
+    if (scriptClash !== null) return fail(scriptClash);
     const path = given !== "" ? given : this.scriptPath(name);
     if (path === null || !existsSync(path)) return fail(`Error not_found: no script "${given || name}".\n${this.scriptList()}`);
     let script: SharedScript | null;
@@ -3804,7 +3917,7 @@ export class TaplineTools {
         const reason = error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined;
         return {
           kind: "error",
-          text: describeError(error),
+          text: kindRefusal(error, params["kind"]) ?? describeError(error),
           code: error instanceof TaplineError ? error.code : "internal",
           ...(reason !== undefined ? { reason } : {}),
         };
@@ -3921,16 +4034,27 @@ export class TaplineTools {
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
     const hiddenField = this.hiddenTarget(args.target);
     if (hiddenField !== null) return Promise.resolve(hiddenField);
+    // A test account's value (§18.6): `params` keeps the placeholder for the log, the viewer and a recording; the
+    // value goes to the app only, through `wire`.
+    const session = this.host.current();
+    const account = this.accountText(args.text, args.account, session);
+    if (account !== null && !account.ok) return Promise.resolve(fail(`Error ${account.code}: ${account.message}`));
     const params: Record<string, unknown> = {
       text: args.text,
       replace: args.replace ?? true,
       submit: args.submit ?? false,
+      ...(account !== null ? { account: args.account ?? this.runAccount } : {}),
       ...(this.userEyes() ? { noScroll: true } : {}),
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
+    const wire = account !== null && account.ok ? { text: account.value, kind: account.kind } : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
-    if (args.dry_run === true) return this.dryRun("type_text", "type", params);
+    if (args.dry_run === true) {
+      if (wire === undefined) return this.dryRun("type_text", "type", params);
+      const { account: _account, ...plain } = params;
+      return this.dryRun("type_text", "type", { ...plain, text: "", kind: wire.kind });
+    }
     return this.act(
       "type",
       params,
@@ -3949,7 +4073,45 @@ export class TaplineTools {
       undefined,
       undefined,
       args.brief,
+      undefined,
+      wire,
     );
+  }
+
+  /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
+  private runAccount: string | undefined;
+
+  /**
+   * What a `type_text` types when its text is a test account's value (AGENT-TOOLS 1.13 §18.6): null when it isn't one,
+   * else the value with the kind of field it may go into, or why not. The words carry no `Error code:` start, so `run`
+   * can say which step.
+   *
+   * Hook for `drive` (task 15): its `account` argument goes through here too, as `named`, for the steps it types.
+   */
+  private accountText(
+    text: string,
+    named: string | undefined,
+    session: SessionInfo | undefined,
+  ): { ok: true; value: string; kind: "secure" | "plain" } | { ok: false; code: string; message: string } | null {
+    const mentions = text.includes("${account.");
+    if (!mentions && named === undefined) return null;
+    const loaded = this.options.accounts;
+    if (loaded === undefined) return { ok: false, code: "bad_params", message: "no accounts are loaded; start Tapline with --accounts FILE." };
+    if (loaded.store === null) return { ok: false, code: "bad_params", message: loaded.blocked };
+    if (!mentions) {
+      return { ok: false, code: "bad_params", message: `account "${named ?? ""}" is named but the text has no \${account.username} or \${account.password}; the text is the whole value.` };
+    }
+    // Without an app there is nothing to type into: the call answers `not_connected` before anything is sent.
+    if (session === undefined) return null;
+    const substituted = substituteAccount(text, loaded.store, named ?? this.runAccount, session.app.id ?? session.app.name);
+    if (!substituted.ok) return substituted;
+    if (substituted.field === null) return null;
+    // An older app ignores the kind and would type a password into any field.
+    if (!session.capabilities.includes("typeKind")) {
+      return { ok: false, code: "unsupported", message: "this app's Tapline is too old to type an account's value safely; update react-native-tapline." };
+    }
+    const field: AccountField = substituted.field;
+    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : "plain" };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {

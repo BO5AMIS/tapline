@@ -19,6 +19,8 @@ export interface WireError {
   refs?: string[];
   /** The candidates as elements (role, id, actions, frame), only for `ambiguous`. */
   candidates?: TaplineElement[];
+  /** Facts about a refusal that carry no text from the app (whether a field is secure, never its value). */
+  data?: { secure: boolean };
 }
 
 /** An error that maps 1:1 onto a protocol error response. */
@@ -26,19 +28,22 @@ export class TaplineError extends Error {
   readonly code: ErrorCode;
   readonly refs: string[] | undefined;
   readonly candidates: TaplineElement[] | undefined;
+  readonly data: { secure: boolean } | undefined;
 
-  constructor(code: ErrorCode, message: string, refs?: string[], candidates?: TaplineElement[]) {
+  constructor(code: ErrorCode, message: string, refs?: string[], candidates?: TaplineElement[], data?: { secure: boolean }) {
     super(message);
     this.name = 'TaplineError';
     this.code = code;
     this.refs = refs;
     this.candidates = candidates;
+    this.data = data;
   }
 
   toWire(): WireError {
     const wire: WireError = { code: this.code, message: this.message };
     if (this.refs) wire.refs = this.refs;
     if (this.candidates) wire.candidates = this.candidates;
+    if (this.data) wire.data = this.data;
     return wire;
   }
 }

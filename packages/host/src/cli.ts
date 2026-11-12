@@ -71,6 +71,8 @@ Options:
   --brief        For mcp and host: actions answer briefly (a call's brief: false overrides it); look is never brief
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
+  --accounts <file>  For mcp and host: test accounts (JSON; the tool types an account's username and password so the
+                 agent never sees them). The file must sit outside any git repo, or be ignored by it
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
                  default it opens the live view in a browser here and keeps the link (its key) from the agent
                  (or TAPLINE_VIEWER_LINK=1)
@@ -269,6 +271,7 @@ export function parseCli(argv: string[]) {
       "no-policy": { type: "boolean" },
       brief: { type: "boolean" },
       "ux-rules": { type: "string" },
+      accounts: { type: "string" },
       "viewer-link": { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -290,6 +293,7 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
     ...(values["no-policy"] === true ? { noPolicy: true } : {}),
     ...(values.brief === true ? { brief: true } : {}),
     ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
+    ...(values.accounts !== undefined ? { accounts: values.accounts } : {}),
     ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
   };
 }
@@ -335,7 +339,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "doctor": {
-      const results = await runDoctor();
+      const results = await runDoctor(values.accounts !== undefined ? { accountsFile: values.accounts } : {});
       process.stdout.write(`${formatDoctor(results, needsAPerson(results))}\n`);
       let failed = results.some((r) => r.status === "fail");
       if (values.app === true) {

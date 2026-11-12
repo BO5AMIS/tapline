@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { randomBytes } from "node:crypto";
+import { redactValue } from "./accounts.js";
 import { handleApi, safeEqual, type ApiHandler } from "./api.js";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { createPairCode, pairCodeExpiry, verifyPairCode } from "./pairing.js";
@@ -155,6 +156,11 @@ export interface TaplineHostOptions {
   agentTouchSlackMs?: number;
   /** Serves `POST /api/<tool>` (the thin call, AGENT-TOOLS 1.13 §18.10). Only a standalone `tapline host` sets it. */
   api?: ApiHandler;
+  /**
+   * Scrubs the text of everything the app sends back (answers, errors, log lines, crashes) before anything else reads
+   * it: how test accounts' values stay out of every answer (AGENT-TOOLS 1.13 §18.6).
+   */
+  redact?: (text: string) => string;
 }
 
 /** The longest touch another tool may announce (`POST /agent-touch`), in milliseconds. */
@@ -347,6 +353,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private sweeper: NodeJS.Timeout | undefined;
   private listenCalled = false;
   private closed = false;
+  private readonly redact: ((text: string) => string) | undefined;
 
   constructor(options: TaplineHostOptions) {
     super();
@@ -361,6 +368,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     this.logBufferSize = options.logBufferSize ?? 500;
     this.agentTouchSlackMs = options.agentTouchSlackMs ?? 1500;
     this.api = options.api;
+    this.redact = options.redact;
   }
 
   /**
@@ -959,10 +967,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
         if (pending === undefined) return;
         clearTimeout(pending.timer);
         session.pending.delete(parsed.data.id);
+        const redact = this.redact;
         if (parsed.data.ok) {
-          pending.resolve(parsed.data.result ?? {});
+          pending.resolve(redact === undefined ? (parsed.data.result ?? {}) : redactValue(parsed.data.result ?? {}, redact));
         } else {
-          const error = parsed.data.error;
+          const error = redact === undefined || parsed.data.error === undefined ? parsed.data.error : (redactValue(parsed.data.error, redact) as typeof parsed.data.error);
           pending.reject(
             new TaplineError(
               error?.code ?? "internal",
@@ -984,7 +993,9 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     }
   }
 
-  private recordEvent(session: Session, event: string, data: unknown): void {
+  private recordEvent(session: Session, event: string, raw: unknown): void {
+    // Pictures are skipped: they are large, and a username may show in one anyway (§18.6).
+    const data = this.redact === undefined || event === "frame" ? raw : redactValue(raw, this.redact);
     if (event === "frame") {
       const frame = appFrameSchema.safeParse(data);
       // Acknowledged on arrival, valid or not: the app counts frames in flight.

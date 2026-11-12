@@ -57,6 +57,24 @@ const TOOL_OF: Record<string, string> = {
   performance: "performance",
 };
 
+/** ASCII letters folded to lower case, and nothing else: names are ASCII, and `K` (Kelvin) is not a `k`. */
+function asciiLower(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => String.fromCharCode(letter.charCodeAt(0) + 32));
+}
+
+/**
+ * The existing name that differs from `name` only in case, else null (AGENT-TOOLS 1.13.1 item 5). `home` and `HOME` are
+ * one file on Windows and macOS, so the second is refused before anything is written. It compares names, never the
+ * file system, so it means the same on every OS.
+ */
+export function caseTwin(name: string, existing: Iterable<string>): string | null {
+  const others = [...existing];
+  // The exact name exists: it is the one meant, even when a twin from another OS sits next to it.
+  if (others.includes(name)) return null;
+  const folded = asciiLower(name);
+  return others.find((other) => asciiLower(other) === folded) ?? null;
+}
+
 /** The app's target (`testID`) as a tool target (`id`). */
 function toolTarget(target: unknown): unknown {
   if (typeof target !== "object" || target === null) return target;
