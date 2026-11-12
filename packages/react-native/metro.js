@@ -82,8 +82,12 @@ function offerMiddleware(dir) {
     };
     // Through a proxy (Tailscale Serve, a tunnel) the peer isn't on the Wi-Fi, whatever the socket says.
     const forwarded = req.headers['x-forwarded-for'] !== undefined || req.headers['tailscale-user-login'] !== undefined;
+    // A web page could make this request (it sends an Origin, or reaches us under its own name: DNS rebinding).
+    const host = String(req.headers.host ?? '').toLowerCase().replace(/:\d+$/, '');
+    const byAddress = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || (host.startsWith('[') && host.endsWith(']')) || host === 'localhost' || host.endsWith('.local');
+    const fromPage = req.headers.origin !== undefined || !byAddress;
     const address = req.socket && req.socket.remoteAddress;
-    if (forwarded || !isLocalNetwork(address)) return answer(403, { error: 'local network only' });
+    if (forwarded || fromPage || !isLocalNetwork(address)) return answer(403, { error: 'local network only' });
     const offer = readOffer(dir);
     const peer = (address ?? '').toLowerCase().replace(/^::ffff:/, '');
     // The first device to fetch it claims it, and only that device can pair with it.

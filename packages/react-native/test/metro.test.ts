@@ -71,7 +71,7 @@ describe('the development offer on Metro (zero-QR pairing)', () => {
     const handler = offerMiddleware(dir);
     const call = (url: string, remoteAddress: string, headers: Record<string, string> = {}) => {
       const out: { status?: number; body?: string; next: boolean } = { next: false };
-      const req = { url, headers, socket: { remoteAddress } } as unknown as import('http').IncomingMessage;
+      const req = { url, headers: { host: '192.168.1.20:8081', ...headers }, socket: { remoteAddress } } as unknown as import('http').IncomingMessage;
       const res = {
         writeHead: (status: number) => {
           out.status = status;
@@ -93,6 +93,9 @@ describe('the development offer on Metro (zero-QR pairing)', () => {
     expect(call('/tapline/offer', '100.101.102.104')).toMatchObject({ status: 403 });
     expect(call('/tapline/offer', '127.0.0.1', { 'x-forwarded-for': '100.101.102.104' })).toMatchObject({ status: 403 });
     expect(isLocalNetwork('fd7a:115c:a1e0::5')).toBe(false);
+    // what a web page could send: an Origin, or a name of its own pointed at this computer (DNS rebinding)
+    expect(call('/tapline/offer', '192.168.1.30', { origin: 'http://evil.example' })).toMatchObject({ status: 403 });
+    expect(call('/tapline/offer', '192.168.1.30', { host: 'evil.example:8081' })).toMatchObject({ status: 403 });
     expect(call('/index.bundle?platform=ios', '192.168.1.30')).toMatchObject({ next: true });
     expect(isLocalNetwork('::ffff:10.1.2.3')).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });

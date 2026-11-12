@@ -131,6 +131,20 @@ export function isLocalNetwork(address: string | undefined): boolean {
   return (/^f[cd][0-9a-f]{2}:/.test(a) && !a.startsWith("fd7a:115c:a1e0:")) || a.startsWith("fe80:");
 }
 
+/**
+ * A request a web page could have made: it carries an Origin (the app's own fetch sends none), or it names a
+ * host that isn't an address (DNS rebinding: a page's own name pointed at this computer). Such requests never
+ * get a pairing offer.
+ */
+export function fromAWebPage(headers: Record<string, string | string[] | undefined>): boolean {
+  if (headers["origin"] !== undefined) return true;
+  const raw = headers["host"];
+  const host = (typeof raw === "string" ? raw : "").toLowerCase().replace(/:\d+$/, "");
+  const ipv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+  const ipv6 = host.startsWith("[") && host.endsWith("]");
+  return !(ipv4 || ipv6 || host === "localhost" || host.endsWith(".local"));
+}
+
 /** One form of a peer's address for comparisons (IPv4-mapped IPv6 → IPv4). */
 export function peerAddress(address: string | undefined): string {
   return (address ?? "").toLowerCase().replace(/^::ffff:/, "");
@@ -440,7 +454,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     }
     // Through a proxy (Tailscale Serve, a tunnel) the peer isn't on the Wi-Fi, whatever the socket says.
     const forwarded = req.headers["x-forwarded-for"] !== undefined || req.headers["tailscale-user-login"] !== undefined;
-    if (forwarded || !isLocalNetwork(req.socket.remoteAddress)) {
+    if (forwarded || fromAWebPage(req.headers) || !isLocalNetwork(req.socket.remoteAddress)) {
       answer(403, { error: "local network only" });
       return true;
     }

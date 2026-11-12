@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { isLocalNetwork, type TaplineHost } from "../src/server.js";
+import { fromAWebPage, isLocalNetwork, type TaplineHost } from "../src/server.js";
 import { TaplineTools } from "../src/tools.js";
 import { FakeApp, TOKEN, startHost } from "./helpers.js";
 
@@ -133,5 +133,11 @@ describe("an offer is the fetching device's alone", () => {
     const res = await fetch(`http://127.0.0.1:${port}/tapline/offer`, { headers: { "x-forwarded-for": "100.101.102.103" } });
     expect(res.status).toBe(403);
     expect(isLocalNetwork("fd7a:115c:a1e0::1")).toBe(false);
+    // a web page in the user's browser: it sends an Origin, or reaches us under its own name (DNS rebinding)
+    expect(fromAWebPage({ host: "127.0.0.1:7210", origin: "http://evil.example" })).toBe(true);
+    expect(fromAWebPage({ host: "evil.example:7210" })).toBe(true);
+    expect(fromAWebPage({ host: "192.168.1.20:7210" })).toBe(false);
+    const page = await fetch(`http://127.0.0.1:${port}/tapline/offer`, { headers: { origin: "http://evil.example" } });
+    expect(page.status).toBe(403);
   });
 });

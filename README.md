@@ -224,14 +224,18 @@ order, pair again (or give each agent a fixed `--port`).
   it off, for a test phone with test data. The answer must come from the live view page in a
   browser, and when the check can't be made, nothing is touched. This guards against an agent's
   mistakes. An agent that can run any command on your computer could still get around it (it could
-  also edit the policy), so give such agents only the access you would give a person.
+  also edit the policy), so give such agents only the access you would give a person. The policy
+  checks touches (`tap`, `long_press`, `toggle`, `swipe`); it doesn't check `type_text` with
+  `submit`, `open_url` or `app_command`.
 - **Action log.** Every action, by the agent or a person, is one JSON line in
   `~/.tapline/log/`. Typed text is logged only as its length. Files are kept for 14 days;
   `--no-log` turns it off.
 - **Pairing without a QR code** is for your own test phone on your own Wi-Fi. An offer exists
   only for 10 minutes after the agent calls `pair`, goes only to devices on the local network
-  (not Tailscale, not through a proxy), and belongs to the first device that fetches it: no
-  other device can pair with it. The Connect prompt is your consent. A tool that makes real
+  (not Tailscale, not through a proxy, never to a web page), and belongs to the first device that
+  fetches it: no other device can pair with it. A device on the same Wi-Fi that asks before your
+  phone does could take it; your phone then doesn't ask to connect, which is the sign. Use the QR
+  code (`pair` with the scheme) on a network you don't trust. The Connect prompt is your consent. A tool that makes real
   touches on the same phone (Tapwright) could accept it, so keep this to phones that only you drive.
 - To unpair one phone, open `<your-scheme>://tapline/forget` on it (deleting the app doesn't: iOS
   keeps the pairing in the keychain). To unpair every phone,
