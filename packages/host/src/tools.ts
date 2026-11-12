@@ -715,7 +715,9 @@ export class TaplineTools {
       lines.push(
         silent !== undefined
           ? silent
-          : state === "background" || state === "inactive"
+          : state === "inactive"
+          ? `${last.session.app.name} disconnected at ${when} after iOS put something in front of it (a system prompt such as a password request, a call, or Control Center). Tapline can't see or answer it: ask the user to deal with it on the phone. The app reconnects by itself.`
+          : state === "background"
           ? `${last.session.app.name} disconnected at ${when} after it went to the background (the user switched apps or locked the phone, and iOS paused it). Ask the user to open the app again: it reconnects by itself.`
           : `${last.session.app.name} disconnected at ${when} (${last.reason}). If the app is still open, it reconnects by itself.`,
       );
@@ -724,7 +726,7 @@ export class TaplineTools {
       "No app is connected to Tapline.",
       ...lines,
       `This host listens at ${url} on ${name}.`,
-      'To connect a phone, call `pair` with the app\'s URL scheme ("scheme" in app.json, e.g. "myapp") and show the user the QR code. They scan it with the phone\'s camera and tap Connect in the app.',
+      'To connect a phone, call `pair`. A development build loading its code from this computer then asks by itself: the user taps Connect. Other builds: pass the app\'s URL scheme ("scheme" in app.json, e.g. "myapp") and show the user the QR code to scan.',
       "The phone needs to be on the same Wi-Fi as this computer, and the app must be a build with Tapline turned on, open in the foreground.",
       "A phone that paired with this host before reconnects by itself while the app is open; one paired with a host on another port (e.g. before a restart) needs `pair` again. Once it connects, retry.",
     ].join("\n");

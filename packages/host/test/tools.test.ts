@@ -751,6 +751,17 @@ describe("after the app went to the background", () => {
     expect(text).toContain("went to the background");
     expect(text).toContain("open the app");
   });
+
+  it("says when iOS put something in front of the app (a system prompt), not that it went to the background", async () => {
+    const { app, tools } = await setup(defaultHandler)();
+    app.send({ type: "event", event: "appState", data: { state: "inactive" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    app.ws.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const text = textOf(await tools.look({}));
+    expect(text).toContain("after iOS put something in front of it (a system prompt");
+    expect(text).not.toContain("went to the background");
+  });
 });
 
 describe("app commands and waiting", () => {
