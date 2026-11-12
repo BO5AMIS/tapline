@@ -294,7 +294,8 @@ describe('off screen', () => {
     const error = await failure(run(() => typeText({ target: { testID: 'field' }, text: 'x' })));
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^off_screen: e\d+ input id=field is off screen \(at 20,900; the screen is 400x800\)\. /);
-    expect(error.message).toContain('Scroll to it first (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
+    // Not inside a scroll view (AGENT-TOOLS 1.12 §16.2): the refusal says why no scroll helps.
+    expect(error.message).toContain("It isn't inside a scroll view, so no scroll can bring it on screen; pass force: true to call its handler anyway.");
     expectUntouched(onChangeText, calls);
     await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }));
     expect(onChangeText).toHaveBeenCalledWith('x');
