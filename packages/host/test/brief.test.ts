@@ -325,7 +325,7 @@ describe("tool text", () => {
     const brief = CORE_INSTRUCTIONS.indexOf("- `brief: true` on an action, `run` or `drive` cuts the answer to its first line");
     expect(settled).toBeGreaterThan(-1);
     expect(brief).toBeGreaterThan(settled);
-    expect(CORE_INSTRUCTIONS).toContain("then `...N more: look`; a new screen shows its headers, its actionable elements and its new text.");
+    expect(CORE_INSTRUCTIONS).toContain("then `…<n> more: look shows them.`; a new screen shows its headers, its actionable elements and its new text.");
   });
 
   it("brief is on the shapes of the action tools and not on look", async () => {
