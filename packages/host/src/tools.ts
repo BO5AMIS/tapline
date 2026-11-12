@@ -495,6 +495,9 @@ export interface ToolsOptions {
   reloadWaitMs?: number;
   /** Extra delay after a reload before looking. Default 1500 ms. */
   reloadSettleMs?: number;
+  /** compare_screen waits for two pictures in a row to agree: the gap between them and the cap (ms; tests set them low). */
+  stillGapMs?: number;
+  stillCapMs?: number;
   /**
    * How `look` delivers screenshots: "inline" puts the image in the tool result; "file" saves it
    * and returns only its path, so a lead agent can hand it to a smaller model without seeing it.
@@ -999,6 +1002,8 @@ export class TaplineTools {
    */
   uxJourney: UxJourneyHook | null = null;
   private readonly reloadSettleMs: number;
+  private readonly stillGapMs: number;
+  private readonly stillCapMs: number;
   private readonly noScreenshot = new Set<string>();
   private readonly shotFiles: string[] = [];
   /** Sessions this agent has had an element list for (so later lists can be just the changes). */
@@ -1066,6 +1071,8 @@ export class TaplineTools {
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
+    this.stillGapMs = options.stillGapMs ?? 150;
+    this.stillCapMs = options.stillCapMs ?? 2000;
     // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
     host.on("touch", (session) => {
@@ -2659,7 +2666,7 @@ export class TaplineTools {
   private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
     let shot: ShotImage;
     try {
-      shot = await this.takeShot(session.id, options.width, 0.9);
+      shot = await this.stillShot(session.id, options.width, 0.9);
     } catch (error) {
       return { kind: "error", line: describeError(error) };
     }
@@ -2789,10 +2796,33 @@ export class TaplineTools {
     }
   }
 
+  /**
+   * A picture of the screen once it stopped moving: two in a row about 150 ms apart that agree (under 0.1% changed),
+   * at most 2 s. The app's settle sees React commits, not a native transition, so a screen pushed by the action before
+   * can still be sliding in (found on the phone, 2026-11-12). Past the cap, the last picture.
+   */
+  private async stillShot(sessionId: string, width: number, quality: number): Promise<ShotImage> {
+    let previous = await this.takeShot(sessionId, width, quality);
+    const started = Date.now();
+    while (Date.now() - started < this.stillCapMs) {
+      await sleep(this.stillGapMs);
+      const next = await this.takeShot(sessionId, width, quality);
+      if (next.data === previous.data) return next;
+      try {
+        const diff = diffImages(previous, next, { mask: [] });
+        if (diff.changedPercent < 0.1) return next;
+      } catch {
+        return next; // sizes differ (a rotation): nothing to wait for
+      }
+      previous = next;
+    }
+    return previous;
+  }
+
   /** Takes the screen and saves it as the reference `name` in `dir`. */
   private async saveReferenceHere(session: SessionInfo, name: string, width: number, dir: string): Promise<CallToolResult> {
     try {
-      return this.writeReference(dir, name, await this.takeShot(session.id, width, 0.9));
+      return this.writeReference(dir, name, await this.stillShot(session.id, width, 0.9));
     } catch (error) {
       return fail(describeError(error));
     }
@@ -2901,7 +2931,7 @@ export class TaplineTools {
     const save = (shot: ShotImage): CallToolResult => this.writeReference(folder, name, shot);
     if (args.update === true) {
       try {
-        return save(await this.takeShot(session.id, width, 0.9));
+        return save(await this.stillShot(session.id, width, 0.9));
       } catch (error) {
         return fail(describeError(error));
       }
