@@ -3,6 +3,7 @@ import { screenshotAvailable } from './actions';
 import { keepAwake } from './awake';
 import { deliverSavedCrash } from './crash';
 import { emitEvent, setEventSink } from './events';
+import { resetMedia } from './media';
 import { onRealTouch } from './touches';
 import { onFrameAck, setFrameAcks, stopLiveFeed } from './live';
 import { forgetLastTree } from './inspect';
@@ -117,7 +118,7 @@ export function collectDeviceInfo(): DeviceInfo {
 }
 
 export function defaultCapabilities(): string[] {
-  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck'];
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck', 'media'];
   if (screenshotAvailable()) capabilities.push('screenshot', 'feed');
   if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload', 'inspect');
   return capabilities;
@@ -181,6 +182,7 @@ export class TaplineClient {
     this.socket = null;
     resetNetworkCondition();
     resetTaplineTextSize();
+    resetMedia();
     if (this.ready) this.status('disconnected');
     this.ready = false;
     setLogSink(null);
@@ -406,6 +408,7 @@ export class TaplineClient {
     // The phone is never left offline or slow with nobody watching.
     resetNetworkCondition();
     resetTaplineTextSize();
+    resetMedia();
     // Nobody can watch while disconnected; the host asks again after it reconnects.
     stopLiveFeed();
     stopPerf();

@@ -156,6 +156,16 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "media",
+    {
+      title: "Add test pictures",
+      description: toolDescription("media"),
+      inputSchema: looseInput("media"),
+    },
+    guarded("media", (args) => tools.media(args)),
+  );
+
+  server.registerTool(
     "inspect",
     {
       title: "Find the code behind an element",

@@ -197,6 +197,8 @@ export { tree, setMeasurer, defaultMeasurer } from './inspect';
 export type { Measurer } from './inspect';
 export { getRoots } from './register';
 export { getLogEntries, installLogs, uninstallLogs } from './logs';
+export { registerTaplinePickerHook } from './media';
+export type { TaplinePickerHook, TaplinePickerPicture } from './media';
 export { TaplineError, PROTOCOL_VERSION } from './types';
 export type {
   Action,

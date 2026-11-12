@@ -19,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
+import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -292,6 +293,7 @@ export const toolShapes = {
     tap: targetField.optional().describe("Tap this first, then measure what it sets off"),
   },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
+  media: mediaShape,
   session_report: {
     since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
   },
@@ -825,7 +827,7 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 
 /** Every tool whose answer can end with a crash note (all but `crash`, which tells it in full). */
 const CRASH_NOTED_TOOLS = [
-  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "uxCheck", "checkLayout", "viewer", "compareScreen", "filmstrip",
+  "apps", "openApp", "pair", "look", "run", "inspect", "audit", "uxCheck", "media", "checkLayout", "viewer", "compareScreen", "filmstrip",
   "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
   "openUrl", "logs", "reload", "performance", "wait",
 ] as const satisfies readonly (keyof TaplineTools)[];
@@ -833,7 +835,7 @@ const CRASH_NOTED_TOOLS = [
 /** Every tool the agent calls, by handler name (the call log numbers these). */
 const CALL_TOOLS: Readonly<Record<string, string>> = {
   apps: "apps", openApp: "open_app", pair: "pair", look: "look", run: "run", inspect: "inspect", audit: "audit",
-  uxCheck: "ux_check", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
+  uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
   crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report",
@@ -1719,6 +1721,31 @@ export class TaplineTools {
     );
     const body = formatUxCheck(title, parsed.data, { textRules: this.uxRules.text, journeyRunning: this.uxJourney !== null });
     return text([body, ...this.takePersonNote()].join("\n"));
+  }
+
+  // -- media (AGENT-TOOLS 1.12 §17.6): the logic is in media.ts
+
+  /** What `media` remembers per app: the asset ids it added, and the picker skips a journey report reads. */
+  readonly mediaState = new MediaState();
+
+  async media(args: Shape<"media"> = {}): Promise<CallToolResult> {
+    if (args.remove === true && (args.add !== undefined || args.picker === true)) {
+      return fail("Error bad_params: media with remove: true takes nothing else; add and picker are separate calls.");
+    }
+    if (args.remove !== true && args.add === undefined) {
+      return fail("Error bad_params: media needs add (picture paths), or remove: true.");
+    }
+    if (args.picker === true && args.add === undefined) return fail("Error bad_params: media with picker: true needs add (picture paths).");
+    // Nothing touches the photo library with picker: true; adding to it needs the user's yes.
+    if (args.remove !== true && args.picker !== true && args.confirm !== true) return fail(CONFIRM_ERROR);
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    return runMedia(args, {
+      state: this.mediaState,
+      session,
+      request: (params) => this.host.request("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
+      describeError,
+    });
   }
 
   // -- check_layout
