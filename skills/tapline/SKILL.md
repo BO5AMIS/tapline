@@ -1,6 +1,6 @@
 ---
 name: tapline
-description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, audit, inspect, wait_for, open_url, app_command, logs), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
+description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, audit, inspect, wait_for, open_url, app_command, logs, crash, performance), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
 license: MIT
 compatibility: Needs the Tapline MCP server (`tapline mcp`, Node.js 20 or later) on the user's computer, and a development or TestFlight build of the app with Tapline's SDK switched on. Works from Windows, macOS or Linux.
 metadata:
@@ -133,6 +133,7 @@ and `y` only for things with no element.
 | jump straight to a screen | `open_url` with the app's deep link |
 | reach a state quickly (a language, a test sign-in, sample data, dark mode) | `app_command`; without a name it lists what the app offers. Put things back when you're done |
 | find out why a screen is broken | `logs`: JavaScript errors and failed requests (`[network]` lines) |
+| a crash or something slow | `Note: the app crashed` on an answer: `crash` shows the error, stack and components; `performance` measures JS heap, frames, stalls and slow renders |
 | start from a fresh state | `reload` (development builds) |
 | answer an alert | the app's alert shows as an `Alert:` line in the header (in a build with Tapline's native module, also an alert iOS draws, and the share sheet as `Alert: "Share sheet"`). With Tapline's stand-in its buttons are also in the list: tap them. When the note says it is an OS alert, Tapline can't tap it: ask the user to tap the button you name |
 | keep a flow to run again after a change | `record` with `start`, act, `record` with `stop`; later `replay` |
@@ -190,7 +191,7 @@ Tapline calls the app's handlers; it doesn't make real touches. `swipe` drags th
 Native's own touch system; a gesture built on react-native-gesture-handler, a pinch, a slider or a
 map can't be made this way: say so, don't guess.
 A refusal (`covered`, `off_screen`, `disabled`) on something a user is meant to reach is
-often the bug itself. Read `logs` after anything that misbehaves, and once at the end.
+often the bug itself. Read `logs` after anything that misbehaves (`level: "warning"` for warnings and errors), and once at the end; a failed `run` step already adds its logs.
 
 **The report**, one entry per problem:
 
