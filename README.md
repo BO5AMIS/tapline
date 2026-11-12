@@ -115,7 +115,7 @@ your agent at it.
 | `swipe` | a finger dragged from `x0, y0` to `x1, y1` over `seconds`, through React Native's touch system (a sheet's swipe to close, a pan view) |
 | `app_command` | the app's own test commands (switch language, sign in as a test user, sample data …) and the built-in light/dark switch |
 | `wait_for` | wait until something appears or is gone, or the network is quiet |
-| `compare_screen` | compare the screen with a saved reference picture: what changed, where, marked in red |
+| `compare_screen` | compare the screen with a saved reference picture: matches or differs (a share that may change, parts to ignore), what changed, where, marked in red; a check in scripts, with the pictures kept next to the script |
 | `filmstrip` | several frames in one image, for animations and loading states |
 | `record`, `replay` | save a test run as a script (shared format, version 1) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml]` (exit 0 all held, 1 a step stopped, 2 couldn't start) |
 | `viewer` | opens the live view in a browser on your computer, with what the agent does marked on it; you can tap, scroll and type there too. The agent never sees its link |

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0, "the Regression Update" (unreleased)
+
+A script now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
+Tapwright.
+
+- `compare_screen` answers `Matches` or `Differs`. `threshold` is the share of the screen that may change and
+  still match (default 0.5%). `ignore` paints out elements or areas that always change, such as a clock. A
+  difference names its regions and the elements there, and shows a picture with the changes in red. A
+  reference saved at another size is refused with both sizes.
+- In `run` and scripts, a `compare_screen` step, or `expect: {"matches": name}` on a step, is a check: the
+  batch stops with `expect_failed` when the screen differs.
+- `record` keeps `compare_screen` calls as checks and copies their reference pictures next to the script, so
+  the script and its pictures travel together. `replay` looks there first.
+- `tapline replay --update-references` saves new reference pictures when a change is intended. A failed check
+  saves its picture next to the script, and the JUnit report names it.
+
 ## 1.1.0, "the Autopilot Update" (2026-11-12)
 
 From the screen to the code: Tapline now names the file and line of your app that drew any element on
