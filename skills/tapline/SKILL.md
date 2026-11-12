@@ -1,6 +1,6 @@
 ---
 name: tapline
-description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, audit, inspect, wait_for, open_url, app_command, logs, crash, performance), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
+description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, audit, inspect, wait_for, open_url, app_command, logs, crash, performance, session_report), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
 license: MIT
 compatibility: Needs the Tapline MCP server (`tapline mcp`, Node.js 20 or later) on the user's computer, and a development or TestFlight build of the app with Tapline's SDK switched on. Works from Windows, macOS or Linux.
 metadata:

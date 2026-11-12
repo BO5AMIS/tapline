@@ -1,6 +1,6 @@
 {
   "name": "tapline-host",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "Tapline host: lets AI agents see and drive your own React Native / Expo app on a test phone on the same Wi-Fi (MCP server and CLI).",
   "license": "MIT",
   "repository": {

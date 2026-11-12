@@ -126,6 +126,7 @@ your agent at it.
 | `open_url` | deep links |
 | `logs` | the app's console output and JavaScript errors, by level, text and count |
 | `crash` | the app's last fatal JavaScript error, with its stack and components; every answer notes a crash |
+| `session_report` | where this session's calls went: per tool, failures, and the waste to cut; also `tapline report` |
 | `performance` | JS heap, frames, stalls and the slowest renders while you wait or after a tap; reload time in development builds; limits as a check in scripts |
 | `reload` | reload the JavaScript bundle (development builds) |
 | `wait` | let something load, then look |

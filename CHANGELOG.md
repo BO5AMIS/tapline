@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.4.0, "the Fewer Steps Update" (unreleased)
+
+The same check now takes fewer calls. The JLD tester's iPhone runs needed about 1.5 times the calls of
+Android; this release goes after where they went. The interface is AGENT-TOOLS 1.11, shared with Tapwright.
+
+- An action (`tap`, `long_press`, `toggle`, `type_text`) on an element that is in the list but off
+  screen scrolls it into view and acts, in one call: `Scrolled to it, then tapped e41 button "Save"
+  id=save.` The safety check runs on the target before the scroll; `dry_run` says where it would tap.
+- `not_found` names up to 3 close matches with their refs (`Closest: e12 button "Save draft"
+  id=save-draft, e30 text "Saved" (off screen, below).`): another case or word order, one inside the
+  other, or a small typo.
+- Every call is logged, reads too, with the agent's name and the answer's size (never typed text,
+  pictures or log text). `session_report` and `tapline report` count the calls per tool and the
+  failures, and flag the waste: a look right after an answer that already had the changes, a retry
+  after `not_found`, scroll hunts, and actions that could have been one `run`.
+- `app_command network`: `offline`, `3g`, `lossy` or `normal` for the app's own requests. Every
+  answer says the condition while it is on, and it goes back to normal by itself when the session ends.
+  Tapline's own connection is never slowed.
+- Language, region and text size without the phone's Settings: the standard `app_command` names
+  `language`, `region` and `text_size`, with the values both tools share. The SDK checks the values,
+  `useTaplineFontScale()` lets an app follow `text_size`, a switch to or from a right-to-left language
+  reloads a development build, and `tapline init` adds `language` and `region` for i18next and
+  expo-localization.
+- The skill has `run` examples for the common shapes (a sheet, a form, a tab tour) and a list of ways
+  to spend fewer calls.
+
 ## 1.3.1 (unreleased)
 
 Fixes only, from a tester's feedback on the sibling tool.
