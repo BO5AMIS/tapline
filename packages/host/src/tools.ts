@@ -4188,7 +4188,8 @@ export class TaplineTools {
     try {
       return await this.journeyStarted(args, goal, session);
     } finally {
-      this.journeyBusy = undefined;
+      // Only the start releases its own hold (a stop never takes it over: it answers busy while this runs).
+      if (this.journeyBusy === "starting") this.journeyBusy = undefined;
       if (this.journeyRun === undefined) this.journeyApp = undefined;
     }
   }
@@ -4338,7 +4339,7 @@ export class TaplineTools {
       }
       return await this.journeyStopped(args, running, args.reached);
     } finally {
-      this.journeyBusy = undefined;
+      if (this.journeyBusy === "stopping") this.journeyBusy = undefined;
     }
   }
 
