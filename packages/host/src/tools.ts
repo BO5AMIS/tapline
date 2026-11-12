@@ -16,11 +16,13 @@ import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { Confirmations } from "./confirm.js";
 import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
   MAX_STEPS,
   RUN_TIMEOUT_MS,
   RUN_TOOLS,
+  UNDER_KEYS,
   describeRunStep,
   expectFailure,
   parseError,
@@ -276,6 +278,14 @@ export const toolShapes = {
     all: z.boolean().optional().describe("The last 5 crashes instead of only the newest"),
   },
   reload: { look: lookField },
+  performance: {
+    launch: z
+      .boolean()
+      .optional()
+      .describe("true: reload the app's JavaScript and time it to the first settled screen (development builds only; not a cold start)"),
+    seconds: z.number().min(0.5).max(30).optional().describe("Measure for this long, 0.5 to 30 seconds (default 3)"),
+    tap: targetField.optional().describe("Tap this first, then measure what it sets off"),
+  },
   wait: { seconds: z.number().min(0.1).max(30).describe("How long to wait, 0.1 to 30 seconds"), screenshot: screenshotField },
   run: {
     steps: z
@@ -283,7 +293,7 @@ export const toolShapes = {
       .min(1)
       .max(MAX_STEPS)
       .describe(
-        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves). expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold.',
+        'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves), performance. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold; on a performance step, under: limits such as {"launch_s": 2, "drops": 0, "fps_min": 50, "busy_ms": 200, "js_heap_mb": 80}.',
       ),
     trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
     dry_run: z
@@ -640,6 +650,15 @@ function toWireTarget(target: Target): WireTarget {
   return { x: target.x ?? 0, y: target.y ?? 0 };
 }
 
+/** A target as the agent wrote it, in words: `id=save`, `"Save"`, `e3`, `120,300`. */
+function targetWords(target: Target): string {
+  if (target.id !== undefined) return `id=${target.id}`;
+  if (target.text !== undefined) return JSON.stringify(target.text);
+  if (target.label !== undefined) return JSON.stringify(target.label);
+  if (target.ref !== undefined) return target.ref;
+  return `${target.x ?? 0},${target.y ?? 0}`;
+}
+
 function candidateLines(details: unknown): string[] {
   const lines: string[] = [];
   const bareRefs: string[] = [];
@@ -762,7 +781,7 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 const CRASH_NOTED_TOOLS = [
   "apps", "openApp", "pair", "look", "run", "inspect", "audit", "checkLayout", "viewer", "compareScreen", "filmstrip",
   "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
-  "openUrl", "logs", "reload", "wait",
+  "openUrl", "logs", "reload", "performance", "wait",
 ] as const satisfies readonly (keyof TaplineTools)[];
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
@@ -802,6 +821,8 @@ export class TaplineTools {
   private replayContext: { referencesDir: string; diffDir: string; update: boolean } | null = null;
   /** Where the latest failed check of the running batch saved its picture. */
   private diffSaved: string | null = null;
+  /** What the last `performance` call measured, for the `under` limits of a `run` step. */
+  private lastPerf: PerfMeasure | undefined;
   /** The screen size in points from the latest list or overlay, for the live viewer's 0..1 positions. */
   private lastScreen: { w: number; h: number } | undefined;
   private shotCount = 0;
@@ -1120,6 +1141,23 @@ export class TaplineTools {
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
         return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
       }
+      const under = step.expect?.under;
+      if (under !== undefined) {
+        if (step.tool !== "performance") {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): under goes only on a performance step.`);
+        }
+        const unknown = badUnderKeys(under);
+        if (unknown.length > 0) {
+          return fail(
+            `Error bad_params: step ${i + 1} (${describeRunStep(step)}): under has ${unknown.map((key) => JSON.stringify(key)).join(", ")}; the limits are ${UNDER_KEYS.join(", ")}.`,
+          );
+        }
+      }
+      // A step's own look and screenshot are ignored (§9.1).
+      if (step.tool === "performance") {
+        delete params["look"];
+        delete params["screenshot"];
+      }
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
@@ -1159,7 +1197,18 @@ export class TaplineTools {
         break;
       }
       notes.push(...stepNotes(said, i + 1));
-      if (step.expect !== undefined) {
+      if (step.expect?.under !== undefined) {
+        // AGENT-TOOLS §15.3: the limits a performance step must keep; every broken one is listed.
+        const measured = this.lastPerf;
+        if (measured !== undefined) {
+          const checked = checkUnder(step.expect.under, measured);
+          notes.push(...checked.notes.map((note) => `Note (step ${i + 1}): ${note}`));
+          if (checked.missed.length > 0) {
+            stop = { index: i, code: "expect_failed", message: `${checked.missed.join("; ")}.`, rest: [] };
+            break;
+          }
+        }
+      } else if (step.expect !== undefined) {
         const missed = await this.expectMissed(step.expect);
         if (missed !== null) {
           stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
@@ -1231,8 +1280,11 @@ export class TaplineTools {
     const total = steps.length;
     const first = steps[0] as Step;
     const head = `Would run ${total} step${total === 1 ? "" : "s"}`;
-    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(first.tool)) {
-      const answer = await this.runStep({ ...first, dry_run: true } as Step);
+    // A performance step with a tap: the tap resolves like any touch; nothing is measured (AGENT-TOOLS §15.3).
+    const perfTap = first.tool === "performance" ? (first as Record<string, unknown>)["tap"] : undefined;
+    const probe = perfTap !== undefined ? ({ tool: "tap", target: perfTap } as Step) : first;
+    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(probe.tool)) {
+      const answer = await this.runStep({ ...probe, dry_run: true } as Step);
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       const [line, ...rest] = said.split("\n");
       if (answer.isError === true) {
@@ -1241,6 +1293,10 @@ export class TaplineTools {
       }
       const would = (line ?? "").replace(/^Would /, "would ");
       return text([`${head}; step 1 ${would}`, ...rest].join("\n"));
+    }
+    if (first.tool === "performance") {
+      const p = first as Record<string, unknown>;
+      return text(`${head}; step 1 would ${p["launch"] === true ? "reload the app and time it to the first settled screen" : `measure ${Number(p["seconds"] ?? 3)} s`}.`);
     }
     return text(`${head}; step 1 would ${describeRunStep(first)}.`);
   }
@@ -1274,6 +1330,8 @@ export class TaplineTools {
         return this.appCommand(quiet as Shape<"app_command">);
       case "compare_screen":
         return this.compareStep(rest as Shape<"compare_screen">);
+      case "performance":
+        return this.performance(rest as Shape<"performance">);
     }
   }
 
@@ -3030,6 +3088,112 @@ export class TaplineTools {
     }
     await sleep(this.reloadSettleMs);
     return this.withLook(this.host.current() ?? session, "Reloaded; the app reconnected.");
+  }
+
+  // -- performance (AGENT-TOOLS §15.3)
+
+  /**
+   * `launch`: a JavaScript reload (development builds), timed from the request to the new session's first
+   * settled screen. Stops with the answer when the reload can't be made or the app doesn't come back.
+   */
+  private async timedReload(session: SessionInfo): Promise<{ stop: CallToolResult } | { session: SessionInfo; seconds: number }> {
+    const started = Date.now();
+    try {
+      // The app goes away on purpose: that is no crash.
+      this.host.expectEnd(session.id);
+      await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+    } catch (error) {
+      // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
+      const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
+      if (!worked) {
+        this.host.expectEnd(session.id, false);
+        if (error instanceof TaplineError && error.code === "unsupported") {
+          return { stop: fail(`Error unsupported: launch is a JavaScript reload, and only development builds can do one (${error.message}).`) };
+        }
+        return { stop: fail(describeError(error)) };
+      }
+    }
+    const deadline = Date.now() + this.reloadWaitMs;
+    let fresh: SessionInfo | undefined;
+    while (fresh === undefined) {
+      const now = this.host.current();
+      if (now !== undefined && now.id !== session.id) fresh = now;
+      else if (Date.now() > deadline) {
+        return { stop: fail(`Error timeout: the app hadn't reconnected ${Number((this.reloadWaitMs / 1000).toFixed(1))} s after the reload; try look in a few seconds.`) };
+      } else await sleep(100);
+    }
+    // The first settled screen: the app waits until React hasn't committed for a moment (§6).
+    await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 }).catch(() => undefined);
+    return { session: fresh, seconds: (Date.now() - started) / 1000 };
+  }
+
+  /** One measuring window in the app: start, (the tap,) wait out `seconds`, stop. */
+  private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>): Promise<PerfResult> {
+    const id = { sessionId: session.id };
+    try {
+      await this.host.request("perfStart", {}, id);
+    } catch (error) {
+      if (error instanceof TaplineError && error.code === "unsupported") {
+        throw new TaplineError("unsupported", "this app's Tapline is too old for performance; update react-native-tapline.");
+      }
+      throw error;
+    }
+    const started = Date.now();
+    try {
+      if (press !== undefined) await this.host.request("press", press, id);
+      const rest = seconds * 1000 - (Date.now() - started);
+      if (rest > 0) await sleep(rest);
+    } catch (error) {
+      await this.host.request("perfStop", {}, id).catch(() => undefined);
+      throw error;
+    }
+    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", {}, id));
+    if (!parsed.success) throw new TaplineError("internal", "the app returned performance numbers the host could not read.");
+    return parsed.data;
+  }
+
+  async performance(args: Shape<"performance"> = {}): Promise<CallToolResult> {
+    this.lastPerf = undefined;
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    if (args.launch === true && args.tap !== undefined) {
+      return fail("Error bad_params: launch reloads the app and tap taps in it; give one of them.");
+    }
+    const seconds = args.seconds ?? 3;
+    try {
+      let measure: PerfMeasure;
+      if (args.launch === true) {
+        const launched = await this.timedReload(session);
+        if ("stop" in launched) return launched.stop;
+        measure = { result: await this.measureWindow(launched.session, seconds), launchS: launched.seconds };
+      } else {
+        let press: Record<string, unknown> | undefined;
+        if (args.tap !== undefined) {
+          // The tap is a touch like any other: the safety policy decides first (as for filmstrip).
+          press = { target: toWireTarget(args.tap) };
+          const stale = this.staleRef(press);
+          if (stale !== null) return stale;
+          const gate = await this.policyGate(session, "tap", "press", press, listsFor(this.policy, session.app));
+          if ("stop" in gate) return gate.stop;
+        }
+        measure = { result: await this.measureWindow(session, seconds, press) };
+      }
+      this.lastPerf = measure;
+      if (this.recording !== null && !this.replaying) {
+        this.recording.steps.push({
+          method: "performance",
+          params: {
+            ...(args.launch === true ? { launch: true } : {}),
+            ...(args.seconds !== undefined ? { seconds: args.seconds } : {}),
+            ...(args.tap !== undefined ? { tap: args.tap } : {}),
+          },
+        });
+      }
+      const tapWords = args.tap === undefined ? undefined : targetWords(args.tap);
+      return text([perfFirstLine(measure, tapWords), ...formatPerfLines(measure.result), ...this.takePersonNote()].join("\n"));
+    } catch (error) {
+      return fail(describeError(error));
+    }
   }
 
   async wait(args: Shape<"wait">): Promise<CallToolResult> {

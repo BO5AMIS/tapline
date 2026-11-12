@@ -298,6 +298,16 @@ export function createMcpServer(tools: TaplineTools): McpServer {
   );
 
   server.registerTool(
+    "performance",
+    {
+      title: "Performance",
+      description: toolDescription("performance"),
+      inputSchema: toolShapes.performance,
+    },
+    (args) => tools.performance(args),
+  );
+
+  server.registerTool(
     "wait",
     {
       title: "Wait",

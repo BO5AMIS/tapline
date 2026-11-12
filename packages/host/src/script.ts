@@ -54,6 +54,7 @@ const TOOL_OF: Record<string, string> = {
   command: "app_command",
   waitFor: "wait_for",
   sleep: "wait",
+  performance: "performance",
 };
 
 /** The app's target (`testID`) as a tool target (`id`). */
@@ -147,7 +148,8 @@ export function readScript(text: string): SharedScript | null {
 /** A step a script can't keep: a ref (it doesn't survive a session). */
 export function refStep(steps: Step[]): number | null {
   const at = steps.findIndex((step) => {
-    const target = (step as Record<string, unknown>)["target"];
+    // A performance step's tap is a target too.
+    const target = (step as Record<string, unknown>)[step.tool === "performance" ? "tap" : "target"];
     return typeof target === "object" && target !== null && "ref" in target;
   });
   return at >= 0 ? at : null;

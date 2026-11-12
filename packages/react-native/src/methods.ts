@@ -3,6 +3,7 @@ import { checkLayout } from './checks';
 import { listCommands, runCommand } from './commands';
 import { overlay, tree } from './inspect';
 import { feedMethod, frameAfterAction } from './live';
+import { perfStart, perfStop } from './perf';
 import { waitFor } from './wait';
 
 export type MethodFn = (params: unknown) => Promise<unknown>;
@@ -43,6 +44,9 @@ export const methods: Record<string, MethodFn> = {
   inspect: (params) => inspect(params),
   audit: (params) => audit(params),
   reload: () => reload(),
+  perfStart: () => perfStart(),
+  perfStop: () => perfStop(),
+  perfSettle: () => settleOutcome(),
   screenshot: (params) => screenshot(params),
   feed: (params) => feedMethod(params),
   overlay: () => overlay(),

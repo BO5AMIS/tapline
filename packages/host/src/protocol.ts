@@ -231,4 +231,7 @@ export type Method =
   | "toggle"
   | "openURL"
   | "logs"
-  | "reload";
+  | "reload"
+  | "perfStart"
+  | "perfStop"
+  | "perfSettle";
