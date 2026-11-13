@@ -51,6 +51,10 @@ describe("drive: the answer", () => {
     three.roads.push(road("language", "trips_id", "trip-row", "Trip"));
     const b = await setup({ map: three, world: (w) => { w.screen = "settings"; w.goes["language|trip-row"] = "trips"; w.elements.language.push(button("e9", "trip-row", "Trip")); } });
     expect((await drive(b, { to: "trips_id" })).split("\n")[0]).toBe("Arrived at trips_id by 3 taps in 0.0 s (settings > general > language > trips_id).");
+    // The app declares trips/[id] with a link, but an empty id is no value: taps stay the way (as fillLink).
+    const emptyId = await setup({ map: three, world: (w) => { w.screen = "settings"; w.goes["language|trip-row"] = "trips"; w.elements.language.push(button("e9", "trip-row", "Trip")); } });
+    expect((await drive(emptyId, { to: "trips_id", with: { id: "" } })).split("\n")[0]).toBe("Arrived at trips_id by 3 taps in 0.0 s (settings > general > language > trips_id).");
+    expect(emptyId.made("openURL")).toBe(0);
     // By link then 1 tap: the link opens a parent screen the map knows, and a road goes on from there.
     const parent = baseMap();
     parent.places["language"] = place(["settings", "general", "language"], "wayfare://language");

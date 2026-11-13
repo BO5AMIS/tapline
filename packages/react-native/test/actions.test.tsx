@@ -194,7 +194,7 @@ describe('press / longPress', () => {
       expect(error.message).toMatch(/^covered: e\d+ button "Settings" is covered at \(70, 120\) by another view: /);
       expect(error.message).not.toMatch(/RCT/);
       // Outside every scroll view (like a button under a fixed bar), the hint doesn't suggest a scroll.
-      expect(error.message).toContain("It isn't inside a scroll view, so no scroll brings it out;");
+      expect(error.message).toContain("It isn't inside a scroll view, so it can't be scrolled clear of what covers it;");
       expect(error.message).not.toContain('scroll it out of the way');
     });
 

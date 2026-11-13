@@ -122,7 +122,8 @@ export function declaredLink(key: PlaceKey, known: KnownPlaces, given: Record<st
   const link = declared?.link;
   if (link === undefined || link === null || link === "") return null;
   const needs = declared?.params ?? [];
-  return needs.every((param) => given[param] !== undefined) ? link : null;
+  // As fillLink: a value that is missing or empty doesn't count, so taps stay the way.
+  return needs.every((param) => Object.hasOwn(given, param) && given[param] !== undefined && given[param] !== "") ? link : null;
 }
 
 export function samePlace(a: PlaceKey, b: PlaceKey, threshold = 0.75): boolean {

@@ -992,7 +992,7 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
       `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit, actor)}: a real tap would land there instead. ` +
         (scrolls
           ? 'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.'
-          : "It isn't inside a scroll view, so no scroll brings it out; dismiss what covers it, target something else or report it, or pass force: true to call the handler anyway."),
+          : "It isn't inside a scroll view, so it can't be scrolled clear of what covers it; dismiss the cover, target something else or report it, or pass force: true to call the handler anyway."),
     );
   };
   const refusal = await refusalAt(Math.round((left + right) / 2), Math.round((top + bottom) / 2));
