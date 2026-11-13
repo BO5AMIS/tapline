@@ -215,6 +215,8 @@ export interface GrantBookOptions {
   /** The audit log. Without one no grant covers a touch: a grant needs its line (§23). */
   audit: AuditSink | null;
   now?: () => Date;
+  /** The wall clock in ms, for the age of a lock (a lock's file time is the real time, whatever the grants' clock says). */
+  lockClock?: () => number;
   sleep?: (ms: number) => Promise<void>;
   staleMs?: number;
 }
@@ -231,12 +233,14 @@ export class GrantBook {
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly staleMs: number;
+  private readonly lockClock: () => number;
   private readonly statePath: string;
   private readonly lockPath: string;
 
   constructor(private readonly options: GrantBookOptions) {
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
+    this.lockClock = options.lockClock ?? Date.now;
     this.staleMs = options.staleMs ?? LOCK_STALE_MS;
     this.statePath = `${options.policyPath}.state.json`;
     this.lockPath = `${options.policyPath}.state.lock`;
@@ -449,7 +453,7 @@ export class GrantBook {
 
   private async stale(): Promise<boolean> {
     try {
-      return this.now().getTime() - (await stat(this.lockPath)).mtimeMs > this.staleMs;
+      return this.lockClock() - (await stat(this.lockPath)).mtimeMs > this.staleMs;
     } catch {
       return false;
     }
@@ -465,7 +469,7 @@ export class GrantBook {
     }
     try {
       const madeAt = (await stat(grabbed)).mtimeMs;
-      if (this.now().getTime() - madeAt <= this.staleMs) {
+      if (this.lockClock() - madeAt <= this.staleMs) {
         // It was fresh after all (it changed hands between our look and our rename): give it back.
         const text = await readFile(grabbed, "utf8").catch(() => "");
         await writeFile(this.lockPath, text, { flag: "wx" }).catch(() => undefined);

@@ -4932,9 +4932,7 @@ export class TaplineTools {
     const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
     if ("stop" in gate) return gate;
     if (gate.grant !== undefined) {
-      // A grant is a person's standing OK: like an OK given now, its move is no road (§18.2).
       this.logExtra = { grant: gate.grant.name };
-      this.setOk(true);
       return { grant: gate.grant };
     }
     if (gate.via === undefined) return {};
