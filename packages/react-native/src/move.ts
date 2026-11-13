@@ -1,5 +1,5 @@
-import { back, longPress, openURL, parseTarget, press, resolveTarget, swipe, toggle } from './actions';
-import { toElement } from './inspect';
+import { back, longPress, openURL, parseTarget, press, swipe, toggle } from './actions';
+import { parseRecipientGuard, type RecipientGuard } from './guard';
 import { currentPlace } from './place';
 import { TaplineError, isRecord, type PlaceState, type TaplineElement, type Target } from './types';
 
@@ -15,8 +15,11 @@ export interface MoveParams {
   method: MoveMethod;
   /** Exactly what the plain method takes. */
   params: Record<string, unknown>;
-  /** The host's policy check was made against this element; refuse with `stale` if the target now resolves to another. */
-  guard?: { id?: string; label?: string; text?: string };
+  /**
+   * The host's policy check was made against this element (the one that takes the touch). Every field counts, and an absent
+   * one must stay absent; the press refuses with `stale` right before it dispatches when the recipient differs.
+   */
+  guard?: RecipientGuard;
   /** Wait until this target is on screen, steady (same frame twice) and touchable (the press dry-run's checks pass). */
   next?: { target: Target; capMs: number };
 }
@@ -39,12 +42,8 @@ const METHODS: Record<MoveMethod, (params: unknown) => Promise<unknown>> = {
   swipe,
 };
 
-/** The methods that take a `target`, and the action a guard checks the target for. */
-const TARGETED: Partial<Record<MoveMethod, 'press' | 'longPress' | 'toggle'>> = {
-  press: 'press',
-  longPress: 'longPress',
-  toggle: 'toggle',
-};
+/** The methods that take a target and so check a guard. */
+const TARGETED: Partial<Record<MoveMethod, true>> = { press: true, longPress: true, toggle: true };
 
 /** How often the next target is looked at while it is waited for. */
 const POLL_MS = 40;
@@ -52,12 +51,6 @@ const MAX_CAP_MS = 10_000;
 
 function bad(message: string): TaplineError {
   return new TaplineError('bad_params', message);
-}
-
-function optionalString(value: unknown, name: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string') throw bad(`${name} must be a string`);
-  return value;
 }
 
 function parseMove(raw: unknown): MoveParams {
@@ -69,18 +62,7 @@ function parseMove(raw: unknown): MoveParams {
   const params = raw.params === undefined ? {} : raw.params;
   if (!isRecord(params)) throw bad('params must be an object');
   const parsed: MoveParams = { method: method as MoveMethod, params };
-  if (raw.guard !== undefined) {
-    if (!isRecord(raw.guard)) throw bad('guard must be an object with id, label or text');
-    const guard: NonNullable<MoveParams['guard']> = {};
-    if (Object.keys(raw.guard).length === 0) throw bad('guard needs at least one of id, label or text');
-    const id = optionalString(raw.guard.id, 'guard.id');
-    const label = optionalString(raw.guard.label, 'guard.label');
-    const text = optionalString(raw.guard.text, 'guard.text');
-    if (id !== undefined) guard.id = id;
-    if (label !== undefined) guard.label = label;
-    if (text !== undefined) guard.text = text;
-    parsed.guard = guard;
-  }
+  if (raw.guard !== undefined) parsed.guard = parseRecipientGuard(raw.guard);
   if (raw.next !== undefined) {
     if (!isRecord(raw.next)) throw bad('next must be {target, capMs}');
     parseTarget(raw.next.target); // the same checks as every target
@@ -89,27 +71,6 @@ function parseMove(raw: unknown): MoveParams {
     parsed.next = { target: raw.next.target as Target, capMs: Math.min(MAX_CAP_MS, Math.round(cap)) };
   }
   return parsed;
-}
-
-/**
- * The host's policy ran against an element the agent named; refuse when the target resolves to another one now (a list
- * recycled a row, a screen changed under it). Nothing is done then.
- */
-async function assertGuard(move: MoveParams): Promise<void> {
-  const hint = TARGETED[move.method];
-  const guard = move.guard;
-  if (hint === undefined || guard === undefined || move.params.target === undefined) return;
-  // A resolution error is the plain method's own answer (not_found, ambiguous, covered): let it travel, never skip the guard.
-  const { entry } = await resolveTarget(move.params.target, hint);
-  // What the host saw is `toElement`'s text (cut, display-normalised), so that is what the guard is compared with.
-  const info = toElement(entry, null, '');
-  const same =
-    (guard.id === undefined || guard.id === info.testID) &&
-    (guard.label === undefined || guard.label === info.label) &&
-    (guard.text === undefined || guard.text === info.text);
-  if (!same) {
-    throw new TaplineError('stale', 'stale: the target is another element now than the one the policy checked; look again.');
-  }
 }
 
 function sameFrame(a: TaplineElement['frame'], b: TaplineElement['frame']): boolean {
@@ -171,9 +132,10 @@ async function waitForNext(next: NonNullable<MoveParams['next']>): Promise<NonNu
 /** The `move` request. */
 export async function move(raw: unknown): Promise<MoveResult> {
   const parsed = parseMove(raw);
-  await assertGuard(parsed);
   const method = METHODS[parsed.method];
-  const done = await method(parsed.params);
+  // The touch itself checks the guard against the element that takes it, right before it dispatches (never a look-alike).
+  const params = parsed.guard !== undefined && TARGETED[parsed.method] !== undefined ? { ...parsed.params, recipientGuard: parsed.guard } : parsed.params;
+  const done = await method(params);
   const result: MoveResult = {
     done: isRecord(done) ? done : {},
     place: null,

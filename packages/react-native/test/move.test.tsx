@@ -1,6 +1,6 @@
 import { frame, mount, unmountAll, useFrames } from './helpers';
 import React, { useState } from 'react';
-import { AppRegistry, Dimensions, FlatList, Linking, PixelRatio, Pressable, Text, View } from 'react-native';
+import { AppRegistry, Dimensions, FlatList, Linking, PixelRatio, Pressable, Switch, Text, View } from 'react-native';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { act } from 'react-test-renderer';
@@ -183,16 +183,93 @@ describe('move', () => {
     expect(result.next?.element?.testID).toBe('next');
   });
 
+  // What the host sends: every policy-relevant field of the element that takes the touch, null when it is absent.
+  async function guardFor(testID: string): Promise<{ id: string | null; label: string | null; text: string | null; role: string | null }> {
+    resetRefs();
+    const seen = (await tree({})).elements.find((element) => element.testID === testID);
+    if (!seen) throw new Error(`no element ${testID}`);
+    return { id: seen.testID ?? null, label: seen.label || null, text: seen.text || null, role: seen.role || null };
+  }
+
   test('guard mismatch refuses with stale and does nothing', async () => {
     const onGo = jest.fn();
     await mount(<Two onGo={onGo} />);
     useFrames({ go: frame(20, 100, 200, 40), next: frame(20, 200, 200, 40) });
-    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: { id: 'delete-account' } })));
+    const right = await guardFor('go');
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: { ...right, id: 'delete-account' } })));
     expect(error.code).toBe('stale');
     expect(onGo).not.toHaveBeenCalled();
-    const text = await failure(run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: { id: 'go', text: 'Delete' } })));
+    const text = await failure(run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: { ...right, text: 'Delete' } })));
     expect(text.code).toBe('stale');
     expect(onGo).not.toHaveBeenCalled();
+  });
+
+  test('a button that gained a label after the host checked it is stale: an absent field stays absent', async () => {
+    const onGo = jest.fn();
+    function Plain() {
+      return (
+        <Pressable testID="go" onPress={onGo}>
+          <Text>Continue</Text>
+        </Pressable>
+      );
+    }
+    await mount(<Plain />);
+    useFrames({ go: frame(20, 100, 200, 40) });
+    const unlabelled = await guardFor('go');
+    expect(unlabelled.label).toBeNull();
+    await run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: unlabelled }));
+    expect(onGo).toHaveBeenCalledTimes(1);
+    await unmountAll();
+    function Labelled() {
+      return (
+        <Pressable testID="go" accessibilityLabel="Delete account" onPress={onGo}>
+          <Text>Continue</Text>
+        </Pressable>
+      );
+    }
+    await mount(<Labelled />);
+    useFrames({ go: frame(20, 100, 200, 40) });
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: unlabelled })));
+    expect(error.code).toBe('stale');
+    expect(onGo).toHaveBeenCalledTimes(1);
+    // A guard that leaves fields out says they are absent, not "any".
+    const partial = await failure(run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: { id: 'go', text: 'Continue' } })));
+    expect(partial.code).toBe('stale');
+    expect(onGo).toHaveBeenCalledTimes(1);
+  });
+
+  test('the guard is held to the element that takes the press: a text inside a destructive parent is stale', async () => {
+    const onDelete = jest.fn();
+    function Refactored() {
+      return (
+        <Pressable testID="parent" accessibilityLabel="Delete account" onPress={onDelete}>
+          <Text testID="child">Continue</Text>
+        </Pressable>
+      );
+    }
+    await mount(<Refactored />);
+    useFrames({ parent: frame(20, 100, 200, 40), child: frame(30, 110, 100, 20) });
+    // The host checked the harmless text it named.
+    const named = await guardFor('child');
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'child' } }, guard: named })));
+    expect(error.code).toBe('stale');
+    expect(onDelete).not.toHaveBeenCalled();
+    // Checked against the parent that takes the touch, it goes through.
+    const parent = await guardFor('parent');
+    await run(() => move({ method: 'press', params: { target: { testID: 'child' } }, guard: parent }));
+    expect(onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  test('a toggle is held to its switch the same way', async () => {
+    const onChange = jest.fn();
+    await mount(<Switch testID="sw" value={false} onValueChange={onChange} />);
+    useFrames({ sw: frame(20, 100, 60, 30) });
+    const right = await guardFor('sw');
+    const error = await failure(run(() => move({ method: 'toggle', params: { target: { testID: 'sw' } }, guard: { ...right, label: 'Delete everything' } })));
+    expect(error.code).toBe('stale');
+    expect(onChange).not.toHaveBeenCalled();
+    await run(() => move({ method: 'toggle', params: { target: { testID: 'sw' } }, guard: right }));
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   test('a guard on a long text compares with the text the host saw (cut at the kept-text limit)', async () => {
@@ -204,13 +281,11 @@ describe('move', () => {
       </Text>,
     );
     useFrames({ long: frame(20, 100, 200, 40) });
-    resetRefs();
-    const seen = (await tree({})).elements.find((element) => element.testID === 'long');
-    expect(seen?.text.length).toBeLessThan(2500);
-    expect(seen?.textMore).toBeGreaterThan(0);
-    await run(() => move({ method: 'press', params: { target: { testID: 'long' } }, guard: { text: seen?.text } }));
+    const seen = await guardFor('long');
+    expect(seen.text?.length).toBeLessThan(2500);
+    await run(() => move({ method: 'press', params: { target: { testID: 'long' } }, guard: seen }));
     expect(onGo).toHaveBeenCalledTimes(1);
-    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'long' } }, guard: { text: long } })));
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'long' } }, guard: { ...seen, text: long } })));
     expect(error.code).toBe('stale');
     expect(onGo).toHaveBeenCalledTimes(1);
   });
@@ -218,7 +293,7 @@ describe('move', () => {
   test('a target that is not there is the plain method\'s not_found, not a skipped guard', async () => {
     await mount(<Two onGo={() => undefined} />);
     useFrames({ go: frame(20, 100, 200, 40), next: frame(20, 200, 200, 40) });
-    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'gone' } }, guard: { id: 'gone' } })));
+    const error = await failure(run(() => move({ method: 'press', params: { target: { testID: 'gone' } }, guard: { id: 'gone', label: null, text: null, role: null } })));
     expect(error.code).toBe('not_found');
   });
 
@@ -226,7 +301,8 @@ describe('move', () => {
     const onGo = jest.fn();
     await mount(<Two onGo={onGo} />);
     useFrames({ go: frame(20, 100, 200, 40), next: frame(20, 200, 200, 40) });
-    await run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: { id: 'go', text: 'Go' } }));
+    const right = await guardFor('go');
+    await run(() => move({ method: 'press', params: { target: { testID: 'go' } }, guard: right }));
     expect(onGo).toHaveBeenCalledTimes(1);
   });
 

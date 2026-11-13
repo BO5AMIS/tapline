@@ -21,7 +21,7 @@ import { reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
-import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
@@ -1273,8 +1273,15 @@ export class TaplineTools {
   }
   /** The place the latest element list showed, so an action's road doesn't read the app again (§18.2). */
   private observedPlace: { sessionId: string; place: Place } | undefined;
-  /** A person's OK was used for the touch in progress: its move is no road (§18.2). */
-  private okUsed = false;
+  /**
+   * Whether a person's OK was used for the action in progress: its move is no road (§18.2). Kept per action, so a reflex
+   * that runs inside it (its own action) can never reset or set the outer action's state.
+   */
+  private readonly okScope = new AsyncLocalStorage<{ used: boolean }>();
+  private setOk(used: boolean): void {
+    const state = this.okScope.getStore();
+    if (state !== undefined) state.used = used;
+  }
   /**
    * While a script replays (AGENT-TOOLS 1.9 §14.3): the references folder next to it (looked in first), where a
    * failed check puts its red picture, and whether the checks save instead of compare (`--update-references`).
@@ -1809,9 +1816,26 @@ export class TaplineTools {
     const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
     // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
     const url = typeof params["url"] === "string" ? params["url"] : "";
-    const known = tool === "open_url" ? [{ ref: "", role: "link", text: linkWords(url) } satisfies TreeElement] : call.known;
+    let known = tool === "open_url" ? [{ ref: "", role: "link", text: linkWords(url) } satisfies TreeElement] : call.known;
     const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" || tool === "open_url" ? tool : short ? "swipe" : null;
     const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
+    let guard = call.guard;
+    // The policy and the guard are about the element that receives the touch, which may be an ancestor of the one named (§18.4).
+    if (call.known !== undefined && (tool === "tap" || tool === "long_press" || tool === "toggle") && (checked || guard !== undefined)) {
+      const named = call.known[0];
+      const needs = tool === "tap" ? "press" : tool === "long_press" ? "longPress" : "toggle";
+      if (named !== undefined && !(named.actions ?? []).includes(needs)) {
+        // Not an actor itself: the app's own tap resolution (a dry run) says which element takes the touch.
+        const resolved = await this.resolveForPolicy(session, method, params);
+        if (resolved.kind === "error") {
+          this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
+          return { kind: "stop", answer: fail(resolved.text) };
+        }
+        if (resolved.elements.length !== 1 || resolved.elements[0] === undefined) return { kind: "stop", answer: fail("Error not_found: the touch's target could not be resolved for the policy check.") };
+        known = resolved.elements;
+        if (guard !== undefined) guard = guardOf(resolved.elements[0]);
+      }
+    }
     let waited: Waited | null = null;
     if (guardedTool !== null && checked) {
       const ready = await this.awaitOk(session, guardedTool, method, params, lists, known);
@@ -1820,13 +1844,13 @@ export class TaplineTools {
     }
     let granted: OkVia | undefined;
     const wire = call.pipelined
-      ? { method: "move", params: { method, params, ...(call.guard !== undefined ? { guard: call.guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
+      ? { method: "move", params: { method, params, ...(guard !== undefined ? { guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
       : { method, params };
     const timeoutMs = call.pipelined ? (call.next?.capMs ?? 0) + 15_000 : undefined;
     let raw: unknown;
     try {
       const run = async (): Promise<unknown> => {
-        this.okUsed = false;
+        this.setOk(false);
         if (guardedTool !== null && checked) {
           // After a wait for a person, the element is read again: a change during the wait must be caught (§11.3).
           const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known);
@@ -3338,8 +3362,13 @@ export class TaplineTools {
     this.lastTouch = { ...(point !== undefined ? { point } : {}), ...(frame ? { frame } : {}) };
   }
 
+  /** Runs one action in its own approval scope (see `okScope`). */
+  private act(...args: Parameters<TaplineTools["actScoped"]>): ReturnType<TaplineTools["actScoped"]> {
+    return this.okScope.run({ used: false }, () => this.actScoped(...args));
+  }
+
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
-  private async act(
+  private async actScoped(
     method: string,
     params: unknown,
     describe: (result: unknown) => string,
@@ -3381,7 +3410,7 @@ export class TaplineTools {
       try {
         const timeoutMs = answerTimeoutMs(method, params);
         const run = async (): Promise<unknown> => {
-          this.okUsed = false;
+          this.setOk(false);
           if (preflight !== undefined) {
             const stop = await preflight();
             if (stop !== null) throw new PolicyStop(stop);
@@ -3499,7 +3528,7 @@ export class TaplineTools {
       }
     }
     if (threwLine !== null && !threwSaid) extra.push(`Note: ${threwLine}`);
-    if (road !== null && response.isError !== true) extra.push(...(await this.roadEnd(session, road, { method, params, result }, this.okUsed)));
+    if (road !== null && response.isError !== true) extra.push(...(await this.roadEnd(session, road, { method, params, result }, this.okScope.getStore()?.used === true)));
     const capMs = typeof result === "object" && result !== null && "settleCapMs" in result ? (result as { settleCapMs: unknown }).settleCapMs : undefined;
     if (typeof capMs === "number" && Number.isFinite(capMs) && capMs > 0) {
       extra.push(`Note: the screen was still changing after ${Number((capMs / 1000).toFixed(3))} s (an animation or video); positions may be mid-change.`);
@@ -4803,7 +4832,7 @@ export class TaplineTools {
     if ("stop" in gate) return gate;
     if (gate.via === undefined) return {};
     this.logExtra = { confirmed: true, confirmed_by: gate.via };
-    this.okUsed = true;
+    this.setOk(true);
     return { via: gate.via };
   }
 

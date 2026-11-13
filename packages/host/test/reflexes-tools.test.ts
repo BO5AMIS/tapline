@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { callTool } from "../src/dispatch.js";
+import { Dialogs, OK_ALLOW, OK_FIELD, type ElicitClient } from "../src/elicit.js";
 import type { MapFile, MapReflex } from "../src/mapfile.js";
 import type { PolicyFile } from "../src/policy.js";
 import type { TaplineHost } from "../src/server.js";
@@ -195,6 +196,32 @@ describe("a reflex goes through the same policy as a single call", () => {
     const answer = await callTool(s.tools, "tap", { target: { text: "General" } });
     expect(answer.isError).not.toBe(true);
     expect(reflexLines(textOf(answer))).toEqual([REFLEX_LINE]);
+  });
+});
+
+describe("an approved touch is no road, even when an arrival reflex runs inside it (PR 9 review, P2)", () => {
+  it("a reflex that taps Not now after an approved Delete trip doesn't let the outer action save the destructive road", async () => {
+    const client: ElicitClient = { canShowForm: () => true, elicit: async () => ({ action: "accept", content: { [OK_FIELD]: OK_ALLOW } }) };
+    const s = await setup({
+      map: mapWith({ ...rate, at: "trips_id" }),
+      policy: { version: 1, confirm: ["delete"], block: [] },
+      tools: { dialogs: new Dialogs(client, {}) },
+      world: (w) => {
+        w.elements.trips = [...w.elements.trips, ...sheet()];
+        w.onPress = (testID) => {
+          if (testID === "not-now") w.elements.trips = withoutSheet(w.elements.trips);
+        };
+      },
+    });
+    await callTool(s.tools, "look", { screenshot: false });
+    const answer = await callTool(s.tools, "tap", { target: { id: "delete-trip" } });
+    expect(answer.isError).not.toBe(true);
+    expect(pressed(s, "delete-trip")).toBe(1);
+    expect(pressed(s, "Not now")).toBe(1);
+    expect(textOf(answer)).toContain(REFLEX_LINE);
+    await s.registry.flushAll();
+    expect(s.file().roads.some((r) => JSON.stringify(r.move.target).includes("delete-trip"))).toBe(false);
+    expect(textOf(answer)).toContain("not saved as a road");
   });
 });
 

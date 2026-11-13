@@ -103,7 +103,7 @@ describe("drive: pipelined moves", () => {
     expect(textOf(answer)).toMatch(/^Error off_route: stopped at step 1 of 2 \(tap "General"\): it is another element now than the one the policy checked\. Now at: settings \(known\)\. Done: 0 moves\. Nothing else was touched\./);
     expect(textOf(answer)).not.toContain("Arrived");
     const [first] = moves(s);
-    expect(first?.guard).toEqual({ id: "general-row", label: "General", text: "General" });
+    expect(first?.guard).toEqual({ id: "general-row", label: "General", text: "General", role: "button" });
     // The road isn't blamed for a stale target.
     expect(s.file().roads.every((r) => r.failed === 0)).toBe(true);
   });
@@ -111,7 +111,7 @@ describe("drive: pipelined moves", () => {
   it("the second move carries the guard of next.element", async () => {
     const s = await setup();
     await callTool(s.tools, "drive", { to: "language" });
-    expect(moves(s)[1]?.guard).toEqual({ id: "language-row", label: "Language", text: "Language" });
+    expect(moves(s)[1]?.guard).toEqual({ id: "language-row", label: "Language", text: "Language", role: "button" });
   });
 
   it("without the capability it falls back and gives the same answer, with the same checks", async () => {

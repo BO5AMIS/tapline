@@ -83,6 +83,8 @@ export interface World {
   alerts?: unknown[];
   /** Answer `move` with this error code once, as the app's guard would. */
   moveError?: { code: string; message: string };
+  /** A touch that resolves to the element with this ref lands on this element instead: its actionable parent. */
+  parents?: Record<string, El>;
   /** A touch on this testID is refused (a sheet covers it), dry runs too. */
   refuse?: (testID: string, screen: Screen) => { code: string; message: string } | undefined;
 }
@@ -105,6 +107,10 @@ export function baseWorld(): World {
 type Wire = { testID?: string; text?: string; label?: string };
 const findOn = (world: World, target: Wire | undefined): El | undefined =>
   world.elements[world.screen].find((e) => (target?.testID !== undefined && e.testID === target.testID) || (target?.text !== undefined && e.text === target.text) || (target?.label !== undefined && e.label === target.label));
+
+/** The element a touch really lands on: the named one, or its actionable parent. */
+const recipientOf = (world: World, named: El | undefined): El | undefined => (named === undefined ? undefined : (world.parents?.[named.ref] ?? named));
+const fingerprintOf = (element: El): Record<string, string | null> => ({ id: element.testID ?? null, label: element.label ?? null, text: element.text ?? null, role: element.role });
 
 export interface Setup {
   tools: TaplineTools;
@@ -157,7 +163,7 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
       case "press":
       case "longPress":
       case "toggle": {
-        const element = findOn(world, params["target"] as Wire | undefined);
+        const element = recipientOf(world, findOn(world, params["target"] as Wire | undefined));
         if (element === undefined) return { ok: false, error: { code: "not_found", message: "No element matches" } };
         const refused = world.refuse?.(element.testID ?? "", world.screen);
         if (refused !== undefined) return { ok: false, error: refused };
@@ -199,7 +205,7 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
         return { ok: true, result: { source: "expo-router", places: [{ route: ROUTES.settings, link: "wayfare://settings", params: [] }, { route: ROUTES.trips, link: "wayfare://trips/[id]", params: ["id"] }] } };
       case "move": {
         const inner = (params["params"] ?? {}) as Record<string, unknown>;
-        const guard = params["guard"] as { id?: string; label?: string; text?: string } | undefined;
+        const guard = params["guard"] as Record<string, string | null | undefined> | undefined;
         if (world.moveError !== undefined) {
           const error = world.moveError;
           delete world.moveError;
@@ -207,15 +213,19 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
         }
         const method = String(params["method"]);
         if (guard !== undefined) {
-          const element = world.swapTo !== undefined ? world.elements[world.screen].find((e) => e.testID === world.swapTo) : findOn(world, inner["target"] as Wire | undefined);
-          if (element !== undefined && ((guard.id !== undefined && guard.id !== element.testID) || (guard.label !== undefined && guard.label !== element.label) || (guard.text !== undefined && guard.text !== element.text))) {
-            return { ok: false, error: { code: "stale", message: "stale: the target is another element now" } };
+          const element = world.swapTo !== undefined ? world.elements[world.screen].find((e) => e.testID === world.swapTo) : recipientOf(world, findOn(world, inner["target"] as Wire | undefined));
+          // Like the app: every field of the recipient must equal the guard's, and a missing field means absent, never "any".
+          if (element !== undefined) {
+            const actual = fingerprintOf(element);
+            if (Object.keys(actual).some((key) => (guard[key] ?? null) !== actual[key])) {
+              return { ok: false, error: { code: "stale", message: "stale: the target is another element now" } };
+            }
           }
         }
         const done = perform(method, inner);
         if (done === "ignore" || !done.ok) return done;
         const next = params["next"] as { target?: Wire } | undefined;
-        const found = next?.target !== undefined ? findOn(world, next.target) : undefined;
+        const found = next?.target !== undefined ? recipientOf(world, findOn(world, next.target)) : undefined;
         return {
           ok: true,
           result: {

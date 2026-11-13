@@ -72,10 +72,12 @@ export function planWay(map: AppMap, from: Place | null, to: { name: string; lin
 export type TouchTool = "tap" | "long_press" | "toggle" | "swipe" | "back" | "open_url";
 export type TouchMethod = "press" | "longPress" | "toggle" | "swipe" | "back" | "openURL";
 
+/** What the policy checked, field by field: null means the field is absent, and the app holds it to absent. */
 export interface Guard {
-  id?: string;
-  label?: string;
-  text?: string;
+  id: string | null;
+  label: string | null;
+  text: string | null;
+  role: string | null;
 }
 
 export interface TouchCall {
@@ -289,13 +291,13 @@ function build(move: Move, values: Record<string, string>, names?: MapRoad["name
   }
 }
 
-const guardOf = (element: TreeElement): Guard | undefined => {
-  const guard: Guard = {};
-  if (typeof element.testID === "string" && element.testID !== "") guard.id = element.testID;
-  if (typeof element.label === "string" && element.label !== "") guard.label = element.label;
-  if (typeof element.text === "string" && element.text !== "") guard.text = element.text;
-  return Object.keys(guard).length > 0 ? guard : undefined;
-};
+/** Every policy-relevant field of the element that receives the touch; an absent field stays absent (never a wildcard). */
+export const guardOf = (element: TreeElement): Guard => ({
+  id: typeof element.testID === "string" && element.testID !== "" ? element.testID : null,
+  label: typeof element.label === "string" && element.label !== "" ? element.label : null,
+  text: typeof element.text === "string" && element.text !== "" ? element.text : null,
+  role: typeof element.role === "string" && element.role !== "" ? element.role : null,
+});
 
 /** How a road names an element now: by id, else label, else text (§18.2). */
 function moveTargetOf(element: TreeElement): { target: NonNullable<Move["target"]>; names: NonNullable<MapRoad["names"]> } | null {

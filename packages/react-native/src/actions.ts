@@ -1,5 +1,6 @@
 import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
 import { keyboardState } from './keyboard';
+import { assertRecipient, parseRecipientGuard, type RecipientGuard } from './guard';
 import { startedRequests } from './network';
 import { waitWhileLoading } from './loading';
 import { nativeModule } from './native';
@@ -1167,21 +1168,29 @@ function focusInput(entry: Entry, frame: Frame | null): void {
   }
 }
 
+/** The guard a `move` hands to the touch it makes, never part of a plain call. */
+function recipientGuardOf(params: Record<string, unknown>): RecipientGuard | undefined {
+  return params.recipientGuard === undefined ? undefined : parseRecipientGuard(params.recipientGuard);
+}
+
 async function pressLike(
   kind: 'press' | 'longPress',
   rawParams: unknown,
 ): Promise<PressResult> {
   const params = paramsOf(rawParams);
   const afterMs = kind === 'press' ? againAfter(params.again) : undefined;
+  const guard = recipientGuardOf(params);
   const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true, params.dryRun !== true);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
+    assertRecipient(guard, entry);
     selectTab(snapshot, entry.tab);
     return { element: toElement(entry, null), ...keyboardNote(closeKeyboardFor(entry)), ...(await settleOutcome()) };
   }
   if (entry.navBack) {
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
+    assertRecipient(guard, entry);
     const { route: _route, ...outcome } = await back({});
     return { element: toElement(entry, null), ...outcome };
   }
@@ -1228,6 +1237,8 @@ async function pressLike(
   const forced = await checkedAfterScroll(params.force === true, reach, () => assertReachable(current, actor, frame));
   // A dry run (AGENT-TOOLS 1.8 §11.4): every check ran; nothing is touched.
   if (params.dryRun === true) return { element, dryRun: true, ...pointOf(frame), ...forced, settledMs: 0 };
+  // The policy checked this very element: refuse when the one that takes the touch is another now (§18.4).
+  assertRecipient(guard, actor);
   const closedKeyboard = closeKeyboardFor(actor);
   const requestsBefore = startedRequests();
   let threw: string | undefined;
@@ -2325,6 +2336,7 @@ export async function toggle(
     const { element } = await elementFor(control);
     return { element, value: params.value, unchanged: true, ...(reach.scrolled ? { scrolled: true as const } : {}), settledMs: 0 };
   }
+  assertRecipient(recipientGuardOf(params), control);
   const closedKeyboard = closeKeyboardFor(control);
   callHandler('onValueChange', handler, [next]);
   const outcome = await settleOutcome();

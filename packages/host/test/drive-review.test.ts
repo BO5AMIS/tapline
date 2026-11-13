@@ -237,6 +237,47 @@ describe("the guard and the wait for a person", () => {
   });
 });
 
+describe("the policy runs on the element that receives the press (PR 9 review, P1)", () => {
+  // A saved road names the text "Continue"; an app refactor put it inside a Pressable labelled "Delete account".
+  const refactored = (w: Parameters<NonNullable<SetupOptions["world"]>>[0], pressed: string[]): void => {
+    const child: El = { ...note("e9", "Continue"), actions: [] };
+    w.elements.settings = [child];
+    w.parents = { e9: button("e8", "account-delete", "Delete account") };
+    w.goes["settings|account-delete"] = "trips";
+    w.onPress = (id) => pressed.push(id);
+  };
+  const textRoad: MapRoad = { ...road("settings", "trips_id", "x", "Continue"), move: { tool: "tap", target: { text: "Continue" } }, names: { text: "Continue" } };
+
+  it("with the move request: asks for the OK and never runs the destructive handler", async () => {
+    const pressed: string[] = [];
+    const s = await setup({ map: withRoads(textRoad), policy: { version: 1, confirm: ["delete"], block: [] }, world: (w) => refactored(w, pressed) });
+    const answer = await drive(s, { to: "trips_id", by: "taps" });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("needs_confirmation");
+    expect(textOf(answer)).toContain("Delete account");
+    expect(pressed).toEqual([]);
+    expect(s.world.screen).toBe("settings");
+  });
+
+  it("without the move request: the same, by the plain press", async () => {
+    const pressed: string[] = [];
+    const s = await setup({ map: withRoads(textRoad), capabilities: ["tree", "press", "logs", "dryRun", "place", "places"], policy: { version: 1, confirm: ["delete"], block: [] }, world: (w) => refactored(w, pressed) });
+    const answer = await drive(s, { to: "trips_id", by: "taps" });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("needs_confirmation");
+    expect(pressed).toEqual([]);
+  });
+
+  it("a blocked parent is refused outright", async () => {
+    const pressed: string[] = [];
+    const s = await setup({ map: withRoads(textRoad), policy: { version: 1, confirm: [], block: ["delete"] }, world: (w) => refactored(w, pressed) });
+    const answer = await drive(s, { to: "trips_id", by: "taps" });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("blocked");
+    expect(pressed).toEqual([]);
+  });
+});
+
 describe("long_press and toggle roads", () => {
   it("are driven as their own moves and counted as moves", async () => {
     const long: MapRoad = { ...road("settings", "general", "general-row", "General"), move: { tool: "long_press", target: { id: "general-row" } } };
