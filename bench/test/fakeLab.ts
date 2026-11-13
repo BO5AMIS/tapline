@@ -384,9 +384,14 @@ export class FakeLab {
     return null;
   }
 
-  /** As the real tools do (AGENT-TOOLS 1.13.1 item 3): an off-screen target in the list is scrolled into view first. */
+  /**
+   * As the real tools do (AGENT-TOOLS 1.13.1 item 3, §16.2): an off-screen target in the list, or one under the
+   * navigation bar, is scrolled into view clear of the bars first. One still covered at the scroll limit stays refused.
+   */
   private scrollToIt(el: El): void {
-    if (el.fixed || el.sheet || !this.refusal(el)?.startsWith("Error not_actionable: off_screen")) return;
+    const why = this.refusal(el);
+    const scrolls = why?.startsWith("Error not_actionable: off_screen") || why === "Error not_actionable: covered by the navigation bar";
+    if (el.fixed || el.sheet || !scrolls) return;
     this.scroll = Math.min(this.maxScroll, Math.max(0, el.y + el.h / 2 - H / 2));
   }
 

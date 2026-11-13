@@ -345,6 +345,16 @@ describe("check tables", () => {
     expect(r.text).toMatch(/^Error not_actionable: off_screen/);
     expect(lab.pressed).toBe("bottom");
   });
+  it("the fake lab scrolls a target out from under the navigation bar, and still refuses one no scroll clears", () => {
+    const lab = new FakeLab();
+    lab.scroll = 150; // lab-save (y 200) sits under the bar
+    expect(lab.call("tap", { target: { id: "lab-save" } }).text).toContain("Tapped lab-save");
+    expect(lab.pressed).toBe("save");
+    expect(lab.scroll).toBe(0);
+    const r = lab.call("tap", { target: { id: "lab-under-header" } });
+    expect(r.text).toBe("Error not_actionable: covered by the navigation bar");
+    expect(lab.pressed).toBe("save");
+  });
   it("resolves viewer points from a look", () => {
     const text = [
       `Screen ${W}x${H} pt @3x · 3 elements`,
