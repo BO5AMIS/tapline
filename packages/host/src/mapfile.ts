@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
 
 // The map file (AGENT-TOOLS 1.13 §18.9). The format is shared with Tapwright, so a field
@@ -542,6 +542,14 @@ export function readRouteSync(dir: string, relative: string): Record<string, unk
   } catch {
     return null;
   }
+}
+
+/** Writes a route's file inside the map folder (atomic, so a reader never sees half a file). Throws for a path outside it. */
+export async function saveRouteFile(dir: string, relative: string, data: string, io: MapIo = nodeMapIo()): Promise<void> {
+  const full = insideDir(dir, relative);
+  if (full === null) throw new Error(`a route file must be inside the map folder (${relative})`);
+  await io.mkdirp(dirname(full));
+  await writeAtomic(io, full, data);
 }
 
 async function readRoute(io: MapIo, dir: string, relative: string): Promise<Record<string, unknown> | null> {

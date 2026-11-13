@@ -3,6 +3,7 @@ import { readRouteSync, type MapReflex, type MapRoad } from "./mapfile.js";
 import { placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
 import { matchWord } from "./policy.js";
 import { looksLikeValue } from "./protocol.js";
+import { routeEdges, type RouteEdge } from "./routes.js";
 import { describeRunStep, type Step } from "./run.js";
 
 // The `map` tool (AGENT-TOOLS 1.13 §18.8): a read, and the way to edit what a map holds. It never touches the app.
@@ -185,31 +186,39 @@ const driveable = (road: MapRoad): boolean => road.by === "tapline" || road.by =
  * The cheapest chain of roads: a proven road costs 1, an unproven one 2. Equal cost goes to the chain with the road used most
  * recently. The graph is a few screens, and the search is capped so a tangled map can't stall a read.
  */
-export function cheapestWay(roads: MapRoad[], from: string, to: string, isProven: (road: MapRoad) => boolean): MapRoad[] | null {
-  const recent = (road: MapRoad): number => {
-    const at = Date.parse(road.last);
+export function cheapestWay(roads: MapRoad[], from: string, to: string, isProven: (road: MapRoad) => boolean, routes: RouteEdge[] = []): Array<MapRoad | RouteEdge> | null {
+  const recent = (leg: { last: string }): number => {
+    const at = Date.parse(leg.last);
     return Number.isNaN(at) ? 0 : at;
   };
-  let best: { cost: number; used: number; chain: MapRoad[] } | null = null;
+  // A route is one leg from its start to its end that costs a move for each of its steps (§18.5).
+  const legs: Array<{ leg: MapRoad | RouteEdge; from: string; to: string; cost: number }> = [
+    ...roads.filter(driveable).map((road) => ({ leg: road, from: road.from, to: road.to, cost: isProven(road) ? 1 : 2 })),
+    ...routes.map((route) => ({ leg: route, from: route.from, to: route.to, cost: route.moves })),
+  ];
+  let best: { cost: number; used: number; chain: Array<MapRoad | RouteEdge> } | null = null;
   let budget = 20_000;
-  const walk = (at: string, seen: Set<string>, chain: MapRoad[], cost: number, used: number): void => {
+  const walk = (at: string, seen: Set<string>, chain: Array<MapRoad | RouteEdge>, cost: number, used: number): void => {
     if (budget-- <= 0 || (best !== null && cost > best.cost)) return;
     if (at === to) {
       if (best === null || cost < best.cost || (cost === best.cost && used > best.used)) best = { cost, used, chain: [...chain] };
       return;
     }
-    for (const road of roads) {
-      if (road.from !== at || seen.has(road.to) || !driveable(road)) continue;
-      seen.add(road.to);
-      chain.push(road);
-      walk(road.to, seen, chain, cost + (isProven(road) ? 1 : 2), Math.max(used, recent(road)));
+    for (const next of legs) {
+      if (next.from !== at || seen.has(next.to)) continue;
+      seen.add(next.to);
+      chain.push(next.leg);
+      walk(next.to, seen, chain, cost + next.cost, Math.max(used, recent(next.leg)));
       chain.pop();
-      seen.delete(road.to);
+      seen.delete(next.to);
     }
   };
   walk(from, new Set([from]), [], 0, 0);
-  return best === null ? null : (best as { chain: MapRoad[] }).chain;
+  return best === null ? null : (best as { chain: Array<MapRoad | RouteEdge> }).chain;
 }
+
+/** A leg that is a saved route rather than a road. */
+export const isRouteLeg = (leg: MapRoad | RouteEdge): leg is RouteEdge => typeof leg.route === "string" && typeof leg.moves === "number";
 
 async function way(to: string, ctx: MapContext): Promise<MapAnswer> {
   const { map } = ctx;
@@ -222,15 +231,19 @@ async function way(to: string, ctx: MapContext): Promise<MapAnswer> {
   const link = saved !== undefined ? saved.link : (up?.link ?? null);
   if (link !== null && link !== "") return said(`Would drive to ${to} by link (${link}).`);
   if (here === null) return { text: "Error not_found: the app's current place isn't known, so no way can be planned; look at the screen first.", error: true };
-  const chain = cheapestWay(map.data().roads, here.name, to, (road) => map.isProven(road));
+  const chain = cheapestWay(map.data().roads, here.name, to, (road) => map.isProven(road), routeEdges(map));
   if (chain === null) {
     return { text: `Error not_found: no known way from ${here.name} to ${to}; drive it once (the driver), and it is remembered.`, error: true };
   }
-  const names = [here.name, ...chain.map((road) => road.to)].join(" > ");
-  const taps = chain.every((road) => road.move.tool === "tap");
-  const how = `${chain.length} ${taps ? (chain.length === 1 ? "tap" : "taps") : chain.length === 1 ? "move" : "moves"}`;
-  const unproven = chain.filter((road) => !map.isProven(road));
-  const state = unproven.length === 0 ? "all proven" : `unproven for build ${map.currentBuild()}: ${unproven.map((road) => `${road.from} > ${road.to}`).join(", ")}`;
+  const names = [here.name, ...chain.map((leg) => leg.to)].join(" > ");
+  // A route counts one move for each of its steps (§18.5).
+  const count = chain.reduce((sum, leg) => sum + (isRouteLeg(leg) ? leg.moves : 1), 0);
+  const taps = chain.every((leg) => !isRouteLeg(leg) && leg.move.tool === "tap");
+  const how = `${count} ${taps ? (count === 1 ? "tap" : "taps") : count === 1 ? "move" : "moves"}`;
+  const roads = chain.filter((leg): leg is MapRoad => !isRouteLeg(leg));
+  const unproven = roads.filter((road) => !map.isProven(road));
+  const via = chain.filter(isRouteLeg).map((leg) => `via route ${leg.route}`);
+  const state = [unproven.length === 0 ? "all proven" : `unproven for build ${map.currentBuild()}: ${unproven.map((road) => `${road.from} > ${road.to}`).join(", ")}`, ...via].join("; ");
   return said(`Would drive to ${to} by ${how}: ${names} (${state}).`);
 }
 

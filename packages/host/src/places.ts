@@ -370,6 +370,12 @@ export class AppMap {
     return this.dir;
   }
 
+  /** Registers a saved route's file under its name (§18.5). The file itself is written by `saveRoute`. */
+  addRoute(name: string, relative: string): void {
+    this.map.routes[name] = relative;
+    this.touch();
+  }
+
   /** The names of the saved routes that start or end at a place (§18.5). */
   routesAt(place: string): string[] {
     return Object.entries(this.map.routes)
@@ -802,6 +808,29 @@ export async function placeNow(source: PlaceSource, map: AppMap): Promise<Observ
     }
     const tree = treeResultSchema.safeParse(await source.request("tree", { peek: true }));
     return tree.success ? map.observe(tree.data) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where the app is, by name, from a read that writes nothing: a `replay` reads the map and never changes it (§18.9).
+ * Null when the place can't be read or isn't one the map holds.
+ */
+export async function placeSeen(source: PlaceSource, map: AppMap): Promise<string | null> {
+  try {
+    let key: PlaceKey | null = null;
+    if (source.capabilities.includes("place")) {
+      const state = placeStateSchema.safeParse(await source.request("place", {}));
+      key = state.success ? keyFromState(state.data) : null;
+    }
+    if (key === null) {
+      const tree = treeResultSchema.safeParse(await source.request("tree", { peek: true }));
+      if (tree.success) key = routeKey(tree.data) ?? signatureKey(tree.data);
+    }
+    if (key === null) return null;
+    const there = key;
+    return Object.entries(map.data().places).find(([, place]) => samePlace(place.key, there))?.[0] ?? null;
   } catch {
     return null;
   }

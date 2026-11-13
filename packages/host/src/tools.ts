@@ -10,7 +10,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
-import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
+import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
@@ -48,6 +48,7 @@ import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type Ux
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { escapeParams, routePathOf, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -210,6 +211,7 @@ export const toolShapes = {
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
     account: accountField,
+    as: z.string().optional().describe("While recording a route: save this text as the variable `${as}` (a name), which drive's `with` fills; the text typed now is not saved"),
     force: forceField,
     dry_run: dryRunField,
     look: lookField,
@@ -299,6 +301,7 @@ export const toolShapes = {
     stop: z.boolean().optional().describe("Stop and save the script (to path, else to the scripts folder under name)"),
     name: z.string().optional().describe("The script's name: letters, digits, '.', '_' and '-'"),
     path: z.string().optional().describe("Where stop saves the script file (optional)"),
+    route: z.string().optional().describe("Record a route for drive instead of a script: its name (letters, digits, '.', '_' and '-'). It starts from the place the app is at and is saved in the app's map folder"),
     action: z
       .enum(["start", "stop", "status", "discard"])
       .optional()
@@ -663,6 +666,8 @@ interface ScriptStep {
   fragile?: boolean;
   /** Typed into a password field: its text wasn't saved (never written to the file). */
   secret?: boolean;
+  /** A route's step whose text is a variable or an account's placeholder: `${` in it is not escaped. */
+  placeholder?: boolean;
 }
 
 const scriptSchema = z.object({
@@ -1212,7 +1217,13 @@ export class TaplineTools {
   private personActed = false;
   /** The next answer to the agent says a person used the app, once. */
   private personNotePending = false;
-  private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
+  private recording: {
+    name: string;
+    app: { name: string; id?: string };
+    steps: ScriptStep[];
+    /** Set while recording a route (AGENT-TOOLS 1.13 §18.5): where it starts, the variables its steps use, and the app's map. */
+    route?: { start: string; variables: Set<string>; map: AppMap };
+  } | null = null;
   private replaying = false;
   /** The place the latest element list showed, so an action's road doesn't read the app again (§18.2). */
   private observedPlace: { sessionId: string; place: Place } | undefined;
@@ -2192,6 +2203,10 @@ export class TaplineTools {
         const named = (params as { account?: unknown }).account;
         const used = typeof typed === "string" ? this.accountText(typed, typeof named === "string" ? named : undefined, session) : null;
         if (used !== null && !used.ok) return fail(`Error ${used.code}: step ${i + 1} (${describeRunStep(step)}): ${used.message}`);
+        // `as` is checked before any step runs too (§18.5): it goes only while a route records.
+        const as = (params as { as?: unknown }).as;
+        const badAs = typeof as === "string" ? this.asRefusal(as, typeof typed === "string" ? typed : "", typeof named === "string" ? named : undefined) : null;
+        if (badAs !== null) return fail(badAs.replace("bad_params: ", `bad_params: step ${i + 1} (${describeRunStep(step)}): `));
       }
       // Every reference name is checked before any step runs: a name with a path in it never reaches the disk.
       const names = [step.tool === "compare_screen" ? (params as { name?: unknown }).name : undefined, step.expect?.matches];
@@ -2951,7 +2966,9 @@ export class TaplineTools {
           if (stop !== null) throw new PolicyStop(stop);
         }
         // The app gets the value and the kind, not the account's name; the log, the viewer and a recording get `params`.
-        const sent = wire === undefined ? params : { ...(typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "account")) : {}), ...wire.values };
+        // `as` is a recording's name for the text, never the app's business.
+        const kept = typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "as" && (wire === undefined || key !== "account"))) : params;
+        const sent = wire === undefined ? kept : { ...(kept as Record<string, unknown>), ...wire.values };
         return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
       };
       // With the live viewer, a person watching goes first.
@@ -3075,9 +3092,14 @@ export class TaplineTools {
       const stable = await this.withIndexIfShared(params, chosen, result, session.id);
       // A password field's text is never saved in a script (Tapwright's review, M4). An account's value is a
       // placeholder in `params`, so the script keeps it and replays with the account.
-      const secret = wire === undefined && method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
-      const step: ScriptStep = { method, params: secret ? { ...stable, text: "" } : stable };
+      // `as` keeps a variable's placeholder instead, and a route keeps an account's too (AGENT-TOOLS 1.13 §18.5).
+      const typed = method === "type" && this.recording.route !== undefined ? routeTyped(stable) : null;
+      const secret = typed?.variable === undefined && wire === undefined && method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
+      const step: ScriptStep = { method, params: typed !== null && !secret ? typed.params : secret ? { ...stable, text: "" } : stable };
       if (secret) step.secret = true;
+      if (typed?.placeholder === true) step.placeholder = true;
+      if (typed?.variable !== undefined) this.recording.route?.variables.add(typed.variable);
+      if (typed?.account === true) this.recording.route?.variables.add("account");
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
@@ -3935,6 +3957,7 @@ export class TaplineTools {
     const op = args.action ?? (args.start === true ? "start" : args.stop === true ? "stop" : "status");
     switch (op) {
       case "start": {
+        if (args.route !== undefined) return this.startRoute(args.route, args.name);
         const name = (args.name ?? "").trim() || `session-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
         if (this.scriptPath(name) === null) {
           return fail("Error bad_params: give the script a name of letters, digits, '.', '_' and '-' (e.g. \"checkout\").");
@@ -3953,7 +3976,7 @@ export class TaplineTools {
         return text(
           this.recording === null
             ? `Not recording.\n${this.scriptList()}`
-            : `Recording "${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
+            : `Recording ${this.recording.route !== undefined ? "route " : ""}"${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
         );
       case "discard": {
         const was = this.recording?.name;
@@ -3963,6 +3986,7 @@ export class TaplineTools {
       case "stop": {
         const recording = this.recording;
         if (recording === null) return fail("Error bad_params: not recording; start with record { start: true, name }.");
+        if (recording.route !== undefined) return this.stopRoute(recording, recording.route, args.path);
         const path = args.path !== undefined && args.path.trim() !== "" ? args.path.trim() : this.scriptPath(recording.name);
         if (path === null) return fail("Error internal: no scripts folder is configured; give a path.");
         // A twin may have appeared while recording; nothing is written then, and the recording stays to stop again.
@@ -4006,6 +4030,63 @@ export class TaplineTools {
         return text(lines.join("\n"));
       }
     }
+  }
+
+  /** `record` with `route` (AGENT-TOOLS 1.13 §18.5): what follows is saved as a route from the place the app is at. */
+  private async startRoute(raw: string, given: string | undefined): Promise<CallToolResult> {
+    const name = routeSlug(raw);
+    if (name === null) return fail("Error bad_params: give the route a name of letters, digits, '.', '_' and '-' (e.g. \"sign_in\").");
+    if (given !== undefined && given.trim() !== "" && routeSlug(given) !== name) {
+      return fail(`Error bad_params: name the route in route only; name "${given}" isn't "${name}".`);
+    }
+    if (this.recording !== null) return fail(`Error bad_params: already recording "${this.recording.name}"; stop it first.`);
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const map = this.mapOf(session);
+    if (map === undefined) return fail("Error unsupported: this server keeps no map for this app, so a route can't be saved.");
+    const twin = caseTwin(name, Object.keys(map.data().routes));
+    if (twin !== null) return fail(`Error bad_params: the route "${name}" differs only in case from the existing "${twin}"; use that name.`);
+    const here = await placeNow(this.placeSource(session), map);
+    if (here === null) return fail("Error not_found: the app's current place isn't known, so a route can't start here; look at the screen first.");
+    this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [], route: { start: here.place.name, variables: new Set(), map } };
+    return text(
+      `Recording route "${name}" on ${session.app.name}, from ${here.place.name}. Every action from now on is a step; type_text with as saves its text as a variable. Stop with record { stop: true }.`,
+    );
+  }
+
+  /** `record` stop for a route: it ends at the place the app is at, and goes into the map folder's `routes/`. */
+  private async stopRoute(recording: NonNullable<TaplineTools["recording"]>, route: { start: string; variables: Set<string>; map: AppMap }, path: string | undefined): Promise<CallToolResult> {
+    if (path !== undefined && path.trim() !== "") return fail("Error bad_params: a route is saved in the app's map folder; path doesn't apply.");
+    const twin = caseTwin(recording.name, Object.keys(route.map.data().routes));
+    if (twin !== null) return fail(`Error bad_params: the route "${recording.name}" differs only in case from the existing "${twin}"; use that name.`);
+    const session = this.host.current();
+    const sameApp = session !== undefined && (session.app.id ?? session.app.name) === (recording.app.id ?? recording.app.name);
+    const end = sameApp ? await placeNow(this.placeSource(session), route.map) : null;
+    const steps = scriptSteps(recording.steps.map((step) => ({ ...step, params: escapeParams(step.params, step.placeholder === true) })));
+    const script = routeScript({ name: recording.name, app: recording.app.id ?? recording.app.name, start: route.start, end: end?.place.name, steps, variables: route.variables });
+    let saved: string;
+    try {
+      saved = await saveRoute(route.map.folder(), script, route.map);
+    } catch (error) {
+      // The recording stays, so stop can be tried again.
+      return fail(`Error internal: couldn't save the route: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.recording = null;
+    const way = end === null ? `from ${route.start}` : `${route.start} → ${end.place.name}`;
+    const lines = [`Saved route ${script.name} (${way}): ${steps.length} step${steps.length === 1 ? "" : "s"} to ${saved}.`];
+    if (route.variables.size > 0) lines.push(`Variables: ${[...route.variables].join(", ")}.`);
+    const ref = refStep(steps);
+    if (ref !== null) {
+      lines.push(`Note: step ${ref + 1} targets a ref, which won't exist on a new run, so replay refuses the route. Give that element a testID, or record it again by its text or label.`);
+    }
+    const secrets = recording.steps.filter((step) => step.secret === true).length;
+    if (secrets > 0) {
+      lines.push(`${secrets} step${secrets === 1 ? " types" : "s type"} into a password field: that text isn't saved. Use an account (\${account.password}) or as for it.`);
+    }
+    if (recording.steps.some((step) => step.method === "type" && step.secret !== true && step.placeholder !== true)) {
+      lines.push("The route keeps the other text typed in it (as makes a variable): keep it private.");
+    }
+    return text(lines.join("\n"));
   }
 
   /** `<script dir>/<script name>.references` and `.diff` for a script file. */
@@ -4064,7 +4145,9 @@ export class TaplineTools {
     // On Windows and macOS a twin in another case would be found as if it were this name, and on Linux not: refuse it everywhere.
     const scriptClash = given === "" ? this.scriptClash(name) : null;
     if (scriptClash !== null) return fail(scriptClash);
-    const path = given !== "" ? given : this.scriptPath(name);
+    let path = given !== "" ? given : this.scriptPath(name);
+    // A name that isn't a saved script may be a route in the app's map folder (§18.5).
+    if (given === "" && (path === null || !existsSync(path))) path = this.routePath(name) ?? path;
     if (path === null || !existsSync(path)) return fail(`Error not_found: no script "${given || name}".\n${this.scriptList()}`);
     let script: SharedScript | null;
     try {
@@ -4072,7 +4155,13 @@ export class TaplineTools {
     } catch (error) {
       return fail(`Error internal: couldn't read ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (script === null) return fail(`Error bad_params: ${path} isn't a script (format agent-tools-script, version 1).`);
+    if (script === null) return fail(`Error bad_params: ${path} isn't a script (format agent-tools-script, version 1 or 2).`);
+    // A route's variables are filled before anything runs; replay has no values to give, so one with a variable is refused (§18.5).
+    const accountStore = this.options.accounts?.store ?? undefined;
+    if (script.version === 2) {
+      const filled = substituteSteps(script.steps, {}, accountStore);
+      if (!filled.ok) return fail(`Error ${filled.code}: ${filled.message}`);
+    }
     const ref = refStep(script.steps);
     if (ref !== null) return fail(`Error bad_params: step ${ref + 1} targets a ref; a script needs an id, label, text or point.`);
     if (script.steps.length === 0) return text(`Ran 0 of 0 steps in 0.0 s.`);
@@ -4092,23 +4181,53 @@ export class TaplineTools {
       if (fresh.isError === true) notes.push("Note: couldn't start the app fresh (a release build has no reload); the script ran on the screen as it was.");
       else if (said.startsWith("Reload requested, but")) notes.push("Note: the app hadn't reconnected after starting fresh when the steps began.");
     }
-    this.replaying = true;
-    this.replayContext = {
-      referencesDir: this.scriptSideFolder(path, "references"),
-      diffDir: this.scriptSideFolder(path, "diff"),
-      update: options.updateReferences === true,
+    const scriptPath = path;
+    const execute = async (steps: Step[]): Promise<CallToolResult> => {
+      this.replaying = true;
+      this.replayContext = {
+        referencesDir: this.scriptSideFolder(scriptPath, "references"),
+        diffDir: this.scriptSideFolder(scriptPath, "diff"),
+        update: options.updateReferences === true,
+      };
+      try {
+        const answer = await this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false });
+        if (notes.length === 0) return answer;
+        const [top, ...rest] = answer.content;
+        return top !== undefined && top.type === "text"
+          ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] }
+          : answer;
+      } finally {
+        this.replaying = false;
+        this.replayContext = null;
+      }
     };
-    try {
-      const answer = await this.run({ steps: script.steps, look: args.look, screenshot: args.screenshot, brief: false });
-      if (notes.length === 0) return answer;
-      const [top, ...rest] = answer.content;
-      return top !== undefined && top.type === "text"
-        ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] }
-        : answer;
-    } finally {
-      this.replaying = false;
-      this.replayContext = null;
-    }
+    if (script.version !== 2) return execute(script.steps);
+    // A route starts at a place: it runs from there, after the fresh start (§18.5).
+    const outcome = await routeRunner.run(script, {}, this.routeContext(execute), accountStore);
+    return outcome.kind === "ran" ? outcome.answer : fail(`Error ${outcome.code}: ${outcome.message}`);
+  }
+
+  /** Where a saved route of that name is, in the current app's map folder; null when there is none. */
+  private routePath(name: string): string | null {
+    const session = this.host.current();
+    const map = session === undefined ? undefined : this.mapOf(session);
+    return map === undefined ? null : routePathOf(map, name);
+  }
+
+  /**
+   * What a route needs from this host (§18.5). `here` reads the app's place and writes nothing, so a replay never changes
+   * the map. Hook for `drive` (task 15): give the context a `driveTo` that takes the app to a place by link or roads;
+   * until then a route runs only from its own start.
+   */
+  private routeContext<R>(runSteps: (steps: Step[]) => Promise<R>): RouteContext<R> {
+    return {
+      here: async () => {
+        const session = this.host.current();
+        const map = session === undefined ? undefined : this.mapOf(session);
+        return session === undefined || map === undefined ? null : placeSeen(this.placeSource(session), map);
+      },
+      runSteps,
+    };
   }
 
   /** Whether an answer is brief: the call's own `brief`, else the server's `--brief` (AGENT-TOOLS 1.13 §13.4). */
@@ -4571,6 +4690,8 @@ export class TaplineTools {
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
     const hiddenField = this.hiddenTarget(args.target);
     if (hiddenField !== null) return Promise.resolve(hiddenField);
+    const badAs = this.asRefusal(args.as, args.text, args.account);
+    if (badAs !== null) return Promise.resolve(fail(badAs));
     // A test account's value (§18.6): `params` keeps the placeholder for the log, the viewer and a recording; the
     // value goes to the app only, through `wire`.
     const session = this.host.current();
@@ -4601,7 +4722,8 @@ export class TaplineTools {
     }
     return this.act(
       "type",
-      params,
+      // `as` is for the recording only: `act` keeps it out of what goes to the app.
+      args.as !== undefined ? { ...params, as: args.as } : params,
       (r) => {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
@@ -4620,6 +4742,16 @@ export class TaplineTools {
       undefined,
       wire,
     );
+  }
+
+  /** Why `as` can't be used on this typed text (AGENT-TOOLS 1.13 §18.5), or null: it goes only while a route records. */
+  private asRefusal(as: string | undefined, text: string, account: string | undefined): string | null {
+    if (as === undefined) return null;
+    if (this.recording?.route === undefined) return "Error bad_params: as goes only while recording a route (record with route).";
+    const problem = variableProblem(as);
+    if (problem !== null) return `Error bad_params: ${problem}`;
+    if (account !== undefined || text.includes("${account.")) return "Error bad_params: as can't go with an account's value; the route keeps its placeholder already.";
+    return null;
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
