@@ -98,11 +98,19 @@ export class ActionLog {
     }
   }
 
+  private scrub: ((value: unknown) => unknown) | undefined;
+
+  /** A backstop at the writer (AGENT-TOOLS 1.14 §20.3): the content values of every line are scrubbed, never its keys. */
+  setBackstop(scrub: ((value: unknown) => unknown) | undefined): void {
+    this.scrub = scrub;
+  }
+
   /** Appends one line. A log that can't be written never fails the action. */
   write(entry: Omit<ActionLogEntry, "t" | "source">, when?: Date): void {
     if (!this.ready) return;
     const at = when ?? this.now();
-    const line: ActionLogEntry = { t: at.toISOString(), source: "tapline", ...entry };
+    const made: ActionLogEntry = { t: at.toISOString(), source: "tapline", ...entry };
+    const line = this.scrub === undefined ? made : (this.scrub(made) as ActionLogEntry);
     try {
       appendFileSync(join(this.dir, `actions-${at.toISOString().slice(0, 10)}.jsonl`), `${JSON.stringify(line)}\n`, { mode: 0o600 });
     } catch {

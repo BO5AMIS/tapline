@@ -28,6 +28,7 @@ import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
+import { protectedLine, protectVaultFile } from "./vault.js";
 
 const HELP = `tapline - let agents see and drive your own app on a test phone, over the same Wi-Fi
 
@@ -55,6 +56,8 @@ Commands:
            --revoke-all revokes every grant in it at once (a running route stops at its next touch that needs one)
   audit-log  What was done under a person's standing permission (grants used, revoked, approvals):
            tapline audit-log [--since <date or ISO time>] lists the lines; --delete deletes the log
+  vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
+           (Windows DPAPI for the current user, or the macOS keychain); Tapwright reads the same file
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
            Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills);
@@ -81,10 +84,13 @@ Options:
   --brief        For mcp and host: actions answer briefly (a call's brief: false overrides it); look is never brief
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
-  --accounts <file>  For mcp and host: test accounts (JSON; the tool types an account's username and password so the
-                 agent never sees them). The file must sit outside any git repo, or be ignored by it.
-                 A password stays out of pictures only while its field is secure (a "show password" toggle shows it).
-                 Keep the file outside the folders the agent may read
+  --accounts <file>  For mcp and host: the vault (JSON, version 2: accounts, cards, addresses, identities and notes;
+                 version 1 accounts files still load). The tool types a value by name, \${vault.<name>.<field>} or an
+                 account's \${account.username} and \${account.password}, so the agent never sees it, and scrubs every
+                 value from what it shows. A plain file must sit outside any git repo, or be ignored by it, and is for test
+                 data only (tapline vault protect FILE encrypts it). A card's fields are typed only with a person's OK
+                 each time. A password stays out of pictures only while its field is secure (a "show password" toggle
+                 shows it). Keep the file outside the folders the agent may read
   --maps <dir>   For mcp and host: keep each app's map (its places, roads and links) in <dir>/<app id>/ instead of
                  ~/.tapline/maps/<app id>/, so a team and both tools can share one folder with a project
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
@@ -406,6 +412,20 @@ export async function main(argv: string[]): Promise<number> {
       });
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
+    }
+    case "vault": {
+      // For a person at a terminal (AGENT-TOOLS 1.14 §20.2); needs no host and no app.
+      if (positionals[1] !== "protect" || positionals[2] === undefined) {
+        process.stderr.write("Usage: tapline vault protect FILE\n");
+        return 2;
+      }
+      const done = await protectVaultFile(positionals[2]);
+      if (!done.ok) {
+        process.stderr.write(`${done.message}\n`);
+        return 1;
+      }
+      process.stdout.write(`${protectedLine(positionals[2], done.how)}\n`);
+      return 0;
     }
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);

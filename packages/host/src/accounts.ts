@@ -407,13 +407,22 @@ export function redactValue(value: unknown, redact: (text: string) => string): u
  * its tool names and its `${vault.home.street}` placeholders.
  */
 export function redactContent(value: unknown, redact: (text: string) => string): unknown {
-  if (typeof value === "string") return redact(value);
+  if (typeof value === "string") {
+    // `${…}` is syntax (a placeholder, a variable): only the text between is content.
+    return value
+      .split(/(\$\{[^}]*\})/)
+      .map((piece) => (piece.startsWith("${") && piece.endsWith("}") ? piece : redact(piece)))
+      .join("");
+  }
   if (Array.isArray(value)) return value.map((item) => redactContent(item, redact));
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactContent(item, redact)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactContent(item, redact)]));
   }
   return value;
 }
+
+/** Keys whose values are the tool's own words (a tool or method name, a time, a format), never a typed or shown value. */
+const CONTENT_FREE = new Set(["t", "tool", "source", "method", "format", "version", "kind", "app", "name", "start", "end", "route", "variables"]);
 
 const WHOLE_ACCOUNT = /^\$\{account\.(\w+)\}$/;
 const WHOLE_VAULT = /^\$\{vault\.(\w+)\.(\w+)\}$/;

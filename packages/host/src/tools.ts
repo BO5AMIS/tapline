@@ -22,7 +22,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { mentionsVault, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
+import { mentionsVault, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -1416,6 +1416,7 @@ export class TaplineTools {
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
+    this.actionLog?.setBackstop(options.accounts?.store != null ? (value) => this.backstop(value) : undefined);
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
     this.stillGapMs = options.stillGapMs ?? 150;
     this.stillCapMs = options.stillCapMs ?? 2000;
@@ -4581,7 +4582,7 @@ export class TaplineTools {
         };
         try {
           mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-          writeFileSync(path, `${JSON.stringify(script, null, 2)}\n`, { mode: 0o600 });
+          writeFileSync(path, `${JSON.stringify(this.backstop(script), null, 2)}\n`, { mode: 0o600 });
         } catch (error) {
           return fail(`Error internal: couldn't save the script: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -4645,7 +4646,7 @@ export class TaplineTools {
     const script = routeScript({ name: recording.name, app: recording.app.id ?? recording.app.name, start: route.start, end: end?.place.name, steps, variables: route.variables });
     let saved: string;
     try {
-      saved = await saveRoute(route.map.folder(), script, route.map);
+      saved = await saveRoute(route.map.folder(), this.backstop(script), route.map);
     } catch (error) {
       // The recording stays, so stop can be tried again.
       return fail(`Error internal: couldn't save the route: ${error instanceof Error ? error.message : String(error)}`);
@@ -5613,6 +5614,12 @@ export class TaplineTools {
     if (!used.granted) return fail(CHANGED_WHILE_WAITING);
     this.approved(session, "card", used.via);
     return null;
+  }
+
+  /** The backstop at the writers of files (§20.3): content values lose any vault value; keys and `${…}` stay. */
+  private backstop<T>(value: T): T {
+    const store = this.options.accounts?.store;
+    return store == null ? value : (redactContent(value, store.redact) as T);
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
