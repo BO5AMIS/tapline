@@ -1001,6 +1001,51 @@ describe("changes after actions", () => {
     expect(textOf(await tools.tap({ target: { ref: "e4" } }))).not.toContain("Alert: gone");
   });
 
+  it("a change in the alert's message alone is a change of the alert (1.14), said once", async () => {
+    let message: string | null = "Saving…";
+    const { tools } = await setup((req) => {
+      if (req.method === "tree") {
+        const wants = typeof req.params === "object" && req.params !== null && (req.params as { changes?: unknown }).changes === true;
+        const open = { alerts: [{ ...ALERT, title: "Please wait", message }] };
+        return { ok: true, result: wants ? { ...BASKET, ...open, changes: NO_CHANGES } : { ...BASKET, ...open } };
+      }
+      if (req.method === "press") return { ok: true, result: { element: TREE.elements[0], settledMs: 310 } };
+      return defaultHandler(req);
+    })();
+    const look = textOf(await tools.look({ screenshot: false }));
+    expect(look).toContain('Alert: "Please wait" "Saving…" [OK]');
+    // Unchanged alert: nothing new to say.
+    expect(textOf(await tools.tap({ target: { ref: "e4" } }))).toContain("No visible change.");
+    message = "Saved.";
+    const changed = textOf(await tools.tap({ target: { ref: "e4" } })).split("\n");
+    expect(changed.slice(1, 3)).toEqual(["Same screen. Changes:", 'Alert: "Please wait" "Saved." [OK]']);
+    expect(changed.join("\n")).not.toContain("No visible change.");
+    // The message going away is a change too; then it is quiet again.
+    message = null;
+    expect(textOf(await tools.tap({ target: { ref: "e4" } }))).toContain('Alert: "Please wait" [OK]');
+    expect(textOf(await tools.tap({ target: { ref: "e4" } }))).toContain("No visible change.");
+  });
+
+  it("policy words are never matched on an alert's message (1.14 §11.1)", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const alert = { ...ALERT, title: "Notice", message: "Delete everything and pay now? Sign out too.", buttons: [{ text: "OK", style: "default" as const }] };
+    const { app } = await FakeApp.connect(port, {}, (req) => {
+      if (req.method === "tree") return { ok: true, result: { ...BASKET, alerts: [alert] } };
+      if (req.method === "press") return { ok: true, result: { element: TREE.elements[0], settledMs: 100 } };
+      return defaultHandler(req);
+    });
+    apps.push(app);
+    const tools = new TaplineTools(host, {
+      connect: { url: `ws://127.0.0.1:${port}/`, name: "Dev PC" },
+      policy: { version: 1, confirm: ["delete", "pay"], block: ["sign out"] },
+    });
+    expect(textOf(await tools.look({ screenshot: false }))).toContain('"Delete everything and pay now? Sign out too."');
+    const tapped = await tools.tap({ target: { ref: "e4" } });
+    expect(textOf(tapped)).not.toMatch(/not_allowed|needs_confirmation|blocked/);
+    expect(app.requests.some((r) => r.method === "press")).toBe(true);
+  });
+
   it("says when nothing visible changed", async () => {
     const { tools } = await setup(basket({ sameRoute: true, added: [], removed: [], changed: [], moved: [] }))();
     await tools.look({ screenshot: false });

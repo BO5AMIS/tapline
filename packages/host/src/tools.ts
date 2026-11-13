@@ -12,7 +12,7 @@ import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, 
 import { briefLines, briefScreen } from "./brief.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
-import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine, roleOf } from "./format.js";
+import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine, roleOf } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -1312,6 +1312,8 @@ export class TaplineTools {
   private readonly listed = new Set<string>();
   /** Sessions whose previous answer had an alert open, so the next change block can say `Alert: gone`. */
   private readonly alertOpen = new Set<string>();
+  /** What each session's open alert said in the previous answer (title, message, buttons), to see a change of the message alone. */
+  private readonly alertSeen = new Map<string, string>();
   /** Per session: how many actions answered with `look: false` since the agent was last given a list or a change block. */
   private readonly unlistedActions = new Map<string, number>();
   /** The route of the latest element list, for recording and checking replays. */
@@ -3320,7 +3322,12 @@ export class TaplineTools {
     const alertGone = this.alertOpen.has(sid) && !alertsNow;
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
-    const changeBlock = askChanges ? changeParts(tree, { alertGone, eyes }) : null;
+    // An alert that was open before and now reads differently (its message alone, say) is a change of the alert.
+    const signature = alertsNow ? alertSignature(tree) : undefined;
+    const alertChanged = signature !== undefined && this.alertSeen.has(sid) && this.alertSeen.get(sid) !== signature;
+    if (signature !== undefined) this.alertSeen.set(sid, signature);
+    else this.alertSeen.delete(sid);
+    const changeBlock = askChanges ? changeParts(tree, { alertGone, alertChanged, eyes }) : null;
     const changesText = changeBlock === null ? null : [changeBlock.label, ...changeBlock.header, ...changeBlock.changes].join("\n");
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
     if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };

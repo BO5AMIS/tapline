@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alertNotes, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "../src/format.js";
+import { alertNotes, alertSignature, formatChanges, formatElement, formatLogs, formatOffScreenAfterList, formatTree } from "../src/format.js";
 import type { TreeResult } from "../src/protocol.js";
 
 const tree: TreeResult = {
@@ -305,7 +305,7 @@ describe("formatTree", () => {
     };
     const lines = formatTree(withStatus).split("\n");
     expect(lines[1]).toBe("Route: workouts");
-    expect(lines[2]).toBe("Alert: \"Delete workout?\" This can't be undone. [Cancel] [Delete (destructive)]");
+    expect(lines[2]).toBe("Alert: \"Delete workout?\" \"This can't be undone.\" [Cancel] [Delete (destructive)]");
     expect(lines[3]).toBe("Network: 2 requests in flight");
     // The alert's note is not a header line: it goes at the end of the answer with the other notes.
     expect(formatTree(withStatus)).not.toContain("Note:");
@@ -327,6 +327,50 @@ describe("formatTree", () => {
     expect(changes).toContain('Alert: "Delete workout?"');
     expect(changes).toContain("Network: 2 requests in flight");
     expect(changes).not.toContain("Note:");
+  });
+
+  describe("an alert's message (AGENT-TOOLS 1.14 §3.2)", () => {
+    const alertOf = (message: string | null) => ({
+      ...tree,
+      alerts: [{ kind: "alert" as const, title: "Allow notifications?", message, buttons: [{ text: "Allow", style: "default" as const }], standIn: false }],
+    });
+    const alertLine = (t: TreeResult): string | undefined => formatTree(t).split("\n").find((line) => line.startsWith("Alert:"));
+
+    it("reads Alert: \"<title>\" \"<message>\" [Button], JSON-quoted with whitespace flattened", () => {
+      expect(alertLine(alertOf('Wayfare would\n  like to "send" you notifications.'))).toBe(
+        'Alert: "Allow notifications?" "Wayfare would like to \\"send\\" you notifications." [Allow]',
+      );
+    });
+
+    it("is left out when empty or missing, which gives the form without a message", () => {
+      expect(alertLine(alertOf(null))).toBe('Alert: "Allow notifications?" [Allow]');
+      expect(alertLine(alertOf(""))).toBe('Alert: "Allow notifications?" [Allow]');
+      expect(alertLine(alertOf("   \n "))).toBe('Alert: "Allow notifications?" [Allow]');
+    });
+
+    it("is cut like element text at 200 characters, ending …(+N)", () => {
+      const line = alertLine(alertOf("x".repeat(257)));
+      expect(line).toBe(`Alert: "Allow notifications?" "${"x".repeat(200)}…(+57)" [Allow]`);
+    });
+
+    it("is not cut at 200 characters or fewer", () => {
+      expect(alertLine(alertOf("y".repeat(200)))).toContain(`"${"y".repeat(200)}" [Allow]`);
+    });
+
+    it("stays in a change block's header with its message", () => {
+      const changes = formatChanges({ ...alertOf("Body."), changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] } });
+      expect(changes).toContain('Alert: "Allow notifications?" "Body." [Allow]');
+    });
+
+    it("a message-only change is a change of the alert: no 'No visible change.'", () => {
+      const t = { ...alertOf("New body."), changes: { sameRoute: true, added: [], removed: [], changed: [], moved: [] } };
+      expect(formatChanges(t)).toContain("No visible change.");
+      const said = formatChanges(t, { alertChanged: true });
+      expect(said).not.toContain("No visible change.");
+      expect(said?.split("\n").slice(0, 2)).toEqual(["Same screen. Changes:", 'Alert: "Allow notifications?" "New body." [Allow]']);
+      expect(alertSignature(alertOf("A"))).not.toBe(alertSignature(alertOf("B")));
+      expect(alertSignature(alertOf("A"))).toBe(alertSignature(alertOf("A")));
+    });
   });
 
   it("says Alert: gone in a change block when an alert closed, right after the first line", () => {

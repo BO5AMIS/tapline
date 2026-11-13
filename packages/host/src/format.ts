@@ -348,7 +348,7 @@ const MAX_MOVED_LINES = 5;
  * Only what changed since the previous list, or null when the screen changed too much (another
  * route, or most elements new or gone) and the full list reads better.
  */
-export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; eyes?: boolean } = {}): string | null {
+export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; alertChanged?: boolean; eyes?: boolean } = {}): string | null {
   const parts = changeParts(tree, options);
   return parts === null ? null : [parts.label, ...parts.header, ...parts.changes].join("\n");
 }
@@ -356,7 +356,7 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; 
 /** The change block in its parts, for a brief answer: the label, the header lines (never cut) and the change lines. */
 export function changeParts(
   tree: TreeResult,
-  options: { alertGone?: boolean; eyes?: boolean } = {},
+  options: { alertGone?: boolean; alertChanged?: boolean; eyes?: boolean } = {},
 ): { label: string; header: string[]; changes: string[] } | null {
   const eyes = options.eyes === true;
   const changes = tree.changes;
@@ -398,7 +398,8 @@ export function changeParts(
     }
   }
   // A closed alert is itself a change, and so is the keyboard coming or going.
-  if (lines.length === 0 && !alertGone && changes.keyboard == null) lines.push("No visible change.");
+  // (1.14 §3.2) An open alert whose text changed, its message alone included, is a change too: its line stands in the header.
+  if (lines.length === 0 && !alertGone && options.alertChanged !== true && changes.keyboard == null) lines.push("No visible change.");
   return { label: "Same screen. Changes:", header, changes: lines };
 }
 
@@ -413,7 +414,9 @@ export function formatStatus(tree: TreeResult, keyboard: "shown" | "hidden" | nu
     const buttons = alert.buttons
       .map((button) => `[${clip(button.text, 40)}${button.style === "destructive" ? " (destructive)" : ""}]`)
       .join(" ");
-    const message = alert.message !== null && alert.message !== "" ? ` ${clip(alert.message, 160)}` : "";
+    // AGENT-TOOLS 1.14 §3.2: the message is cut like element text and left out when empty. The host redacts what the app sends
+    // before any formatting (server.ts), so the cut never meets a vault value in pieces.
+    const message = alert.message !== null && alert.message.trim() !== "" ? ` ${quote(alert.message)}` : "";
     lines.push(`${alert.kind === "prompt" ? "Prompt" : "Alert"}: ${quote(alert.title)}${message} ${buttons}`);
   }
   if (keyboard !== null) lines.push(`Keyboard: ${keyboard}`);
@@ -430,6 +433,11 @@ export function formatStatus(tree: TreeResult, keyboard: "shown" | "hidden" | nu
 /** `Network: 3g (Tapline).` — the same line the `network` command answers with and every header carries. */
 export function networkLine(mode: string): string {
   return `Network: ${mode} (Tapline).`;
+}
+
+/** What the open alerts say, title, message and buttons: a change of the message alone is a change of the alert (§3.2). */
+export function alertSignature(tree: TreeResult): string {
+  return JSON.stringify((tree.alerts ?? []).map((alert) => [alert.kind, alert.title, alert.message ?? "", alert.buttons.map((button) => button.text)]));
 }
 
 /** What an open alert means for the agent, as `Note:` lines for the end of the answer (§3.6). */
