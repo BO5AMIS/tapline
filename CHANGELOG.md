@@ -1,17 +1,21 @@
 # Changelog
 
-## 1.6.2 (unreleased)
+## 1.6.2 (2026-11-14)
 
 Fixes found on the phone after 1.6.1 (Wayfare on a real iPhone, iOS 26.5). No change to the shared documents.
 
 - `drive` by link works more than once to a place the app lists up front. The first visit saved the place without its
   link, so the next `drive {"to": "notes", "by": "link"}` answered "notes has no link to jump to". A visited place now
-  uses the link the app declares for it. A declared link that needs params is used only when `with` gives them all.
+  uses the link the app declares for it. A declared link that needs params is used only when `with` gives them all, none
+  empty.
 - A development build paired with a host that has stopped (or moved to another port) takes a new zero-QR offer from the
   computer serving its code. Before, it kept retrying the old host and ignored the offer until the forget link was
   opened. The person is still asked "Connect for testing?" first.
-- A covered target outside every scroll view (a button under a fixed bar) is no longer told to "scroll it out of the
-  way"; the refusal says no scroll brings it out.
+  - If the old host comes back while the question is open, it is kept.
+  - If the offered computer doesn't answer within 15 s, the app goes back to the saved one. The saved pairing changes
+    only when the new one succeeds.
+- A target outside every scroll view (a button under a fixed bar, or under the bars iOS draws) is no longer told to
+  scroll: the refusal says it can't be scrolled clear.
 
 ## 1.6.1 (2026-11-13)
 
