@@ -1,6 +1,7 @@
 import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
 import { keyboardState } from './keyboard';
 import { startedRequests } from './network';
+import { waitWhileLoading } from './loading';
 import { nativeModule } from './native';
 import {
   closingModalHosts,
@@ -642,8 +643,41 @@ function inFrontLayer(matches: Entry[]): Entry[] {
   return inAlert.length > 0 ? inAlert : matches;
 }
 
-/** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
+/**
+ * Resolve a protocol target to exactly one element, or throw not_found / ambiguous. A target that isn't there while the screen
+ * is loading (a request in flight, a spinner) is waited for up to the settle cap before `not_found` is answered (AGENT-TOOLS
+ * 1.13 §18.7); the answer after the wait is made from the screen as it is then, so its closest matches are unchanged.
+ */
 export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
+  try {
+    return await resolveNow(raw, hint, glassOnly);
+  } catch (error) {
+    if (!(error instanceof TaplineError) || error.code !== 'not_found' || !isNamedTarget(raw) || settings.capMs <= 0) throw error;
+    await waitWhileLoading({
+      requestMark,
+      capMs: settings.capMs,
+      // Anything but `not_found` (ambiguous, covered) means the target has come.
+      isThere: () =>
+        resolveNow(raw, hint, glassOnly).then(
+          () => true,
+          (again: unknown) => !(again instanceof TaplineError && again.code === 'not_found'),
+        ),
+    });
+    return resolveNow(raw, hint, glassOnly);
+  }
+}
+
+/** A target by id, label or text: the kinds a screen can still be loading. A ref or a point is never waited for. */
+function isNamedTarget(raw: unknown): boolean {
+  try {
+    const kind = parseTarget(raw).kind;
+    return kind === 'testID' || kind === 'label' || kind === 'text';
+  } catch {
+    return false;
+  }
+}
+
+async function resolveNow(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
   const target = parseTarget(raw);
   const snapshot = takeSnapshot();
 

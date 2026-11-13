@@ -83,6 +83,8 @@ export interface World {
   alerts?: unknown[];
   /** Answer `move` with this error code once, as the app's guard would. */
   moveError?: { code: string; message: string };
+  /** A touch on this testID is refused (a sheet covers it), dry runs too. */
+  refuse?: (testID: string, screen: Screen) => { code: string; message: string } | undefined;
 }
 
 export function baseWorld(): World {
@@ -147,13 +149,15 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
       case "toggle": {
         const element = findOn(world, params["target"] as Wire | undefined);
         if (element === undefined) return { ok: false, error: { code: "not_found", message: "No element matches" } };
+        const refused = world.refuse?.(element.testID ?? "", world.screen);
+        if (refused !== undefined) return { ok: false, error: refused };
         if (params["dryRun"] !== true) {
           const landed = world.landOnce ?? world.goes[`${world.screen}|${element.testID ?? ""}`];
           delete world.landOnce;
           world.onPress?.(element.testID ?? "");
           if (landed !== undefined) world.screen = landed;
         }
-        return { ok: true, result: { element, settledMs: 20 } };
+        return { ok: true, result: { element, settledMs: 20, ...(params["dryRun"] === true ? { dryRun: true } : {}) } };
       }
       case "back":
         return { ok: true, result: { settledMs: 20 } };

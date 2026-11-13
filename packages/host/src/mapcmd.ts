@@ -27,7 +27,7 @@ const whenSchema = z
 const named = z.string().min(1).max(200);
 const elementTarget = z.union([z.object({ id: named }).strict(), z.object({ label: named }).strict(), z.object({ text: named }).strict()]);
 const elementStep = <T extends "tap" | "long_press" | "toggle">(tool: T) => z.object({ tool: z.literal(tool), target: elementTarget }).strict();
-const doSchema = z.discriminatedUnion("tool", [
+export const reflexDoSchema = z.discriminatedUnion("tool", [
   elementStep("tap"),
   elementStep("long_press"),
   elementStep("toggle"),
@@ -58,12 +58,13 @@ export const reflexSchema = z
   .object({
     name: z.string().regex(NAME, "a reflex's name is [a-z0-9_]"),
     when: whenSchema,
-    do: doSchema,
+    do: reflexDoSchema,
     max: z.number().int().min(1).max(3).optional(),
     at: z.string().regex(NAME).optional(),
   })
   .strict();
 export type ReflexInput = z.infer<typeof reflexSchema>;
+export type ReflexDo = z.infer<typeof reflexDoSchema>;
 
 export interface MapArgs {
   to?: string | undefined;
@@ -335,7 +336,7 @@ async function addLink(link: string, placeName: string | undefined, ctx: MapCont
 
 
 /** The words a policy could match in a reflex's `do`: its text and label, an id's words, and a link's path words. */
-function wordsOf(step: ReflexInput["do"]): { label?: string; text?: string } {
+export function reflexWords(step: ReflexInput["do"]): { label?: string; text?: string } {
   if (step.tool === "open_url") return { text: linkWords(step.url) };
   if (step.tool !== "tap" && step.tool !== "long_press" && step.tool !== "toggle") return {};
   const target = step.target;
@@ -346,7 +347,7 @@ function wordsOf(step: ReflexInput["do"]): { label?: string; text?: string } {
 
 function addReflex(input: ReflexInput, ctx: MapContext): [MapAnswer, boolean] {
   if (input.at !== undefined && ctx.map.data().places[input.at] === undefined) return [notFoundPlace(input.at), false];
-  const words = wordsOf(input.do);
+  const words = reflexWords(input.do);
   const blocked = matchWord(ctx.lists.block, words);
   const flagged = blocked === null ? matchWord(ctx.lists.confirm, words) : null;
   if (blocked !== null || flagged !== null) {

@@ -18,7 +18,8 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
-import { mapArgsError, reflexSchema, runMap } from "./mapcmd.js";
+import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
+import { MAX_REFLEX_FIRINGS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
@@ -26,6 +27,7 @@ import {
   IDS_HIDDEN,
   Journey,
   DRIVE_ALLOWED,
+  REFLEXES_ALLOWED,
   OPEN_URL,
   conditionsSchema,
   exportSchema,
@@ -1148,6 +1150,12 @@ const ELEMENT_ACTIONS: ReadonlySet<string> = new Set(["tap", "long_press", "type
 const AGENT_TOUCHES: ReadonlySet<string> = new Set(["tap", "long_press", "toggle", "back", "open_url", "swipe"]);
 
 /** What a call in flight collects for the call log. */
+/** What the reflexes did in one call (AGENT-TOOLS 1.13 §18.7): the limit is per call, and every line is said in its answer. */
+interface ReflexCall {
+  fired: Map<string, number>;
+  lines: string[];
+}
+
 interface CallState {
   call: number;
   tool: string;
@@ -1692,6 +1700,7 @@ export class TaplineTools {
       },
       candidates: (target, elements) => candidatesFor(target, elements),
       touch: (call) => this.driveTouch(session, call),
+      reflexes: (at) => this.checkReflexes(session, at),
       screen: (line, brief) => this.withLook(session, line, false, this.briefOn(brief)),
     };
   }
@@ -1792,11 +1801,134 @@ export class TaplineTools {
     if (this.noteScope.getStore() === true) return run();
     const mark = this.host.crashMark();
     const startedWith: AppIdentity | undefined = this.host.current();
-    return this.noteScope.run(true, () => {
-      const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run));
-      if (result instanceof Promise) return result.then((answer) => this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))));
-      return this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith)));
-    });
+    // Reflexes fired during the call are counted for it, and said in its answer (§18.7).
+    const reflexes: ReflexCall = { fired: new Map(), lines: [] };
+    return this.noteScope.run(true, () =>
+      this.reflexScope.run(reflexes, () => {
+        const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run));
+        if (result instanceof Promise) {
+          return result.then((answer) => this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))), reflexes));
+        }
+        return this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith))), reflexes);
+      }),
+    );
+  }
+
+  /** What reflexes did in the call in flight: how often each fired, and the lines the answer carries. */
+  private readonly reflexScope = new AsyncLocalStorage<ReflexCall>();
+  /** A reflex's own step is running: it triggers no reflex, no road and no recorded step. */
+  private reflexBusy = false;
+
+  /** The `Reflex:` lines (and the notes of a reflex that didn't fire) go right under the answer's first line. */
+  private withReflexLines(answer: CallToolResult, call: ReflexCall): CallToolResult {
+    if (call.lines.length === 0) return answer;
+    const [first, ...rest] = answer.content;
+    if (first === undefined || first.type !== "text") return answer;
+    const [head = "", ...more] = first.text.split("\n");
+    return { ...answer, content: [{ type: "text", text: [head, ...call.lines, ...more].join("\n") }, ...rest] };
+  }
+
+  /**
+   * AGENT-TOOLS 1.13 §18.7: looks for a declared reflex whose moment has come, and fires it. Called at a place change and before a
+   * failure is answered (1.13.1 item 10), never in a dry run, never in a replay, and in a user's-eyes journey only when its
+   * `allow` names `reflexes`. Reads nothing unless the app's map holds a reflex. Answers how many fired.
+   */
+  private async checkReflexes(session: SessionInfo, at?: string): Promise<number> {
+    const call = this.reflexScope.getStore();
+    if (call === undefined || this.reflexBusy || this.replaying) return 0;
+    const map = this.options.maps === undefined ? undefined : this.mapOf(session);
+    const reflexes = map?.data().reflexes ?? [];
+    if (map === undefined || reflexes.length === 0) return 0;
+    const eyes = this.userEyes() ? "user" : "agent";
+    const allows = this.journeyRun?.allows(REFLEXES_ALLOWED) === true;
+    if (eyes === "user" && !allows) return 0;
+    const lists = listsFor(this.policy, session.app);
+    const thisMoment = new Set<string>();
+    let fired = 0;
+    for (let n = 0; n < MAX_REFLEX_FIRINGS; n++) {
+      let tree: TreeResult;
+      let place: string | null;
+      try {
+        const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+        if (!read.success) break;
+        tree = read.data;
+        place = at ?? (await placeNow(this.placeSource(session), map))?.place.name ?? null;
+      } catch {
+        break;
+      }
+      const match = matchReflex(reflexes, tree.elements, {
+        place,
+        firedThisCall: call.fired,
+        eyes,
+        journeyAllowsReflexes: allows,
+        firedThisMoment: thisMoment,
+        alerts: tree.alerts,
+        screen: tree.screen,
+      });
+      if (match === null) break;
+      thisMoment.add(match.name);
+      // The reflex's step is no move of the agent's: it leaves no road, no recorded step and no map change.
+      const wasRecording = this.recording;
+      const wasReplaying: boolean = this.replaying;
+      this.reflexBusy = true;
+      this.recording = null;
+      this.replaying = true;
+      let outcome: Awaited<ReturnType<typeof fireReflex>>;
+      try {
+        outcome = await fireReflex(
+          match,
+          (step) => this.runStepNow(step),
+          (step) => this.reflexVerdict(session, step, lists),
+        );
+      } finally {
+        this.reflexBusy = false;
+        this.recording = wasRecording;
+        this.replaying = wasReplaying;
+      }
+      if ("line" in outcome) {
+        call.fired.set(match.name, (call.fired.get(match.name) ?? 0) + 1);
+        call.lines.push(outcome.line);
+        fired++;
+        this.observedPlace = undefined;
+      } else if (!call.lines.includes(`Note: ${outcome.skipped}`)) {
+        call.lines.push(`Note: ${outcome.skipped}`);
+      }
+    }
+    return fired;
+  }
+
+  /**
+   * The policy's verdict on a reflex's step, made right before it fires (§18.7): by the words the map keeps, and by the element
+   * the app would touch now. It uses the same word lists and the same matching as a single call (`policyWords`).
+   */
+  private async reflexVerdict(session: SessionInfo, step: ReflexDo, lists: { confirm: string[]; block: string[] }): Promise<ReflexVerdict> {
+    const words = reflexWords(step);
+    const blockedWord = matchWord(lists.block, words);
+    if (blockedWord !== null) return { kind: "blocked", word: blockedWord };
+    const flaggedWord = matchWord(lists.confirm, words);
+    if (flaggedWord !== null) return { kind: "flagged", word: flaggedWord };
+    if (lists.confirm.length === 0 && lists.block.length === 0) return { kind: "none" };
+    if (step.tool !== "tap" && step.tool !== "long_press" && step.tool !== "toggle") return { kind: "none" };
+    const method = step.tool === "tap" ? "press" : step.tool === "long_press" ? "longPress" : "toggle";
+    const resolved = await this.resolveForPolicy(session, method, { target: toWireTarget(step.target) });
+    if (resolved.kind === "error") return { kind: "unresolved", why: `it can't be checked now (${resolved.text.replace(/^Error \w+: /, "").split("\n")[0]?.slice(0, 120) ?? ""})` };
+    const verdict = this.policyWords(lists, resolved.elements);
+    return verdict.kind === "none" ? { kind: "none" } : { kind: verdict.kind === "blocked" ? "blocked" : "flagged", word: verdict.word };
+  }
+
+  /** After a touch that changed the place (§18.7): the arrival is looked at for a reflex before the list is built. */
+  private async reflexAtPlaceChange(session: SessionInfo, from: Place | null): Promise<void> {
+    if (this.reflexBusy || this.replaying || this.reflexScope.getStore() === undefined) return;
+    const map = this.options.maps === undefined ? undefined : this.mapOf(session);
+    if (map === undefined || map.data().reflexes.length === 0) return;
+    let arrived: Place | undefined;
+    try {
+      arrived = (await placeNow(this.placeSource(session), map))?.place;
+    } catch {
+      return;
+    }
+    if (arrived === undefined || (from !== null && from.name === arrived.name)) return;
+    await this.checkReflexes(session, arrived.name);
   }
 
   /** The needs-a-person moments already asked about in this call: one dialog per moment per call (§11.5). */
@@ -3141,34 +3273,44 @@ export class TaplineTools {
     const road = this.roadStart(session, method);
     this.observedPlace = undefined;
     this.actionStartedAt = Date.now();
-    try {
-      const timeoutMs = answerTimeoutMs(method, params);
-      const run = async (): Promise<unknown> => {
-        this.okUsed = false;
-        if (preflight !== undefined) {
-          const stop = await preflight();
-          if (stop !== null) throw new PolicyStop(stop);
+    // A reflex gets one chance before a failure is answered (1.13.1 item 10); the step then runs again, its checks included.
+    let reflexTried = false;
+    for (;;) {
+      try {
+        const timeoutMs = answerTimeoutMs(method, params);
+        const run = async (): Promise<unknown> => {
+          this.okUsed = false;
+          if (preflight !== undefined) {
+            const stop = await preflight();
+            if (stop !== null) throw new PolicyStop(stop);
+          }
+          // The app gets the value and the kind, not the account's name; the log, the viewer and a recording get `params`.
+          // `as` is a recording's name for the text, never the app's business.
+          const kept = typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "as" && (wire === undefined || key !== "account"))) : params;
+          const sent = wire === undefined ? kept : { ...(kept as Record<string, unknown>), ...wire.values };
+          return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        };
+        // With the live viewer, a person watching goes first.
+        result = this.options.control ? await this.options.control.runAgent(run) : await run();
+        break;
+      } catch (error) {
+        const failure = error instanceof PolicyStop ? parseError(answerText(error.answer)) : error instanceof TaplineError ? { code: error.code, message: error.message } : null;
+        if (!reflexTried && failure !== null && isReflexFailure(failure.code, failure.message)) {
+          reflexTried = true;
+          if ((await this.checkReflexes(session)) > 0) continue;
         }
-        // The app gets the value and the kind, not the account's name; the log, the viewer and a recording get `params`.
-        // `as` is a recording's name for the text, never the app's business.
-        const kept = typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "as" && (wire === undefined || key !== "account"))) : params;
-        const sent = wire === undefined ? kept : { ...(kept as Record<string, unknown>), ...wire.values };
-        return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
-      };
-      // With the live viewer, a person watching goes first.
-      result = this.options.control ? await this.options.control.runAgent(run) : await run();
-    } catch (error) {
-      if (error instanceof PolicyStop) return error.answer;
-      this.logExtra = undefined;
-      this.showAction(
-        "agent",
-        method,
-        undefined,
-        params,
-        error instanceof TaplineError ? error.code : "internal",
-        error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
-      );
-      return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
+        if (error instanceof PolicyStop) return error.answer;
+        this.logExtra = undefined;
+        this.showAction(
+          "agent",
+          method,
+          undefined,
+          params,
+          error instanceof TaplineError ? error.code : "internal",
+          error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
+        );
+        return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
+      }
     }
     const line = describe(result);
     this.noteTouch(method, params, result);
@@ -3177,6 +3319,8 @@ export class TaplineTools {
       return text([line, ...this.takePersonNote()].join("\n"));
     }
     this.showAction("agent", method, result, params);
+    // A touch that left the place it was at: a reflex may have its moment now, before the list is built (1.13.1 item 10).
+    if (road !== null) await this.reflexAtPlaceChange(session, road.from);
     // A handler that threw: a step of `run` or `replay` fails (the touch happened, and the app's code is what is wrong);
     // anywhere else every answer says so, whether the screen changed or not (lead's decision, review of 1.6 task 5).
     const threwLine = touch !== undefined ? threwText(touch, readPressFacts(result)) : null;

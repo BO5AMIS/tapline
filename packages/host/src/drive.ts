@@ -5,6 +5,7 @@ import { cheapestWay, isRouteLeg } from "./mapcmd.js";
 import type { MapRoad, Move } from "./mapfile.js";
 import { keyFromState, placeNameFromRoute, placeNow, type AppMap, type KnownPlaces, type Observation, type Place, type PlaceSource } from "./places.js";
 import { elementSchema, placeStateSchema, type PlaceState, type TreeElement, type TreeResult } from "./protocol.js";
+import { isReflexFailure } from "./reflexes.js";
 import { loadRoute, routeEdges, routeRunner, substituteSteps, type RouteEdge } from "./routes.js";
 import type { SharedScriptV2 } from "./script.js";
 import type { Step } from "./run.js";
@@ -126,6 +127,11 @@ export interface DriveServices {
   candidates(target: Record<string, unknown>, elements: TreeElement[]): TreeElement[];
   /** One move: the policy, a person's OK when needed, then the request. */
   touch(call: TouchCall): Promise<TouchOutcome>;
+  /**
+   * Gives declared reflexes their moment (§18.7): at a place change (`at` is the place arrived at) and before a failure is
+   * answered (no `at`). Says how many fired.
+   */
+  reflexes?(at?: string): Promise<number>;
   /** The screen as an action's answer shows a new screen, under this first line. */
   screen(line: string, brief: boolean | undefined): Promise<CallToolResult>;
 }
@@ -550,7 +556,10 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
     provenAgain: 0,
     dropped: [] as string[],
     replans: 0,
+    reflexes: 0,
   };
+  // Each leg gives reflexes one chance before a failure is answered (1.13.1 item 10).
+  const reflexTried = new Set<number>();
   const allowed = new Set<string>();
   let fresh: TreeElement[] | null = tree.elements;
   let waiting: NextWait | undefined;
@@ -578,6 +587,16 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         return { ok: false, code: "cancelled", message, answer: failed(`Error cancelled: ${message}`) };
       }
       const leg: Leg = { i, n: moves.length, road, eyes };
+      const reflexed = async (): Promise<boolean> => {
+        if (svc.reflexes === undefined || reflexTried.has(i)) return false;
+        reflexTried.add(i);
+        const fired = await svc.reflexes();
+        if (fired === 0) return false;
+        run.reflexes += fired;
+        waiting = undefined;
+        fresh = null;
+        return true;
+      };
 
       // A saved route is one leg: its steps run as `run` runs them, and the arrival is checked as for a road (18.5).
       if (planned.route !== undefined) {
@@ -611,7 +630,13 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
       if (built.wire !== undefined && !("x" in built.wire)) {
         const state = waiting?.state;
         if (state === "ready" || state === "moving") element = waiting?.element;
-        else if (state === "covered") return covered(svc, leg, run.done, here, finish);
+        else if (state === "covered") {
+          if (await reflexed()) {
+            i--;
+            continue;
+          }
+          return covered(svc, leg, run.done, here, finish);
+        }
         if (element === undefined) {
           const elements = fresh ?? (tree = await svc.tree()).elements;
           const found = svc.candidates(built.wire, elements);
@@ -620,6 +645,10 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
           else {
             const meant = repairTarget({ ...road.names, ...(road.move.target?.id !== undefined ? { id: road.move.target.id } : {}) }, elements, svc.candidates, eyes);
             if (meant === null) {
+              if (await reflexed()) {
+                i--;
+                continue;
+              }
               markFailed(road, viaLink, map, run.dropped);
               return finish("off_route", offRouteWhy("not_found", ""), leg, here, false);
             }
@@ -666,6 +695,10 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         return { ok: false, code: found?.[1] ?? "not_allowed", message: `${found?.[2] ?? body} ${lines[0] ?? ""}`.trim(), answer: appendLines(outcome.answer, lines) };
       }
       if (outcome.kind === "error") {
+        if (isReflexFailure(outcome.code, outcome.message) && (await reflexed())) {
+          i--;
+          continue;
+        }
         // Only a target that isn't there, or an arrival elsewhere, blames a road (18.2).
         if (outcome.code === "not_actionable" && /^behind_alert/.test(outcome.message)) return batchFailure(outcome.code, outcome.message, leg, run.done);
         if (OFF_ROUTE_CODES.has(outcome.code)) {
@@ -723,13 +756,23 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
       else run.path.push(here.name);
       waiting = outcome.next;
       if (!pipelined && nextWire !== undefined) waiting = await pollNext(svc, nextWire, capMs);
+      // A place change is a moment for reflexes (§18.7): one may close what came up on arrival, before the next target is read.
+      if (svc.reflexes !== undefined && here.name !== road.from) {
+        const fired = await svc.reflexes(here.name);
+        if (fired > 0) {
+          run.reflexes += fired;
+          waiting = undefined;
+          fresh = null;
+        }
+      }
     }
     if (replanned) continue;
     break;
   }
 
   // 4. Arrived and checked.
-  const how = howText(run.links, run.taps, run.others, run.routes);
+  // `, 1 reflex` when one fired (§18.4).
+  const how = `${howText(run.links, run.taps, run.others, run.routes)}${run.reflexes > 0 ? `, ${plural(run.reflexes, "reflex", "reflexes")}` : ""}`;
   const roadsDriven = run.taps + run.others + run.routes.length;
   // A person can't see the app's place names (18.12).
   const path = !eyes && roadsDriven > 0 && run.path.length > 1 ? ` (${run.path.join(" > ")})` : "";
