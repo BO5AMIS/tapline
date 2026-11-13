@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { callTool } from "../src/dispatch.js";
 import type { MapFile } from "../src/mapfile.js";
+import type { MapRegistry } from "../src/places.js";
 import type { TaplineHost } from "../src/server.js";
 import { ALL_CAPS, baseMap, button, place, road, setupDrive, textOf, type Setup, type SetupOptions } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
@@ -13,16 +14,21 @@ import type { FakeApp } from "./helpers.js";
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
 const dirs: string[] = [];
+const registries: MapRegistry[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // A drive marks its roads as driven and the registry saves that map in the background. Wait for the save to end before the folder
+  // goes, or the delete races the map's temp file and lock (ENOTEMPTY on Windows).
+  await Promise.all(registries.splice(0).map((r) => r.flushAll()));
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 async function setup(options: SetupOptions = {}): Promise<Setup & { journeys: string }> {
   const journeys = mkdtempSync(join(tmpdir(), "tapline-drive-journeys-"));
   dirs.push(journeys);
   const s = await setupDrive(hosts, apps, dirs, { capabilities: ALL_CAPS, ...options, tools: { journeysDir: journeys, ...options.tools } });
+  registries.push(s.registry);
   return { ...s, journeys };
 }
 const begin = (s: Setup, extra: Record<string, unknown> = {}) => callTool(s.tools, "journey", { start: true, goal: "change the language", persona: "a first-timer", ...extra });
