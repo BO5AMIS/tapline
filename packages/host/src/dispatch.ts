@@ -47,6 +47,7 @@ const HANDLERS: Handlers = {
   journey: (tools, args) => tools.journey(args),
   session_report: (tools, args) => tools.sessionReport(args),
   map: (tools, args) => tools.map(args),
+  drive: (tools, args) => tools.drive(args),
 };
 
 export interface ToolMeta {
@@ -90,6 +91,8 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   session_report: { title: "Session report", readOnly: true },
   // It edits only the local map file, never the app.
   map: { title: "The app's map", readOnly: false },
+  // It moves the app along roads the map knows, with the policy checked before every move.
+  drive: { title: "Drive to a place", readOnly: false },
 };
 
 export function isToolName(name: string): name is ToolName {

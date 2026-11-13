@@ -456,6 +456,12 @@ result:
 
 - `done`: what the plain method returns, settle fields included.
 - `place`: the place after the move (`null` only when it can't be read).
+- How `drive` uses it (AGENT-TOOLS 1.13 §18.4): the first move is checked against one `tree` read. Move k is one `move` request whose
+  `next` is move k+1's target; before the host sends move k+1 it checks its policy (and asks for a person's OK) against
+  `next.element`, and sends `guard` with what it checked, so a target that is another element by then answers `stale` and nothing is
+  done. `capMs` is the next road's own time times 3, at least 2 s, at most 10 s. Without the capability the host sends the plain
+  method and reads the screen between moves, with the same checks. The arrival check uses `place` (or a read when the route is
+  empty); a drive never claims an arrival it has not checked.
 - `next.state`: `ready`; `missing` (not there at the cap, or refused for another reason); `covered` (covered by something,
   under the tab bar or behind an alert); `moving` (there but its frame still changing at the cap, with `element`).
   `element` is present for `ready` and `moving`. `waitedMs` is how long the wait took.

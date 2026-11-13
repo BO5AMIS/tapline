@@ -19,6 +19,7 @@ import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.j
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
 import { mapArgsError, reflexSchema, runMap } from "./mapcmd.js";
+import { driveArgsError, driveRoute, driveTo, parseMoveResult, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
@@ -355,6 +356,16 @@ export const toolShapes = {
     reflex: reflexSchema.optional().describe("Adds a rule that runs one step when its moment comes: name, when (text, label or id), do (one step), max (1 to 3), at (a place)"),
     forget_reflex: z.string().optional().describe("Removes a reflex by name"),
     forget: z.string().optional().describe("Drops a place, with its roads, routes and reflexes"),
+  },
+  drive: {
+    to: z.string().optional().describe("A place's name (map lists them)"),
+    route: z.string().optional().describe("A saved route's name; exactly one of to or route"),
+    with: z.record(z.string(), z.string()).optional().describe('Values for a link\'s params or a route\'s variables, like {"id": "42"}'),
+    account: z.string().optional().describe("With route: a test account's name; the tool types its values, you never see the password"),
+    then: z.array(stepSchema).optional().describe("run steps that go on after arriving, in the same call"),
+    by: z.enum(["any", "taps", "link"]).optional().describe('"any" (default), "taps" (roads only, never a jump) or "link" (a jump only)'),
+    brief: briefField,
+    dry_run: dryRunField,
   },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
@@ -1081,7 +1092,7 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 const CRASH_NOTED_TOOLS = [
   "apps", "openApp", "pair", "look", "run", "inspect", "audit", "uxCheck", "media", "checkLayout", "viewer", "compareScreen", "filmstrip",
   "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
-  "openUrl", "logs", "reload", "performance", "wait",
+  "openUrl", "logs", "reload", "performance", "wait", "drive",
 ] as const satisfies readonly (keyof TaplineTools)[];
 
 /** Every tool the agent calls, by handler name (the call log numbers these). */
@@ -1090,7 +1101,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
@@ -1623,6 +1634,112 @@ export class TaplineTools {
       accounts: this.options.accounts?.store?.names() ?? [],
     });
     return answer.error ? fail(answer.text) : text(answer.text);
+  }
+
+  /** `drive` (AGENT-TOOLS 1.13 §18.4): takes the app to a place along the map's roads. The work is in drive.ts. */
+  async drive(args: Shape<"drive">): Promise<CallToolResult> {
+    const refused = driveArgsError(args);
+    if (refused !== null) return fail(`Error bad_params: ${refused}`);
+    if (args.then !== undefined) return fail("Error unsupported: drive's then isn't available yet; run the steps after the drive.");
+    if (this.options.maps === undefined) return fail("Error unsupported: this server keeps no maps.");
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const map = this.mapOf(session);
+    if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
+    if (this.userEyes()) return fail("Error unsupported: drive isn't available in a user's-eyes journey yet.");
+    const services = this.driveServices(session, map);
+    const go = (): Promise<CallToolResult> => (args.route !== undefined ? driveRoute(services, this.routeServices(session, args.account, args.brief), args) : driveTo(services, args));
+    // A wait for a person's OK is this call's own, as for `run`.
+    return this.holdScope.getStore() !== undefined ? go() : this.holdScope.run({ ms: 0 }, go);
+  }
+
+  /** What drive needs from this host: reads, and one move that passes the policy and a person's OK like a single call. */
+  private driveServices(session: SessionInfo, map: AppMap): DriveServices {
+    const source = this.placeSource(session);
+    return {
+      map,
+      source,
+      capabilities: session.capabilities,
+      tapsOnly: this.userEyes(),
+      clock: this.clock,
+      sleep: this.sleep,
+      describe: describeError,
+      known: async () => (session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] })),
+      tree: async () => {
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", {}, { sessionId: session.id }));
+        if (!tree.success) throw new TaplineError("internal", "the app returned an element list the host could not read.");
+        return tree.data;
+      },
+      candidates: (target, elements) => candidatesFor(target, elements),
+      touch: (call) => this.driveTouch(session, call),
+      screen: (line, brief) => this.withLook(session, line, false, this.briefOn(brief)),
+    };
+  }
+
+  private routeServices(session: SessionInfo, account: string | undefined, brief: boolean | undefined): RouteServices {
+    return {
+      accounts: this.options.accounts?.store ?? undefined,
+      probeAccount: (field, named) => {
+        const used = this.accountText("$" + "{account." + field + "}", named, session);
+        return used !== null && !used.ok ? used.message : null;
+      },
+      runSteps: (steps) => this.run({ steps, account, brief }),
+    };
+  }
+
+  /**
+   * One move of a drive. The policy and a person's OK are checked as for the same call alone, before the request is sent (§18.4):
+   * against the element the drive already read when there is one, else by a dry run. With the app's `move` capability the
+   * request also waits for the next target and holds the touch to the element that was checked (`guard`).
+   */
+  private async driveTouch(session: SessionInfo, call: TouchCall): Promise<TouchOutcome> {
+    this.logExtra = undefined;
+    this.actionStartedAt = Date.now();
+    const lists = listsFor(this.policy, session.app);
+    const { tool, method, params } = call;
+    const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
+    const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" ? tool : short ? "swipe" : null;
+    const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
+    let waited: Waited | null = null;
+    if (guardedTool !== null && checked) {
+      const ready = await this.awaitOk(session, guardedTool, method, params, lists, call.known);
+      if ("stop" in ready) return { kind: "stop", answer: ready.stop };
+      waited = ready.waited;
+    }
+    let granted: OkVia | undefined;
+    const wire = call.pipelined
+      ? { method: "move", params: { method, params, ...(call.guard !== undefined ? { guard: call.guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
+      : { method, params };
+    const timeoutMs = call.pipelined ? (call.next?.capMs ?? 0) + 15_000 : undefined;
+    let raw: unknown;
+    try {
+      const run = async (): Promise<unknown> => {
+        this.okUsed = false;
+        if (guardedTool !== null && checked) {
+          const gate = await this.policyGate(session, guardedTool, method, params, lists, waited, call.known);
+          if ("stop" in gate) throw new PolicyStop(gate.stop);
+          granted = gate.via;
+          if (granted !== undefined) {
+            this.logExtra = { confirmed: true, confirmed_by: granted };
+            this.okUsed = true;
+          }
+        }
+        return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+      };
+      raw = this.options.control ? await this.options.control.runAgent(run) : await run();
+    } catch (error) {
+      if (error instanceof PolicyStop) return { kind: "stop", answer: error.answer };
+      this.logExtra = undefined;
+      const code = error instanceof TaplineError ? error.code : "internal";
+      this.showAction("agent", method, undefined, params, code, error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
+      return { kind: "error", code, message: error instanceof TaplineError ? error.message : describeError(error) };
+    }
+    const done = call.pipelined && typeof raw === "object" && raw !== null && "done" in raw ? (raw as { done: unknown }).done : raw;
+    this.noteTouch(method, params, done);
+    this.showAction("agent", method, done, params);
+    if (granted !== undefined) this.journeyRun?.noteOk(granted);
+    const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
+    return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}) };
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
@@ -4345,10 +4462,12 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
     lists: { confirm: string[]; block: string[] },
+    /** Elements a drive already read: the policy is checked against them instead of a dry run (§18.4). */
+    known?: TreeElement[],
   ): Promise<{ stop: CallToolResult } | { waited: Waited | null }> {
     const dialogs = this.dialogs;
     if (dialogs === undefined || !dialogs.available() || lists.confirm.length === 0) return { waited: null };
-    const resolved = await this.resolveForPolicy(session, method, params);
+    const resolved = known !== undefined ? ({ kind: "ok", elements: known } as const) : await this.resolveForPolicy(session, method, params);
     // A target that can't be checked is answered by the check right before the touch.
     if (resolved.kind === "error") return { waited: null };
     const verdict = this.policyWords(lists, resolved.elements);
@@ -4444,9 +4563,11 @@ export class TaplineTools {
     lists: { confirm: string[]; block: string[] },
     /** An OK the person gave while the call waited (`awaitOk`): used up, and checked against the screen as it is now. */
     waited?: Waited | null,
+    /** Elements a drive already read: checked instead of a dry run; the app's guard holds the touch to them (§18.4). */
+    known?: TreeElement[],
   ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
-    const resolved = await this.resolveForPolicy(session, method, params);
+    const resolved = known !== undefined ? ({ kind: "ok", elements: known } as const) : await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
       // Fail closed: what can't be checked isn't touched. The answer is the one the touch would give.
       this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);

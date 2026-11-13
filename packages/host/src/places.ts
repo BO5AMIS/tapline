@@ -591,6 +591,24 @@ export class AppMap {
     return "kept";
   }
 
+  /**
+   * A drive found a road's target under another name and arrived where the road leads: the road keeps the new move (§18.4).
+   * Returns the road as it is stored now.
+   */
+  repairRoad(road: MapRoad, move: Move, names: NonNullable<MapRoad["names"]>): MapRoad | null {
+    const id = roadId(road.from, road.move, road.to);
+    const stored = this.map.roads.find((candidate) => roadId(candidate.from, candidate.move, candidate.to) === id);
+    if (stored === undefined) return null;
+    const renewed = roadId(stored.from, move, stored.to);
+    const twin = this.map.roads.find((candidate) => candidate !== stored && roadId(candidate.from, candidate.move, candidate.to) === renewed);
+    this.removeRoad(stored.from, stored.move, stored.to);
+    if (twin !== undefined) return twin;
+    const updated: MapRoad = { ...stored, move, names: { ...stored.names, ...names } };
+    this.map.roads.push(updated);
+    this.touch();
+    return updated;
+  }
+
   // -- edits the `map` tool makes
 
   removeRoad(from: string, move: Move, to: string): boolean {

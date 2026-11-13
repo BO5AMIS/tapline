@@ -266,6 +266,7 @@ export type TaplineErrorCode =
   | "reconnecting"
   | "not_answering"
   | "send_failed"
+  | "off_route"
   | (string & {});
 
 /** An error from the host itself or relayed from the app (`code` is then the app's code). */
