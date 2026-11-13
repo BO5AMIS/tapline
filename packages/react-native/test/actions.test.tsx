@@ -193,6 +193,29 @@ describe('press / longPress', () => {
       const error = await failure(run(() => press({ target: { testID: 'settings' } })));
       expect(error.message).toMatch(/^covered: e\d+ button "Settings" is covered at \(70, 120\) by another view: /);
       expect(error.message).not.toMatch(/RCT/);
+      // Outside every scroll view (like a button under a fixed bar), the hint doesn't suggest a scroll.
+      expect(error.message).toContain("It isn't inside a scroll view, so no scroll brings it out;");
+      expect(error.message).not.toContain('scroll it out of the way');
+    });
+
+    test('a covered element inside a scroll view is told it can be scrolled out of the way', async () => {
+      await mount(
+        <ScrollView testID="list">
+          <Pressable testID="settings" onPress={() => {}}>
+            <Text>Settings</Text>
+          </Pressable>
+          <View />
+        </ScrollView>,
+      );
+      useFrames({ list: frame(0, 0, 400, 800), settings: frame(20, 100, 100, 40) });
+      const veil = collectNodes()
+        .filter((n) => n.hostType === 'View' && n.fiber.child === null)
+        .pop();
+      if (!veil) throw new Error('no plain view');
+      setHitTester(async () => veil.fiber);
+      const error = await failure(run(() => press({ target: { testID: 'settings' } })));
+      expect(error.message).toMatch(/^covered: /);
+      expect(error.message).toContain('Dismiss or scroll it out of the way');
     });
 
     test('a cover inside an open modal is "an open modal", with its nearest named element', async () => {

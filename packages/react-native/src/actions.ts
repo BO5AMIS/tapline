@@ -985,10 +985,14 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
     }
     const hit = await hitAt(x, y);
     if (!hit || isWithin(hit, actor.node.fiber) || isWithin(actor.node.fiber, hit)) return null;
+    // Outside every scroll view (a button under a fixed bar), no scroll can bring it out: don't suggest one.
+    const scrolls = scrollersOf(snapshot, actor).length > 0;
     return notActionable(
       'covered',
       `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit, actor)}: a real tap would land there instead. ` +
-        'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.',
+        (scrolls
+          ? 'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.'
+          : "It isn't inside a scroll view, so no scroll brings it out; dismiss what covers it, target something else or report it, or pass force: true to call the handler anyway."),
     );
   };
   const refusal = await refusalAt(Math.round((left + right) / 2), Math.round((top + bottom) / 2));
