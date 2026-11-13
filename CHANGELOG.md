@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.2 (unreleased)
+
+Fixes found on the phone after 1.6.1 (Wayfare on a real iPhone, iOS 26.5). No change to the shared documents.
+
+- `drive` by link works more than once to a place the app lists up front. The first visit saved the place without its
+  link, so the next `drive {"to": "notes", "by": "link"}` answered "notes has no link to jump to". A visited place now
+  uses the link the app declares for it. A declared link that needs params is used only when `with` gives them all.
+- A development build paired with a host that has stopped (or moved to another port) takes a new zero-QR offer from the
+  computer serving its code. Before, it kept retrying the old host and ignored the offer until the forget link was
+  opened. The person is still asked "Connect for testing?" first.
+- A covered target outside every scroll view (a button under a fixed bar) is no longer told to "scroll it out of the
+  way"; the refusal says no scroll brings it out.
+
 ## 1.6.1 (2026-11-13)
 
 Shared documents brought up to date with Tapwright, and small CI hardening. No change to how Tapline drives an app.
