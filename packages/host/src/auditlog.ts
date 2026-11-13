@@ -30,6 +30,11 @@ export interface AuditSink {
 }
 
 export class AuditLog implements AuditSink {
+  /** Where the lines go. */
+  get folder(): string {
+    return this.dir;
+  }
+
   constructor(
     private readonly dir: string,
     private readonly now: () => Date = () => new Date(),
@@ -79,6 +84,62 @@ export class AuditLog implements AuditSink {
       return false;
     }
   }
+}
+
+/** Every line of the audit log from `sinceMs` on (none: all), oldest first, as written. A line that doesn't parse is kept when no `since` is given. */
+export function readAuditLines(dir: string, sinceMs?: number): Array<{ line: string; entry: AuditEntry | null }> {
+  const out: Array<{ line: string; entry: AuditEntry | null }> = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir)
+      .filter((name) => /^\d{4}-\d{2}\.jsonl$/.test(name))
+      .sort();
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    let text: string;
+    try {
+      text = readFileSync(join(dir, name), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      const when = lineTime(line);
+      if (sinceMs !== undefined && (when === null || when < sinceMs)) continue;
+      let entry: AuditEntry | null = null;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (typeof parsed === "object" && parsed !== null) entry = parsed as AuditEntry;
+      } catch {
+        // kept as a bare line
+      }
+      out.push({ line, entry });
+    }
+  }
+  return out;
+}
+
+/** `audit-log --delete` (§23): removes the log's files. Returns how many lines went. */
+export function deleteAuditLog(dir: string): number {
+  let lines = 0;
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => /^\d{4}-\d{2}\.jsonl$/.test(name));
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      lines += readFileSync(path, "utf8").split("\n").filter((line) => line.trim() !== "").length;
+    } catch {
+      // counted as nothing
+    }
+    rmSync(path, { force: true });
+  }
+  return lines;
 }
 
 function lineTime(line: string): number | null {

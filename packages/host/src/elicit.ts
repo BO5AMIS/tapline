@@ -13,7 +13,7 @@ export const OK_DENY = "Don't allow";
  */
 export interface ElicitSchema {
   type: "object";
-  properties: Record<string, { type: "string"; title: string; enum: string[] }>;
+  properties: Record<string, { type: "string"; title: string; enum: string[]; default?: string }>;
   required: string[];
 }
 
@@ -32,6 +32,27 @@ export const DONE_SCHEMA: ElicitSchema = {
   type: "object",
   properties: { [DONE_FIELD]: { type: "string", title: "Has it been done?", enum: [CANT_NOW, DONE] } },
   required: [DONE_FIELD],
+};
+
+/** AGENT-TOOLS 1.14 §19.6: the grant's question. One required field, no default; Don't allow first, as for an OK. */
+export const GRANT_FIELD = "answer";
+export const GRANT_ALLOW = "Allow";
+export const GRANT_DENY = "Don't allow";
+export const GRANT_SCHEMA: ElicitSchema = {
+  type: "object",
+  properties: { [GRANT_FIELD]: { type: "string", title: "Allow this grant?", enum: [GRANT_DENY, GRANT_ALLOW] } },
+  required: [GRANT_FIELD],
+};
+
+/** §19.6: the separate second question for a word that reaches other people. It defaults to No; only Yes lifts drafts-only. */
+export const DRAFTS_FIELD = "answer";
+export const DRAFTS_YES = "Yes";
+export const DRAFTS_NO = "No";
+export const DRAFTS_QUESTION = "Send these without showing you each one first?";
+export const DRAFTS_SCHEMA: ElicitSchema = {
+  type: "object",
+  properties: { [DRAFTS_FIELD]: { type: "string", title: "Send without showing drafts?", enum: [DRAFTS_NO, DRAFTS_YES], default: DRAFTS_NO } },
+  required: [DRAFTS_FIELD],
 };
 
 export interface ElicitAnswer {
@@ -90,6 +111,25 @@ export class Dialogs {
       const answer = await this.ask(message, DONE_SCHEMA, signal);
       if (answer === "aborted" || answer === "unavailable") return answer;
       return answer.action === "accept" && answer.content?.[DONE_FIELD] === DONE ? "done" : "cant";
+    });
+  }
+
+  /** §19.6: the grant's question. Only an accepted "Allow" is `allow`; anything else is `deny`. */
+  askGrant(caption: string, signal?: AbortSignal): Promise<OkAnswer> {
+    return this.queued(async () => {
+      const answer = await this.ask(caption, GRANT_SCHEMA, signal);
+      if (answer === "aborted" || answer === "unavailable") return answer;
+      return answer.action === "accept" && answer.content?.[GRANT_FIELD] === GRANT_ALLOW ? "allow" : "deny";
+    });
+  }
+
+  /** §19.6: the drafts question. Only an accepted "Yes" is `allow`; No, a decline, a cancel and an error are `deny`. */
+  askLiftDrafts(signal?: AbortSignal): Promise<OkAnswer> {
+    return this.queued(async () => {
+      const answer = await this.ask(DRAFTS_QUESTION, DRAFTS_SCHEMA, signal);
+      if (answer === "aborted") return "aborted";
+      if (answer === "unavailable") return "deny";
+      return answer.action === "accept" && answer.content?.[DRAFTS_FIELD] === DRAFTS_YES ? "allow" : "deny";
     });
   }
 

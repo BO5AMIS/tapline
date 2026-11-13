@@ -187,14 +187,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const maps = new MapRegistry({ mapsDir: options.maps ?? join(configDir(options.env), "maps") });
 
   // Grants (AGENT-TOOLS 1.14 §19) live in the policy file: no file, no grants. The audit log (§23) has no off switch.
+  const audit = new AuditLog(join(configDir(options.env), "audit"));
+  audit.open();
   let grants: GrantBook | undefined;
-  if (options.noPolicy !== true && options.policy !== undefined) {
-    const audit = new AuditLog(join(configDir(options.env), "audit"));
-    audit.open();
-    grants = new GrantBook({ policyPath: options.policy, audit });
-  }
+  if (options.noPolicy !== true && options.policy !== undefined) grants = new GrantBook({ policyPath: options.policy, audit });
   const toolsOptions: ToolsOptions = {
     maps,
+    audit,
     ...(grants !== undefined ? { grants } : {}),
     ...(options.brief === true ? { brief: true } : {}),
     policy,

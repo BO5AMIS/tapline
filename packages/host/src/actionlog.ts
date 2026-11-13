@@ -34,6 +34,10 @@ export interface ActionLogEntry {
   confirmed_by?: "chat" | "live view";
   /** AGENT-TOOLS 1.14 §12, §19: the name of the grant that let the touch through. */
   grant?: string;
+  /** With `grant`: the count including this use, `2 of 3 today` (the report's Grants line says it). */
+  grant_use?: string;
+  /** A grant matched the touch but didn't cover it, so a person was asked: why, `limit reached`, `quiet hours`, `ended` or `revoked`. */
+  grant_asked?: string;
   /** For typing: how many characters, never the text. */
   chars?: number;
   /** AGENT-TOOLS 1.11 §16.1: `"read"` for a call that isn't an action (look, wait_for, logs, ...). */

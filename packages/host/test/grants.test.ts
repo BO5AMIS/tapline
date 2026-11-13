@@ -160,7 +160,7 @@ describe("what a grant covers (§19.3)", () => {
     expect(r.audit.lines).toEqual([{ kind: "grant", app: "com.instagram.ios", name: "instagram_posting", detail: 'tap "Post" (1 of 3 today)' }]);
     // perHour: 1 stops the second use in the same hour
     const second = await r.book.decide(touch(), "use", 'tap "Post"');
-    expect(second).toEqual({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (1 of 1 this hour); asking a person.'] });
+    expect(second).toMatchObject({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (1 of 1 this hour); asking a person.'] });
     expect(r.audit.lines).toHaveLength(1);
   });
 
@@ -175,7 +175,7 @@ describe("what a grant covers (§19.3)", () => {
   it("says 3 of 3 today when the day's limit is reached", async () => {
     const r = rig([{ ...GRANT, perHour: undefined }]);
     for (let i = 0; i < 3; i++) expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (3 of 3 today); asking a person.'] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (3 of 3 today); asking a person.'] });
   });
 
   it("a new local day starts from zero", async () => {
@@ -198,9 +198,9 @@ describe("what a grant covers (§19.3)", () => {
     const r = rig([{ ...GRANT, quiet: { from: "22:00", to: "07:00" } }]);
     const note = 'Note: grant "instagram_posting" doesn\'t cover this (quiet hours 22:00 to 07:00); asking a person.';
     r.clock.now = new Date(2026, 10, 14, 23, 0, 0);
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: [note] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: [note] });
     r.clock.now = new Date(2026, 10, 14, 6, 59, 0);
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: [note] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: [note] });
     r.clock.now = new Date(2026, 10, 14, 7, 0, 0);
     expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
   });
@@ -210,21 +210,21 @@ describe("what a grant covers (§19.3)", () => {
     r.clock.now = new Date(2026, 10, 21, 23, 59, 0);
     expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
     r.clock.now = new Date(2026, 10, 22, 0, 1, 0);
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (it ended on 2026-11-21); asking a person.'] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (it ended on 2026-11-21); asking a person.'] });
   });
 
   it("a revoked grant covers nothing and says when", async () => {
     const r = rig([{ ...GRANT, revoked: "2026-11-14" }]);
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (it was revoked on 2026-11-14); asking a person.'] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (it was revoked on 2026-11-14); asking a person.'] });
   });
 
   it("a mismatch of the app, the word or the route is not noted", async () => {
     const r = rig();
-    expect(await r.book.decide(touch({ app: { id: "other", name: "Other" } }), "use", "x")).toEqual({ kind: "ask", notes: [] });
-    expect(await r.book.decide(touch({ element: { text: "Send" } }), "use", "x")).toEqual({ kind: "ask", notes: [] });
-    expect(await r.book.decide(touch({ element: { text: "Posted" } }), "use", "x")).toEqual({ kind: "ask", notes: [] });
-    expect(await r.book.decide(touch({ routes: [] }), "use", "x")).toEqual({ kind: "ask", notes: [] });
-    expect(await r.book.decide(touch({ routes: ["other"] }), "use", "x")).toEqual({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch({ app: { id: "other", name: "Other" } }), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch({ element: { text: "Send" } }), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch({ element: { text: "Posted" } }), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch({ routes: [] }), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch({ routes: ["other"] }), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
   });
 
   it("matches the word whole, ignoring case, on the label too", async () => {
@@ -240,16 +240,16 @@ describe("what a grant covers (§19.3)", () => {
   it("never-grantable words always ask, even when a hand-edited grant that loaded lists them", async () => {
     const r = rig([{ name: "pay", app: "x", words: ["Remove"], until: "2026-11-20" }]);
     const t = { app: { id: "x", name: "X" }, element: { text: "Pay now" }, routes: [] };
-    expect(await r.book.decide(t, "use", "x")).toEqual({ kind: "ask", notes: [] });
-    expect(await r.book.decide({ ...t, element: { text: "Delete account" } }, "use", "x")).toEqual({ kind: "ask", notes: [] });
+    expect(await r.book.decide(t, "use", "x")).toMatchObject({ kind: "ask", notes: [] });
+    expect(await r.book.decide({ ...t, element: { text: "Delete account" } }, "use", "x")).toMatchObject({ kind: "ask", notes: [] });
     // and the grant that names such a word is refused at load, so it covers nothing at all
     const bad = rig([{ name: "pay", app: "x", words: ["Pay"], until: "2026-11-20" }]);
-    expect(await bad.book.decide({ ...t, element: { text: "Pay" } }, "use", "x")).toEqual({ kind: "ask", notes: [] });
+    expect(await bad.book.decide({ ...t, element: { text: "Pay" } }, "use", "x")).toMatchObject({ kind: "ask", notes: [] });
   });
 
   it("a draftsOnly grant covers nothing until drafts exist (task A2)", async () => {
     const r = rig([{ ...GRANT, draftsOnly: undefined }]);
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
   });
 
   it("an edit of the policy file is seen at the very next touch", async () => {
@@ -260,7 +260,7 @@ describe("what a grant covers (§19.3)", () => {
     r.put([{ ...GRANT, perHour: undefined }]);
     expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
     writeFileSync(r.path, "{ not json");
-    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "ask", notes: [] });
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
   });
 
   it("an unreadable file later is said as a note for doctor", async () => {

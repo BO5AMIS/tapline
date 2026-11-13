@@ -2,6 +2,7 @@ import { open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { AuditSink } from "./auditlog.js";
+import { plainText } from "./elicit.js";
 import { listsFor, matchWord, policySchema } from "./policy.js";
 
 /**
@@ -198,7 +199,7 @@ export type GrantDecision =
   /** `stamp` and `date` name the recorded use, so `release` can take it back when the touch wasn't made. */
   | { kind: "covered"; name: string; line: string; /** `2 of 3`, for a dry run's words. */ counts: string; counted: boolean; stamp: string; date: string }
   /** The touch asks a person; `notes` say why a grant that matched didn't cover it (§19.3). */
-  | { kind: "ask"; notes: string[] };
+  | { kind: "ask"; notes: string[]; /** Why each matching grant didn't cover it, in the report's words: `limit reached`, `quiet hours`, `ended`, `revoked`. */ asked: string[] };
 
 /** What a look at the policy file and the state file found, for `doctor` and the first answer (§19.1, §19.4). */
 export interface GrantReport {
@@ -288,6 +289,124 @@ export class GrantBook {
     return { fileOk: policy !== null, grants: policy?.grants ?? [], refused: policy?.refused ?? [], stateBroken: state === null };
   }
 
+  /** The date, `YYYY-MM-DD`, that is `days` from today (at most 30), for the dialog's question and a new grant's `until`. */
+  untilFor(days: number): string {
+    const at = this.now();
+    return localDate(new Date(at.getFullYear(), at.getMonth(), at.getDate() + Math.min(GRANT_MAX_DAYS, Math.max(0, days))));
+  }
+
+  /** Every grant with today's and this hour's counts (null when the state file is broken), for `tapline grants` (§19.7). */
+  async listing(): Promise<{ report: GrantReport; usage: Map<string, { today: number; hour: number } | null> }> {
+    const report = await this.inspect();
+    const uses = await this.readState();
+    const at = this.now();
+    const usage = new Map<string, { today: number; hour: number } | null>();
+    for (const grant of report.grants) usage.set(grant.name, uses === null ? null : this.counts(uses, grant, at));
+    return { report, usage };
+  }
+
+  /**
+   * `grants --revoke-all` (§19.5): marks every grant in the policy file `"revoked": "<today>"` and writes one `revoke` audit
+   * line each. A grant that is already revoked keeps its date. The file is changed under the state lock (a temporary file and
+   * a rename), and every running tool sees it at its very next touch, because each touch reads the file again.
+   */
+  async revokeAll(detail = "grants --revoke-all"): Promise<{ revoked: string[]; already: string[] } | { error: string }> {
+    const today = localDate(this.now());
+    const revoked: Array<{ name: string; app?: string }> = [];
+    const already: string[] = [];
+    const done = await this.editPolicy((file) => {
+      const list = file["grants"];
+      if (!Array.isArray(list)) return false;
+      let changed = false;
+      list.forEach((item: unknown, index) => {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) return;
+        const grant = item as Record<string, unknown>;
+        const name = typeof grant["name"] === "string" && grant["name"].trim() !== "" ? grant["name"] : `#${index + 1}`;
+        if (typeof grant["revoked"] === "string" && dateMs(grant["revoked"]) !== null) {
+          already.push(name);
+          return;
+        }
+        grant["revoked"] = today;
+        revoked.push({ name, ...(typeof grant["app"] === "string" ? { app: grant["app"] } : {}) });
+        changed = true;
+      });
+      return changed;
+    });
+    if (typeof done === "string") return { error: done };
+    // The kill switch never waits for its record: a line that can't be written doesn't undo the revocation.
+    for (const grant of revoked) this.options.audit?.write({ kind: "revoke", ...(grant.app !== undefined ? { app: grant.app } : {}), name: grant.name, detail });
+    return { revoked: revoked.map((g) => g.name), already };
+  }
+
+  /**
+   * Writes a grant a person made through the dialog (§19.6) into the policy file: a temporary file and a rename, a name not used
+   * yet, `until` at most 30 days away, a version 1 file becoming version 2. The creation is logged (§23, `approval`). Only the
+   * host's dialog calls this, with what the person answered; nothing a model sends reaches it.
+   */
+  async create(spec: GrantSpec): Promise<{ grant: Grant } | { error: string }> {
+    const at = this.now();
+    const today = localDate(at);
+    let made: Grant | undefined;
+    let refusal: string | undefined;
+    const done = await this.editPolicy((file) => {
+      if (file["version"] !== 1 && file["version"] !== 2) {
+        refusal = "the policy file has no version 1 or 2.";
+        return false;
+      }
+      const list = Array.isArray(file["grants"]) ? (file["grants"] as unknown[]) : [];
+      const taken = new Set(list.map((item) => (typeof item === "object" && item !== null ? (item as { name?: unknown }).name : undefined)));
+      let name = spec.nameBase;
+      for (let n = 2; taken.has(name); n++) name = `${spec.nameBase}_${n}`;
+      const raw = {
+        name,
+        app: spec.app,
+        words: spec.words,
+        ...(spec.route !== undefined ? { route: spec.route } : {}),
+        perDay: spec.perDay,
+        ...(spec.perHour !== undefined ? { perHour: spec.perHour } : {}),
+        until: this.untilFor(spec.days),
+        ...(spec.quiet !== undefined ? { quiet: spec.quiet } : {}),
+        ...(spec.draftsOnly === false ? { draftsOnly: false } : {}),
+      };
+      const parsed = parseGrants([raw], today, (app) => listsFor(policySchema.parse({ ...file, version: 2 }), { id: app, name: app }).block);
+      const grant = parsed.grants[0];
+      if (grant === undefined) {
+        refusal = parsed.refused[0]?.reason ?? "it can't be a grant.";
+        return false;
+      }
+      file["version"] = 2;
+      file["grants"] = [...list, raw];
+      made = grant;
+      return true;
+    });
+    if (typeof done === "string") return { error: done };
+    if (made === undefined) return { error: refusal ?? "nothing was written." };
+    this.options.audit?.write({ kind: "approval", app: made.app, name: made.words[0] ?? made.name, detail: "grant created" });
+    return { grant: made };
+  }
+
+  /** Reads the policy file as it is, lets `change` edit it, and writes it back when it says it did. A string is why it couldn't. */
+  private async editPolicy(change: (file: Record<string, unknown>) => boolean): Promise<true | string> {
+    const path = this.options.policyPath;
+    const outcome = await this.withLock(async (): Promise<true | string> => {
+      let file: unknown;
+      try {
+        file = JSON.parse(await readFile(path, "utf8"));
+      } catch (error) {
+        return `couldn't read the policy file: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      if (typeof file !== "object" || file === null || Array.isArray(file)) return "the policy file isn't a policy.";
+      if (!change(file as Record<string, unknown>)) return true;
+      try {
+        await this.writeAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
+      } catch (error) {
+        return `couldn't write the policy file: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      return true;
+    });
+    return outcome ?? "the grants' lock is held by another tool; try again.";
+  }
+
   /** The `Note:` lines of an inspection: each refused grant, and a state file that doesn't parse. */
   static noticeLines(report: GrantReport): string[] {
     const lines = report.refused.map(refusalLine);
@@ -303,13 +422,14 @@ export class GrantBook {
    */
   async decide(touch: GrantTouch, mode: "use" | "peek", detail: string): Promise<GrantDecision> {
     const policy = await this.readPolicy();
-    if (policy === null) return { kind: "ask", notes: [] };
+    if (policy === null) return { kind: "ask", notes: [], asked: [] };
     // Never grantable, whatever the file says: a touch on a payment or an account deletion always asks (§19.2).
-    if (matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], touch.element) !== null) return { kind: "ask", notes: [] };
+    if (matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], touch.element) !== null) return { kind: "ask", notes: [], asked: [] };
     const at = this.now();
     const today = localDate(at);
     const minutes = at.getHours() * 60 + at.getMinutes();
     const notes: string[] = [];
+    const asked: string[] = [];
     for (const grant of policy.grants) {
       if (grant.app !== touch.app.id && grant.app !== touch.app.name) continue;
       if (matchWord(grant.words, touch.element) === null) continue;
@@ -320,25 +440,29 @@ export class GrantBook {
       const doesnt = (why: string): string => `Note: grant ${name} doesn't cover this (${why}); asking a person.`;
       if (grant.revoked !== undefined) {
         notes.push(doesnt(`it was revoked on ${grant.revoked}`));
+        asked.push("revoked");
         continue;
       }
       if (today > grant.until) {
         notes.push(doesnt(`it ended on ${grant.until}`));
+        asked.push("ended");
         continue;
       }
       if (grant.quiet !== undefined && inQuiet(grant.quiet, minutes)) {
         notes.push(doesnt(`quiet hours ${grant.quiet.from} to ${grant.quiet.to}`));
+        asked.push("quiet hours");
         continue;
       }
       const counted = mode === "use" ? await this.use(grant, at, detail, touch.app, policy.grants) : await this.peek(grant, at);
       if (counted === null) continue;
       if (typeof counted === "string") {
         notes.push(doesnt(counted));
+        asked.push("limit reached");
         continue;
       }
       return { kind: "covered", name: grant.name, counts: `${counted.today} of ${grant.perDay}`, counted: mode === "use", stamp: counted.stamp, date: counted.date, line: `Note: allowed by grant ${name} (${counted.today} of ${grant.perDay} today).` };
     }
-    return { kind: "ask", notes };
+    return { kind: "ask", notes, asked };
   }
 
   /** A use taken back: the touch wasn't made after all (§19.4: a use is counted when the touch is made). */
@@ -481,12 +605,16 @@ export class GrantBook {
 
   /** A temporary file and a rename, with retries on Windows (§19.4). */
   private async writeState(uses: Uses): Promise<void> {
-    const temp = `${this.statePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    await this.writeAtomic(this.statePath, `${JSON.stringify({ version: 1, uses }, null, 2)}\n`);
+  }
+
+  private async writeAtomic(path: string, content: string): Promise<void> {
+    const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
-      await writeFile(temp, `${JSON.stringify({ version: 1, uses }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      await writeFile(temp, content, { encoding: "utf8", mode: 0o600 });
       for (let attempt = 0; ; attempt++) {
         try {
-          await rename(temp, this.statePath);
+          await rename(temp, path);
           return;
         } catch (error) {
           const code = errorCode(error);
@@ -500,6 +628,59 @@ export class GrantBook {
     }
   }
 }
+
+/** What the person said yes to in the dialog (§19.6). `days` counts from today, at most 30. */
+export interface GrantSpec {
+  /** A name to start from; a number is added when it is taken. */
+  nameBase: string;
+  app: string;
+  words: string[];
+  route?: string;
+  perDay: number;
+  perHour?: number;
+  days: number;
+  quiet?: { from: string; to: string };
+  /** Only `false` is written (the person said Yes to sending without drafts); otherwise the file says nothing (§19.1). */
+  draftsOnly?: false;
+}
+
+/** Whether the element touched is a payment or an account deletion: no grant covers it, whatever its word (§19.2). */
+export const elementNeverGrantable = (element: { label?: string | null; text?: string | null }): boolean => matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], element) !== null;
+
+/** Whether a word reaches other people, so a grant for it shows drafts first unless a person lifts that (§19.1). */
+export const reachesPeople = (word: string): boolean => matchWord(REACH_WORDS, { label: word }) !== null;
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `2026-11-21` as `21 Nov`. */
+function shortDate(date: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  return m === null ? date : `${Number(m[3])} ${MONTHS[Number(m[2]) - 1] ?? m[2]}`;
+}
+
+/**
+ * The dialog's question, saying everything the grant allows (§19.6):
+ * `Allow tapping "Post" in Instagram up to 3 times a day, only in route post_update, until 21 Nov (drafts shown to you first)?`
+ * `app` is the app's name as the dialog may show it (already cut and cleaned); words are cleaned here.
+ */
+export function grantCaption(grant: Pick<Grant, "words" | "perDay" | "perHour" | "until" | "route" | "quiet" | "draftsOnly">, app: string): string {
+  const words = grant.words.map((w) => JSON.stringify(plainText(w)));
+  const spoken = words.length <= 1 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} or ${words[words.length - 1]}`;
+  const counts = `up to ${grant.perDay} ${grant.perDay === 1 ? "time" : "times"} a day${grant.perHour !== undefined ? ` and ${grant.perHour} an hour` : ""}`;
+  const quiet = grant.quiet !== undefined ? `, not between ${grant.quiet.from} and ${grant.quiet.to}` : "";
+  const route = grant.route !== undefined ? `, only in route ${plainText(grant.route)}` : "";
+  const drafts = grant.draftsOnly ? " (drafts shown to you first)" : "";
+  return `Allow tapping ${spoken} in ${app} ${counts}${quiet}${route}, until ${shortDate(grant.until)}${drafts}?`;
+}
+
+/** A grant's name from the app's name and the word, as `instagram_post`: ASCII letters, digits and `_`. */
+export function grantNameBase(app: string, word: string): string {
+  const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return [slug(app), slug(word)].filter((part) => part !== "").join("_") || "grant";
+}
+
+/** Whether a whole-word match for a word is a payment or an account deletion: never grantable, so never offered (§19.2). */
+export const neverGrantable = (word: string, block: string[]): boolean => neverReason(word, block) !== null;
 
 /** Whether a local time of day (minutes since midnight) falls in the quiet window, which may cross midnight. */
 function inQuiet(quiet: { from: string; to: string }, minutes: number): boolean {

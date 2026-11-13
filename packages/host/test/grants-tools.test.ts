@@ -196,13 +196,25 @@ describe("a grant stands in for a person's OK (§19.3)", () => {
     expect(r.dialog.shown).toBe(1);
   });
 
-  it("a failed audit line means the grant doesn't cover the touch", async () => {
+  it("a failed audit line means the grant doesn't cover the touch, and a person is asked through the dialog as usual (A2 loose end)", async () => {
     const r = await setup([GRANT]);
     // the audit folder is replaced by a file, so no line can be written
     rmSync(r.auditDir, { recursive: true, force: true });
     writeFileSync(r.auditDir, "a file");
     const answer = await r.tools.tap({ target: { id: "post" }, look: false });
-    // the touch asks as without the grant (here the live-view answer: the dialog's turn had passed when the line failed)
+    expect(answer.isError).not.toBe(true);
+    expect(textOf(answer)).toContain("Note: allowed by a person (in chat).");
+    expect(textOf(answer)).not.toContain("allowed by grant");
+    expect(r.dialog.shown).toBeGreaterThanOrEqual(1);
+    expect(presses(r.app)).toBe(1);
+  });
+
+  it("a failed audit line with no dialog answers needs_confirmation, the live-view answer", async () => {
+    const r = await setup([GRANT]);
+    rmSync(r.auditDir, { recursive: true, force: true });
+    writeFileSync(r.auditDir, "a file");
+    const tools = r.makeTools(new GrantBook({ policyPath: r.policyPath, audit: new AuditLog(r.auditDir) }), { version: 2, confirm: ["Post", "Pay"], block: [] }, false);
+    const answer = await tools.tap({ target: { id: "post" }, look: false });
     expect(answer.isError).toBe(true);
     expect(textOf(answer)).toMatch(/^Error not_allowed: needs_confirmation: button "Post" needs a person's OK/);
     expect(presses(r.app)).toBe(0);
