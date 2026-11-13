@@ -331,6 +331,25 @@ describe("map link", () => {
     expect(s.file().places["language"]?.link).toBeNull();
   });
 
+  it("refuses a long segment with no separator, and a JWT", async () => {
+    const s = await setup({ route: ["settings"] });
+    for (const link of ["wayfare://reset/abcdefghijklmnopqrstuvwxyz", "wayfare://t/aaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccc"]) {
+      expect(await call(s, { link, place: "language" })).toMatch(/^Error bad_params: .*looks like a value/);
+    }
+    expect(await call(s, { link: "https://example.com/terms", place: "language" })).toBe("Added link https://example.com/terms to language.");
+  });
+
+  it("prints a route's start and end only when they are names, cut short", async () => {
+    const s = await setup();
+    writeFileSync(
+      join(s.folder, "routes", "sign_in.json"),
+      JSON.stringify({ start: "Chat with Sara <script>", end: `home${"x".repeat(80)}`, variables: ["account"] }),
+    );
+    const line = (await call(s, {})).split("\n").find((l) => l.startsWith("Routes: ")) as string;
+    expect(line).not.toContain("Sara");
+    expect(line).not.toContain("x".repeat(41));
+  });
+
   it("refuses text that is not a link", async () => {
     const s = await setup({ route: ["settings"] });
     expect(await call(s, { link: "settings", place: "language" })).toMatch(/^Error bad_params: a link is scheme:\/\/path/);
@@ -360,6 +379,53 @@ describe("map reflex", () => {
     expect(flagged).toBe('Error not_allowed: blocked: reflex "gone" would tap "Delete account", which the policy flags ("delete"); a reflex may not do what needs a person\'s OK. Nothing was saved.');
     expect(await call(s, { reflex: { name: "gone", when: { text: "Sure?" }, do: { tool: "tap", target: { id: "sign-out-button" } } } })).toMatch(/^Error not_allowed: blocked: .*"sign out"/);
     expect(s.file().reflexes.map((r) => r.name)).toEqual(["rate_prompt"]);
+  });
+
+  it("sees the words of a camelCase id", async () => {
+    const s = await setup({ tools: { policy: { version: 1, confirm: ["delete"], block: [] } } });
+    const said = await call(s, { reflex: { name: "gone", when: { text: "Sure?" }, do: { tool: "tap", target: { id: "deleteAccountButton" } } } });
+    expect(said).toMatch(/^Error not_allowed: blocked: .*\("delete"\)/);
+    expect(s.file().reflexes.map((r) => r.name)).toEqual(["rate_prompt"]);
+  });
+
+  it("checks an open_url do: the policy sees the path words, and a value or a query is refused without being echoed", async () => {
+    const s = await setup({ tools: { policy: { version: 1, confirm: ["delete"], block: [] } } });
+    const flagged = await call(s, { reflex: { name: "a", when: { text: "x" }, do: { tool: "open_url", url: "wayfare://account/delete" } } });
+    expect(flagged).toMatch(/^Error not_allowed: blocked: .*\("delete"\)/);
+    for (const url of ["wayfare://trips/482913", "wayfare://reset?token=zzqq", "wayfare://a#zzfrag", "https://u:pw@example.com/x"]) {
+      const said = await call(s, { reflex: { name: "a", when: { text: "x" }, do: { tool: "open_url", url } } });
+      expect(said).toMatch(/^Error bad_params: /);
+      for (const secret of ["482913", "zzqq", "zzfrag", "pw@"]) expect(said).not.toContain(secret);
+    }
+    expect(await call(s, { reflex: { name: "ok", when: { text: "x" }, do: { tool: "open_url", url: "wayfare://trips/[id]" } } })).toBe("Added reflex ok.");
+  });
+
+  it.each([
+    ["force", { tool: "tap", target: { text: "Ok" }, force: true }],
+    ["index", { tool: "tap", target: { text: "Ok" }, index: 1 }],
+    ["account", { tool: "tap", target: { text: "Ok" }, account: "tester1" }],
+    ["text on a tap", { tool: "tap", target: { text: "Ok" }, text: "hi" }],
+    ["secure", { tool: "toggle", target: { id: "a" }, secure: true }],
+    ["two names in a target", { tool: "tap", target: { id: "a", text: "b" } }],
+    ["a point", { tool: "tap", target: { x: 1, y: 2 } }],
+    ["a back with a target", { tool: "back", target: { text: "x" } }],
+    ["a swipe without a point", { tool: "swipe", x0: 1, y0: 2, x1: 3 }],
+    ["an open_url with force", { tool: "open_url", url: "wayfare://x", force: true }],
+    ["a scroll with an unknown key", { tool: "scroll", direction: "down", force: true }],
+  ])("accepts only a step's own keys: %s", async (_label, step) => {
+    const s = await setup();
+    expect(await call(s, { reflex: { name: "a", when: { text: "x" }, do: step } })).toMatch(/^Error bad_params: /);
+    expect(s.file().reflexes).toHaveLength(1);
+  });
+
+  it("accepts the steps with their own keys", async () => {
+    const s = await setup();
+    for (const [name, step] of [
+      ["t", { tool: "long_press", target: { label: "More" } }],
+      ["b", { tool: "back" }],
+      ["w", { tool: "swipe", x0: 1, y0: 2, x1: 3, y1: 4, seconds: 0.5 }],
+      ["c", { tool: "scroll", direction: "down", amount: 0.5 }],
+    ] as const) expect(await call(s, { reflex: { name, when: { id: "banner" }, do: step } })).toBe(`Added reflex ${name}.`);
   });
 
   it("is accepted when the policy is off", async () => {

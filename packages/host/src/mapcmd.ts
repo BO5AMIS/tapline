@@ -4,7 +4,7 @@ import { placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Plac
 import { matchWord } from "./policy.js";
 import { looksLikeValue } from "./protocol.js";
 import { routeEdges, type RouteEdge } from "./routes.js";
-import { describeRunStep, type Step } from "./run.js";
+import { describeRunStep } from "./run.js";
 
 // The `map` tool (AGENT-TOOLS 1.13 §18.8): a read, and the way to edit what a map holds. It never touches the app.
 // Every edit goes through AppMap, which writes with saveMap; nothing here writes the file.
@@ -19,26 +19,40 @@ const whenSchema = z
   .strict()
   .refine((when) => [when.text, when.label, when.id].filter((value) => value !== undefined).length === 1, { message: "when needs exactly one of text, label or id" });
 
-/** What a reflex may do: one step that acts. Typing, waiting and the tools that read are not reflexes. */
-const REFLEX_TOOLS = ["tap", "long_press", "toggle", "back", "swipe", "scroll", "open_url"] as const;
-const ELEMENT_TOOLS: readonly string[] = ["tap", "long_press", "toggle"];
-
-const doSchema = z.record(z.string(), z.unknown()).superRefine((step, ctx) => {
-  const tool = step["tool"];
-  if (typeof tool !== "string" || !(REFLEX_TOOLS as readonly string[]).includes(tool)) {
-    ctx.addIssue({ code: "custom", message: `do's tool must be one of ${REFLEX_TOOLS.join(", ")}` });
-    return;
-  }
-  if (!ELEMENT_TOOLS.includes(tool)) return;
-  const target = step["target"];
-  const named =
-    typeof target === "object" && target !== null && !Array.isArray(target)
-      ? Object.entries(target as Record<string, unknown>)
-      : [];
-  // A ref only lasts one list, and a point depends on the screen: a reflex names its element.
-  const ok = named.length === 1 && ["id", "label", "text"].includes(named[0]?.[0] ?? "") && typeof named[0]?.[1] === "string" && named[0][1] !== "";
-  if (!ok) ctx.addIssue({ code: "custom", message: "do's target must be exactly one of id, label or text (never a ref)" });
-});
+/**
+ * What a reflex may do: one step that acts, written as `run` takes it and nothing more (no force, text, secure, index
+ * or account). Typing, waiting and the tools that read are not reflexes. An element is named by id, label or text,
+ * never by a ref or a point.
+ */
+const named = z.string().min(1).max(200);
+const elementTarget = z.union([z.object({ id: named }).strict(), z.object({ label: named }).strict(), z.object({ text: named }).strict()]);
+const elementStep = <T extends "tap" | "long_press" | "toggle">(tool: T) => z.object({ tool: z.literal(tool), target: elementTarget }).strict();
+const doSchema = z.discriminatedUnion("tool", [
+  elementStep("tap"),
+  elementStep("long_press"),
+  elementStep("toggle"),
+  z.object({ tool: z.literal("back") }).strict(),
+  z
+    .object({ tool: z.literal("swipe"), x0: z.number(), y0: z.number(), x1: z.number(), y1: z.number(), seconds: z.number().min(0.05).max(5).optional() })
+    .strict(),
+  z
+    .object({
+      tool: z.literal("scroll"),
+      direction: z.enum(["up", "down", "left", "right"]).optional(),
+      amount: z.number().min(0.1).max(1).optional(),
+      to: z.enum(["start", "end"]).optional(),
+      target: elementTarget.optional(),
+    })
+    .strict(),
+  // The cut-down link, as a road keeps it (clarification 14): no query, fragment, credentials or value.
+  z
+    .object({ tool: z.literal("open_url"), url: named })
+    .strict()
+    .superRefine((step, ctx) => {
+      const problem = linkProblem(step.url);
+      if (problem !== null) ctx.addIssue({ code: "custom", path: ["url"], message: problem });
+    }),
+]);
 
 export const reflexSchema = z
   .object({
@@ -127,9 +141,13 @@ function withLink(name: string, link: string | null | undefined): string {
 function routeLine(map: AppMap, name: string, relative: string): string {
   const file = readRouteSync(map.folder(), relative);
   if (file === null) return name;
-  const start = typeof file["start"] === "string" ? file["start"] : undefined;
-  const end = typeof file["end"] === "string" ? file["end"] : undefined;
-  const variables = Array.isArray(file["variables"]) ? file["variables"].filter((v): v is string => typeof v === "string" && /^\w+$/.test(v)) : [];
+  // A route file is a person's to edit: only a name-shaped start or end is printed, and cut short.
+  const place = (value: unknown): string | undefined => (typeof value === "string" && NAME.test(value) ? value.slice(0, 40) : undefined);
+  const start = place(file["start"]);
+  const end = place(file["end"]);
+  const variables = Array.isArray(file["variables"])
+    ? file["variables"].filter((v): v is string => typeof v === "string" && /^\w+$/.test(v)).map((v) => v.slice(0, 40))
+    : [];
   const way = start !== undefined && end !== undefined ? `${start} → ${end}` : "";
   const parts = [way, variables.join(", ")].filter((part) => part !== "");
   return parts.length === 0 ? name : `${name} (${parts.join("; ")})`;
@@ -196,12 +214,13 @@ export function cheapestWay(roads: MapRoad[], from: string, to: string, isProven
     ...roads.filter(driveable).map((road) => ({ leg: road, from: road.from, to: road.to, cost: isProven(road) ? 1 : 2 })),
     ...routes.map((route) => ({ leg: route, from: route.from, to: route.to, cost: route.moves })),
   ];
-  let best: { cost: number; used: number; chain: Array<MapRoad | RouteEdge> } | null = null;
+  const found: { best: { cost: number; used: number; chain: Array<MapRoad | RouteEdge> } | null } = { best: null };
   let budget = 20_000;
   const walk = (at: string, seen: Set<string>, chain: Array<MapRoad | RouteEdge>, cost: number, used: number): void => {
+    const { best } = found;
     if (budget-- <= 0 || (best !== null && cost > best.cost)) return;
     if (at === to) {
-      if (best === null || cost < best.cost || (cost === best.cost && used > best.used)) best = { cost, used, chain: [...chain] };
+      if (best === null || cost < best.cost || (cost === best.cost && used > best.used)) found.best = { cost, used, chain: [...chain] };
       return;
     }
     for (const next of legs) {
@@ -214,7 +233,7 @@ export function cheapestWay(roads: MapRoad[], from: string, to: string, isProven
     }
   };
   walk(from, new Set([from]), [], 0, 0);
-  return best === null ? null : (best as { chain: Array<MapRoad | RouteEdge> }).chain;
+  return found.best === null ? null : found.best.chain;
 }
 
 /** A leg that is a saved route rather than a road. */
@@ -254,6 +273,7 @@ const NO_HERE: MapAnswer = { text: "Error not_found: the app's current place isn
 async function nameHere(name: string, ctx: MapContext): Promise<[MapAnswer, boolean]> {
   const here = await ctx.here();
   if (here === null) return [NO_HERE, false];
+  if (ctx.map.data().places[here.name] === undefined) return [{ text: "Error not_found: the current place isn't in the map yet; look at the screen first.", error: true }, false];
   if (here.name === name) return [said(`The current place is already ${name}.`), false];
   if (ctx.map.data().places[name] !== undefined) return [bad(`a place named "${name}" already exists; pick another name.`), false];
   // The name is the agent's choice and may be any [a-z0-9_]; the tool never fills one in from screen text.
@@ -268,7 +288,14 @@ const PARAM_PIECE = /^\[(?:\.\.\.)?[A-Za-z0-9_]+\]$/;
 /** A segment that holds a value: a number, a uuid, long hex (§18.1), or a long mixed run that looks like a token. */
 function holdsValue(segment: string): boolean {
   if (PARAM_PIECE.test(segment)) return false;
-  return looksLikeValue(segment) || (segment.length >= 20 && /^[A-Za-z0-9_-]+$/.test(segment) && /[A-Za-z]/.test(segment) && /\d/.test(segment));
+  // A JWT is three dotted parts: each part is looked at on its own.
+  return segment.split(".").some(
+    (part) =>
+      looksLikeValue(part) ||
+      (part.length >= 20 && /^[A-Za-z0-9_-]+$/.test(part) && /[A-Za-z]/.test(part) && /\d/.test(part)) ||
+      // A long run with no separator is no word of a route.
+      (part.length >= 24 && /^[A-Za-z0-9]+$/.test(part)),
+  );
 }
 
 /** A message when the link can't be kept as given; null when it can. It never repeats what was refused. */
@@ -306,13 +333,17 @@ async function addLink(link: string, placeName: string | undefined, ctx: MapCont
 
 // -- reflexes (§18.7); the machinery that fires them is not here
 
-/** The words a policy could match in a reflex's `do`: its text and label, and an id's words. */
-function wordsOf(step: Record<string, unknown>): { label?: string; text?: string } {
-  const target = typeof step["target"] === "object" && step["target"] !== null ? (step["target"] as Record<string, unknown>) : {};
-  const id = typeof target["id"] === "string" ? target["id"].replace(/[-_.]+/g, " ") : undefined;
-  const text = typeof target["text"] === "string" ? target["text"] : id;
-  const label = typeof target["label"] === "string" ? target["label"] : undefined;
-  return { ...(text !== undefined ? { text } : {}), ...(label !== undefined ? { label } : {}) };
+/** An id or a path as words: `deleteAccountButton` and `delete-account` both read "delete account". */
+const asWords = (piece: string): string => piece.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[-_./]+/g, " ");
+
+/** The words a policy could match in a reflex's `do`: its text and label, an id's words, and a link's path words. */
+function wordsOf(step: ReflexInput["do"]): { label?: string; text?: string } {
+  if (step.tool === "open_url") return { text: asWords(step.url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")) };
+  if (step.tool !== "tap" && step.tool !== "long_press" && step.tool !== "toggle") return {};
+  const target = step.target;
+  if ("id" in target) return { text: asWords(target.id) };
+  if ("label" in target) return { label: target.label };
+  return { text: target.text };
 }
 
 function addReflex(input: ReflexInput, ctx: MapContext): [MapAnswer, boolean] {
@@ -321,7 +352,7 @@ function addReflex(input: ReflexInput, ctx: MapContext): [MapAnswer, boolean] {
   const blocked = matchWord(ctx.lists.block, words);
   const flagged = blocked === null ? matchWord(ctx.lists.confirm, words) : null;
   if (blocked !== null || flagged !== null) {
-    const what = describeRunStep(input.do as Step);
+    const what = describeRunStep(input.do);
     const refusal =
       blocked !== null
         ? `which the policy blocks (${JSON.stringify(blocked)}); a reflex may not do it.`
