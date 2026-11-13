@@ -515,7 +515,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
   const up = saved === undefined ? known.places.find((place) => placeNameFromRoute(place.route) === to) : undefined;
   if (saved === undefined && up === undefined) return bad("not_found", `no place named "${to}"; map lists the places.`);
   // A saved place without a link of its own still has the one the app declares for it.
-  const target = { name: to, link: saved !== undefined ? (saved.link ?? declaredLink(saved.key, known)) : (up?.link ?? null) };
+  const target = { name: to, link: saved !== undefined ? (saved.link ?? declaredLink(saved.key, known, args.with ?? {})) : (up?.link ?? null) };
 
   // 1. Where am I? One read: it names the place, and it holds the first target for the policy.
   let tree = await svc.tree();

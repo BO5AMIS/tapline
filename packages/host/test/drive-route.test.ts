@@ -247,7 +247,7 @@ describe("a route as one leg of a way", () => {
     const map = welcomeMap();
     const s = await setupDrive(hosts, apps, dirs, { map, capabilities: CAPS, world: (w) => (w.screen = "welcome") });
     writeFileSync(join(s.folder, "routes", "enter.json"), enter);
-    expect(textOf(await callTool(s.tools, "drive", { to: "settings", dry_run: true }))).toBe("Would drive to settings by route enter: welcome > settings (all proven; via route enter).");
+    expect(textOf(await callTool(s.tools, "drive", { to: "settings", by: "taps", dry_run: true }))).toBe("Would drive to settings by route enter: welcome > settings (all proven; via route enter).");
     expect(s.count("press") + s.count("move")).toBe(0);
   });
 
@@ -255,7 +255,7 @@ describe("a route as one leg of a way", () => {
     const map = welcomeMap();
     const s = await setupDrive(hosts, apps, dirs, { map, capabilities: CAPS, world: (w) => { w.screen = "welcome"; w.goes["welcome|continue"] = "general"; } });
     writeFileSync(join(s.folder, "routes", "enter.json"), enter);
-    const answer = await callTool(s.tools, "drive", { to: "settings" });
+    const answer = await callTool(s.tools, "drive", { to: "settings", by: "taps" }); // the app also declares a link to settings; this test is about the route
     expect(answer.isError).toBe(true);
     expect(textOf(answer)).toMatch(/^Error off_route: stopped at step 1 of 1 \(route enter\): it didn't lead where the road says\./);
   });
