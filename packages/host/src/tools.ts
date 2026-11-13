@@ -372,6 +372,7 @@ export const toolShapes = {
     account: z.string().optional().describe("With route: a test account's name; the tool types its values, you never see the password"),
     then: z.array(stepSchema).optional().describe("run steps that go on after arriving, in the same call"),
     by: z.enum(["any", "taps", "link"]).optional().describe('"any" (default), "taps" (roads only, never a jump) or "link" (a jump only)'),
+    look: lookField,
     brief: briefField,
     dry_run: dryRunField,
   },
@@ -1831,13 +1832,23 @@ export class TaplineTools {
     const map = this.mapOf(session);
     if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
     // As a `run` step a drive builds no screen of its own: the batch answers once (9.1).
-    const given: Shape<"drive"> & { quiet?: boolean } = options.asStep === true ? { ...args, quiet: true } : args;
+    // `look: false` (1.13.3) answers the first line only on arrival; a step's own `look` is ignored (§9.1).
+    const { look: askedLook, ...withoutLook } = args;
+    // With `then`, the run steps answer and take the `look` (drive.ts afterThen).
+    const quietLook = options.asStep !== true && askedLook === false && args.dry_run !== true && args.then === undefined;
+    const given: Shape<"drive"> & { quiet?: boolean } =
+      options.asStep === true ? { ...withoutLook, quiet: true } : quietLook ? { ...args, quiet: true } : args;
     const services = this.driveServices(session, map);
     const routes = this.routeServices(session, args.account, args.brief);
     const drove = (): Promise<CallToolResult> => (given.route !== undefined ? driveRoute(services, routes, given) : driveTo(services, given, routes));
     // A batch keeps only `Note:` lines of a step's answer, so a repair is said as one there.
     const go = async (): Promise<CallToolResult> => {
       const answer = await drove();
+      if (quietLook && answer.isError !== true) {
+        // No list and no changes were given: the next answer's changes cover this call too, and says so.
+        this.markListUnseen();
+        this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
+      }
       if (options.asStep !== true) return answer;
       return { ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: block.text.replace(/^Road repaired/gm, "Note: Road repaired") } : block)) };
     };

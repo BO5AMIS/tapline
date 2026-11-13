@@ -81,6 +81,8 @@ export interface World {
   nextState?: "covered" | "moving";
   /** Open alerts the tree reports. */
   alerts?: unknown[];
+  /** The `changes` block a tree read answers with when it is asked for them (a same-screen answer). */
+  treeChanges?: unknown;
   /** Answer `move` with this error code once, as the app's guard would. */
   moveError?: { code: string; message: string };
   /** A touch that resolves to the element with this ref lands on this element instead: its actionable parent. */
@@ -198,7 +200,7 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
     const params = (req.params ?? {}) as Record<string, unknown>;
     switch (req.method) {
       case "tree":
-        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: world.elements[world.screen], ...(world.alerts !== undefined ? { alerts: world.alerts } : {}), route: { names: ROUTES[world.screen] }, place: { route: ROUTES[world.screen] } } };
+        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: world.elements[world.screen], ...(world.alerts !== undefined ? { alerts: world.alerts } : {}), ...(world.treeChanges !== undefined && params["changes"] === true ? { changes: world.treeChanges } : {}), route: { names: ROUTES[world.screen] }, place: { route: ROUTES[world.screen] } } };
       case "place":
         return { ok: true, result: { route: ROUTES[world.screen], seenAt: Date.now() } };
       case "places":

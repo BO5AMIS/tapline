@@ -148,6 +148,8 @@ export interface DriveArgs {
   then?: unknown[] | undefined;
   by?: "any" | "taps" | "link" | undefined;
   brief?: boolean | undefined;
+  /** `false` (1.13.3): the first line only on arrival. A stop always carries the screen. */
+  look?: boolean | undefined;
   dry_run?: boolean | undefined;
   /** Set by the host for a drive that is a `run` step or a route's way to its start: no screen is built on success. */
   quiet?: boolean | undefined;
@@ -462,7 +464,7 @@ export async function driveQuietly(svc: DriveServices, args: DriveArgs, rs?: Rou
 async function afterThen(core: Core, args: DriveArgs, rs: RouteServices | undefined): Promise<CallToolResult> {
   // A dry run touches nothing, so the steps after it don't run either.
   if (!core.ok || args.then === undefined || rs === undefined || args.dry_run === true) return core.answer;
-  const ran = await rs.runSteps(args.then as Step[], true);
+  const ran = await rs.runSteps(args.then as Step[], args.look !== false);
   if (ran.isError === true) return appendLines(ran, [...core.notes, `Note: arrived at ${core.arrived} before the steps ran.`]);
   return withLinesBefore(ran, [core.line, ...core.notes]);
 }
