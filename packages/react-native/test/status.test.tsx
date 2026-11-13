@@ -3,6 +3,7 @@ import React from 'react';
 import { Alert, Dimensions, PixelRatio, Pressable, Text } from 'react-native';
 import { act } from 'react-test-renderer';
 import { configureActions, press } from '../src/actions';
+import { setAnimationSpeed } from '../src/anim';
 import { installAlertTracking, nativeAlert, uninstallAlertTracking } from '../src/alerts';
 import { forgetLastTree, resetRefs, setMeasurer, tree } from '../src/inspect';
 import { installNetworkTracking, uninstallNetworkTracking } from '../src/network';
@@ -94,6 +95,19 @@ test('tree reports an open alert with its buttons, and requests in flight', asyn
   xhr.finish(200);
   const after = await tree({});
   expect(after.network).toBeUndefined();
+});
+
+test('tree says animations: fast while fast animations are on, and nothing otherwise', async () => {
+  await mount(<Text>Workout</Text>);
+  useFrames({});
+  expect((await tree({})).animations).toBeUndefined();
+  await setAnimationSpeed('fast');
+  try {
+    expect((await tree({})).animations).toBe('fast');
+  } finally {
+    await setAnimationSpeed('normal');
+  }
+  expect((await tree({})).animations).toBeUndefined();
 });
 
 test('a press is refused while an iOS alert is open, unless forced', async () => {

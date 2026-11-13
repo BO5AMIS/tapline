@@ -49,6 +49,8 @@ export interface CallRecord {
   ms?: number;
   /** The call came through the thin call (§16.1). */
   via?: "call";
+  /** Fast animations were on when the call began. */
+  fastAnimations?: true;
 }
 
 export interface Flag {
@@ -67,6 +69,8 @@ export interface Report {
   time?: string;
   /** Person's OKs used, by where they were given; absent when none (§11.3). */
   approvals?: { chat: number; liveView: number };
+  /** Calls that ran with fast animations on; absent when none did (PLAN-1.6 F4). */
+  fastAnimations?: number;
 }
 
 /** Groups the log's agent entries into calls, in order. Entries from before the call log have no call number: each is a call, a batch is one. */
@@ -111,6 +115,7 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
       ...(end !== undefined ? { end, ms: end - start } : {}),
       ...(client !== undefined ? { client } : {}),
       ...(group.some((e) => e.via === "call") ? { via: "call" as const } : {}),
+      ...(group.some((e) => e.animations === "fast") ? { fastAnimations: true as const } : {}),
       listed: group.some((e) => e.listed === true),
       dryRun: group.some((e) => e.dry_run === true),
       ...(single && first.element !== undefined ? { element: first.element } : {}),
@@ -341,6 +346,7 @@ export function analyze(calls: readonly CallRecord[]): Report {
     failedCodes: [...codes].sort(byCount),
     flags,
     ...(time !== undefined ? { time } : {}),
+    ...(calls.some((c) => c.fastAnimations === true) ? { fastAnimations: calls.filter((c) => c.fastAnimations === true).length } : {}),
     ...(given.length > 0 ? { approvals: { chat: given.filter((v) => v === "chat").length, liveView: given.filter((v) => v === "live view").length } } : {}),
   };
 }
@@ -410,7 +416,14 @@ export function formatReport(report: Report, accounts: readonly string[] = []): 
   const a = report.approvals;
   const approvalsLine =
     a === undefined ? undefined : `Approvals: ${[...(a.chat > 0 ? [`${a.chat} in chat`] : []), ...(a.liveView > 0 ? [`${a.liveView} in the live view`] : [])].join(", ")}.`;
-  const top = [head, ...(report.time !== undefined ? [report.time] : []), ...(approvalsLine !== undefined ? [approvalsLine] : []), ...(accountsLine !== undefined ? [accountsLine] : [])];
+  const animationsLine = report.fastAnimations === undefined ? undefined : `Animations: fast for ${report.fastAnimations} of ${report.calls} ${report.calls === 1 ? "call" : "calls"}.`;
+  const top = [
+    head,
+    ...(report.time !== undefined ? [report.time] : []),
+    ...(approvalsLine !== undefined ? [approvalsLine] : []),
+    ...(animationsLine !== undefined ? [animationsLine] : []),
+    ...(accountsLine !== undefined ? [accountsLine] : []),
+  ];
   if (report.flags.length === 0) return [...top, "Waste: none."].join("\n");
   return [...top, "Waste:", ...report.flags.map((f) => `- ${f.text}`)].join("\n");
 }

@@ -144,6 +144,8 @@ export interface TreeResult {
   alerts?: TreeAlert[];
   /** Network requests still running (fetch / XMLHttpRequest) and the condition Tapline put on them; absent when neither. */
   network?: { inFlight?: number; condition?: 'offline' | '3g' | 'lossy' };
+  /** Present (as "fast") while the `animations` command has fast-forwarded animations. */
+  animations?: 'fast';
   /** True while the software keyboard is up; absent when it is down or isn't known. */
   keyboard?: true;
   /** The focused screen, when the app uses React Navigation (Expo Router included). */

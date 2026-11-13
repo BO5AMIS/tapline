@@ -18,6 +18,7 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
+import { ANIMATIONS_PAUSED_NOTE, animationsOn, endAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
@@ -28,6 +29,7 @@ import {
   Journey,
   DRIVE_ALLOWED,
   REFLEXES_ALLOWED,
+  FAST_ANIMATIONS_ALLOWED,
   OPEN_URL,
   conditionsSchema,
   exportSchema,
@@ -1098,6 +1100,9 @@ const CRASH_NOTED_TOOLS = [
   "openUrl", "logs", "reload", "performance", "wait", "drive",
 ] as const satisfies readonly (keyof TaplineTools)[];
 
+/** The tools that measure or compare: fast animations are normal inside them (PLAN-1.6 F4, E8). `compareStep` is `run`'s own. */
+const PAUSED_TOOLS = ["compareScreen", "compareStep", "filmstrip", "performance"] as const;
+
 /** Every tool the agent calls, by handler name (the call log numbers these). */
 const CALL_TOOLS: Readonly<Record<string, string>> = {
   apps: "apps", openApp: "open_app", pair: "pair", look: "look", run: "run", inspect: "inspect", audit: "audit",
@@ -1163,6 +1168,8 @@ interface CallState {
   afterScrolls: boolean;
   /** The call came through the thin call. */
   thin: boolean;
+  /** Fast animations were on when the call began (the report says how many calls they covered). */
+  fast: boolean;
   entries: Array<{ entry: Omit<ActionLogEntry, "t" | "source">; at: Date }>;
 }
 
@@ -1371,6 +1378,13 @@ export class TaplineTools {
         this.pickerFrom = undefined;
       }
     });
+    // The measuring tools run with fast animations paused (PLAN-1.6 F4, E8): innermost, so the note is part of the answer.
+    for (const name of PAUSED_TOOLS) {
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.pausingAnimations(() => method.apply(this, args)));
+    }
     // Crashes before this agent's session began are not its news.
     this.crashBaseline = host.crashMark();
     for (const name of CRASH_NOTED_TOOLS) {
@@ -1394,6 +1408,18 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.journeyCall(tool, args[0], () => method.apply(this, args)));
     }
+  }
+
+  /** Whether fast animations are on for the app being driven now. */
+  private fastNow(): boolean {
+    const id = this.host.current()?.id;
+    return id !== undefined && animationsOn(this.host, id);
+  }
+
+  /** Runs a measuring call with fast animations normal, then puts them back, and says so in the answer (E8). */
+  private async pausingAnimations(run: () => CallToolResult | Promise<CallToolResult>): Promise<CallToolResult> {
+    const { value, paused } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run());
+    return paused ? appendNote(value, ANIMATIONS_PAUSED_NOTE) : value;
   }
 
   /** The journey running now, for the stress moments and the report writer (AGENT-TOOLS 1.12 §17). */
@@ -1503,6 +1529,14 @@ export class TaplineTools {
     return null;
   }
 
+  /** In a user's eyes `animations fast` is off unless `allow` names fast_animations; `normal` always goes (PLAN-1.6 F4, E8). */
+  private animationsRefusal(args: unknown): string | null {
+    if (!this.userEyes()) return null;
+    const speed = typeof args === "object" && args !== null ? (args as { speed?: unknown }).speed : undefined;
+    if (speed === "normal" || this.journeyRun?.allows(FAST_ANIMATIONS_ALLOWED) === true) return null;
+    return "Error not_allowed: in a journey, fast animations are off: a user waits for them; the journey's allow can name fast_animations.";
+  }
+
   private static readonly SCROLL_TO_TARGET_OFF =
     'Error not_allowed: in a journey, scroll to: "target" is off: a person scrolls until they see it. Scroll down or up, then look.';
 
@@ -1521,6 +1555,10 @@ export class TaplineTools {
       return this.shortcutWords("open_url", "").replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
     }
     const name = String(s["name"] ?? "");
+    // Fast animations have their own allow word (fast_animations), not the command's name.
+    if (step.tool === "app_command" && name === "animations") {
+      return this.animationsRefusal(s["args"])?.replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `) ?? null;
+    }
     if (step.tool === "app_command" && name !== "" && !this.shortcutAllowed("app_command", name)) {
       return this.shortcutWords("app_command", name).replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
     }
@@ -1553,7 +1591,14 @@ export class TaplineTools {
     const afterScrolls = this.prevCallTool === "scroll";
     if (tool === "scroll" && !afterScrolls) this.scrollBase = this.listBase;
     this.prevCallTool = tool;
-    const state: CallState = { call: ++this.callCount, tool, afterScrolls, thin: this.thinScope.getStore() === true, entries: [] };
+    const state: CallState = {
+      call: ++this.callCount,
+      tool,
+      afterScrolls,
+      thin: this.thinScope.getStore() === true,
+      fast: this.fastNow(),
+      entries: [],
+    };
     const began = new Date();
     let result: CallToolResult | Promise<CallToolResult>;
     try {
@@ -1594,6 +1639,7 @@ export class TaplineTools {
       size,
       v: 2 as const,
       ...(state.thin ? { via: "call" as const } : {}),
+      ...(state.fast ? { animations: "fast" as const } : {}),
     };
     const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     if (state.entries.length > 0) {
@@ -3874,6 +3920,11 @@ export class TaplineTools {
    * folders to look in, in order. A missing reference hands back the screenshot, so the caller may save it.
    */
   private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
+    // A comparison, from a step's `expect` too, is made with animations normal (the tools that say so add the note).
+    return (await withNormalAnimations(this.host, session.id, () => this.checkAgainstReferenceNow(session, name, options))).value;
+  }
+
+  private async checkAgainstReferenceNow(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
     let shot: ShotImage;
     try {
       shot = await this.stillShot(session.id, options.width, 0.9);
@@ -5342,11 +5393,16 @@ export class TaplineTools {
       );
     }
     const name = args.name.trim();
-    const shortcut = this.shortcutRefusal("app_command", name);
+    if (name === "animations") {
+      const refused = this.animationsRefusal(args.args);
+      if (refused !== null) return fail(refused);
+    }
+    const shortcut = name === "animations" ? null : this.shortcutRefusal("app_command", name);
     if (shortcut !== null) return shortcut;
     const blocked = name === "network" ? this.networkRefusal((args.args as { mode?: unknown } | undefined)?.mode) : null;
     if (blocked !== null) return blocked;
-    return this.act(
+    const sessionId = this.host.current()?.id;
+    const answer = await this.act(
       "command",
       { name, args: args.args ?? {} },
       (r) => {
@@ -5368,6 +5424,12 @@ export class TaplineTools {
       undefined,
       args.brief,
     );
+    // What the app says it is now: the host remembers it, to pause it for a measurement and to end it with the session.
+    const speed = (args.args as { speed?: unknown } | undefined)?.speed;
+    if (name === "animations" && answer.isError !== true && sessionId !== undefined && (speed === "fast" || speed === "normal")) {
+      noteAnimations(this.host, sessionId, speed);
+    }
+    return answer;
   }
 
   /** AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes. */
@@ -5775,6 +5837,10 @@ export class TaplineTools {
       journey.state.conditionRecords.push(record);
       if (!record.applied) notes.push(`Note: condition ${name} ${value} was not applied: ${record.failure ?? "the app refused"}.`);
     }
+    // A user waits for animations: fast ones end here unless the journey's allow keeps them (PLAN-1.6 F4, E8).
+    if (journey.userEyes && !journey.allows(FAST_ANIMATIONS_ALLOWED) && (await endAnimations(this.host, session.id))) {
+      notes.push("Note: animations were turned off for this journey: a user waits for them. allow fast_animations keeps them on.");
+    }
     this.journeyRun = journey;
     this.journeyDone = undefined;
     this.stressWaiting.clear();
@@ -5867,7 +5933,8 @@ export class TaplineTools {
         // Right after a password was typed iOS may still show its last character: no picture then, from any path (a ux_check's too).
         if (this.secureWindow()) return undefined;
         try {
-          return await this.takeShot(session.id, width, quality);
+          // The picture is taken with fast animations paused, as a user would see the screen (PLAN-1.6 F4, E8).
+          return (await withNormalAnimations(this.host, session.id, () => this.takeShot(session.id, width, quality))).value;
         } catch {
           return undefined;
         }

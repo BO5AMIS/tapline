@@ -183,6 +183,8 @@ export const treeResultSchema = z.object({
       condition: z.string().optional(), // any string: a mode a newer SDK adds must not make the whole tree unreadable
     })
     .optional(),
+  /** "fast" while the app's fast-forwarded animations are on (capability `animations`); absent otherwise. */
+  animations: z.string().optional(),
   /** True while the software keyboard is up (absent from older SDKs and when it is down). */
   keyboard: z.boolean().nullish(),
   /** With `changes: true`: what changed since the previous tree call. */

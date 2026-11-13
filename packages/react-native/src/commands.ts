@@ -1,5 +1,6 @@
 import { Appearance, I18nManager } from 'react-native';
 import { reload } from './actions';
+import { animationsSaid, setAnimationSpeed } from './anim';
 import { setKnowIdle } from './idle';
 import { originalWarn } from './logs';
 import {
@@ -82,7 +83,23 @@ const settleMode: TaplineCommand = {
   },
 };
 
+/**
+ * Built in: fast-forwarded animations (PLAN-1.6 F4), in three layers. Off unless an agent asks; every answer says
+ * while it is on (the host reads `tree.animations`); back to normal by itself when the session ends.
+ */
+const animations: TaplineCommand = {
+  description:
+    'Fast-forward animations: the native window, Animated and LayoutAnimation, Reanimated when present; timers are not touched (args: { speed: "fast" | "normal" }); back to normal when the session ends',
+  run: async (args) => {
+    const speed = args.speed;
+    if (speed !== 'fast' && speed !== 'normal') throw new Error('speed must be "fast" or "normal"');
+    const on = await setAnimationSpeed(speed);
+    return { speed, layers: { ...on }, say: animationsSaid(speed) };
+  },
+};
+
 function installBuiltIns(): void {
+  registry.set('animations', animations);
   registry.set('settle', settleMode);
   registry.set('appearance', appearance);
   registry.set('network', network);

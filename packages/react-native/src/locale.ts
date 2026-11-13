@@ -32,7 +32,7 @@ export function isTextSize(value: unknown): value is TextSize {
 }
 
 /** Names the SDK provides itself that an app cannot replace (`appearance` can be replaced, as in 1.3). */
-export const RESERVED_COMMANDS: readonly string[] = ['network', 'text_size', 'settle'];
+export const RESERVED_COMMANDS: readonly string[] = ['network', 'text_size', 'settle', 'animations'];
 
 // --- validation ---------------------------------------------------------------------------------------------
 

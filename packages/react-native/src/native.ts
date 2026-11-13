@@ -11,6 +11,11 @@ export interface TaplineNativeModule {
   capture(pixelWidth: number, quality: number, fresh: boolean): Promise<string>;
   /** What UIKit presents over the app. */
   cover(): Promise<unknown>;
+  /**
+   * Sets the speed of the app's windows' layers: 1 is normal, 100 makes UIKit animations finish at once (PLAN-1.6 F4).
+   * Absent from a build made before 1.6.0: the SDK then fast-forwards only what JavaScript runs.
+   */
+  setAnimationSpeed?(speed: number): Promise<void> | void;
 }
 
 /** What UIKit shows in front of the app, as the native module reports it. */

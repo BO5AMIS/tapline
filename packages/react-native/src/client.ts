@@ -13,6 +13,7 @@ import { methods as defaultMethods, type MethodFn } from './methods';
 import { refreshCover } from './native';
 import { resetTaplineTextSize } from './locale';
 import { resetKnowIdle } from './idle';
+import { resetAnimations } from './anim';
 import { resetNetworkCondition } from './network';
 import { stopPerf } from './perf';
 import { startPlaceEvents } from './place';
@@ -121,7 +122,7 @@ export function collectDeviceInfo(): DeviceInfo {
 }
 
 export function defaultCapabilities(): string[] {
-  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck', 'media', 'place', 'places', 'move', 'waitOnce', 'pressFacts', 'typeKind', 'idle'];
+  const capabilities = ['tree', 'press', 'longPress', 'type', 'scroll', 'toggle', 'openURL', 'back', 'check', 'commands', 'waitFor', 'logs', 'overlay', 'dryRun', 'audit', 'performance', 'uxCheck', 'media', 'place', 'places', 'move', 'waitOnce', 'pressFacts', 'typeKind', 'idle', 'animations'];
   if (screenshotAvailable()) capabilities.push('screenshot', 'feed');
   if (typeof __DEV__ !== 'undefined' && __DEV__) capabilities.push('reload', 'inspect');
   return capabilities;
@@ -185,6 +186,8 @@ export class TaplineClient {
     const socket = this.socket;
     this.socket = null;
     resetNetworkCondition();
+    // Before the idle signals: our wrapper sits over theirs, so it comes off first.
+    resetAnimations();
     resetKnowIdle();
     resetTaplineTextSize();
     resetMedia();
@@ -424,6 +427,8 @@ export class TaplineClient {
     setEventSink(null);
     // The phone is never left offline or slow with nobody watching.
     resetNetworkCondition();
+    // Before the idle signals: our wrapper sits over theirs, so it comes off first.
+    resetAnimations();
     resetKnowIdle();
     resetTaplineTextSize();
     resetMedia();

@@ -13,6 +13,7 @@ import { openAlerts } from './alerts';
 import { placeFrom, type PlaceParts } from './placekey';
 import { keyboardState } from './keyboard';
 import { refreshCover } from './native';
+import { animationsFast } from './anim';
 import { inFlight, networkCondition } from './network';
 import { commitRevision, getRoots } from './register';
 import {
@@ -1537,6 +1538,8 @@ export async function tree(params: unknown = {}, glass?: GlassPass): Promise<Tre
   if (busy > 0 || mode !== 'normal') {
     result.network = { ...(busy > 0 ? { inFlight: busy } : {}), ...(mode !== 'normal' ? { condition: mode } : {}) };
   }
+  // Said in every answer while fast animations are on (PLAN-1.6 F4); the host prints `Animations: fast (Tapline).`.
+  if (animationsFast()) result.animations = 'fast';
   // `Keyboard: shown` in the header while it is up; in a change block only when it came or went.
   const keyboard = keyboardState()?.shown;
   if (keyboard === true) result.keyboard = true;

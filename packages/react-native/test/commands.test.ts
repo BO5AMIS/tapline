@@ -17,9 +17,10 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-test('lists the built-in appearance, network and settle commands and the app’s own, sorted by name', () => {
+test('lists the built-in animations, appearance, network and settle commands and the app’s own, sorted by name', () => {
   registerTaplineCommand('signin', { description: 'Sign in as a test user', run: () => undefined });
   expect(listCommands()).toEqual([
+    { name: 'animations', description: expect.stringContaining('fast') },
     { name: 'appearance', description: expect.stringContaining('dark') },
     { name: 'network', description: expect.stringContaining('offline') },
     { name: 'settle', description: expect.stringContaining('quiet') },

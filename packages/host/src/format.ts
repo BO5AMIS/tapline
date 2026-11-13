@@ -1,3 +1,4 @@
+import { ANIMATIONS_LINE } from "./animations.js";
 import type { LogEntry, TreeElement, TreeResult } from "./protocol.js";
 
 /** How much of a text a line shows (AGENT-TOOLS v1.5). */
@@ -408,6 +409,8 @@ export function formatStatus(tree: TreeResult, keyboard: "shown" | "hidden" | nu
   if (condition !== undefined) lines.push(networkLine(condition));
   const busy = tree.network?.inFlight ?? 0;
   if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);
+  // Said in every answer while fast animations are on (PLAN-1.6 F4).
+  if (tree.animations === "fast") lines.push(ANIMATIONS_LINE);
   return lines;
 }
 

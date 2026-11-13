@@ -1,4 +1,5 @@
-import { Platform } from 'react-native';
+import { Animated, Platform } from 'react-native';
+import { animationsFast, setAnimationSpeed } from '../src/anim';
 import {
   HOST_SILENCE_MS,
   PING_INTERVAL_MS,
@@ -367,6 +368,23 @@ describe('keepalive', () => {
       } finally {
         configureKnowIdle(false);
       }
+    });
+
+    test('fast animations go back to normal when the socket drops or Tapline stops, and the app announces the capability', async () => {
+      expect(defaultCapabilities()).toContain('animations');
+      const timing = Animated.timing;
+      const socket = connect(makeClient());
+      await setAnimationSpeed('fast');
+      expect(animationsFast()).toBe(true);
+      socket.drop(1006);
+      expect(animationsFast()).toBe(false);
+      expect(Animated.timing).toBe(timing);
+      const harness = makeClient();
+      connect(harness);
+      await setAnimationSpeed('fast');
+      harness.client.stop();
+      expect(animationsFast()).toBe(false);
+      expect(Animated.timing).toBe(timing);
     });
 
     test('the host going silent puts the network back to normal', () => {

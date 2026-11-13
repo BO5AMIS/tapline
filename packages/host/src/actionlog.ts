@@ -24,6 +24,8 @@ export interface ActionLogEntry {
   v?: 2;
   /** `"call"` when the call came through the thin call, a new process each time (§18.10). */
   via?: "call";
+  /** `"fast"` when fast-forwarded animations were on while the call ran (PLAN-1.6 F4); the report says how many calls. */
+  animations?: "fast";
   app?: string;
   batch?: { id: string; step: number };
   dry_run?: boolean;

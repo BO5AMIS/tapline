@@ -24,6 +24,7 @@ import { realRunner } from "./journeyexport.js";
 import { MapRegistry } from "./places.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
 import { TaplineHost, type ListenResult } from "./server.js";
+import { restoreAnimations } from "./animations.js";
 import { TaplineTools, type ToolsOptions } from "./tools.js";
 import { NO_UX_RULES, loadUxRules, type UxRules } from "./uxcheck.js";
 import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
@@ -288,6 +289,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     // The maps are written at most once a second while driving, and in full here.
     close: async () => {
       await maps.flushAll().catch(() => undefined);
+      // The phone is never left fast-forwarded with nobody watching (PLAN-1.6 F4, E8).
+      await restoreAnimations(host).catch(() => undefined);
       await host.close();
     },
   };
