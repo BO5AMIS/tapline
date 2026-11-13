@@ -71,7 +71,12 @@ describe("GET /place", () => {
     place(app, { route: ["trips", "[id]"], params: { id: "42", token: "secret-value" }, title: "Trip to Paris", extra: { id: "42" } });
     await delay(50);
     const text = await (await get(port, `?app=${APP_ID}`)).text();
-    expect(text).not.toMatch(/42|secret-value|Paris|params|title|extra/);
+    expect(text).not.toMatch(/secret-value|Paris|params|title|extra/);
+    // "42" is checked on the place's own fields only: seenAt is an epoch in ms and can contain it by chance.
+    const { seenAt, ...fields } = JSON.parse(text) as Record<string, unknown>;
+    expect(typeof seenAt).toBe("number");
+    expect(JSON.stringify(fields)).not.toContain("42");
+    expect(fields).not.toHaveProperty("params");
   });
 
   it("inFront is false when the app is in the background", async () => {

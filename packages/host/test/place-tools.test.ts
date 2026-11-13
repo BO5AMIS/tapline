@@ -303,7 +303,8 @@ describe("links from open_url (§18.3)", () => {
     expect(mapOf()?.data().roads[0]).toMatchObject({ from: "settings", to: "trips_id", move: { tool: "open_url", url: "wayfare://trips/[id]" } });
     await registry.flushAll();
     const text = readFileSync(join(registry["options"].mapsDir as string, "com.example.demo", "map.json"), "utf8");
-    expect(text).not.toMatch(/42|abc123/);
+    // The file's own timestamps are ISO times and can contain "42" by chance: look at everything else.
+    expect(text.replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, "<time>")).not.toMatch(/42|abc123/);
     expect(file().places["trips_id"]?.link).toBe("wayfare://trips/[id]");
   });
 

@@ -83,7 +83,8 @@ describe("the accounts file", () => {
     writeFileSync(file, JSON.stringify({ version: 1, accounts: { a: { password: 5 } } }));
     const wrong = await loadAccounts(file, clear).catch((e: unknown) => e);
     expect(String((wrong as Error).message)).toContain("isn't the right format");
-    expect(String((wrong as Error).message)).not.toContain("5");
+    // The message names the file (a random temp path that can hold a "5"): look at the reason after it.
+    expect(String((wrong as Error).message).replace(file, "<file>")).not.toContain("5");
   });
 
   it("a file reached through a link into a repo is checked where it really is", async () => {

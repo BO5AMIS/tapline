@@ -384,7 +384,8 @@ describe("links (§18.3)", () => {
     if (!saved.saved) throw new Error("expected a link");
     const verdict = map.recordMove(from, { tool: "open_url", url: saved.link }, {}, place, 300);
     expect(verdict.saved).toBe(true);
-    expect(JSON.stringify(map.data().roads)).not.toContain("42");
+    // Roads carry ISO timestamps that can contain "42" by chance: look at everything but those.
+    expect(JSON.stringify(map.data().roads).replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, "<time>")).not.toContain("42");
   });
 });
 

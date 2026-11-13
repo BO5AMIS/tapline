@@ -1,6 +1,7 @@
 import { mount, unmountAll } from './helpers';
 import React, { useState } from 'react';
 import { Dimensions, PixelRatio, Pressable, ScrollView, Text, View } from 'react-native';
+import { act } from 'react-test-renderer';
 import { configureActions, press } from '../src/actions';
 import { propsOf, type Fiber } from '../src/fiber';
 import { collectNodes, forgetLastTree, resetRefs, setHitTester, setMeasurer } from '../src/inspect';
@@ -58,7 +59,11 @@ async function pressWhileRecycling(row: React.ReactElement, target: Record<strin
   if (!isRecord(list)) throw new Error('no list');
   list.scrollTo = (arg: Record<string, unknown>) => {
     offset = Number(arg.y);
-    recycle('Delete account'); // the list reuses the component for another row
+    // The list reuses the component for another row. The commit is flushed here, synchronously, as it is in an app
+    // before the next frame: a bare setState would commit on React's scheduler, racing the action's own wait.
+    act(() => {
+      recycle('Delete account');
+    });
   };
   setMeasurer(async (fiber) => {
     const id = nearestId(fiber);
