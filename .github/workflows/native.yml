@@ -31,9 +31,13 @@ jobs:
         # The newest Expo, and the oldest SDK an app is known to run Tapline on.
         template: ["blank-typescript", "blank-typescript@sdk-55"]
     runs-on: macos-latest
-    timeout-minutes: 75
+    # A cold run takes 6 to 8 minutes.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes, so the job keeps no git credential.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:

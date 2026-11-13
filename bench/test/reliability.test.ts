@@ -3,9 +3,9 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkUnchanged, expectNoState, expectState, isTimeoutAnswer, PRESENT_WAIT_S } from "../src/lab.js";
-import type { CallResult } from "../src/mcp.js";
+import type { CallResult, ToolSession } from "../src/mcp.js";
 import { R1_STEPS, R3_CHECKS, R4_GRID } from "../src/reliability/checks.js";
-import { dismissShare, popoverDismissPoint, runR1, type Env } from "../src/reliability/driver.js";
+import { dismissShare, popoverDismissPoint, runR1, runStateCall, whereNow, type Env } from "../src/reliability/driver.js";
 
 describe("closing a popover share sheet (iOS 26)", () => {
   const region = 'e1 other "dismiss popup" id=PopoverDismissRegion @0,0 430x932 [tap]';
@@ -329,6 +329,32 @@ describe("check tables", () => {
     expect(R3_CHECKS).toHaveLength(7);
     expect(R4_GRID).toHaveLength(7);
   });
+  it("put lab-bottom in R1 (scrolled to, then tapped) and lab-behind-bar in R3 (QUALITY-BAR 2.5)", () => {
+    expect(R1_STEPS.map((s) => s.name)).toContain("tap lab-bottom from the top: the tool scrolls to it and taps");
+    expect(R3_CHECKS.some((c) => "id" in c.target && c.target.id === "lab-bottom")).toBe(false);
+    const bar = R3_CHECKS.find((c) => "id" in c.target && c.target.id === "lab-behind-bar");
+    expect(bar?.reasons).toEqual(["off_screen", "covered"]);
+    expect(bar?.notPressed).toBe("behind-bar");
+  });
+  it("the fake lab scrolls to lab-bottom on a tap, and refuses lab-behind-bar as off_screen", () => {
+    const lab = new FakeLab();
+    expect(lab.call("tap", { target: { id: "lab-bottom" } }).text).toContain("Tapped lab-bottom");
+    expect(lab.pressed).toBe("bottom");
+    lab.scroll = 0;
+    const r = lab.call("tap", { target: { id: "lab-behind-bar" } });
+    expect(r.text).toMatch(/^Error not_actionable: off_screen/);
+    expect(lab.pressed).toBe("bottom");
+  });
+  it("the fake lab scrolls a target out from under the navigation bar, and still refuses one no scroll clears", () => {
+    const lab = new FakeLab();
+    lab.scroll = 150; // lab-save (y 200) sits under the bar
+    expect(lab.call("tap", { target: { id: "lab-save" } }).text).toContain("Tapped lab-save");
+    expect(lab.pressed).toBe("save");
+    expect(lab.scroll).toBe(0);
+    const r = lab.call("tap", { target: { id: "lab-under-header" } });
+    expect(r.text).toBe("Error not_actionable: covered by the navigation bar");
+    expect(lab.pressed).toBe("save");
+  });
   it("resolves viewer points from a look", () => {
     const text = [
       `Screen ${W}x${H} pt @3x · 3 elements`,
@@ -366,6 +392,89 @@ describe("R1 and R2 on the fake lab", () => {
     expect(out).toHaveLength(32);
     expect(lab.state()).toContain("alert=ok");
     expect(lab.state()).toContain("typed2=xyz");
+  });
+
+  it("a scrollsInto step whose target is already on screen proves nothing, and says so", async () => {
+    const lab = new FakeLab({ alertTool: false });
+    lab.call("scroll", { target: { id: "lab-scroll" }, to: "end" });
+    const env: Env = { tool: lab.tool(), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const step = R1_STEPS.find((s) => s.scrollsInto === "lab-bottom");
+    expect(step).toBeDefined();
+    // Without its scroll to the start, lab-bottom is in view before the tap.
+    const { unproven, missing } = await runStateCall(env, { ...step, tool: "tap", before: [] });
+    expect(missing).toEqual([]);
+    expect(unproven).toEqual([
+      "lab-bottom was already on screen before the call, so nothing shows the tool scrolled to it",
+    ]);
+  });
+
+  it("a look that fails before the call is no evidence the target was off screen", async () => {
+    const lab = new FakeLab({ alertTool: false });
+    lab.call("scroll", { target: { id: "lab-scroll" }, to: "end" }); // lab-bottom is in view
+    const base = lab.tool();
+    let looks = 0;
+    const tool: ToolSession = {
+      call: (name, args) =>
+        name === "look" && looks++ === 0
+          ? Promise.resolve({ text: "Error not_answering: the app is not answering", images: 0, isError: true, ms: 1 })
+          : base.call(name, args),
+    };
+    const env: Env = { tool, hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const step = R1_STEPS.find((s) => s.scrollsInto === "lab-bottom");
+    // A scroll that answers but doesn't move: the before call can't show the precondition either.
+    const { unproven } = await runStateCall(env, {
+      ...step,
+      tool: "tap",
+      before: [{ tool: "scroll", args: { target: { id: "lab-scroll" }, direction: "down", amount: 0.1, look: false } }],
+    });
+    expect(unproven).toEqual([
+      "couldn't see whether lab-bottom was off screen before the call (the look failed: Error not_answering: the app is not answering)",
+    ]);
+  });
+
+  it("a target the tool leaves under the fixed header isn't proven on screen", async () => {
+    const lab = new FakeLab({ alertTool: false, bugs: { scrollsUnderHeader: true } });
+    lab.scroll = 600; // lab-save (y 200) is off the top
+    const env: Env = { tool: lab.tool(), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const { result, unproven } = await runStateCall(env, {
+      tool: "tap",
+      target: { id: "lab-save" },
+      bring: null,
+      scrollsInto: "lab-save",
+      expect: ["pressed=save"],
+    });
+    expect(result.isError).toBe(false);
+    expect(lab.pressed).toBe("save");
+    expect(unproven).toEqual([
+      "lab-save was under the fixed header right after the call: the tool acted where a person couldn't",
+    ]);
+  });
+
+  it("takes the header band from lab-bar when the tool lists it, down to its lowest edge", async () => {
+    const lines = [
+      `Screen ${W}x${H} pt @3x · 3 elements`,
+      `App: ${LAB_APP}`,
+      "e1 button id=lab-behind-bar @135,63 160x30 [tap]",
+      'e2 other "Lab" id=lab-bar @0,0 440x110',
+      "e3 button id=lab-bottom @80,100 280x40 [tap]",
+    ];
+    const look = (text: string): ToolSession => ({
+      call: () => Promise.resolve({ text, images: 0, isError: false, ms: 1 }),
+    });
+    const env = (text: string): Env => ({ tool: look(text), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() });
+    expect((await whereNow(env(lines.join("\n")), "lab-bottom")).at).toBe("under-header");
+    // Without lab-bar, lab-behind-bar's edge (y 93) is the band: lab-bottom at y 100 is clear of it.
+    expect((await whereNow(env(lines.filter((l) => !l.includes("lab-bar ")).join("\n")), "lab-bottom")).at).toBe("clear");
+    expect((await whereNow(env(`App: ${LAB_APP}\ne3 button id=lab-bottom @80,300 280x40`), "lab-bottom")).at).toBe("unknown");
+  });
+
+  it("the lab-bottom step, run as written, proves the scroll", async () => {
+    const lab = new FakeLab({ alertTool: false });
+    const env: Env = { tool: lab.tool(), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const step = R1_STEPS.find((s) => s.scrollsInto === "lab-bottom");
+    const { unproven, missing } = await runStateCall(env, { ...step, tool: "tap" });
+    expect(unproven).toEqual([]);
+    expect(missing).toEqual([]);
   });
 });
 
@@ -411,6 +520,15 @@ describe("the whole suite on the fake lab", () => {
     expect(r3.misses).toBe(1);
     expect(r3.notes).toContain("tap lab-save behind the sheet");
     expect(r3.notes).toContain("not_found instead of not_actionable (AGENT-TOOLS v1.4)");
+  }, 60_000);
+
+  it("fails R1 (not R2) when a tap fires lab-bottom's handler without scrolling to it", async () => {
+    const { rows } = await runWith({ alertTool: true, bugs: { pressesWithoutScrolling: true } }, 1);
+    const r1 = rowOf(rows, "R1");
+    expect(r1).toMatchObject({ misses: 1, pass: false });
+    expect(r1.notes).toContain("tap lab-bottom from the top");
+    expect(r1.notes).toContain("lab-bottom wasn't on screen right after the call");
+    expect(rowOf(rows, "R2").pass).toBe(true);
   }, 60_000);
 
   it("behind OS-drawn UI, judges the state after the cover is closed (the cover hides lab-state)", async () => {

@@ -52,8 +52,10 @@ the row. Rows are `{ id, checks, misses, pass, notes }`; the notes name each mis
 tool's first answer line (token-redacted).
 
 - R1 right element (state as expected), R2 no false refusals (each R1 action answered without
-  `Error`), R3 `not_actionable` with the right reason and the state unchanged (disabled, covered, off
-  screen, behind the sheet, under the header; behind a native alert and the share sheet only when the
+  `Error`; including `lab-bottom` tapped from the top, where the tool scrolls to it and taps: R1 also checks
+  it was off screen before the tap and on screen right after, so a handler fired without a scroll fails), R3
+  `not_actionable` with the right reason and the state unchanged (disabled, covered, off screen where no
+  scroll can reach it (`lab-behind-bar`, `off_screen` or `covered`), behind the sheet, under the header; behind a native alert and the share sheet only when the
   tool has `alert`, else noted as skipped), R5 `ambiguous` with `Candidates:`.
 - R4 sends a person's tap through the viewer `/ws` at points from `look` (buttons, edges, overlay,
   under the bar, empty space, inside the sheet) and waits for the agent's 3 s idle after each; `busy`

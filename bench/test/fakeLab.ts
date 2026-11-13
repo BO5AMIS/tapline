@@ -61,6 +61,8 @@ function buildElements(): El[] {
     els.push(col(`lab-row-${n}`, 1160 + (n - 1) * 40, { text: `Row ${n}`, h: 36, role: "text" }));
   }
   els.push(col("lab-bottom", 2800));
+  // Under the fixed header: no scroll brings it out.
+  els.push({ id: "lab-behind-bar", role: "button", x: 80, y: 60, w: 280, h: 30, fixed: true });
   return els;
 }
 
@@ -81,6 +83,16 @@ export interface Bugs {
    * the element anyway. The cover hides lab-state, so only a read after it closes shows it.
    */
   pressesBehindCover?: boolean;
+  /**
+   * A tap on an off-screen element fires its handler without scrolling to it (the scroll stays where
+   * it was), and answers as if it tapped.
+   */
+  pressesWithoutScrolling?: boolean;
+  /**
+   * A tap on an off-screen element scrolls it only as far as the fixed header (its centre lands at y 75,
+   * behind lab-behind-bar) and fires its handler there.
+   */
+  scrollsUnderHeader?: boolean;
 }
 
 export const LAB_APP = "Lab (com.example.lab)";
@@ -369,11 +381,23 @@ export class FakeLab {
     if (el.id === "lab-covered" && !this.options.bugs?.falseSuccessCovered) {
       return "Error not_actionable: covered by lab-overlay";
     }
+    if (el.id === "lab-behind-bar") return "Error not_actionable: off_screen, no scroll can bring it out (behind the fixed header)";
     const r = this.rect(el);
     const cy = r.y + r.h / 2;
     if (!el.fixed && cy < BAR && cy >= 0) return "Error not_actionable: covered by the navigation bar";
     if (cy < 0 || cy > H) return "Error not_actionable: off_screen, scroll to it";
     return null;
+  }
+
+  /**
+   * As the real tools do (AGENT-TOOLS 1.13.1 item 3, §16.2): an off-screen target in the list, or one under the
+   * navigation bar, is scrolled into view clear of the bars first. One still covered at the scroll limit stays refused.
+   */
+  private scrollToIt(el: El): void {
+    const why = this.refusal(el);
+    const scrolls = why?.startsWith("Error not_actionable: off_screen") || why === "Error not_actionable: covered by the navigation bar";
+    if (el.fixed || el.sheet || !scrolls) return;
+    this.scroll = Math.min(this.maxScroll, Math.max(0, el.y + el.h / 2 - H / 2));
   }
 
   private tap(args: Record<string, unknown>): string {
@@ -415,6 +439,23 @@ export class FakeLab {
       this.foreground = OTHER_APP;
       return `Tapped ${first.id}.\nSettled in 0.10 s.`;
     }
+    if (
+      this.options.bugs?.pressesWithoutScrolling &&
+      this.refusal(first)?.startsWith("Error not_actionable: off_screen, scroll to it")
+    ) {
+      this.press(first);
+      return `Tapped ${first.id}.\nSettled in 0.10 s.`;
+    }
+    if (
+      this.options.bugs?.scrollsUnderHeader &&
+      !first.fixed &&
+      this.refusal(first)?.startsWith("Error not_actionable: off_screen, scroll to it")
+    ) {
+      this.scroll = Math.min(this.maxScroll, Math.max(0, first.y + first.h / 2 - 75));
+      this.press(first);
+      return `Tapped ${first.id}.\nSettled in 0.10 s.`;
+    }
+    this.scrollToIt(first);
     const refused = this.refusal(first);
     if (refused && this.options.bugs?.pressesBehindCover && (this.shareOpen || this.nativeAlert)) {
       this.pressed = first.id.replace(/^lab-/, "");
@@ -462,6 +503,7 @@ export class FakeLab {
         const found = this.find(args.target);
         const el = found[0];
         if (!el) return out("Error not_found: nothing matches");
+        this.scrollToIt(el);
         const refused = this.refusal(el);
         if (refused) return out(refused);
         this.press(el);
@@ -471,6 +513,7 @@ export class FakeLab {
       case "type_text": {
         const el = this.find(args.target)[0];
         if (!el) return out("Error not_found: nothing matches");
+        this.scrollToIt(el);
         const refused = this.refusal(el);
         if (refused) return out(refused);
         const text = typeof args.text === "string" ? args.text : "";
@@ -481,6 +524,7 @@ export class FakeLab {
       case "toggle": {
         const el = this.find(args.target)[0];
         if (!el) return out("Error not_found: nothing matches");
+        this.scrollToIt(el);
         const refused = this.refusal(el);
         if (refused) return out(refused);
         const on = args.value === true;

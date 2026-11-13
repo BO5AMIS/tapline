@@ -22,6 +22,13 @@ export interface StateCall {
   before?: Call[];
   /** Parts of lab-state that must show afterwards. */
   expect?: string[];
+  /**
+   * The tool must scroll this id into view itself: the `before` calls succeed, a successful look
+   * right before the call shows the id off screen, and one right after it (before anything scrolls
+   * back) shows it on screen, below the fixed header. A handler fired without a scroll, a target left
+   * under the header, or a look that fails or can't be read fails the step.
+   */
+  scrollsInto?: string;
 }
 
 const scrollTo = (to: "start" | "end"): Call => ({
@@ -92,10 +99,12 @@ export const R1_STEPS: ActStep[] = [
     expect: ["pressed=save"],
   },
   {
-    name: "scroll to the end, tap lab-bottom",
+    // From the start: the tool scrolls the off-screen target into view and taps it (AGENT-TOOLS 1.13.1 item 3).
+    name: "tap lab-bottom from the top: the tool scrolls to it and taps",
     ...tap("lab-bottom"),
     bring: null,
-    before: [scrollTo("end")],
+    before: [scrollTo("start")],
+    scrollsInto: "lab-bottom",
     expect: ["pressed=bottom"],
   },
   { name: "tap lab-alert, answer it", ...tap("lab-alert"), alert: true, expect: ["alert=ok"] },
@@ -128,12 +137,13 @@ export const R3_CHECKS: RefuseCheck[] = [
   { name: "tap lab-disabled", target: { id: "lab-disabled" }, reasons: ["disabled"], notPressed: "disabled" },
   { name: "tap lab-covered", target: { id: "lab-covered" }, reasons: ["covered"], notPressed: "covered" },
   {
-    name: "tap lab-bottom while off screen",
-    target: { id: "lab-bottom" },
+    // A button the lab's fixed header covers; no scroll can bring it out (AGENT-TOOLS 1.13.1 item 3).
+    name: "tap lab-behind-bar, which no scroll can reach",
+    target: { id: "lab-behind-bar" },
     bring: null,
     before: [scrollTo("start")],
-    reasons: ["off_screen"],
-    notPressed: "bottom",
+    reasons: ["off_screen", "covered"],
+    notPressed: "behind-bar",
   },
   {
     name: "tap lab-save behind the sheet",

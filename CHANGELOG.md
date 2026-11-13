@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.1 (2026-11-13)
+
+Shared documents brought up to date with Tapwright, and small CI hardening. No change to how Tapline drives an app.
+
+- QUALITY-BAR 2.5 (shared with Tapwright): R3's off-screen case is now one no scroll can reach (`lab-behind-bar`, a
+  button the lab's fixed header covers), and `lab-bottom` moves to R1, where the tool scrolls to it and taps. The
+  bench follows it, and proves the scroll: `lab-bottom` must be off screen before the tap and on screen right after
+  it, so a tool that fires the handler without scrolling fails R1.
+- AGENT-TOOLS 1.13.2 (shared with Tapwright): pictures are free of a password only while its field stays secure; the
+  live view hears `confirm_closed` with `"by": "chat"` when the chat dialog answers first; the passcode unlock is
+  marked planned; Tapwright no longer names places after titles. Tapline already behaves this way.
+- The macOS job that compiles the native module keeps no git credential and stops after 30 minutes.
+
 ## 1.6.0, "the Speed Update" (2026-11-13)
 
 The same checks in fewer calls and fewer seconds, on ground the agent has been over before. The interface
