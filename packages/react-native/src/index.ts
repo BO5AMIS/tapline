@@ -180,6 +180,7 @@ export { registerTaplineCommand, registerLanguageCommand, registerRegionCommand 
 export { useTaplineFontScale, getTaplineFontScale, subscribeTaplineFontScale, TEXT_SIZES } from './locale';
 export type { TextSize } from './locale';
 export type { TaplineCommand } from './commands';
+export { TaplineFromOthers } from './fromothers';
 export { isTaplineLink, parseTaplineLink } from './link';
 export type { TaplineLink } from './link';
 export { memoryStorage, secureStoreStorage } from './storage';

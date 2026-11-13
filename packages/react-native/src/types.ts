@@ -80,6 +80,8 @@ export interface TaplineElement {
   checked: boolean | 'mixed' | null;
   /** Inside a virtualized list's item: its text is content, so the host never saves it (AGENT-TOOLS 1.13 §18.2). */
   row?: true;
+  /** Inside a view the app marked as text other people wrote (AGENT-TOOLS 1.14 §21.1); absent otherwise, never `false`. */
+  fromOthers?: true;
 }
 
 export interface ScreenInfo {

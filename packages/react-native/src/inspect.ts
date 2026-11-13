@@ -10,6 +10,7 @@ import {
   type FiberRootLike,
 } from './fiber';
 import { openAlerts } from './alerts';
+import { marksFromOthers } from './fromothers';
 import { placeFrom, type PlaceParts } from './placekey';
 import { keyboardState } from './keyboard';
 import { refreshCover } from './native';
@@ -73,6 +74,8 @@ export interface HostNode {
   insideText: boolean;
   /** Inside a virtualized list's item (AGENT-TOOLS 1.13 §18.2: the host never saves what a row said). */
   row?: true;
+  /** Inside a subtree the app marked as text from other people (AGENT-TOOLS 1.14 §21.1). */
+  fromOthers?: true;
 }
 
 /** Invisible direction marks (AGENT-TOOLS v1.3): U+200E, U+200F, U+202A–U+202E, U+2066–U+2069. */
@@ -225,6 +228,7 @@ function walk(
   chain: RouteFound[],
   presentation?: string,
   inRow = false,
+  fromOthers = false,
 ): string[] {
   const segments: string[] = [];
   for (let fiber = first; fiber; fiber = fiber.sibling) {
@@ -238,6 +242,7 @@ function walk(
       if (MODAL_HOSTS.has(hostType)) out.modals.push(fiber);
       const isText = TEXT_HOSTS.has(hostType);
       const row = inRow || owners.some(isListItemOwner);
+      const others = fromOthers || marksFromOthers(fiber);
       let shown = presentation;
       if (hostType === 'RNSScreen') {
         const stack = propsOf(fiber).stackPresentation;
@@ -253,19 +258,20 @@ function walk(
         isText,
         insideText,
         ...(row ? { row: true as const } : {}),
+        ...(others ? { fromOthers: true as const } : {}),
       };
       out.nodes.push(node);
-      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row);
+      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row, others);
       node.text = normalizeText(isText ? inner.join('') : inner.join(' '), isText);
       if (isText) segments.push(inner.join(''));
       else for (const piece of inner) segments.push(piece);
     } else if (isCompositeTag(fiber.tag)) {
       const route = routeOf(fiber, chain, presentation);
       if (route) out.routes.push(route);
-      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow);
+      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow, fromOthers || marksFromOthers(fiber));
       for (const piece of inner) segments.push(piece);
     } else {
-      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow);
+      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow, fromOthers);
       for (const piece of inner) segments.push(piece);
     }
   }
@@ -1309,6 +1315,7 @@ export function toElement(entry: Entry, frame: Frame | null, ref: string = refFo
     selected: info.selected,
     checked: info.checked,
     ...(entry.node.row === true ? { row: true as const } : {}),
+    ...(entry.node.fromOthers === true ? { fromOthers: true as const } : {}),
   };
 }
 
