@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { checkUnchanged, expectNoState, expectState, isTimeoutAnswer, PRESENT_WAIT_S } from "../src/lab.js";
 import type { CallResult } from "../src/mcp.js";
 import { R1_STEPS, R3_CHECKS, R4_GRID } from "../src/reliability/checks.js";
-import { dismissShare, popoverDismissPoint, runR1, type Env } from "../src/reliability/driver.js";
+import { dismissShare, popoverDismissPoint, runR1, runStateCall, type Env } from "../src/reliability/driver.js";
 
 describe("closing a popover share sheet (iOS 26)", () => {
   const region = 'e1 other "dismiss popup" id=PopoverDismissRegion @0,0 430x932 [tap]';
@@ -383,6 +383,29 @@ describe("R1 and R2 on the fake lab", () => {
     expect(lab.state()).toContain("alert=ok");
     expect(lab.state()).toContain("typed2=xyz");
   });
+
+  it("a scrollsInto step whose target is already on screen proves nothing, and says so", async () => {
+    const lab = new FakeLab({ alertTool: false });
+    lab.call("scroll", { target: { id: "lab-scroll" }, to: "end" });
+    const env: Env = { tool: lab.tool(), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const step = R1_STEPS.find((s) => s.scrollsInto === "lab-bottom");
+    expect(step).toBeDefined();
+    // Without its scroll to the start, lab-bottom is in view before the tap.
+    const { unproven, missing } = await runStateCall(env, { ...step, tool: "tap", before: [] });
+    expect(missing).toEqual([]);
+    expect(unproven).toEqual([
+      "lab-bottom was already on screen before the call, so nothing shows the tool scrolled to it",
+    ]);
+  });
+
+  it("the lab-bottom step, run as written, proves the scroll", async () => {
+    const lab = new FakeLab({ alertTool: false });
+    const env: Env = { tool: lab.tool(), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const step = R1_STEPS.find((s) => s.scrollsInto === "lab-bottom");
+    const { unproven, missing } = await runStateCall(env, { ...step, tool: "tap" });
+    expect(unproven).toEqual([]);
+    expect(missing).toEqual([]);
+  });
 });
 
 describe("the whole suite on the fake lab", () => {
@@ -427,6 +450,15 @@ describe("the whole suite on the fake lab", () => {
     expect(r3.misses).toBe(1);
     expect(r3.notes).toContain("tap lab-save behind the sheet");
     expect(r3.notes).toContain("not_found instead of not_actionable (AGENT-TOOLS v1.4)");
+  }, 60_000);
+
+  it("fails R1 (not R2) when a tap fires lab-bottom's handler without scrolling to it", async () => {
+    const { rows } = await runWith({ alertTool: true, bugs: { pressesWithoutScrolling: true } }, 1);
+    const r1 = rowOf(rows, "R1");
+    expect(r1).toMatchObject({ misses: 1, pass: false });
+    expect(r1.notes).toContain("tap lab-bottom from the top");
+    expect(r1.notes).toContain("lab-bottom wasn't on screen right after the call");
+    expect(rowOf(rows, "R2").pass).toBe(true);
   }, 60_000);
 
   it("behind OS-drawn UI, judges the state after the cover is closed (the cover hides lab-state)", async () => {

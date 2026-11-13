@@ -83,6 +83,11 @@ export interface Bugs {
    * the element anyway. The cover hides lab-state, so only a read after it closes shows it.
    */
   pressesBehindCover?: boolean;
+  /**
+   * A tap on an off-screen element fires its handler without scrolling to it (the scroll stays where
+   * it was), and answers as if it tapped.
+   */
+  pressesWithoutScrolling?: boolean;
 }
 
 export const LAB_APP = "Lab (com.example.lab)";
@@ -422,6 +427,13 @@ export class FakeLab {
       // The touch lands on a share target: another app opens.
       this.shareOpen = false;
       this.foreground = OTHER_APP;
+      return `Tapped ${first.id}.\nSettled in 0.10 s.`;
+    }
+    if (
+      this.options.bugs?.pressesWithoutScrolling &&
+      this.refusal(first)?.startsWith("Error not_actionable: off_screen, scroll to it")
+    ) {
+      this.press(first);
       return `Tapped ${first.id}.\nSettled in 0.10 s.`;
     }
     this.scrollToIt(first);

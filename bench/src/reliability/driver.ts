@@ -18,6 +18,7 @@ import {
   failed,
   fieldParts,
   firstLine,
+  isOnScreen,
   parseError,
   parseStateFields,
   readStateFields,
@@ -65,6 +66,12 @@ export interface CallOutcome {
   result: CallResult;
   /** Expected lab-state parts that did not show (all of them when the call was refused). */
   missing: string[];
+  /** For `scrollsInto`: why the step doesn't prove the tool scrolled to the target (empty when it does). */
+  unproven?: string[];
+}
+
+async function onScreenNow(env: Env, id: string): Promise<boolean> {
+  return isOnScreen((await env.tool.call("look", { screenshot: false })).text, id);
 }
 
 /** Brings the target into view, makes the call, then waits for each expected state part. */
@@ -73,11 +80,26 @@ export async function runStateCall(
   c: StateCall,
   opts: { immediate?: boolean; look?: boolean } = {},
 ): Promise<CallOutcome> {
-  for (const b of c.before ?? []) await env.tool.call(b.tool, b.args);
+  const unproven: string[] = [];
+  for (const b of c.before ?? []) {
+    const r = await env.tool.call(b.tool, b.args);
+    if (c.scrollsInto && failed(r)) unproven.push(`${b.tool} before the call failed: ${line(env, r)}`);
+  }
   const bring = c.bring === undefined ? idOf(c.target) : c.bring;
   if (bring && !opts.immediate) await bringIntoView(env.tool, bring);
+  if (c.scrollsInto && (await onScreenNow(env, c.scrollsInto))) {
+    unproven.push(`${c.scrollsInto} was already on screen before the call, so nothing shows the tool scrolled to it`);
+  }
   const result = await env.tool.call(c.tool, argsOf(c, opts.look ?? false));
-  return { result, missing: await missingStates(env, result, c.expect ?? []) };
+  // Read the screen at once: missingStates may scroll back to the top to read lab-state.
+  if (c.scrollsInto && !failed(result) && !(await onScreenNow(env, c.scrollsInto))) {
+    unproven.push(`${c.scrollsInto} wasn't on screen right after the call: the tool acted without scrolling to it`);
+  }
+  return {
+    result,
+    missing: await missingStates(env, result, c.expect ?? []),
+    ...(c.scrollsInto ? { unproven } : {}),
+  };
 }
 
 async function missingStates(env: Env, result: CallResult, expect: string[]): Promise<string[]> {
@@ -124,19 +146,23 @@ export async function runR1(env: Env): Promise<Outcome[]> {
   const out: Outcome[] = [];
   for (const step of R1_STEPS) {
     markStep(env, "R1", step.name);
-    const { result, missing } = step.alert
+    const { result, missing, unproven = [] } = step.alert
       ? await runAlertStep(env, step)
       : await runStateCall(env, step, { immediate: step.immediate === true });
     if (step.closeKeyboard) await closeKeyboard(env.tool);
     const refused = failed(result);
+    const problems = [
+      ...unproven,
+      ...(missing.length > 0 ? [`state lacks ${missing.join(", ")}`] : []),
+    ];
     out.push({
       id: "R1",
       name: step.name,
-      ok: !refused && missing.length === 0,
+      ok: !refused && problems.length === 0,
       ...(refused
         ? { note: line(env, result) }
-        : missing.length > 0
-        ? { note: `state lacks ${missing.join(", ")}; answer: ${line(env, result)}` }
+        : problems.length > 0
+        ? { note: `${problems.join("; ")}; answer: ${line(env, result)}` }
         : {}),
     });
     out.push({

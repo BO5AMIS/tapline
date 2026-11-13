@@ -22,6 +22,12 @@ export interface StateCall {
   before?: Call[];
   /** Parts of lab-state that must show afterwards. */
   expect?: string[];
+  /**
+   * The tool must scroll this id into view itself: the `before` calls succeed, the id is off screen
+   * right before the call, and on screen in a look right after it (before anything scrolls back).
+   * A handler fired without a scroll fails the step.
+   */
+  scrollsInto?: string;
 }
 
 const scrollTo = (to: "start" | "end"): Call => ({
@@ -97,6 +103,7 @@ export const R1_STEPS: ActStep[] = [
     ...tap("lab-bottom"),
     bring: null,
     before: [scrollTo("start")],
+    scrollsInto: "lab-bottom",
     expect: ["pressed=bottom"],
   },
   { name: "tap lab-alert, answer it", ...tap("lab-alert"), alert: true, expect: ["alert=ok"] },
