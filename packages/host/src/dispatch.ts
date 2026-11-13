@@ -46,6 +46,7 @@ const HANDLERS: Handlers = {
   wait: (tools, args) => tools.wait(args),
   journey: (tools, args) => tools.journey(args),
   session_report: (tools, args) => tools.sessionReport(args),
+  map: (tools, args) => tools.map(args),
 };
 
 export interface ToolMeta {
@@ -87,6 +88,8 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   wait: { title: "Wait", readOnly: true },
   journey: { title: "Journey", readOnly: false },
   session_report: { title: "Session report", readOnly: true },
+  // It edits only the local map file, never the app.
+  map: { title: "The app's map", readOnly: false },
 };
 
 export function isToolName(name: string): name is ToolName {

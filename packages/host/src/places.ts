@@ -5,11 +5,13 @@ import {
   loadMap,
   mapDir,
   mergeMaps,
+  readRouteSync,
   roadId,
   saveMap,
   stable,
   type MapFile,
   type MapPlace,
+  type MapReflex,
   type MapRemovals,
   type MapRoad,
   type Move,
@@ -343,6 +345,7 @@ export class AppMap {
     places: new Map<string, { name: string; before: string }>(),
     roads: new Map<string, { from: string; move: Move; to: string; before: string }>(),
     renamed: {} as Record<string, string>,
+    reflexes: new Set<string>(),
   };
 
   constructor(app: MapApp, options: AppMapOptions) {
@@ -360,6 +363,21 @@ export class AppMap {
   /** The app reconnected, maybe with a new build. */
   updateApp(app: MapApp): void {
     this.app = app;
+  }
+
+  /** The map's folder (it holds the route files). */
+  folder(): string {
+    return this.dir;
+  }
+
+  /** The names of the saved routes that start or end at a place (§18.5). */
+  routesAt(place: string): string[] {
+    return Object.entries(this.map.routes)
+      .filter(([, relative]) => {
+        const file = readRouteSync(this.dir, relative);
+        return file !== null && (file["start"] === place || file["end"] === place);
+      })
+      .map(([name]) => name);
   }
 
   /** The map as it is now. Read only: change it through the methods. */
@@ -586,7 +604,27 @@ export class AppMap {
     delete this.map.places[name];
     this.map.roads = this.map.roads.filter((road) => road.from !== name && road.to !== name);
     this.map.reflexes = this.map.reflexes.filter((reflex) => reflex.at !== name);
+    // Its routes go too, so a merge with the file can't bring them back (the route files stay on disk).
+    for (const route of this.routesAt(name)) delete this.map.routes[route];
     if (this.here?.name === name) this.here = null;
+    this.touch();
+    return true;
+  }
+
+  /** Adds a declared reflex (§18.7); one with the same name is replaced. */
+  addReflex(reflex: MapReflex): "added" | "replaced" {
+    const index = this.map.reflexes.findIndex((existing) => existing.name === reflex.name);
+    this.pending.reflexes.delete(reflex.name);
+    if (index >= 0) this.map.reflexes[index] = reflex;
+    else this.map.reflexes.push(reflex);
+    this.touch();
+    return index >= 0 ? "replaced" : "added";
+  }
+
+  removeReflex(name: string): boolean {
+    if (!this.map.reflexes.some((reflex) => reflex.name === name)) return false;
+    this.pending.reflexes.add(name);
+    this.map.reflexes = this.map.reflexes.filter((reflex) => reflex.name !== name);
     this.touch();
     return true;
   }
@@ -649,10 +687,12 @@ export class AppMap {
         places: new Map(this.pending.places),
         roads: new Map(this.pending.roads),
         renamed: { ...this.pending.renamed },
+        reflexes: new Set(this.pending.reflexes),
       };
       const removed: MapRemovals = {
         ...(sent.places.size > 0 ? { places: [...sent.places.values()] } : {}),
         ...(sent.roads.size > 0 ? { roads: [...sent.roads.values()] } : {}),
+        ...(sent.reflexes.size > 0 ? { reflexes: [...sent.reflexes] } : {}),
         ...(Object.keys(sent.renamed).length > 0 ? { renamed: sent.renamed } : {}),
       };
       const version = this.version;
@@ -663,6 +703,8 @@ export class AppMap {
         for (const [name, entry] of sent.places) if (this.pending.places.get(name) === entry) this.pending.places.delete(name);
         for (const [id, entry] of sent.roads) if (this.pending.roads.get(id) === entry) this.pending.roads.delete(id);
         for (const [old, now] of Object.entries(sent.renamed)) if (this.pending.renamed[old] === now) delete this.pending.renamed[old];
+        // A name added again meanwhile is no longer pending, so only the names still waiting stay.
+        for (const name of sent.reflexes) this.pending.reflexes.delete(name);
         this.adopt(merged, version);
       } catch (error) {
         this.dirty = true;
@@ -691,6 +733,8 @@ export class AppMap {
       const id = roadId(entry.from, entry.move, entry.to);
       next.roads = next.roads.filter((road) => roadId(road.from, road.move, road.to) !== id);
     }
+    // A forgotten reflex that is still waiting to be written is not brought back by the file.
+    if (this.pending.reflexes.size > 0) next.reflexes = next.reflexes.filter((reflex) => !this.pending.reflexes.has(reflex.name));
     this.map = next;
     if (this.here !== null) {
       const here = this.here;

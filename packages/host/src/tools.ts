@@ -18,6 +18,7 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
+import { mapArgsError, reflexSchema, runMap } from "./mapcmd.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
@@ -342,6 +343,15 @@ export const toolShapes = {
   media: mediaShape,
   session_report: {
     since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
+  },
+  map: {
+    to: z.string().optional().describe("A place's name: the shortest known way to it, and whether each road is proven"),
+    name: z.string().regex(/^[a-z0-9_]+$/).optional().describe("Names the current place: [a-z0-9_]"),
+    link: z.string().optional().describe("The link that reaches a place, kept as given: a pattern (wayfare://trips/[id]), never a real id"),
+    place: z.string().optional().describe("With link: the place (default the current one)"),
+    reflex: reflexSchema.optional().describe("Adds a rule that runs one step when its moment comes: name, when (text, label or id), do (one step), max (1 to 3), at (a place)"),
+    forget_reflex: z.string().optional().describe("Removes a reflex by name"),
+    forget: z.string().optional().describe("Drops a place, with its roads, routes and reflexes"),
   },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
@@ -1075,7 +1085,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
@@ -1580,6 +1590,28 @@ export class TaplineTools {
     if (base.unseen) return undefined;
     if (candidatesFor(target, base.elements).length > 0) return true;
     return base.stale ? undefined : false;
+  }
+
+  /** `map` (AGENT-TOOLS 1.13 §18.8): reads and edits the app's map; never touches the app. The work is in mapcmd.ts. */
+  async map(args: Shape<"map">): Promise<CallToolResult> {
+    const refused = mapArgsError(args);
+    if (refused !== null) return fail(`Error bad_params: ${refused}`);
+    if (this.options.maps === undefined) return fail("Error unsupported: this server keeps no maps.");
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const map = this.mapOf(session);
+    if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
+    const source = this.placeSource(session);
+    const answer = await runMap(args, {
+      map,
+      app: { name: session.app.name, id: session.app.id },
+      here: async () => (await placeNow(source, map))?.place ?? null,
+      known: async () =>
+        session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] }),
+      lists: listsFor(this.policy, session.app),
+      accounts: this.options.accounts?.store?.names() ?? [],
+    });
+    return answer.error ? fail(answer.text) : text(answer.text);
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */

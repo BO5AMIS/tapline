@@ -532,6 +532,18 @@ function insideDir(dir: string, relative: string): string | null {
   return full.startsWith(resolve(dir) + sep) ? full : null;
 }
 
+/** A route file read at once, for the `map` listing and a forget's counts. Null when it is missing, outside the folder or not an object. */
+export function readRouteSync(dir: string, relative: string): Record<string, unknown> | null {
+  const full = insideDir(dir, relative);
+  if (full === null) return null;
+  try {
+    const raw: unknown = JSON.parse(readFileSync(full, "utf8"));
+    return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readRoute(io: MapIo, dir: string, relative: string): Promise<Record<string, unknown> | null> {
   const full = insideDir(dir, relative);
   if (full === null) return null;
