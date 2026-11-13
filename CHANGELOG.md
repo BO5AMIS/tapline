@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.1 (unreleased)
+## 1.6.1 (2026-11-13)
 
 Shared documents brought up to date with Tapwright, and small CI hardening. No change to how Tapline drives an app.
 
