@@ -1,6 +1,6 @@
-import { TaplineAgent, isLocalNetworkHost, type AgentDeps, type DevOffer, type LinkingLike, type OfferSource } from '../src/agent';
+import { PAIRING_KEY, TaplineAgent, isLocalNetworkHost, type AgentDeps, type DevOffer, type LinkingLike, type OfferSource } from '../src/agent';
 import type { WebSocketLike } from '../src/client';
-import { memoryStorage } from '../src/storage';
+import { memoryStorage, type TaplineStorage } from '../src/storage';
 
 // Zero-QR pairing (Tapline 1.1): a development build asks to connect to the computer its code comes from.
 
@@ -33,7 +33,7 @@ interface Rig {
   answer: { value: boolean };
 }
 
-function rig(host: string | null, offers: Record<number, DevOffer>, active = true, metroPort = 8081): Rig {
+function rig(host: string | null, offers: Record<number, DevOffer>, active = true, metroPort = 8081, storage: TaplineStorage = memoryStorage()): Rig {
   const prompts: string[] = [];
   const fetched: Array<{ host: string; port: number }> = [];
   const answer = { value: true };
@@ -54,7 +54,7 @@ function rig(host: string | null, offers: Record<number, DevOffer>, active = tru
     },
   };
   const deps: AgentDeps = {
-    storage: memoryStorage(),
+    storage,
     linking,
     confirm: (title, message) => {
       prompts.push(`${title}\n${message}`);
@@ -131,6 +131,40 @@ test('takes the offer Metro passes on, and connects to the port it names', async
   expect(prompts).toHaveLength(1);
   expect(MockSocket.instances[0]?.url).toBe('ws://192.168.1.20:19001/');
   agent.stop();
+});
+
+test('a saved pairing whose host is gone (another port now) no longer blocks the offer: the person is asked', async () => {
+  // Found on the phone (2026-11-13): an app paired with a host that stopped kept retrying it and ignored new offers.
+  const storage = memoryStorage();
+  await storage.setItem(PAIRING_KEY, JSON.stringify({ url: 'ws://192.168.1.20:7210/', token: 't-old', name: 'Dev PC' }));
+  const { agent, prompts, tick } = rig('192.168.1.20', { 8081: { code: 'm-2', name: 'Dev PC', port: 19001 } }, true, 8081, storage);
+  try {
+    await agent.start();
+    expect(MockSocket.instances[0]?.url).toBe('ws://192.168.1.20:7210/'); // the old home is tried, and never answers
+    await tick();
+    expect(prompts).toHaveLength(1);
+    expect(MockSocket.instances.at(-1)?.url).toBe('ws://192.168.1.20:19001/');
+  } finally {
+    agent.stop(); // a failure must not leave the old home's reconnect timer running
+  }
+});
+
+test('a saved pairing whose host answers still blocks offers: nothing is asked', async () => {
+  const storage = memoryStorage();
+  await storage.setItem(PAIRING_KEY, JSON.stringify({ url: 'ws://192.168.1.20:7210/', token: 't-live', name: 'Dev PC' }));
+  const { agent, prompts, fetched, tick } = rig('192.168.1.20', { 8081: { code: 'm-3', name: 'Dev PC', port: 19001 } }, true, 8081, storage);
+  try {
+    await agent.start();
+    const home = MockSocket.instances[0];
+    home?.onopen?.({});
+    home?.onmessage?.({ data: JSON.stringify({ type: 'welcome' }) });
+    await tick();
+    expect(prompts).toHaveLength(0);
+    expect(fetched).toHaveLength(0);
+    expect(MockSocket.instances).toHaveLength(1);
+  } finally {
+    agent.stop();
+  }
 });
 
 test('local network hosts', () => {
