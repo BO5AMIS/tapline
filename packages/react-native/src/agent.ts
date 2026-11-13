@@ -128,6 +128,9 @@ function readPairing(raw: string | null): Pairing | null {
  * The in-app side of pairing: connects to the remembered computer, and handles pairing and
  * forget links (asking the user before connecting anywhere new). Work runs one step at a time.
  */
+/** How long an accepted offer may go without a welcome before the agent gives up on it and resumes the saved home. */
+export const OFFER_PAIR_TIMEOUT_MS = 15_000;
+
 export class TaplineAgent {
   private client: TaplineClient | null = null;
   private subscription: { remove(): void } | null = null;
@@ -140,6 +143,7 @@ export class TaplineAgent {
   private offerTimer: unknown = null;
   private offerStarted = 0;
   private asking = false;
+  private pairTimer: unknown = null;
 
   constructor(
     private readonly options: AgentOptions,
@@ -210,7 +214,6 @@ export class TaplineAgent {
     }
     if (hit !== null && !this.holdsLiveHome() && !this.stopped) {
       const chosen = hit;
-      this.seenCodes.add(chosen.offer.code);
       await this.enqueue(() => this.onOffer(host, chosen.port, chosen.offer));
     }
     this.scheduleOffer(offers, server, next);
@@ -225,7 +228,9 @@ export class TaplineAgent {
   }
 
   private async onOffer(host: string, port: number, offer: DevOffer): Promise<void> {
+    // Skipped here, the offer stays eligible: it is remembered only once the person is actually asked.
     if (this.stopped || this.holdsLiveHome()) return;
+    this.seenCodes.add(offer.code);
     // The address is Metro's own: the computer that already runs this app's code, never one the offer names.
     const url = `ws://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}/`;
     this.asking = true;
@@ -240,15 +245,42 @@ export class TaplineAgent {
       this.asking = false;
     }
     if (!agreed || this.stopped) return;
+    // The saved home may have reconnected while the person decided: never replace a working connection.
+    if (this.holdsLiveHome()) return;
     const name = offer.name;
-    this.connect({
+    const client = this.connect({
       url,
       pairCode: offer.code,
       onPaired: (token) => {
+        this.clearPairTimer();
         void this.enqueue(() => this.remember({ url, token, name, code: offer.code }));
       },
       onRejected: () => this.onPairingRefused(name),
     });
+    if (client !== null) this.watchPairing(client);
+  }
+
+  /**
+   * The offered computer may never answer, and a client retries without limit. If it hasn't paired within
+   * OFFER_PAIR_TIMEOUT_MS it is stopped and the saved home (if any) resumes. The saved pairing stays in storage
+   * until the new one succeeds.
+   */
+  private watchPairing(client: TaplineClient): void {
+    this.clearPairTimer();
+    const set = this.deps.offers?.setTimeout ?? ((fn: () => void, wait: number) => setTimeout(fn, wait));
+    this.pairTimer = set(() => {
+      this.pairTimer = null;
+      if (this.stopped || this.client !== client || client.connected) return;
+      this.log('the offered computer did not answer; going back to the saved one');
+      this.reconnectHome();
+    }, OFFER_PAIR_TIMEOUT_MS);
+  }
+
+  private clearPairTimer(): void {
+    if (this.pairTimer === null) return;
+    const clear = this.deps.offers?.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    clear(this.pairTimer);
+    this.pairTimer = null;
   }
 
   /** Connects to the direct host, else the paired computer, if there is one. */
@@ -266,6 +298,7 @@ export class TaplineAgent {
 
   stop(): void {
     this.stopped = true;
+    this.clearPairTimer();
     if (this.offerTimer !== null) {
       const clear = this.deps.offers?.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
       clear(this.offerTimer);
@@ -302,13 +335,15 @@ export class TaplineAgent {
     }
   }
 
-  private connect(options: Pick<ClientOptions, 'url' | 'token' | 'pairCode' | 'onPaired' | 'onRejected'>): void {
+  private connect(options: Pick<ClientOptions, 'url' | 'token' | 'pairCode' | 'onPaired' | 'onRejected'>): TaplineClient | null {
+    this.clearPairTimer();
     this.client?.stop();
     this.client = null;
-    if (this.stopped) return;
+    if (this.stopped) return null;
     const client = new TaplineClient({ ...options, app: this.options.app, deviceId: this.installId }, this.deps.clientDeps);
     this.client = client;
     client.start();
+    return client;
   }
 
   /**
