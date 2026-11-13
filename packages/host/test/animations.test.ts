@@ -5,7 +5,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import jpeg from "jpeg-js";
 import { afterEach, describe, expect, it } from "vitest";
 import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
-import { restoreAnimations } from "../src/animations.js";
+import { animationsOn, restoreAnimations, withNormalAnimations } from "../src/animations.js";
 import { formatChanges, formatTree } from "../src/format.js";
 import { treeResultSchema } from "../src/protocol.js";
 import { createRuntime, type Runtime } from "../src/runtime.js";
@@ -296,6 +296,50 @@ describe("measuring tools pause it", () => {
     world.order.length = 0;
     await tools.performance({ seconds: 1 });
     expect(world.order).toEqual(["performance while normal"]);
+  });
+});
+
+describe("pauses", () => {
+  it("two overlapping pauses send normal once and put fast back only when the last one ends", async () => {
+    const { tools, host, world, app } = await setup();
+    await fast(tools);
+    const id = host.current()?.id ?? "";
+    world.order.length = 0;
+    let endFirst: () => void = () => undefined;
+    let endSecond: () => void = () => undefined;
+    const first = withNormalAnimations(host, id, () => new Promise<string>((resolve) => (endFirst = () => resolve("one"))));
+    const second = withNormalAnimations(host, id, () => new Promise<string>((resolve) => (endSecond = () => resolve("two"))));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(world.order).toEqual(["animations normal"]);
+    endFirst();
+    expect(await first).toMatchObject({ value: "one", paused: true });
+    // the second is still running: fast stays off
+    expect(world.order).toEqual(["animations normal"]);
+    expect(world.speed).toBe("normal");
+    endSecond();
+    expect(await second).toMatchObject({ value: "two", paused: true });
+    expect(world.order).toEqual(["animations normal", "animations fast"]);
+    expect(world.speed).toBe("fast");
+    expect(app.requests.filter((r) => r.method === "command")).toHaveLength(3);
+  });
+
+  it("when the switch to normal fails the note says so and does not claim animations were normal", async () => {
+    const { tools, world } = await setup();
+    await fast(tools);
+    world.failCommand = true;
+    const said = textOf(await tools.performance({ seconds: 1 }));
+    expect(said).not.toContain("animations were normal");
+    expect(said).toContain("Note: animations could not be set to normal for this call; it ran with fast animations.");
+  });
+
+  it("a session that ends is forgotten, so a new one is not thought fast", async () => {
+    const { tools, host, app } = await setup();
+    await fast(tools);
+    const id = host.current()?.id ?? "";
+    expect(animationsOn(host, id)).toBe(true);
+    app.ws.terminate();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(animationsOn(host, id)).toBe(false);
   });
 });
 

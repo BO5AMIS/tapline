@@ -18,7 +18,7 @@ import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
-import { ANIMATIONS_PAUSED_NOTE, animationsOn, endAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
+import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
@@ -1364,6 +1364,8 @@ export class TaplineTools {
       if (state !== "active") this.appLeftAt.set(identityOf(session), Date.now());
     });
     host.on("disconnect", (session) => {
+      // The app puts its animations back by itself when it loses the host; the host forgets it was fast.
+      forgetAnimations(this.host, session.id);
       this.appLeftAt.set(identityOf(session), Date.now());
     });
     host.on("connect", (session) => {
@@ -1418,8 +1420,8 @@ export class TaplineTools {
 
   /** Runs a measuring call with fast animations normal, then puts them back, and says so in the answer (E8). */
   private async pausingAnimations(run: () => CallToolResult | Promise<CallToolResult>): Promise<CallToolResult> {
-    const { value, paused } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run());
-    return paused ? appendNote(value, ANIMATIONS_PAUSED_NOTE) : value;
+    const { value, paused, failed } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run());
+    return failed ? appendNote(value, ANIMATIONS_NOT_PAUSED_NOTE) : paused ? appendNote(value, ANIMATIONS_PAUSED_NOTE) : value;
   }
 
   /** The journey running now, for the stress moments and the report writer (AGENT-TOOLS 1.12 §17). */

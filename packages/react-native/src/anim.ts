@@ -52,6 +52,10 @@ let patches: Patch[] = [];
 let layers: AnimationLayers = { native: false, javascript: false, reanimated: false };
 let why: AnimationWhy = {};
 let reanimatedBefore: boolean | null = null;
+/** Counts switches and resets: a native call that comes back after a later one must not write its result. */
+let generation = 0;
+/** The native module was asked for fast speed since the last time it was put back. */
+let nativeAsked = false;
 
 /** Whether fast animations are on now. */
 export function animationsFast(): boolean {
@@ -105,24 +109,83 @@ function unpatch(): void {
   patches = [];
 }
 
+/** One frame: the shortest an animation inside a loop or a spring may take, so a loop never spins without yielding. */
+const FRAME_MS = 16;
+
+/** Makes the same animation again, with durations floored at one frame; remembered per animation made while fast. */
+const rebuilders = new WeakMap<object, (floored: boolean) => unknown>();
+/** While set, the timing wrapper keeps the duration it is given (a spring's own one frame). */
+let exactDuration = false;
+
+function remember(animation: unknown, rebuild: (floored: boolean) => unknown): unknown {
+  if (typeof animation === 'object' && animation !== null) rebuilders.set(animation, rebuild);
+  return animation;
+}
+
+/** The animation as it should run inside a loop: floored at one frame when it was made while fast. */
+function floored(animation: unknown): unknown {
+  const rebuild = typeof animation === 'object' && animation !== null ? rebuilders.get(animation) : undefined;
+  return rebuild ? rebuild(true) : animation;
+}
+
+function timingFast(original: AnyFn, self: unknown, args: unknown[], floor: boolean): unknown {
+  const config = args[1];
+  if (!isRecord(config)) return original.apply(self, args);
+  const given = typeof config.duration === 'number' ? config.duration : TIMING_DEFAULT_MS;
+  const duration = exactDuration ? given : scaled(given);
+  const next: Record<string, unknown> = {
+    ...config,
+    duration: floor && typeof duration === 'number' ? Math.max(FRAME_MS, duration) : duration,
+    ...(config.delay !== undefined ? { delay: scaled(config.delay) } : {}),
+  };
+  return original.apply(self, [args[0], next, ...args.slice(2)]);
+}
+
 function patchAnimated(): void {
   patch(Animated, 'timing', (original) =>
     function (this: unknown, ...args: unknown[]): unknown {
-      const config = args[1];
-      if (!fast || !isRecord(config)) return original.apply(this, args);
-      const duration = typeof config.duration === 'number' ? config.duration : TIMING_DEFAULT_MS;
-      return original.apply(this, [args[0], { ...config, duration: scaled(duration), ...(config.delay !== undefined ? { delay: scaled(config.delay) } : {}) }, ...args.slice(2)]);
+      if (!fast) return original.apply(this, args);
+      return remember(timingFast(original, this, args, false), (floor) => timingFast(original, this, args, floor));
     },
   );
-  // A spring has no duration to scale: it becomes a one-millisecond timing to the same value in the same driver mode.
+  // A spring has no duration to scale: it becomes a one-frame timing to the same value in the same driver mode
+  // (never shorter, so a spring inside a loop still yields). Its delay is scaled by the timing patch it goes through.
   // It goes through `Animated.timing` as the app sees it now, so whatever else wraps timing (the idle signals) sees it.
   patch(Animated, 'spring', (original) =>
     function (this: unknown, ...args: unknown[]): unknown {
       const config = args[1];
       if (!fast || !isRecord(config) || !isFn(Animated.timing)) return original.apply(this, args);
-      const timing: Record<string, unknown> = { toValue: config.toValue, duration: 1 };
+      const timing: Record<string, unknown> = { toValue: config.toValue, duration: FRAME_MS };
       for (const key of ['useNativeDriver', 'delay', 'isInteraction']) if (config[key] !== undefined) timing[key] = config[key];
-      return Animated.timing(args[0] as never, timing as never);
+      const make = (): unknown => {
+        exactDuration = true;
+        try {
+          return Animated.timing(args[0] as never, timing as never);
+        } finally {
+          exactDuration = false;
+        }
+      };
+      return remember(make(), make);
+    },
+  );
+  // Composites and loops: a loop repeats what it is given, so what it holds is rebuilt with durations of at least one frame.
+  for (const [name, at] of [['sequence', 0], ['parallel', 0], ['stagger', 1]] as const) {
+    patch(Animated, name, (original) =>
+      function (this: unknown, ...args: unknown[]): unknown {
+        const children = args[at];
+        if (!fast || !Array.isArray(children)) return original.apply(this, args);
+        const build = (floor: boolean): unknown => {
+          const next = [...args];
+          next[at] = floor ? children.map(floored) : children;
+          return original.apply(this, next);
+        };
+        return remember(build(false), build);
+      },
+    );
+  }
+  patch(Animated, 'loop', (original) =>
+    function (this: unknown, ...args: unknown[]): unknown {
+      return fast ? original.apply(this, [floored(args[0]), ...args.slice(1)]) : original.apply(this, args);
     },
   );
 }
@@ -217,21 +280,31 @@ async function nativeSpeed(speed: number): Promise<{ ok: boolean; reason?: strin
 /** Switches the layers on or off. Returns which are on after the call. */
 export async function setAnimationSpeed(speed: AnimationSpeed): Promise<AnimationLayers> {
   if (speed === 'normal') {
-    const wasFast = fast;
+    generation += 1;
+    const sent = nativeAsked;
     fast = false;
     unpatch();
     reanimatedBack();
-    if (wasFast || layers.native) await nativeSpeed(1);
+    nativeAsked = false;
+    if (sent) await nativeSpeed(1);
     layers = { native: false, javascript: false, reanimated: false };
     why = {};
     return layers;
   }
   if (fast) return layers;
   fast = true;
+  generation += 1;
+  const mine = generation;
   patchAnimated();
   patchLayoutAnimation();
   const reanimated = reanimatedOn();
+  nativeAsked = true;
   const native = await nativeSpeed(NATIVE_FAST_SPEED);
+  if (generation !== mine) {
+    // Normal or a disconnect came while the native call was out: it may have landed after that reset, so put 1 back.
+    await nativeSpeed(1);
+    return layers;
+  }
   layers = { native: native.ok, javascript: true, reanimated: reanimated.on };
   why = { ...(native.reason !== undefined ? { native: native.reason } : {}), ...(reanimated.reason !== undefined ? { reanimated: reanimated.reason } : {}) };
   return layers;
@@ -244,14 +317,17 @@ export function animationLayerReasons(): AnimationWhy {
 
 /** The disconnect and stop path: everything back to normal now, without waiting for the native call. */
 export function resetAnimations(): void {
-  if (!fast) return;
+  generation += 1;
   fast = false;
   unpatch();
   reanimatedBack();
-  const wasNative = layers.native;
   layers = { native: false, javascript: false, reanimated: false };
   why = {};
-  if (wasNative) void nativeSpeed(1);
+  // After any fast request, whether or not its native call has answered: 1 is idempotent.
+  if (nativeAsked) {
+    nativeAsked = false;
+    void nativeSpeed(1);
+  }
 }
 
 /** The sentence a switch answers with: the line every answer carries, then which layers are on. */

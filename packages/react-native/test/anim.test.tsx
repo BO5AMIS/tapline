@@ -91,14 +91,14 @@ describe('JavaScript layer', () => {
     }
   });
 
-  test('a spring turns into a one-millisecond timing to the same value with the same driver', async () => {
+  test('a spring turns into a one-frame (16 ms) timing to the same value with the same driver', async () => {
     const fake = stand();
     try {
       await setAnimationSpeed('fast');
       const value = new Animated.Value(0);
       Animated.spring(value, { toValue: 7, useNativeDriver: true, delay: 300 });
       expect(fake.timings[0]?.value).toBe(value);
-      expect(fake.timings[0]?.config).toMatchObject({ toValue: 7, duration: 1, useNativeDriver: true, delay: 6 });
+      expect(fake.timings[0]?.config).toMatchObject({ toValue: 7, duration: 16, useNativeDriver: true, delay: 6 });
     } finally {
       fake.restore();
     }
@@ -214,6 +214,58 @@ describe('JavaScript layer', () => {
   });
 });
 
+describe('loops and sequences', () => {
+  test('a spring inside Animated.loop is not shorter than one frame', async () => {
+    const fake = stand();
+    try {
+      await setAnimationSpeed('fast');
+      Animated.loop(Animated.spring(new Animated.Value(0), { toValue: 1, useNativeDriver: true }));
+      expect(fake.timings.every((t) => (t.config.duration as number) >= 16)).toBe(true);
+    } finally {
+      fake.restore();
+    }
+  });
+
+  test('a timing inside Animated.loop is floored at 16 ms, one outside is not', async () => {
+    const fake = stand();
+    try {
+      await setAnimationSpeed('fast');
+      const value = new Animated.Value(0);
+      Animated.timing(value, { toValue: 1, duration: 100, useNativeDriver: true });
+      expect(fake.timings.at(-1)?.config.duration).toBe(2);
+      Animated.loop(Animated.timing(value, { toValue: 1, duration: 100, useNativeDriver: true }));
+      expect(fake.timings.at(-1)?.config.duration).toBe(16);
+      expect(fake.timings.at(-1)?.value).toBe(value);
+    } finally {
+      fake.restore();
+    }
+  });
+
+  test('a sequence inside a loop has every step floored; a sequence outside is scaled', async () => {
+    const fake = stand();
+    try {
+      await setAnimationSpeed('fast');
+      const value = new Animated.Value(0);
+      const step = (to: number) => Animated.timing(value, { toValue: to, duration: 200, useNativeDriver: true });
+      Animated.sequence([step(1), step(0)]);
+      expect(fake.timings.slice(-2).map((t) => t.config.duration)).toEqual([4, 4]);
+      Animated.loop(Animated.sequence([step(1), step(0)]));
+      expect(fake.timings.slice(-2).map((t) => t.config.duration)).toEqual([16, 16]);
+      Animated.loop(Animated.parallel([step(1), Animated.spring(value, { toValue: 2, useNativeDriver: true })]));
+      expect(fake.timings.slice(-2).map((t) => t.config.duration)).toEqual([16, 16]);
+    } finally {
+      fake.restore();
+    }
+  });
+
+  test('loop and sequence are back after normal', async () => {
+    const before = { loop: Animated.loop, sequence: Animated.sequence, parallel: Animated.parallel };
+    await setAnimationSpeed('fast');
+    await setAnimationSpeed('normal');
+    expect({ loop: Animated.loop, sequence: Animated.sequence, parallel: Animated.parallel }).toEqual(before);
+  });
+});
+
 describe('Reanimated layer', () => {
   test('Reanimated absent: no throw, layer 3 reports unavailable', async () => {
     const layers = await setAnimationSpeed('fast');
@@ -264,6 +316,42 @@ describe('native layer', () => {
     expect(calls).toEqual([100, 1]);
     expect(animationsFast()).toBe(false);
     // already normal: a disconnect sends nothing more
+    resetAnimations();
+    expect(calls).toEqual([100, 1]);
+  });
+
+  test('a disconnect during the native call leaves the phone at 1', async () => {
+    const calls: number[] = [];
+    let release: () => void = () => undefined;
+    setNativeModule({
+      capture: () => Promise.resolve(''),
+      cover: () => Promise.resolve({ kind: '' }),
+      setAnimationSpeed: (speed: number) => {
+        calls.push(speed);
+        return speed === 100 ? new Promise<void>((resolve) => (release = resolve)) : Promise.resolve();
+      },
+    });
+    const pending = setAnimationSpeed('fast');
+    resetAnimations();
+    expect(calls).toEqual([100, 1]);
+    release();
+    await pending;
+    // the call came back after the reset: it sends 1 again and writes nothing
+    expect(calls).toEqual([100, 1, 1]);
+    expect(animationsFast()).toBe(false);
+  });
+
+  test('a reset after any fast request sends 1, even when the native call failed', async () => {
+    const calls: number[] = [];
+    setNativeModule({
+      capture: () => Promise.resolve(''),
+      cover: () => Promise.resolve({ kind: '' }),
+      setAnimationSpeed: (speed: number) => {
+        calls.push(speed);
+        return speed === 100 ? Promise.reject(new Error('late')) : Promise.resolve();
+      },
+    });
+    await setAnimationSpeed('fast');
     resetAnimations();
     expect(calls).toEqual([100, 1]);
   });

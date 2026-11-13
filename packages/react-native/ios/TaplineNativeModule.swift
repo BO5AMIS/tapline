@@ -23,12 +23,45 @@ private enum TaplineWindows {
     UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }
   }
 
-  /// Sets every window's layer speed (1 is normal) from any thread.
+  /// The speed the app's windows should have now (1 is normal); new windows get it too (see `setSpeed`).
+  private static var wanted: Float = 1
+  private static var visibleObserver: NSObjectProtocol?
+
+  /// Gives one window's layer `speed` without a jump or a freeze (Apple's QA1673 pattern for changing a layer's
+  /// timing). Changing `speed` alone moves the layer's local time, which stops repeating animations (an
+  /// ActivityIndicator) after a few flips. So the local time now is read first and kept: it becomes the time offset,
+  /// counted from now.
+  private static func apply(_ speed: Float, to window: UIWindow) {
+    let layer = window.layer
+    guard layer.speed != speed else { return }
+    let now = CACurrentMediaTime()
+    let local = layer.convertTime(now, from: nil)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.speed = speed
+    layer.timeOffset = local
+    layer.beginTime = now
+    CATransaction.commit()
+  }
+
+  /// Sets every window's layer speed (1 is normal) from any thread. While the speed is not 1, a window that
+  /// becomes visible later (React Native's alert window, a scene's window) gets it too; at 1 the observer goes.
   static func setSpeed(_ speed: Float) {
-    let apply = {
-      for window in allWindows() { window.layer.speed = speed }
+    let run = {
+      wanted = speed
+      for window in allWindows() { apply(speed, to: window) }
+      if speed != 1 {
+        if visibleObserver == nil {
+          visibleObserver = NotificationCenter.default.addObserver(forName: UIWindow.didBecomeVisibleNotification, object: nil, queue: .main) { note in
+            if let window = note.object as? UIWindow { apply(wanted, to: window) }
+          }
+        }
+      } else if let observer = visibleObserver {
+        NotificationCenter.default.removeObserver(observer)
+        visibleObserver = nil
+      }
     }
-    if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
   }
 
   /// The view controllers presented over the root, front last.
@@ -72,8 +105,9 @@ public final class TaplineNativeModule: Module {
 
     /// Sets the speed of the app's windows' layers (PLAN-1.6 F4; the trick EarlGrey and KIF use). 1 is normal; a
     /// larger number makes every UIKit and Core Animation animation in those windows (native-stack pushes, sheets,
-    /// alerts) finish that many times sooner. Timers and JavaScript are not touched. The JavaScript side puts 1 back
-    /// on `normal`, on a disconnect and when the session ends.
+    /// alerts) finish that many times sooner. Windows that open while the speed is not 1 get it as they appear.
+    /// Timers and JavaScript are not touched. The JavaScript side puts 1 back on `normal`, on a disconnect and when
+    /// the session ends.
     AsyncFunction("setAnimationSpeed") { (speed: Double) in
       let safe = speed.isFinite ? min(max(speed, 1), 1000) : 1
       TaplineWindows.setSpeed(Float(safe))

@@ -9,12 +9,26 @@ import type { TaplineHost } from "./server.js";
 
 /** The line every answer carries while fast animations are on (the shape of the network line). */
 export const ANIMATIONS_LINE = "Animations: fast (Tapline).";
+/** What a call says when it could not be run with animations normal. */
+export const ANIMATIONS_NOT_PAUSED_NOTE = "Note: animations could not be set to normal for this call; it ran with fast animations.";
 /** What a call that ran with animations paused says at its end. */
 export const ANIMATIONS_PAUSED_NOTE = "Note: animations were normal during this call.";
 
 const on = new WeakMap<TaplineHost, Set<string>>();
-/** Sessions whose animations a measurement has put to normal for now. */
-const paused = new WeakMap<TaplineHost, Set<string>>();
+/** The pauses running now per session: how many, and whether the switch to normal was accepted. */
+interface Pause {
+  count: number;
+  ready: Promise<boolean>;
+}
+const pauses = new WeakMap<TaplineHost, Map<string, Pause>>();
+
+function pausesOf(host: TaplineHost): Map<string, Pause> {
+  const known = pauses.get(host);
+  if (known !== undefined) return known;
+  const made = new Map<string, Pause>();
+  pauses.set(host, made);
+  return made;
+}
 
 function setOf(map: WeakMap<TaplineHost, Set<string>>, host: TaplineHost): Set<string> {
   const known = map.get(host);
@@ -47,19 +61,34 @@ async function send(host: TaplineHost, sessionId: string, speed: "fast" | "norma
 
 /**
  * Runs `run` with animations normal when they are on for the session, and puts them back after, whatever `run` does.
- * `paused` is true when they were paused (the caller says so). A pause inside a pause only runs.
+ * `paused` is true when they were on and are normal for this call; `failed` when the switch to normal did not go through
+ * (the call then ran fast, and says so). Pauses overlapping in one session are counted: normal is sent by the first and
+ * fast comes back when the last one ends.
  */
-export async function withNormalAnimations<T>(host: TaplineHost, sessionId: string | undefined, run: () => Promise<T>): Promise<{ value: T; paused: boolean }> {
-  if (sessionId === undefined || !animationsOn(host, sessionId) || setOf(paused, host).has(sessionId)) return { value: await run(), paused: false };
-  const pausedNow = setOf(paused, host);
-  pausedNow.add(sessionId);
-  await send(host, sessionId, "normal");
+export async function withNormalAnimations<T>(
+  host: TaplineHost,
+  sessionId: string | undefined,
+  run: () => Promise<T>,
+): Promise<{ value: T; paused: boolean; failed: boolean }> {
+  if (sessionId === undefined || !animationsOn(host, sessionId)) return { value: await run(), paused: false, failed: false };
+  const all = pausesOf(host);
+  let pause = all.get(sessionId);
+  if (pause === undefined) {
+    pause = { count: 0, ready: send(host, sessionId, "normal") };
+    all.set(sessionId, pause);
+  }
+  pause.count += 1;
+  const mine = pause;
+  const accepted = await mine.ready;
   try {
-    return { value: await run(), paused: true };
+    return { value: await run(), paused: accepted, failed: !accepted };
   } finally {
-    // A switch made during the call wins: only put fast back when it is still meant to be on.
-    pausedNow.delete(sessionId);
-    if (animationsOn(host, sessionId)) await send(host, sessionId, "fast");
+    mine.count -= 1;
+    if (mine.count === 0) {
+      if (all.get(sessionId) === mine) all.delete(sessionId);
+      // A switch made during the call wins: only put fast back when it is still meant to be on.
+      if (animationsOn(host, sessionId)) await send(host, sessionId, "fast");
+    }
   }
 }
 
@@ -81,5 +110,5 @@ export async function restoreAnimations(host: TaplineHost): Promise<void> {
 /** Forgets a session that ended (the app restores itself on a disconnect). */
 export function forgetAnimations(host: TaplineHost, sessionId: string): void {
   setOf(on, host).delete(sessionId);
-  setOf(paused, host).delete(sessionId);
+  pausesOf(host).delete(sessionId);
 }
