@@ -174,11 +174,14 @@ describe("a reflex goes through the same policy as a single call", () => {
       world: (w) => {
         sheetWorld({ up: true, again: false })(w);
         w.elements.settings = [...w.elements.settings, button("e22", "dismiss", "Delete trip")];
+        // The sheet lets "dismiss" through, so only the policy check can stop the reflex.
+        const covered = w.refuse;
+        w.refuse = (testID, screen) => (testID === "dismiss" ? undefined : covered?.(testID, screen));
       },
     });
     const answer = await callTool(s.tools, "tap", { target: { text: "General" } });
     expect(answer.isError).toBe(true);
-    expect(textOf(answer)).toContain("didn't fire");
+    expect(textOf(answer)).toContain('which the policy flags ("delete")');
     expect(pressed(s, "dismiss")).toBe(0);
   });
 

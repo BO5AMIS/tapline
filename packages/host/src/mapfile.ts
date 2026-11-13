@@ -326,16 +326,20 @@ function renameName(name: string, renames: Record<string, string>): string {
 function renamePlaces(file: MapFile, renames: Record<string, string>): MapFile {
   if (Object.keys(renames).length === 0) return file;
   const places: Record<string, MapPlace> = {};
+  // Only the renames that really happened move roads and reflexes.
+  const applied: Record<string, string> = {};
   for (const [name, place] of Object.entries(file.places)) {
     const target = renameName(name, renames);
     // A name that is already taken is not overwritten by a rename.
-    places[target !== name && file.places[target] !== undefined ? name : target] = place;
+    const blocked = target !== name && file.places[target] !== undefined;
+    places[blocked ? name : target] = place;
+    if (!blocked && target !== name) applied[name] = target;
   }
   return {
     ...file,
     places,
-    roads: file.roads.map((r) => ({ ...r, from: renameName(r.from, renames), to: renameName(r.to, renames) })),
-    reflexes: file.reflexes.map((r) => (typeof r.at === "string" ? { ...r, at: renameName(r.at, renames) } : r)),
+    roads: file.roads.map((r) => ({ ...r, from: renameName(r.from, applied), to: renameName(r.to, applied) })),
+    reflexes: file.reflexes.map((r) => (typeof r.at === "string" ? { ...r, at: renameName(r.at, applied) } : r)),
   };
 }
 
@@ -355,7 +359,8 @@ export function mergeMapsWithRenames(
   const nameByKey = new Map<string, string>();
   for (const [name, place] of Object.entries(places)) nameByKey.set(placeIdentity(place.key), name);
   const taken = new Set([...Object.keys(base.places), ...Object.keys(mine.places)]);
-  // One key found under two names: both sides follow the kept name.
+  // One key found under two names: each side renames only its own old name to the kept name.
+  const baseRenames: Record<string, string> = {};
   const both: Record<string, string> = {};
   // A different place with the same name: only my side takes the new name.
   const clash: Record<string, string> = {};
@@ -375,8 +380,8 @@ export function mergeMapsWithRenames(
       if (keepMine) delete places[known];
       places[kept] = mergePlace(existing, place);
       nameByKey.set(identity, kept);
-      both[name] = kept;
-      both[known] = kept;
+      if (name !== kept) both[name] = kept;
+      if (known !== kept) baseRenames[known] = kept;
       continue;
     }
     if (places[name] !== undefined) {
@@ -401,14 +406,14 @@ export function mergeMapsWithRenames(
     const have = roads.get(id);
     roads.set(id, have === undefined ? moved : mergeRoad(have, moved));
   };
-  for (const road of base.roads) add(road, both);
+  for (const road of base.roads) add(road, baseRenames);
   for (const road of mine.roads) add(road, mineMap);
 
   const reflexes = new Map<string, MapReflex>();
   const addReflex = (reflex: MapReflex, renames: Record<string, string>): void => {
     reflexes.set(reflex.name, typeof reflex.at === "string" ? { ...reflex, at: renameName(reflex.at, renames) } : reflex);
   };
-  for (const reflex of base.reflexes) addReflex(reflex, both);
+  for (const reflex of base.reflexes) addReflex(reflex, baseRenames);
   for (const reflex of mine.reflexes) addReflex(reflex, mineMap);
 
   // Unknown top-level fields: the disk copy decides, so a stale one in memory never overwrites a newer one.
@@ -455,6 +460,7 @@ async function withLock<T>(io: MapIo, lockPath: string, body: () => Promise<T>):
     if (madeAt === null) {
       // A real permission error looks the same as a busy lock; never spin past the deadline.
       if (io.now() > deadline) throw new Error(`the map file is locked (${lockPath}); try again`);
+      await io.sleep(LOCK_POLL_MS);
       continue;
     }
     if (io.now() - madeAt > LOCK_STALE_MS) {
