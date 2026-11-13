@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AccountStore } from "./accounts.js";
 import { cheapestWay, describeWay, howText, isRouteLeg, type WayLeg } from "./mapcmd.js";
 import type { MapRoad, Move } from "./mapfile.js";
-import { keyFromState, placeNameFromRoute, placeNow, type AppMap, type KnownPlaces, type Observation, type Place, type PlaceSource } from "./places.js";
+import { declaredLink, keyFromState, placeNameFromRoute, placeNow, type AppMap, type KnownPlaces, type Observation, type Place, type PlaceSource } from "./places.js";
 import { elementSchema, placeStateSchema, type PlaceState, type TreeElement, type TreeResult } from "./protocol.js";
 import { isReflexFailure } from "./reflexes.js";
 import { loadRoute, routeEdges, routeRunner, substituteSteps, type RouteEdge } from "./routes.js";
@@ -511,9 +511,11 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
 
   // The place: one the map holds, or one the app lists up front (it may have a link and no roads yet).
   const saved = map.data().places[to];
-  const up = saved === undefined ? (await svc.known()).places.find((place) => placeNameFromRoute(place.route) === to) : undefined;
+  const known = await svc.known();
+  const up = saved === undefined ? known.places.find((place) => placeNameFromRoute(place.route) === to) : undefined;
   if (saved === undefined && up === undefined) return bad("not_found", `no place named "${to}"; map lists the places.`);
-  const target = { name: to, link: saved !== undefined ? saved.link : (up?.link ?? null) };
+  // A saved place without a link of its own still has the one the app declares for it.
+  const target = { name: to, link: saved !== undefined ? (saved.link ?? declaredLink(saved.key, known)) : (up?.link ?? null) };
 
   // 1. Where am I? One read: it names the place, and it holds the first target for the policy.
   let tree = await svc.tree();

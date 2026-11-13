@@ -111,6 +111,13 @@ export function signatureKey(tree: TreeResult): PlaceKey {
  * Whether two keys are one place. Route keys are equal parts for parts; signature keys agree when at least `threshold`
  * of their parts do. A route key and a signature key never match, and neither do keys from two sources.
  */
+/** The link the app declares up front for the place with this key, or null (§18.1). */
+export function declaredLink(key: PlaceKey, known: KnownPlaces): string | null {
+  if (!("route" in key)) return null;
+  const link = known.places.find((place) => samePlace(key, { route: place.route }))?.link;
+  return link !== undefined && link !== null && link !== "" ? link : null;
+}
+
 export function samePlace(a: PlaceKey, b: PlaceKey, threshold = 0.75): boolean {
   if ("route" in a || "route" in b) return "route" in a && "route" in b && stable(a) === stable(b);
   if (a.signature === b.signature) return true;
@@ -449,7 +456,8 @@ export class AppMap {
       found[1].last = this.iso();
     } else {
       name = this.freshName(key);
-      this.map.places[name] = { key, link: null, last: this.iso() };
+      // A place the app listed up front keeps its declared link once it is visited (§18.1, §18.3).
+      this.map.places[name] = { key, link: this.known !== undefined ? declaredLink(key, this.known) : null, last: this.iso() };
       isNew = true;
       this.touch();
     }
