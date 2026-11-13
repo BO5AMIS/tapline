@@ -12,7 +12,7 @@ import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, 
 import { briefLines, briefScreen } from "./brief.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
-import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
+import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine, roleOf } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -48,15 +48,15 @@ import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourney
 import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
-import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
+import { Dialogs, askDone, draftCaption, okCaption, plainText, type MomentOutcome } from "./elicit.js";
 import type { AuditSink } from "./auditlog.js";
-import { GrantBook, elementNeverGrantable, grantCaption, grantNameBase, neverGrantable, reachesPeople, type GrantDecision, type GrantSpec } from "./grants.js";
+import { GrantBook, REACH_WORDS, elementNeverGrantable, grantCaption, grantNameBase, neverGrantable, reachesPeople, type GrantDecision, type GrantSpec } from "./grants.js";
 import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
-import { escapeParams, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
+import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -1209,7 +1209,20 @@ interface CallState {
 const CHANGED_WHILE_WAITING = "Error not_allowed: needs_confirmation: the screen changed while waiting for the OK; ask again.";
 
 /** A person's OK given while the call waited: what the screen showed then, and where it was given. */
-type Waited = { fp: string; via: OkVia } | { fp: string; pre: PreUse };
+type Waited = { fp: string; via: OkVia; /** The OK was for a draft (§21.3), and where the draft came from. */ draft?: Draft["source"] } | { fp: string; pre: PreUse };
+
+/** A draft shown to a person before the touch that sends it (AGENT-TOOLS 1.14 §21.3): where it came from, the question and the field's text. */
+interface Draft {
+  source: "grant" | "route";
+  /** The policy word that matched, as the dialog says it. */
+  word: string;
+  caption: string;
+  /** The field's text, redacted: what the person was shown and what the OK is bound to. */
+  text: string;
+}
+
+/** What binds a person's OK to the draft they saw: the text. A changed draft is another question. */
+const draftBinding = (draft: Draft | null): string => (draft === null ? "" : `|draft|${draft.text}`);
 
 /**
  * A grant's use taken before the dialog stage (§19.4): a grant that covers the touch asks no one, and when taking its use fails
@@ -1334,6 +1347,10 @@ export class TaplineTools {
   private readonly okScope = new AsyncLocalStorage<{ used: boolean }>();
   /** The saved routes running in this call (a drive, a replay): a grant with a `route` covers touches made inside it only (§19.1). */
   private readonly routeScope = new AsyncLocalStorage<string[]>();
+  /** True inside a route that carries `"draftsOnly": true` (§18.5, §21.3); it nests: a route inside one is drafts-only too. */
+  private readonly draftsScope = new AsyncLocalStorage<boolean>();
+  /** The input the agent last typed into (§21.3): the draft's field. A secure field is never kept. */
+  private lastTyped: { sessionId: string; ref: string; testID?: string } | undefined;
   /** The grant notes of the call in flight (§19.3): they end its answer, before the call's other closing notes. */
   private readonly grantNotes = new AsyncLocalStorage<string[]>();
   private grantNoticeDone = false;
@@ -1855,8 +1872,25 @@ export class TaplineTools {
   }
 
   /** Runs what a saved route does with its name in scope: a grant that names the route covers touches made inside it (§19.1). */
-  private inRoute<T>(route: string | undefined, run: () => T): T {
-    return route === undefined ? run() : this.routeScope.run([...(this.routeScope.getStore() ?? []), route], run);
+  private inRoute<T>(route: string | undefined, run: () => T, draftsOnly = false): T {
+    if (route === undefined) return run();
+    const drafts = draftsOnly || this.draftsScope.getStore() === true;
+    return this.routeScope.run([...(this.routeScope.getStore() ?? []), route], () => this.draftsScope.run(drafts, run));
+  }
+
+  /** Whether the saved route of that name in this app's map carries `"draftsOnly": true` (§18.5). */
+  private routeDraftsOnly(session: SessionInfo, route: string | undefined): boolean {
+    const map = route === undefined ? undefined : this.mapOf(session);
+    return route !== undefined && map !== undefined && loadRoute(map.folder(), route)?.draftsOnly === true;
+  }
+
+  /**
+   * The policy's lists for a touch. In a drafts-only route (§21.3) the words that reach other people ask a person whatever the
+   * policy file lists, so that every such touch stops at a draft.
+   */
+  private touchLists(session: SessionInfo): { confirm: string[]; block: string[] } {
+    const lists = listsFor(this.policy, session.app);
+    return this.draftsScope.getStore() === true ? { confirm: [...lists.confirm, ...REACH_WORDS], block: lists.block } : lists;
   }
 
   private routeServices(session: SessionInfo, account: string | undefined, brief: boolean | undefined): RouteServices {
@@ -1866,7 +1900,7 @@ export class TaplineTools {
         const used = this.accountText(field.startsWith("${") ? field : "$" + "{account." + field + "}", named, session);
         return used !== null && !used.ok ? used.message : null;
       },
-      runSteps: (steps, look, route) => this.inRoute(route, () => this.run({ steps, account, brief, ...(look ? {} : { look: false }) })),
+      runSteps: (steps, look, route) => this.inRoute(route, () => this.run({ steps, account, brief, ...(look ? {} : { look: false }) }), this.routeDraftsOnly(session, route)),
       checkSteps: (steps) => {
         // The call's account is the steps' default account here too, as when `run` runs them.
         const before = this.runAccount;
@@ -1888,7 +1922,7 @@ export class TaplineTools {
   private async driveTouch(session: SessionInfo, call: TouchCall): Promise<TouchOutcome> {
     this.logExtra = undefined;
     this.actionStartedAt = Date.now();
-    const lists = listsFor(this.policy, session.app);
+    const lists = this.touchLists(session);
     const { tool, method, params } = call;
     const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
     // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
@@ -1929,6 +1963,7 @@ export class TaplineTools {
       waited = ready.waited;
     }
     let granted: OkVia | undefined;
+    let sentDraft = false;
     let covered: GrantUse | undefined;
     const wire = call.pipelined
       ? { method: "move", params: { method, params, ...(guard !== undefined ? { guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
@@ -1943,6 +1978,7 @@ export class TaplineTools {
           const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known === undefined ? undefined : { elements: known, raw: knownRaw ?? known });
           if ("stop" in gate) throw new PolicyStop(gate.stop);
           granted = gate.via;
+          sentDraft = gate.draft === true;
           covered = gate.grant;
         }
         return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
@@ -1966,7 +2002,7 @@ export class TaplineTools {
     // A jump is a shortcut a user doesn't have; a journey whose `allow` names drive says so in its report (AGENT-TOOLS 1.13 18.12).
     if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
-    return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}) };
+    return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}), ...(sentDraft ? { sent: true as const } : {}) };
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
@@ -4459,7 +4495,7 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap), ...(this.userEyes() ? { noScroll: true } : {}) };
-        const tapLists = listsFor(this.policy, session.app);
+        const tapLists = this.touchLists(session);
         const ready = await this.awaitOk(session, "tap", "press", pressParams, tapLists);
         if ("stop" in ready) return ready.stop;
         // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
@@ -4778,7 +4814,7 @@ export class TaplineTools {
         update: options.updateReferences === true,
       };
       try {
-        const answer = await this.inRoute(script.version === 2 ? script.name : undefined, () => this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false }));
+        const answer = await this.inRoute(script.version === 2 ? script.name : undefined, () => this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false }), script.version === 2 && script.draftsOnly === true);
         if (notes.length === 0) return answer;
         const [top, ...rest] = answer.content;
         return top !== undefined && top.type === "text"
@@ -4893,7 +4929,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     this.logExtra = undefined;
     this.actionStartedAt = Date.now();
-    const lists = listsFor(this.policy, session.app);
+    const lists = this.touchLists(session);
     if (!dryRun && lists.confirm.length === 0 && lists.block.length === 0) return perform();
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
@@ -4916,6 +4952,8 @@ export class TaplineTools {
         // §19.3: a dry run says a grant would allow it, and counts nothing.
         const grant = await this.grantFor(session, tool, verdict.raw, verdict.word, "peek");
         if (grant !== null) needs = ` It is allowed by grant ${JSON.stringify(grant.name)} (${grant.counts} today).`;
+        // §21.3: a touch that sends something stops at a draft first; nothing is shown now.
+        else if ((await this.draftSource(session, verdict.raw, verdict.word)) !== null) needs = ` It stops at a draft first, and needs a person's OK (policy word ${JSON.stringify(verdict.word)}).`;
       }
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
@@ -4924,6 +4962,7 @@ export class TaplineTools {
     const ready = await this.awaitOk(session, tool, method, params, lists);
     if ("stop" in ready) return ready.stop;
     let granted: OkVia | undefined;
+    let sentDraft = false;
     let covered: GrantUse | undefined;
     let answer: CallToolResult;
     try {
@@ -4931,6 +4970,7 @@ export class TaplineTools {
         const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
         if ("stop" in gate) return gate.stop;
         granted = gate.via;
+        sentDraft = gate.draft === true;
         covered = gate.grant;
         return null;
       });
@@ -4944,7 +4984,7 @@ export class TaplineTools {
     if (covered !== undefined && answer.isError !== true) return appendNote(withNotes, covered.line);
     if (granted === undefined || answer.isError === true) return withNotes;
     this.journeyRun?.noteOk(granted);
-    return appendNote(withNotes, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
+    return appendNote(withNotes, `Note: ${sentDraft ? "sent" : "allowed"} by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
   }
 
   /**
@@ -4959,7 +4999,7 @@ export class TaplineTools {
     lists: { confirm: string[]; block: string[] },
     waited: Waited | null,
     known?: KnownElements,
-  ): Promise<{ stop: CallToolResult } | { via?: OkVia; grant?: GrantUse }> {
+  ): Promise<{ stop: CallToolResult } | { via?: OkVia; grant?: GrantUse; draft?: true }> {
     const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
     if ("stop" in gate) return gate;
     if (gate.grant !== undefined) {
@@ -4967,9 +5007,9 @@ export class TaplineTools {
       return { grant: gate.grant };
     }
     if (gate.via === undefined) return {};
-    this.logExtra = { ...(this.logExtra ?? {}), confirmed: true, confirmed_by: gate.via };
+    this.logExtra = { ...(this.logExtra ?? {}), confirmed: true, confirmed_by: gate.via, ...(gate.draft === true ? { draft: true } : {}) };
     this.setOk(true);
-    return { via: gate.via };
+    return { via: gate.via, ...(gate.draft === true ? { draft: true as const } : {}) };
   }
 
   /** What the person was asked for and what the screen showed then; the touch is checked against it right before it happens. */
@@ -5002,36 +5042,41 @@ export class TaplineTools {
     if (this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
     // A grant that covers the touch asks no one. Its use is taken here, before the dialog stage, so that a use that can't be
     // taken (the audit line fails) falls back to asking a person; the check right before the touch takes it over (§19.3, §19.4).
+    // §21.3: a touch under a draftsOnly grant, or in a drafts-only route, stops at a draft a person sees first: no grant stands in.
+    const draft = await this.draftOf(session, verdict.raw, verdict.word);
     const asked: string[] = [];
-    const early = await this.grantFor(session, tool, verdict.raw, verdict.word, "use", asked);
+    const early = draft === null ? await this.grantFor(session, tool, verdict.raw, verdict.word, "use", asked) : null;
     if (early !== null) return { waited: { fp: this.fingerprint(verdict.raw), pre: { use: early, handed: false } } };
     // The reason a grant didn't cover goes into the action log with the touch, also after a long wait.
     const keepAsked = (): void => {
       if (asked[0] !== undefined) this.logExtra = { ...(this.logExtra ?? {}), grant_asked: asked[0] };
     };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
-    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    const key = this.confirmKey(session, tool, verdict.raw);
+    const caption = draft?.caption ?? captionFor(tool, label ?? undefined, params) ?? tool;
+    const key = this.confirmKey(session, tool, verdict.raw) + draftBinding(draft);
     const ask = { kind: tool, caption, word: verdict.word };
-    const fp = this.fingerprint(verdict.raw);
+    const fp = this.fingerprint(verdict.raw) + draftBinding(draft);
     const name = this.shortName(verdict.element, false);
-    const refuse = (tail: string): { stop: CallToolResult } => {
+    // `why` is a draft's reason for not being sent (§21.3); without one a draft is waiting in the live view.
+    const refuse = (tail: string, why?: string): { stop: CallToolResult } => {
       keepAsked();
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      if (draft !== null) return { stop: fail(this.draftRefusal(name, verdict.word, why, tail)) };
       return { stop: fail(`Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${tail}`) };
     };
     const hold = this.holdScope.getStore();
     const cancelled = hold?.signal;
     const wasCancelled = (): boolean => cancelled?.aborted === true;
-    if (wasCancelled()) return refuse("The call was cancelled before anyone answered.");
+    if (wasCancelled()) return refuse("The call was cancelled before anyone answered.", "The call was cancelled before anyone answered.");
     const check = this.confirmations.check(key, ask);
     if (check.granted) {
       keepAsked();
-      return { waited: { fp, via: check.via } };
+      return { waited: { fp, via: check.via, ...(draft !== null ? { draft: draft.source } : {}) } };
     }
     if ("held" in check) {
       keepAsked();
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      if (draft !== null) return { stop: fail("Error not_allowed: needs_confirmation: the draft wasn't sent (They declined it just now.). Don't ask again by repeating the call: ask your user what they want.") };
       return {
         stop: fail(
           `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
@@ -5042,9 +5087,10 @@ export class TaplineTools {
     const waitStarted = Date.now();
     // The dialog's answer goes through the same request the live view answers: the first one wins, the other is closed.
     const noDialog = new Promise<"no_dialog">((resolve) => {
-      void dialogs
-        .askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
-        .then((answer) => {
+      void (draft !== null
+        ? dialogs.askDraft(draft.caption, draft.word, abort.signal)
+        : dialogs.askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
+      ).then((answer) => {
           if (answer === "unavailable") resolve("no_dialog");
           else if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
         });
@@ -5063,19 +5109,20 @@ export class TaplineTools {
     }
     if (wasCancelled()) {
       if (settled.allow) this.confirmations.check(key, ask);
-      return refuse("The call was cancelled before anyone answered.");
+      return refuse("The call was cancelled before anyone answered.", "The call was cancelled before anyone answered.");
     }
-    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
+    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.", "Nobody answered.");
     if (!settled.allow) {
       this.options.audit?.write({ kind: "approval", app: session.app.id ?? session.app.name, name: verdict.word, detail: "declined" });
-      return refuse("They declined. Ask your user what to do.");
+      return refuse("They declined. Ask your user what to do.", "They declined.");
     }
     const used = this.confirmations.check(key, ask);
     if (!used.granted) return { stop: fail(CHANGED_WHILE_WAITING) };
     // The person said yes in the chat's own dialog: they may also want it as a standing grant (§19.6).
-    if (used.via === "chat") await this.offerGrant(session, verdict.word, verdict.raw, asked, cancelled);
+    // A draft a person sends doesn't offer a grant: the next one is shown to them too.
+    if (used.via === "chat" && draft === null) await this.offerGrant(session, verdict.word, verdict.raw, asked, cancelled);
     keepAsked();
-    return { waited: { fp, via: used.via } };
+    return { waited: { fp, via: used.via, ...(draft !== null ? { draft: draft.source } : {}) } };
   }
 
   /** The answer of a reflex's step that the policy flags at the moment it runs: skipped, never asked (§18.7). */
@@ -5118,7 +5165,7 @@ export class TaplineTools {
     waited?: Waited | null,
     /** Elements a drive already read: checked instead of a dry run; the app's guard holds the touch to them (§18.4). */
     known?: KnownElements,
-  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia; grant?: GrantUse }> {
+  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia; grant?: GrantUse; draft?: true }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
     const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
@@ -5133,12 +5180,18 @@ export class TaplineTools {
     }
     // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
     if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
+    // §21.3: read again right before the touch: the OK a person gave is for the text they saw.
+    // Whether a draft applies was decided where the person was asked; a grant made by their answer in this very call is for the next touch.
+    const waiting = waited !== undefined && waited !== null;
+    const draftFrom = waiting ? ("draft" in waited ? waited.draft : undefined) : undefined;
+    const draft =
+      verdict.kind !== "confirm" ? null : waiting ? (draftFrom !== undefined ? await this.draftWith(session, draftFrom, verdict.word) : null) : await this.draftOf(session, verdict.raw, verdict.word);
     if (waited !== undefined && waited !== null) {
       // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
       // A call that was cancelled while it waited never touches.
       const same =
         verdict.kind === "confirm" &&
-        this.fingerprint(verdict.raw) === waited.fp &&
+        this.fingerprint(verdict.raw) + draftBinding(draft) === waited.fp &&
         this.host.current()?.id === session.id &&
         this.holdScope.getStore()?.signal?.aborted !== true;
       if (!same) {
@@ -5150,24 +5203,26 @@ export class TaplineTools {
         waited.pre.handed = true;
         return { granted: false, grant: waited.pre.use };
       }
-      this.approved(session, verdict.word, waited.via);
-      return { granted: true, via: waited.via };
+      this.approved(session, verdict.word, waited.via, draft !== null);
+      return { granted: true, via: waited.via, ...(draft !== null ? { draft: true as const } : {}) };
     }
     if (verdict.kind === "none") return { granted: false };
     // §19.3: where the policy says a person must OK, a grant may stand in for them: it is used up here, right before the touch.
-    const grant = await this.grantFor(session, tool, verdict.raw, verdict.word, "use");
+    // Not for a draft (§21.3): a person sees it first.
+    const grant = draft === null ? await this.grantFor(session, tool, verdict.raw, verdict.word, "use") : null;
     if (grant !== null) return { granted: false, grant };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
-    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
+    const caption = draft?.caption ?? captionFor(tool, label ?? undefined, params) ?? tool;
     // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
-    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.raw), { kind: tool, caption, word: verdict.word });
+    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.raw) + draftBinding(draft), { kind: tool, caption, word: verdict.word });
     if (check.granted) {
-      this.approved(session, verdict.word, check.via);
-      return { granted: true, via: check.via };
+      this.approved(session, verdict.word, check.via, draft !== null);
+      return { granted: true, via: check.via, ...(draft !== null ? { draft: true as const } : {}) };
     }
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      if (draft !== null) return { stop: fail("Error not_allowed: needs_confirmation: the draft wasn't sent (They declined it just now.). Don't ask again by repeating the call: ask your user what they want.") };
       return {
         stop: fail(
           `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
@@ -5175,6 +5230,7 @@ export class TaplineTools {
       };
     }
     this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+    if (draft !== null) return { stop: fail(this.draftRefusal(name, verdict.word, undefined, `${this.liveViewLine()}${check.suffix}`)) };
     return {
       stop: fail(
         `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${this.liveViewLine()}${check.suffix}`,
@@ -5197,6 +5253,8 @@ export class TaplineTools {
     } catch {
       return null;
     }
+    // A draftsOnly grant covers nothing by itself: the touch stops at a draft (§21.3).
+    if (decision.kind === "draft") return null;
     if (decision.kind === "ask") {
       const notes = this.grantNotes.getStore();
       if (notes !== undefined) for (const note of decision.notes) if (!notes.includes(note)) notes.push(note);
@@ -5210,8 +5268,70 @@ export class TaplineTools {
   }
 
   /** A person's OK is used up: one `approval` line of the audit log (§23). */
-  private approved(session: SessionInfo, word: string, via: OkVia): void {
-    this.options.audit?.write({ kind: "approval", app: session.app.id ?? session.app.name, name: word, detail: `allowed by a person (in ${via === "chat" ? "chat" : "the live view"})` });
+  private approved(session: SessionInfo, word: string, via: OkVia, draft = false): void {
+    this.options.audit?.write({
+      kind: "approval",
+      app: session.app.id ?? session.app.name,
+      name: word,
+      detail: draft ? "draft sent" : `allowed by a person (in ${via === "chat" ? "chat" : "the live view"})`,
+    });
+  }
+
+  /**
+   * AGENT-TOOLS 1.14 §21.3: why a touch stops at a draft, or null. Under a `draftsOnly` grant that would cover the touch, or in a
+   * route that carries `"draftsOnly": true` for a word that reaches other people. Reads nothing from the phone.
+   */
+  private async draftSource(session: SessionInfo, element: TreeElement, word: string): Promise<"grant" | "route" | null> {
+    if (word === UNREADABLE_LINK) return null;
+    if (this.draftsScope.getStore() === true && matchWord(REACH_WORDS, element) !== null) return "route";
+    const book = this.options.grants;
+    if (book === undefined) return null;
+    try {
+      const decision = await book.decide({ app: session.app, element, routes: this.routeScope.getStore() ?? [] }, "peek", "");
+      return decision.kind === "draft" ? "grant" : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The draft a touch stops at (§21.3), with the question and the field's text as the person will see them; null when none applies. */
+  private async draftOf(session: SessionInfo, element: TreeElement, word: string): Promise<Draft | null> {
+    const source = await this.draftSource(session, element, word);
+    return source === null ? null : this.draftWith(session, source, word);
+  }
+
+  /** The draft as the field holds it now. */
+  private async draftWith(session: SessionInfo, source: Draft["source"], word: string): Promise<Draft> {
+    const text = await this.draftText(session);
+    return { source, word, text, caption: draftCaption({ word, app: session.app.name, text }) };
+  }
+
+  /**
+   * The text of the field the agent last typed into on this screen, else the only input that holds text, read from the app now
+   * (Tapline's host reads it from the app, §21.3). Redacted of vault and account values. A secure field is never kept, and what
+   * can't be read is an empty draft.
+   */
+  private async draftText(session: SessionInfo): Promise<string> {
+    let read: ReturnType<typeof treeResultSchema.safeParse>;
+    try {
+      read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id, internal: true }));
+    } catch {
+      return "";
+    }
+    if (!read.success) return "";
+    const inputs = read.data.elements.filter((e) => roleOf(e) === "input" || (e.actions ?? []).includes("type"));
+    const last = this.lastTyped;
+    const own = last !== undefined && last.sessionId === session.id ? (inputs.find((e) => e.ref === last.ref) ?? (last.testID !== undefined ? inputs.find((e) => e.testID === last.testID) : undefined)) : undefined;
+    const filled = inputs.filter((e) => typeof e.value === "string" && e.value !== "");
+    const field = own ?? (filled.length === 1 ? filled[0] : undefined);
+    return typeof field?.value === "string" ? this.host.redactOut(field.value) : "";
+  }
+
+  /** A draft that wasn't sent, or one that waits in the live view (§21.3). `why` is the reason in parentheses. */
+  private draftRefusal(name: string, word: string, why: string | undefined, tail: string): string {
+    return why !== undefined
+      ? `Error not_allowed: needs_confirmation: the draft wasn't sent (${why}). Ask your user what to do.`
+      : `Error not_allowed: needs_confirmation: a draft is waiting for a person (${name}, policy word ${JSON.stringify(word)}). ${tail}`;
   }
 
   /** A use taken before the dialog stage that no check took over (the call stopped first): given back. */
@@ -5524,6 +5644,12 @@ export class TaplineTools {
         // Journey or not, iOS shows the last character of a password for about a second: remember when (finding 4).
         if (secure) this.secureTypedAt = this.clock();
         secureField = secure;
+        // The draft's field (§21.3): the last input typed into. A secure field's text is never read back.
+        const typedInto = !secure && typeof r === "object" && r !== null && "element" in r ? elementSchema.safeParse((r as { element: unknown }).element) : undefined;
+        const typedSession = this.host.current();
+        if (typedInto?.success === true && typedSession !== undefined) {
+          this.lastTyped = { sessionId: typedSession.id, ref: typedInto.data.ref, ...(typedInto.data.testID ? { testID: typedInto.data.testID } : {}) };
+        }
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
         return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
@@ -6092,7 +6218,7 @@ export class TaplineTools {
         }
         let ready: { waited: Waited | null } = { waited: null };
         if (press !== undefined) {
-          const waitedFor = await this.awaitOk(session, "tap", "press", press, listsFor(this.policy, session.app));
+          const waitedFor = await this.awaitOk(session, "tap", "press", press, this.touchLists(session));
           if ("stop" in waitedFor) return waitedFor.stop;
           ready = waitedFor;
         }
@@ -6102,7 +6228,7 @@ export class TaplineTools {
         const tapped = press;
         const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
           if (tapped !== undefined) {
-            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app), ready.waited);
+            const gate = await this.policyGate(session, "tap", "press", tapped, this.touchLists(session), ready.waited);
             if ("stop" in gate) return { stop: gate.stop };
             try {
               const result = await this.measureWindow(session, seconds, tapped);
@@ -6616,7 +6742,7 @@ export class TaplineTools {
     // One OK never covers two touches: a target the policy flags (a word that asks a person, or blocks) is refused whole.
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
-    const lists = listsFor(this.policy, session.app);
+    const lists = this.touchLists(session);
     // Resolved inside the agent's turn, right before the press, as a guarded tap does: a queued person's action can't change
     // what is under the target between the check and the touch.
     const refusal: { answer: CallToolResult | null } = { answer: null };

@@ -28,6 +28,8 @@ export const sharedScriptV2Schema = z.object({
   start: z.string().min(1).optional(),
   end: z.string().min(1).optional(),
   variables: z.array(variableNameSchema).optional(),
+  /** AGENT-TOOLS 1.14 §18.5, §21.3: every touch on a word that reaches other people stops at a draft shown to a person. */
+  draftsOnly: z.boolean().optional(),
 });
 
 export const sharedScriptSchema = z.union([sharedScriptV1Schema, sharedScriptV2Schema]);

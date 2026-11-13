@@ -106,7 +106,7 @@ export interface NextWait {
 export type TouchOutcome =
   | { kind: "stop"; answer: CallToolResult }
   | { kind: "error"; code: string; message: string }
-  | { kind: "done"; place: PlaceState | null; next?: NextWait; via?: "chat" | "live view" };
+  | { kind: "done"; place: PlaceState | null; next?: NextWait; via?: "chat" | "live view"; /** The person's OK was for a draft (§21.3): the note says sent. */ sent?: true };
 
 export interface DriveServices {
   map: AppMap;
@@ -568,6 +568,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
   // Each leg gives reflexes one chance before a failure is answered (1.13.1 item 10).
   const reflexTried = new Set<number>();
   const allowed = new Set<string>();
+  const sent = new Set<string>();
   let fresh: TreeElement[] | null = tree.elements;
   let waiting: NextWait | undefined;
   const droppedNote = (road: string): string => (eyes ? "Note: dropped a road (it failed twice in a row)." : `Note: dropped the road ${road} (it failed twice in a row).`);
@@ -723,7 +724,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
       }
       run.done++;
       svc.moved?.(road.move.tool, viaLink);
-      if (outcome.via !== undefined) allowed.add(outcome.via);
+      if (outcome.via !== undefined) (outcome.sent === true ? sent : allowed).add(outcome.via);
       if (viaLink) run.links++;
       else if (road.move.tool === "tap") run.taps++;
       else run.others++;
@@ -794,6 +795,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
   const line = `Arrived at ${arrived}${path}.`;
   const notes = [
     ...[...allowed].map((via) => `Note: allowed by a person (in ${via === "chat" ? "chat" : "the live view"}).`),
+    ...[...sent].map((via) => `Note: sent by a person (in ${via === "chat" ? "chat" : "the live view"}).`),
     ...run.repairs,
     ...(run.provenAgain > 0 ? [`Note: ${plural(run.provenAgain, "road", "roads")} proven again for build ${map.currentBuild()}.`] : []),
     ...run.dropped.map(droppedNote),

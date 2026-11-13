@@ -247,9 +247,19 @@ describe("what a grant covers (§19.3)", () => {
     expect(await bad.book.decide({ ...t, element: { text: "Pay" } }, "use", "x")).toMatchObject({ kind: "ask", notes: [] });
   });
 
-  it("a draftsOnly grant covers nothing until drafts exist (task A2)", async () => {
-    const r = rig([{ ...GRANT, draftsOnly: undefined }]);
-    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: [] });
+  it("a draftsOnly grant stops at a draft and counts nothing (§19.3, §21.3)", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, draftsOnly: undefined }]);
+    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "draft", name: "instagram_posting" });
+    // nothing was used, so it stops at a draft again, and no audit line was written
+    expect(await r.book.decide(touch(), "use", "x")).toEqual({ kind: "draft", name: "instagram_posting" });
+    expect(r.audit.lines).toEqual([]);
+  });
+
+  it("a draftsOnly grant still has its other limits: ended, revoked, quiet hours and the counts ask a person", async () => {
+    const ended = rig([{ ...GRANT, until: "2026-11-01", draftsOnly: true }]);
+    expect(await ended.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", asked: ["ended"] });
+    const revoked = rig([{ ...GRANT, revoked: "2026-11-10", draftsOnly: true }]);
+    expect(await revoked.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", asked: ["revoked"] });
   });
 
   it("an edit of the policy file is seen at the very next touch", async () => {

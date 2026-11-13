@@ -198,6 +198,11 @@ export interface GrantTouch {
 export type GrantDecision =
   /** `stamp` and `date` name the recorded use, so `release` can take it back when the touch wasn't made. */
   | { kind: "covered"; name: string; line: string; /** `2 of 3`, for a dry run's words. */ counts: string; counted: boolean; stamp: string; date: string }
+  /**
+   * A draftsOnly grant covers the touch (§19.3): the touch stops before it is made and shows a draft to a person (§21.3). Nothing is
+   * counted: a draft a person sends isn't a use of the grant, the person's OK let it through.
+   */
+  | { kind: "draft"; name: string }
   /** The touch asks a person; `notes` say why a grant that matched didn't cover it (§19.3). */
   | { kind: "ask"; notes: string[]; /** Why each matching grant didn't cover it, in the report's words: `limit reached`, `quiet hours`, `ended`, `revoked`. */ asked: string[] };
 
@@ -434,8 +439,6 @@ export class GrantBook {
       if (grant.app !== touch.app.id && grant.app !== touch.app.name) continue;
       if (matchWord(grant.words, touch.element) === null) continue;
       if (grant.route !== undefined && !touch.routes.includes(grant.route)) continue;
-      // A draftsOnly grant stops before the touch and shows a draft (§21.3, task A2): until that is built it covers nothing.
-      if (grant.draftsOnly) continue;
       const name = JSON.stringify(grant.name);
       const doesnt = (why: string): string => `Note: grant ${name} doesn't cover this (${why}); asking a person.`;
       if (grant.revoked !== undefined) {
@@ -453,13 +456,15 @@ export class GrantBook {
         asked.push("quiet hours");
         continue;
       }
-      const counted = mode === "use" ? await this.use(grant, at, detail, touch.app, policy.grants) : await this.peek(grant, at);
+      // A draftsOnly grant only looks: its touch stops at a draft, and a draft a person sends counts no use (§19.3, §21.3).
+      const counted = mode === "use" && !grant.draftsOnly ? await this.use(grant, at, detail, touch.app, policy.grants) : await this.peek(grant, at);
       if (counted === null) continue;
       if (typeof counted === "string") {
         notes.push(doesnt(counted));
         asked.push("limit reached");
         continue;
       }
+      if (grant.draftsOnly) return { kind: "draft", name: grant.name };
       return { kind: "covered", name: grant.name, counts: `${counted.today} of ${grant.perDay}`, counted: mode === "use", stamp: counted.stamp, date: counted.date, line: `Note: allowed by grant ${name} (${counted.today} of ${grant.perDay} today).` };
     }
     return { kind: "ask", notes, asked };
