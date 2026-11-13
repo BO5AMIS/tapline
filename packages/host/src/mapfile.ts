@@ -40,6 +40,9 @@ export type Move = {
   tool: MoveTool | (string & {});
   target?: { id?: string; label?: string; text?: string; row?: true; x?: number; y?: number };
   url?: string;
+  /** A swipe's end point and length: Tapline's own fields, kept by any tool that reads the file (§18.9). */
+  to?: { x: number; y: number };
+  seconds?: number;
 };
 
 export interface MapRoad {
@@ -261,7 +264,7 @@ export function loadMap(dir: string, app: string): { map: MapFile; status: "ok" 
 // Merge, by place key and by road (from, move, to). The newest `last` wins; on a tie, mine.
 
 /** A stable text for a value: object keys sorted, so the same key always compares equal. */
-function stable(value: unknown): string {
+export function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (typeof value === "object" && value !== null) {
     const entries = Object.entries(value as Record<string, unknown>)

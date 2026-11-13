@@ -207,7 +207,7 @@ const MAX_ELEMENTS = 200;
  * The whole screen as text (AGENT-TOOLS §3.2): the screen line, the app, route, alert and network
  * lines, then one line per element in tree order, up to 200.
  */
-export function formatTree(tree: TreeResult, app?: { name: string; id?: string }, options: { eyes?: boolean } = {}): string {
+export function formatTree(tree: TreeResult, app?: { name: string; id?: string }, options: { eyes?: boolean; place?: string } = {}): string {
   const eyes = options.eyes === true;
   const screen = tree.screen;
   const size = screen
@@ -219,6 +219,8 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
   // A route name is the app's own naming, not on the glass: a user's eyes don't get it (tree.route stays for the journey's measures).
   const route = eyes ? null : formatRoute(tree.route);
   if (route !== null) lines.push(route);
+  // `Place:` (AGENT-TOOLS 1.13 §18.1) is a line of the header, after the route.
+  if (options.place !== undefined) lines.push(options.place);
   lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");
   lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map((element) => formatElement(element, { eyes })));

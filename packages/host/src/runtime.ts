@@ -21,6 +21,7 @@ import { ControlQueue } from "./control.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { isToolName, callTool, type ToolName } from "./dispatch.js";
 import { realRunner } from "./journeyexport.js";
+import { MapRegistry } from "./places.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
 import { TaplineHost, type ListenResult } from "./server.js";
 import { TaplineTools, type ToolsOptions } from "./tools.js";
@@ -50,6 +51,8 @@ export interface RuntimeOptions extends ResolveOptions {
   gitProbe?: GitProbe;
   /** `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). */
   brief?: boolean;
+  /** `--maps DIR`: where the apps' maps live, `<DIR>/<app id>/` (AGENT-TOOLS 1.13 §18.9). Default `~/.tapline/maps`. */
+  maps?: string;
   /** Serve `POST /api/<tool>`: set by a standalone `tapline host`, never by an agent's MCP server (AGENT-TOOLS 1.13 §18.10). */
   api?: boolean;
   /** Where the host's own lines go. Default: stderr with a `[tapline]` prefix (stdout is the MCP protocol's). */
@@ -174,7 +177,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   let hub: ViewerHub | undefined;
   const openBrowser = options.openBrowser ?? openInBrowser;
 
+  // One map per app for every client of this host: places, roads and links grow as agents drive (§18.9).
+  const maps = new MapRegistry({ mapsDir: options.maps ?? join(configDir(options.env), "maps") });
+
   const toolsOptions: ToolsOptions = {
+    maps,
     ...(options.brief === true ? { brief: true } : {}),
     policy,
     uxRules,
@@ -278,6 +285,10 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     viewerLinks,
     remoteViewer,
     toolsFor,
-    close: () => host.close(),
+    // The maps are written at most once a second while driving, and in full here.
+    close: async () => {
+      await maps.flushAll().catch(() => undefined);
+      await host.close();
+    },
   };
 }

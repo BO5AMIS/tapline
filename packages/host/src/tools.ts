@@ -10,6 +10,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
+import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
@@ -538,6 +539,8 @@ export interface ToolsOptions {
   uxRules?: UxRules;
   /** The test accounts (`--accounts FILE`, AGENT-TOOLS 1.13 §18.6): loaded, or refused with the reason. Default: none. */
   accounts?: AccountsLoad;
+  /** The apps' maps (AGENT-TOOLS 1.13 §18.9): places, roads and links grow as the agent drives. Default: none (no `Place:` line). */
+  maps?: MapRegistry;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
@@ -625,6 +628,9 @@ export interface ToolsOptions {
 const TAP_SLOP = 10;
 /** Held at least this long, a tap is a long press. */
 const LONG_PRESS_MS = 500;
+
+/** The requests whose call may be a road, or tell the map that text was typed (AGENT-TOOLS 1.13 §18.2). */
+const ROAD_METHODS: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "back", "openURL", "swipe", "type"]);
 
 const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
 /** The answer to a reference name that isn't one: no slashes, so no way out of the references folder. */
@@ -1198,6 +1204,10 @@ export class TaplineTools {
   private personNotePending = false;
   private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
   private replaying = false;
+  /** The place the latest element list showed, so an action's road doesn't read the app again (§18.2). */
+  private observedPlace: { sessionId: string; place: Place } | undefined;
+  /** A person's OK was used for the touch in progress: its move is no road (§18.2). */
+  private okUsed = false;
   /**
    * While a script replays (AGENT-TOOLS 1.9 §14.3): the references folder next to it (looked in first), where a
    * failed check puts its red picture, and whether the checks save instead of compare (`--update-references`).
@@ -2623,7 +2633,7 @@ export class TaplineTools {
     labels = false,
     /** A brief answer (AGENT-TOOLS 1.13 §13.4): the answer's first line; the text then starts with it. */
     briefFirst?: string,
-  ): Promise<{ content: CallToolResult["content"]; isError: boolean }> {
+  ): Promise<{ content: CallToolResult["content"]; isError: boolean; placeLine?: string }> {
     const sid = session.id;
     // Right after typing into a password field iOS may still show its last character: no picture then, and the note says why.
     const secureQuiet = wantScreenshot && this.secureWindow();
@@ -2658,6 +2668,7 @@ export class TaplineTools {
 
     this.listed.add(sid);
     const previousElements = this.listBase?.elements ?? [];
+    const seenPlace = this.observePlace(session, tree);
     this.lastLookRoute = tree.route?.names;
     if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
     const alertsNow = (tree.alerts ?? []).length > 0;
@@ -2671,7 +2682,10 @@ export class TaplineTools {
     else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
-    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes })];
+    // §18.1: `Place:` goes on a full list (a new screen), never on a same-screen answer, and not on the glass of a user's eyes.
+    // `look` carries it in its header; an action's answer carries it after its first line (withLook).
+    const placeLine = changesText === null && !eyes ? (seenPlace?.line ?? null) : null;
+    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes, ...(!onlyChanges && placeLine !== null ? { place: placeLine } : {}) })];
     // Brief: the same facts, cut. The journey's copy of a full list below stays whole.
     const briefed =
       briefFirst === undefined
@@ -2680,6 +2694,7 @@ export class TaplineTools {
           ? briefLines({ first: briefFirst, label: changeBlock.label, changes: changeBlock.changes, fixed: changeBlock.header })
           : briefLines({
               first: briefFirst,
+              ...(placeLine !== null ? { place: placeLine } : {}),
               changes: [],
               screen: briefScreen(tree.elements, previousElements, { eyes }),
               // The off-screen count stays: what lies below or above is what an agent scrolls for.
@@ -2737,7 +2752,95 @@ export class TaplineTools {
       notes.push(`Note: screenshot failed: ${shot.error instanceof Error ? shot.error.message : String(shot.error)}`);
     }
     lines.push(...notes, ...this.takePersonNote());
-    return { content: [{ type: "text", text: lines.join("\n") }, ...content], isError: false };
+    return {
+      content: [{ type: "text", text: lines.join("\n") }, ...content],
+      isError: false,
+      ...(onlyChanges && placeLine !== null && briefed === undefined ? { placeLine } : {}),
+    };
+  }
+
+  // -- places and roads (AGENT-TOOLS 1.13 §18.1 to §18.3)
+
+  /** The app's map, when this server keeps maps. */
+  private mapOf(session: SessionInfo): AppMap | undefined {
+    return this.options.maps?.forApp(session.app);
+  }
+
+  /** Where the app is, from what this host already holds, and how to ask it. */
+  private placeSource(session: SessionInfo): PlaceSource {
+    return {
+      capabilities: session.capabilities,
+      latest: () => this.host.sessions().find((s) => s.id === session.id)?.place,
+      request: (method, params) => this.host.request(method, params ?? {}, { sessionId: session.id }),
+    };
+  }
+
+  /** Notes the place a fresh list shows. A script that replays doesn't change the map (§18.9); a map that fails never fails a call. */
+  private observePlace(session: SessionInfo, tree: TreeResult): { line: string | null } | undefined {
+    if (this.replaying) return undefined;
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return undefined;
+      const seen = map.observe(tree);
+      this.observedPlace = { sessionId: session.id, place: seen.place };
+      return { line: seen.line };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Before a move: where the app is. Only for calls that can be roads (§18.2). */
+  private roadStart(session: SessionInfo, method: string): { map: AppMap; from: Place | null; typed: boolean } | null {
+    if (this.options.maps === undefined || this.replaying || !ROAD_METHODS.has(method)) return null;
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return null;
+      const from = placeBefore(this.placeSource(session), map);
+      // Asked now: the look after the move may arrive somewhere else, and that clears it.
+      return { map, from, typed: map.typedHere() };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * After a move: saves it as a road when it left a place and arrived at another, and says what the agent should
+   * know (a link that wasn't saved; a move that needed a person's OK). Never fails the call.
+   */
+  private async roadEnd(
+    session: SessionInfo,
+    start: { map: AppMap; from: Place | null; typed: boolean },
+    call: { method: string; params: unknown; result: unknown },
+    neededOk: boolean,
+  ): Promise<string[]> {
+    try {
+      const { map, from } = start;
+      if (call.method === "type") {
+        map.noteTyped();
+        return [];
+      }
+      const classified = classifyMove({ ...call, by: "agent", neededOk, replaying: this.replaying });
+      if ("skip" in classified && classified.skip !== "needed_ok") return [];
+      const source = this.placeSource(session);
+      const arrived = this.observedPlace?.sessionId === session.id ? this.observedPlace.place : (await placeNow(source, map))?.place;
+      if (arrived === undefined) return [];
+      const moved = from === null || from.name !== arrived.name;
+      if ("skip" in classified) return from !== null && moved ? ["Note: not saved as a road (it needed a person's OK)."] : [];
+      let move = classified.move;
+      if (move.tool === "open_url") {
+        // Only a place the link reached keeps it, and only as a pattern, never the real url (§18.3).
+        if (!moved) return [];
+        if (session.capabilities.includes("places")) await map.ensureKnown(session.id, () => source.request("places", {}));
+        const url = (call.params as { url?: unknown }).url;
+        const link = typeof url === "string" ? map.rememberLink(url, arrived) : { saved: false as const, message: LINK_NOT_SAVED };
+        if (!link.saved) return [link.message];
+        move = { ...move, url: link.link };
+      }
+      map.recordMove(from, move, classified.names, arrived, Date.now() - (this.actionStartedAt ?? Date.now()), start.typed ? "typed" : undefined);
+      return [];
+    } catch {
+      return [];
+    }
   }
 
   // -- actions
@@ -2801,10 +2904,14 @@ export class TaplineTools {
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
     let result: unknown;
+    // Where the app is before the move; the road is saved after it (AGENT-TOOLS 1.13 §18.2).
+    const road = this.roadStart(session, method);
+    this.observedPlace = undefined;
     this.actionStartedAt = Date.now();
     try {
       const timeoutMs = answerTimeoutMs(method, params);
       const run = async (): Promise<unknown> => {
+        this.okUsed = false;
         if (preflight !== undefined) {
           const stop = await preflight();
           if (stop !== null) throw new PolicyStop(stop);
@@ -2910,6 +3017,7 @@ export class TaplineTools {
       }
     }
     if (threwLine !== null && !threwSaid) extra.push(`Note: ${threwLine}`);
+    if (road !== null && response.isError !== true) extra.push(...(await this.roadEnd(session, road, { method, params, result }, this.okUsed)));
     const capMs = typeof result === "object" && result !== null && "settleCapMs" in result ? (result as { settleCapMs: unknown }).settleCapMs : undefined;
     if (typeof capMs === "number" && Number.isFinite(capMs) && capMs > 0) {
       extra.push(`Note: the screen was still changing after ${Number((capMs / 1000).toFixed(3))} s (an animation or video); positions may be mid-change.`);
@@ -3982,8 +4090,9 @@ export class TaplineTools {
     const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true, false, brief ? line : undefined);
     const [first, ...rest] = parts.content;
     const head = first !== undefined && first.type === "text" ? first.text : "";
-    // A brief answer already carries the first line.
-    return { content: [{ type: "text", text: brief ? head : `${line}\n${head}` }, ...rest], ...(parts.isError ? { isError: true } : {}) };
+    // A brief answer already carries the first line (and its `Place:` line). Otherwise `Place:` follows the first line (§18.1).
+    const top = parts.placeLine !== undefined ? `${line}\n${parts.placeLine}` : line;
+    return { content: [{ type: "text", text: brief ? head : `${top}\n${head}` }, ...rest], ...(parts.isError ? { isError: true } : {}) };
   }
 
   /**
@@ -4051,7 +4160,11 @@ export class TaplineTools {
       const gate = await this.policyGate(session, tool, method, params, lists, ready.waited);
       if ("stop" in gate) return gate.stop;
       granted = gate.via;
-      if (granted !== undefined) this.logExtra = { confirmed: true, confirmed_by: granted };
+      if (granted !== undefined) {
+        this.logExtra = { confirmed: true, confirmed_by: granted };
+        // §18.2: a move that needed a person's OK is never saved as a road.
+        this.okUsed = true;
+      }
       return null;
     });
     if (granted === undefined || answer.isError === true) return answer;

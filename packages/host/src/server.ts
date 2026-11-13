@@ -7,6 +7,7 @@ import { redactValue } from "./accounts.js";
 import { handleApi, safeEqual, type ApiHandler } from "./api.js";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { createPairCode, pairCodeExpiry, verifyPairCode } from "./pairing.js";
+import { placeAnswer } from "./places.js";
 import {
   CLOSE_BAD_PAIR_CODE,
   CLOSE_BAD_PROTOCOL,
@@ -19,10 +20,12 @@ import {
   eventSchema,
   appFrameSchema,
   logEntrySchema,
+  placeStateSchema,
   responseSchema,
   type AppInfo,
   type DeviceInfo,
   type LogEntry,
+  type PlaceState,
 } from "./protocol.js";
 
 export const CLOSE_REPLACED = 4010;
@@ -37,6 +40,11 @@ export interface SessionInfo {
   lastSeen: number;
   /** The app's last reported state ("active", "background", "inactive"), when it sent one. */
   appState?: { state: string; at: number };
+  /**
+   * The app's latest `place` event (AGENT-TOOLS 1.13 §18.11): route patterns, tab and layer, never params. `seenAt` is
+   * this host's clock when it arrived, the same computer's time as the tool that asks.
+   */
+  place?: PlaceState & { seenAt: number };
   /** How the app reaches this host, from the address it connected from. */
   via?: "tailscale" | "wifi";
 }
@@ -169,6 +177,29 @@ export const MAX_AGENT_TOUCH_MS = 10_000;
 /** Whether a socket's peer is this computer. */
 export function isLoopback(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+/** The checks and the answer of `GET /place`, apart from the socket so a test can use a peer that isn't this computer. */
+export function handlePlaceRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  context: { token: string; loopback: boolean; sessions: () => SessionInfo[] },
+): boolean {
+  const answer = (status: number, body: string, type = "text/plain"): boolean => {
+    res.writeHead(status, { "content-type": type });
+    res.end(body);
+    return true;
+  };
+  if (!context.loopback) return answer(403, "Only from this computer.\n");
+  if (req.method !== "GET") return answer(405, "GET only.\n");
+  const auth = req.headers.authorization;
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ") || !safeEqual(auth.slice(7).trim(), context.token)) {
+    return answer(401, "Bearer token required.\n");
+  }
+  const app = new URL(req.url ?? "/", "http://host").searchParams.get("app");
+  if (app === null || app === "") return answer(400, '{"error":"app is required"}\n', "application/json");
+  const found = placeAnswer(context.sessions(), app);
+  return answer(found.status, `${JSON.stringify(found.body)}\n`, "application/json");
 }
 
 /**
@@ -432,6 +463,16 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return true;
   }
 
+  /**
+   * `GET /place?app=<app id>` with `Authorization: Bearer <the host token>` (AGENT-TOOLS 1.13 §18.11): only from this
+   * computer, answered from memory with no request to the phone. Returns false for any other path.
+   */
+  private handlePlace(req: IncomingMessage, res: ServerResponse): boolean {
+    const url = new URL(req.url ?? "/", "http://host");
+    if (url.pathname !== "/place") return false;
+    return handlePlaceRequest(req, res, { token: this.token, loopback: isLoopback(req.socket.remoteAddress), sessions: () => this.sessions() });
+  }
+
   // ---- lifecycle ------------------------------------------------------------
 
   /**
@@ -569,6 +610,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const http = createServer((req, res) => {
         try {
           if (this.handleAgentTouch(req, res)) return;
+          if (this.handlePlace(req, res)) return;
           if (handleApi(req, res, { token: this.token, loopback: isLoopback(req.socket.remoteAddress), handler: this.api })) return;
           if (this.handleDevOffer(req, res)) return;
           if (this.httpExtension?.onRequest(req, res) === true) return;
@@ -1035,6 +1077,12 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const where = state === "active" ? "came back to the front" : state === "background" ? "went to the background" : `is ${state}`;
       this.pushEntry(session, { level: "info", message: `[tapline] the app ${where}`, ts: at });
       this.safely(() => this.emit("appState", { ...session.info }, state));
+      return;
+    }
+    if (event === "place") {
+      // Kept for GET /place and the Place: line. Only the route key is stored: the schema drops anything else (params).
+      const place = placeStateSchema.safeParse(data);
+      if (place.success) session.info.place = { route: place.data.route, ...(place.data.tab ? { tab: place.data.tab } : {}), ...(place.data.layer ? { layer: place.data.layer } : {}), seenAt: Date.now() };
       return;
     }
     if (event === "pickerSkipped") {

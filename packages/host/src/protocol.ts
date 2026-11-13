@@ -17,6 +17,8 @@ export const ERROR_CODES = [
   "bad_params",
   "timeout",
   "internal",
+  // A `move` whose guard no longer matches the element (AGENT-TOOLS 1.13 §18.4): a refusal, not a protocol error.
+  "stale",
 ] as const;
 export type AppErrorCode = (typeof ERROR_CODES)[number];
 
@@ -115,8 +117,18 @@ export const elementSchema = z.object({
   disabled: z.boolean().nullish(),
   selected: z.boolean().nullish(),
   checked: z.union([z.boolean(), z.string()]).nullish(),
+  /** Inside a virtualized list item: its text is content, so a road never keeps it (AGENT-TOOLS 1.13 §18.2). */
+  row: z.boolean().nullish(),
 });
 export type TreeElement = z.infer<typeof elementSchema>;
+
+/** Where the app is: route patterns, never params, and no screen text (AGENT-TOOLS 1.13 §18.1). */
+export const placeStateSchema = z.object({
+  route: z.array(z.string().max(200)).max(32),
+  tab: z.string().max(200).nullish(),
+  layer: z.string().max(200).nullish(),
+});
+export type PlaceState = z.infer<typeof placeStateSchema>;
 
 export const treeResultSchema = z.object({
   screen: z
@@ -131,6 +143,8 @@ export const treeResultSchema = z.object({
   offScreen: z.object({ above: z.number(), below: z.number() }).nullish(),
   /** Only for a request with `glass: true` (a journey in a user's eyes): whether a scroll view can really go further. */
   glass: z.object({ moreAbove: z.boolean(), moreBelow: z.boolean() }).optional(),
+  /** Where the app is as a route key (capability `place`). `route` is empty without a router. */
+  place: placeStateSchema.optional(),
   /** The focused screen (apps using React Navigation / Expo Router). */
   route: z
     .object({

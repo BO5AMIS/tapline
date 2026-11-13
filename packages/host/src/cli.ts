@@ -77,6 +77,8 @@ Options:
                  agent never sees them). The file must sit outside any git repo, or be ignored by it.
                  A password stays out of pictures only while its field is secure (a "show password" toggle shows it).
                  Keep the file outside the folders the agent may read
+  --maps <dir>   For mcp and host: keep each app's map (its places, roads and links) in <dir>/<app id>/ instead of
+                 ~/.tapline/maps/<app id>/, so a team and both tools can share one folder with a project
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
                  default it opens the live view in a browser here and keeps the link (its key) from the agent
                  (or TAPLINE_VIEWER_LINK=1)
@@ -277,6 +279,7 @@ export function parseCli(argv: string[]) {
       brief: { type: "boolean" },
       "ux-rules": { type: "string" },
       accounts: { type: "string" },
+      maps: { type: "string" },
       "viewer-link": { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -300,6 +303,7 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
     ...(values.brief === true ? { brief: true } : {}),
     ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
     ...(values.accounts !== undefined ? { accounts: values.accounts } : {}),
+    ...(values.maps !== undefined ? { maps: values.maps } : {}),
     ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
   };
 }
