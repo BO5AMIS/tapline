@@ -1,4 +1,4 @@
-import { mount, unmountAll, useFrames } from './helpers';
+import { frame, mount, unmountAll, useFrames } from './helpers';
 import React from 'react';
 import { ActivityIndicator, Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
 import { act } from 'react-test-renderer';
@@ -207,5 +207,60 @@ describe('waitWhileLoading', () => {
     expect(result.found).toBe(false);
     expect(result.waitedMs).toBeGreaterThanOrEqual(190);
     expect(result.waitedMs).toBeLessThan(600);
+  });
+});
+
+describe('only a spinner a person could see counts (review of task 17)', () => {
+  function Spun({ style, testID = 'spin' }: { style?: { opacity: number }; testID?: string }) {
+    return (
+      <View>
+        <ActivityIndicator testID={testID} {...(style !== undefined ? { style } : {})} />
+        <Pressable testID="open-trip" onPress={onOpen}>
+          <Text>Open trip</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  test('a spinner lying off screen is not loading: not_found at once', async () => {
+    await mount(<Spun />);
+    useFrames({ spin: frame(0, 5000, 20, 20) });
+    configureActions({ quietMs: 0, capMs: 2000 });
+    const started = Date.now();
+    const error = await failure(press({ target: { testID: 'trip-1' } }));
+    expect(error.code).toBe('not_found');
+    expect(Date.now() - started).toBeLessThan(400);
+  });
+
+  test('a spinner with zero opacity is not loading', async () => {
+    await mount(<Spun style={{ opacity: 0 }} />);
+    useFrames({});
+    configureActions({ quietMs: 0, capMs: 2000 });
+    const started = Date.now();
+    const error = await failure(press({ target: { testID: 'trip-1' } }));
+    expect(error.code).toBe('not_found');
+    expect(Date.now() - started).toBeLessThan(400);
+  });
+
+  test('a spinner alone holds the wait for 1 s at most, whatever the cap', async () => {
+    await mount(<Spun />);
+    useFrames({});
+    configureActions({ quietMs: 0, capMs: 5000 });
+    const started = Date.now();
+    const error = await failure(press({ target: { testID: 'trip-1' } }));
+    const took = Date.now() - started;
+    expect(error.code).toBe('not_found');
+    expect(took).toBeGreaterThanOrEqual(950);
+    expect(took).toBeLessThan(1800);
+  });
+
+  test('a dry run (the policy check) never waits for loading', async () => {
+    await mount(<Spun />);
+    useFrames({});
+    configureActions({ quietMs: 0, capMs: 2000 });
+    const started = Date.now();
+    const error = await failure(press({ target: { testID: 'trip-1' }, dryRun: true }));
+    expect(error.code).toBe('not_found');
+    expect(Date.now() - started).toBeLessThan(400);
   });
 });

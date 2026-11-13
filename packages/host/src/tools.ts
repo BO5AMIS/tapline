@@ -19,7 +19,7 @@ import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.j
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
-import { MAX_REFLEX_FIRINGS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
+import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
@@ -1239,14 +1239,31 @@ export class TaplineTools {
   private personActed = false;
   /** The next answer to the agent says a person used the app, once. */
   private personNotePending = false;
-  private recording: {
+  private recordingState: {
     name: string;
     app: { name: string; id?: string };
     steps: ScriptStep[];
     /** Set while recording a route (AGENT-TOOLS 1.13 §18.5): where it starts, the variables its steps use, and the app's map. */
     route?: { start: string; variables: Set<string>; map: AppMap };
   } | null = null;
-  private replaying = false;
+  private replayingState = false;
+  /** Set inside a reflex's own step (and what it awaits) only: other calls running beside it are not touched (§18.7). */
+  private readonly reflexStep = new AsyncLocalStorage<true>();
+
+  /** A reflex's step is no recorded step: inside it nothing is recording. */
+  private get recording(): NonNullable<typeof this.recordingState> | null {
+    return this.reflexStep.getStore() === true ? null : this.recordingState;
+  }
+  private set recording(value: typeof this.recordingState) {
+    this.recordingState = value;
+  }
+  /** A reflex's step changes no map (as in a replay): inside it the host reads as replaying. */
+  private get replaying(): boolean {
+    return this.replayingState || this.reflexStep.getStore() === true;
+  }
+  private set replaying(value: boolean) {
+    this.replayingState = value;
+  }
   /** The place the latest element list showed, so an action's road doesn't read the app again (§18.2). */
   private observedPlace: { sessionId: string; place: Place } | undefined;
   /** A person's OK was used for the touch in progress: its move is no road (§18.2). */
@@ -1821,8 +1838,10 @@ export class TaplineTools {
 
   /** What reflexes did in the call in flight: how often each fired, and the lines the answer carries. */
   private readonly reflexScope = new AsyncLocalStorage<ReflexCall>();
-  /** A reflex's own step is running: it triggers no reflex, no road and no recorded step. */
-  private reflexBusy = false;
+  /** A reflex's own step is running (in this call only): it triggers no reflex, no road and no recorded step. */
+  private inReflexStep(): boolean {
+    return this.reflexStep.getStore() === true;
+  }
 
   /** The `Reflex:` lines (and the notes of a reflex that didn't fire) go right under the answer's first line. */
   private withReflexLines(answer: CallToolResult, call: ReflexCall): CallToolResult {
@@ -1840,7 +1859,7 @@ export class TaplineTools {
    */
   private async checkReflexes(session: SessionInfo, at?: string): Promise<number> {
     const call = this.reflexScope.getStore();
-    if (call === undefined || this.reflexBusy || this.replaying) return 0;
+    if (call === undefined || this.inReflexStep() || this.replaying) return 0;
     const map = this.options.maps === undefined ? undefined : this.mapOf(session);
     const reflexes = map?.data().reflexes ?? [];
     if (map === undefined || reflexes.length === 0) return 0;
@@ -1850,7 +1869,9 @@ export class TaplineTools {
     const lists = listsFor(this.policy, session.app);
     const thisMoment = new Set<string>();
     let fired = 0;
-    for (let n = 0; n < MAX_REFLEX_FIRINGS; n++) {
+    // A reflex that doesn't fire uses no firing of the moment's three; skips are bounded on their own.
+    let skipped = 0;
+    while (fired < MAX_REFLEX_FIRINGS && skipped < MAX_REFLEX_SKIPS) {
       let tree: TreeResult;
       let place: string | null;
       try {
@@ -1872,24 +1893,16 @@ export class TaplineTools {
       });
       if (match === null) break;
       thisMoment.add(match.name);
-      // The reflex's step is no move of the agent's: it leaves no road, no recorded step and no map change.
-      const wasRecording = this.recording;
-      const wasReplaying: boolean = this.replaying;
-      this.reflexBusy = true;
-      this.recording = null;
-      this.replaying = true;
-      let outcome: Awaited<ReturnType<typeof fireReflex>>;
-      try {
-        outcome = await fireReflex(
+      // The reflex's step is no move of the agent's: it leaves no road, no recorded step and no map change, and it never asks a
+      // person (see `reflexStep`). The scope is this step's own, so a call running beside it is not touched.
+      const outcome = await this.reflexStep.run(true, () =>
+        fireReflex(
           match,
           (step) => this.runStepNow(step),
           (step) => this.reflexVerdict(session, step, lists),
-        );
-      } finally {
-        this.reflexBusy = false;
-        this.recording = wasRecording;
-        this.replaying = wasReplaying;
-      }
+        ),
+      );
+      if (!("line" in outcome)) skipped++;
       if ("line" in outcome) {
         call.fired.set(match.name, (call.fired.get(match.name) ?? 0) + 1);
         call.lines.push(outcome.line);
@@ -1921,9 +1934,42 @@ export class TaplineTools {
     return verdict.kind === "none" ? { kind: "none" } : { kind: verdict.kind === "blocked" ? "blocked" : "flagged", word: verdict.word };
   }
 
+  /** The elements a plain id, label or text target means now; null for any other target (an index, a ref, a point) or no read. */
+  private async namedCandidates(session: SessionInfo, params: unknown): Promise<TreeElement[] | null> {
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (typeof target !== "object" || target === null) return null;
+    const t = target as Record<string, unknown>;
+    if ("index" in t || "ref" in t || "x" in t || !("testID" in t || "label" in t || "text" in t)) return null;
+    try {
+      const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+      return read.success ? candidatesFor(target, read.data.elements) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * After a reflex fired: whether the step may run again (1.13.1 item 10). Only when the target is the one element it was before
+   * (its id, role, label and text), or, for a target a sheet hid, the one that came carries the name the failure gave. An index
+   * target, an ambiguous one and a changed one are not retried: the original failure is answered, with the Reflex line.
+   */
+  private async sameTarget(session: SessionInfo, params: unknown, before: TreeElement[] | null, message: string): Promise<boolean> {
+    if (before === null || before.length > 1) return false;
+    const after = await this.namedCandidates(session, params);
+    const [now] = after ?? [];
+    if (after === null || after.length !== 1 || now === undefined) return false;
+    const [was] = before;
+    if (was !== undefined) {
+      const key = (e: TreeElement): string => [e.testID ?? "", e.role ?? "", e.label ?? "", e.text ?? ""].join("|");
+      return key(was) === key(now);
+    }
+    const named = /"([^"]+)"/.exec(message)?.[1];
+    return named === undefined || [now.text, now.label].some((v) => v?.toLowerCase() === named.toLowerCase());
+  }
+
   /** After a touch that changed the place (§18.7): the arrival is looked at for a reflex before the list is built. */
   private async reflexAtPlaceChange(session: SessionInfo, from: Place | null): Promise<void> {
-    if (this.reflexBusy || this.replaying || this.reflexScope.getStore() === undefined) return;
+    if (this.inReflexStep() || this.replaying || this.reflexScope.getStore() === undefined) return;
     const map = this.options.maps === undefined ? undefined : this.mapOf(session);
     if (map === undefined || map.data().reflexes.length === 0) return;
     let arrived: Place | undefined;
@@ -3305,7 +3351,8 @@ export class TaplineTools {
         const failure = error instanceof PolicyStop ? parseError(answerText(error.answer)) : error instanceof TaplineError ? { code: error.code, message: error.message } : null;
         if (!reflexTried && failure !== null && isReflexFailure(failure.code, failure.message)) {
           reflexTried = true;
-          if ((await this.checkReflexes(session)) > 0) continue;
+          const before = this.mapOf(session)?.data().reflexes.length ? await this.namedCandidates(session, params) : null;
+          if ((await this.checkReflexes(session)) > 0 && (await this.sameTarget(session, params, before, failure.message))) continue;
         }
         if (error instanceof PolicyStop) return error.answer;
         this.logExtra = undefined;
@@ -4734,6 +4781,7 @@ export class TaplineTools {
     if (resolved.kind === "error") return { waited: null };
     const verdict = this.policyWords(lists, resolved.elements);
     if (verdict.kind !== "confirm") return { waited: null };
+    if (this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
     const key = this.confirmKey(session, tool, verdict.element);
@@ -4792,6 +4840,11 @@ export class TaplineTools {
     return { waited: { fp, via: used.via } };
   }
 
+  /** The answer of a reflex's step that the policy flags at the moment it runs: skipped, never asked (§18.7). */
+  private reflexNeedsPerson(element: TreeElement, word: string): CallToolResult {
+    return fail(`Error not_allowed: needs_confirmation: ${this.shortName(element, false)} needs a person's OK (policy word ${JSON.stringify(word)}); a reflex never asks.`);
+  }
+
   /** Where an OK is given when no dialog can be shown (AGENT-TOOLS 1.8 §11.2). */
   private liveViewLine(): string {
     return this.options.canConfirm === false
@@ -4840,6 +4893,8 @@ export class TaplineTools {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
       return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
     }
+    // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
+    if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
     if (waited !== undefined && waited !== null) {
       // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
       // A call that was cancelled while it waited never touches.

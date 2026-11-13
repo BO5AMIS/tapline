@@ -9,8 +9,12 @@ import type { Step } from "./run.js";
 // screen, its `do` runs. This module holds the pure part: which reflex matches, the limits, the line, and the checks made
 // at the moment one fires. Where the checks run (place changes, before a failure is answered) is in tools.ts.
 
+const REFLEX_NAME = /^[a-z0-9_]+$/;
+
 /** The most a reflex may fire in one call, whatever its map entry says. */
 export const MAX_REFLEX_FIRINGS = 3;
+/** The most reflexes one moment may skip before it gives up: skips use no firings, but they are bounded too. */
+export const MAX_REFLEX_SKIPS = 10;
 
 export interface ReflexContext {
   /** The place the app is at, or null when it can't be read. */
@@ -83,7 +87,7 @@ function targetWords(target: { id?: string; label?: string; text?: string } | un
   if (target === undefined) return "";
   if (target.text !== undefined) return quoted(target.text);
   if (target.label !== undefined) return quoted(target.label);
-  return target.id !== undefined ? `id=${target.id}` : "";
+  return target.id !== undefined ? `id=${quoted(target.id)}` : "";
 }
 
 /** What the reflex did, as a past-tense phrase: `tapped "Not now"`. */
@@ -137,6 +141,8 @@ export async function fireReflex(
   run: (step: Step) => Promise<CallToolResult>,
   policy: PolicyCheck,
 ): Promise<{ line: string } | { skipped: string }> {
+  // A map file is a person's to edit: a name that isn't name-shaped is never printed, and its reflex never fires.
+  if (typeof reflex.name !== "string" || !REFLEX_NAME.test(reflex.name)) return { skipped: "a reflex in the map didn't fire: its name is not a valid name ([a-z0-9_])." };
   const parsed = reflexDoSchema.safeParse(reflex.do);
   if (!parsed.success) return { skipped: `reflex ${reflex.name} didn't fire: its do is not a step a reflex may take.` };
   const step = parsed.data;

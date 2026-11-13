@@ -648,11 +648,11 @@ function inFrontLayer(matches: Entry[]): Entry[] {
  * is loading (a request in flight, a spinner) is waited for up to the settle cap before `not_found` is answered (AGENT-TOOLS
  * 1.13 §18.7); the answer after the wait is made from the screen as it is then, so its closest matches are unchanged.
  */
-export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
+export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false, loadingWait = true): Promise<Resolved> {
   try {
     return await resolveNow(raw, hint, glassOnly);
   } catch (error) {
-    if (!(error instanceof TaplineError) || error.code !== 'not_found' || !isNamedTarget(raw) || settings.capMs <= 0) throw error;
+    if (!(error instanceof TaplineError) || error.code !== 'not_found' || !loadingWait || !isNamedTarget(raw) || settings.capMs <= 0) throw error;
     await waitWhileLoading({
       requestMark,
       capMs: settings.capMs,
@@ -1173,7 +1173,7 @@ async function pressLike(
 ): Promise<PressResult> {
   const params = paramsOf(rawParams);
   const afterMs = kind === 'press' ? againAfter(params.again) : undefined;
-  const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true);
+  const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true, params.dryRun !== true);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
@@ -1477,9 +1477,9 @@ function keyboardNote(closed: boolean): { closedKeyboard?: true } {
   return closed ? { closedKeyboard: true } : {};
 }
 
-async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown, glassOnly = false): Promise<Resolved> {
+async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown, glassOnly = false, loadingWait = true): Promise<Resolved> {
   if (rawTarget !== undefined && rawTarget !== null) {
-    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type', glassOnly);
+    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type', glassOnly, loadingWait);
     const input = findActionable(snap, entry, 'type', true);
     if (!input) throw notActionable('no_action', `${describe(entry)} is not an input`);
     return { snapshot: snap, entry: input };
@@ -1532,7 +1532,7 @@ export async function typeText(
   const kind = params.kind;
   if (kind !== undefined && kind !== 'secure' && kind !== 'plain') throw badParams('kind is "secure" or "plain"');
 
-  let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true);
+  let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true, params.dryRun !== true);
   // A test account's value goes only into the kind of field it is for (AGENT-TOOLS 1.13 §18.6). The refusal
   // comes before anything is typed or scrolled, and says only whether the field is secure, never its text.
   const isSecure = isSecureInput(entry.node);
@@ -2108,7 +2108,7 @@ export async function scroll(rawParams: unknown): Promise<ScrollResult> {
   let entry: Entry;
   let frame: Frame | null = null;
   if (params.target !== undefined && params.target !== null) {
-    const resolved = await resolveTarget(params.target, 'scroll');
+    const resolved = await resolveTarget(params.target, 'scroll', undefined, params.dryRun !== true);
     const scroller = findActionable(resolved.snapshot, resolved.entry, 'scroll', true);
     if (!scroller) throw notActionable('no_action', `${describe(resolved.entry)} is not inside a scroll view`);
     entry = scroller;
@@ -2283,7 +2283,7 @@ export async function toggle(
 ): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
-  const first = await resolveTarget(params.target, 'toggle', params.noScroll === true);
+  const first = await resolveTarget(params.target, 'toggle', params.noScroll === true, params.dryRun !== true);
   const plan = (snap: Snapshot, picked: Entry): { control: Entry; handler: NonNullable<ReturnType<typeof findHandler>> } => {
     const found = findActionable(snap, picked, 'toggle', true);
     if (!found) throw notActionable('no_action', `${describe(picked)} is not a switch`);
