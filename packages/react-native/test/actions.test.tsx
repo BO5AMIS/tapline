@@ -226,7 +226,7 @@ describe('press / longPress', () => {
       expect(error.message).not.toMatch(/RCT/);
     });
 
-    test('refuses an element that is off screen, suggesting a scroll', async () => {
+    test('refuses an element that is off screen, with no scroll advice', async () => {
       const onFar = jest.fn();
       await mount(
         <Pressable testID="far" onPress={onFar}>
@@ -237,7 +237,7 @@ describe('press / longPress', () => {
       const error = await failure(run(() => press({ target: { testID: 'far' }, look: false })));
       expect(error.code).toBe('not_actionable');
       expect(error.message).toMatch(/^off_screen: /);
-      expect(error.message).toMatch(/scroll/i);
+      expect(error.message).not.toContain('to: "target"');
       expect(onFar).not.toHaveBeenCalled();
       await run(() => press({ target: { testID: 'far' }, force: true }));
       expect(onFar).toHaveBeenCalledTimes(1);
@@ -338,14 +338,14 @@ describe('press / longPress', () => {
     expect(spies.onLogin).toHaveBeenCalledTimes(1);
   });
 
-  test('a throwing handler becomes an internal error', async () => {
+  test('a throwing handler does not fail the press: the answer says it threw', async () => {
     spies.onLogin.mockImplementation(() => {
       throw new Error('boom');
     });
     await mountSample();
-    const error = await failure(run(() => press({ target: { testID: 'login-button' } })));
-    expect(error.code).toBe('internal');
-    expect(error.message).toContain('boom');
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const result = await run(() => press({ target: { testID: 'login-button' } }));
+    expect(result.handler).toMatchObject({ kind: 'own', threw: 'boom' });
   });
 
   test('an async handler rejection is logged, not thrown', async () => {

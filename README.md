@@ -117,7 +117,7 @@ your agent at it.
 | `wait_for` | wait until something appears or is gone, or the network is quiet |
 | `compare_screen` | compare the screen with a saved reference picture: matches or differs (a share that may change, parts to ignore), what changed, where, marked in red; a check in scripts, with the pictures kept next to the script |
 | `filmstrip` | several frames in one image, for animations and loading states |
-| `record`, `replay` | save a test run as a script (shared format, version 1) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml]` (exit 0 all held, 1 a step stopped, 2 couldn't start) |
+| `record`, `replay` | save a test run as a script (shared format, version 2 for routes, version 1 still read) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml]` (exit 0 all held, 1 a step stopped, 2 couldn't start) |
 | `viewer` | opens the live view in a browser on your computer, with what the agent does marked on it; you can tap, scroll and type there too. The agent never sees its link |
 | `tap`, `long_press` | by `id` (the `testID` prop), label, visible text, ref from the last look, or x/y (`long_press` takes `seconds`, which Tapline ignores) |
 | `type_text` | into an input; replace or append; optionally submit; refused where a person couldn't type |
@@ -132,11 +132,53 @@ your agent at it.
 | `wait` | let something load, then look |
 | `journey` | test as a real user: `start` with a goal and a persona, act seeing only what a person sees (no ids, nothing scrolls by itself), `stop` with whether the goal was reached; it measures taps, time, wrong turns and hesitations, adds stress moments (a bad network, a double tap, background, rotate) and writes a visual report with a GIF in `~/.tapline/journeys` (the newest 20 kept), which `export` can put on a pull request or issue through your own `gh` |
 | `ux_check` | the screen against usability basics: competing choices, one main action, thumb reach, icon-only buttons, cut-off text, contrast, target size, naming across screens, error and empty states; house rules from `--ux-rules FILE` |
+| `drive` | go to a known place in one call (`drive {"to": "language"}`), or run a saved route (`route`, with `with` for its variables); follows the map's roads, checks every move and the arrival, repairs a stale road or stops with `off_route`; `then` goes on with `run` steps, `by` picks taps or a link, `account` names a test account |
+| `map` | the app's places, roads, links, routes and reflexes, learned as the agent works, and where the app is now; `to` shows the way, `name`, `link`, `reflex`, `forget_reflex` and `forget` edit it |
 | `media` | test pictures for an app's photo picker: `add` puts them in the phone's library through the app's own `expo-media-library` (with `confirm: true`), `picker: true` hands them to the next `expo-image-picker` call instead, `remove: true` deletes only what was added |
 
 Every touch tool also takes `dry_run: true`: every check runs and nothing is touched, and the
 answer says what it would do and whether a person's OK is needed. Password fields never show their
-value, only one • per character.
+value, only one • per character. `run` steps take `if` and `optional`, to run a step only when
+something is on screen. Actions take `brief: true` for an answer of at most 12 element lines.
+
+### The Speed Update (1.6)
+
+- **Known ground.** Tapline learns the app's *places* (a screen by its route pattern, never by its
+  text), the *roads* between them and the deep *links* to them, and keeps them per app in
+  `~/.tapline/maps/<app id>/`. After the first visit an agent calls `drive` and arrives in one call.
+  Answers carry a `Place:` line. Nothing from a list row, typed text or a secret is saved. Tapline
+  never navigates from inside the app: a drive is the app's own taps, or a deep link.
+- **Reflexes.** A rule you or the agent declare in the map (`map {reflex}`) closes a known
+  interruption, such as a rate prompt, at a place change or before a failure answer. Only declared
+  reflexes run, and none that would need a person's OK.
+- **Test accounts.** `--accounts FILE` holds usernames and passwords by name. The agent says
+  `account: "tester2"` and the host types the value: it never reaches the agent as text, a log, a report or a
+  recording. Screenshots show what the screen shows: a username in a plain field, and a password only if
+  its field's "show password" toggle is on. The file must be outside a git repository, or ignored by it.
+- **A person's OK in the chat.** A touch that needs one opens the host's own dialog (Allow once /
+  Don't allow) as well as the live view; the first answer wins. The same dialog says what to do when
+  the app isn't open or an alert needs a person (`Needs a person: ...`), and the call goes on by
+  itself when it clears.
+- **Fewer seconds.** `tapline call` makes one tool call to a running `tapline host` in about 0.1 s;
+  `--brief` shortens answers; `session_report` shows where the seconds went. Fast animations are
+  opt-in (`app_command animations`) and need a new native build for their native layer. Faster
+  settling is behind the app's `knowIdle` option and is off until it passes the device gate.
+
+New flags (`tapline mcp` and `tapline host`):
+
+| Flag | What it does |
+|---|---|
+| `--brief` | actions answer briefly; a call's `brief: false` overrides it; `look` is never brief |
+| `--accounts FILE` | the test accounts file (see above) |
+| `--maps DIR` | keep each app's map in `DIR/<app id>/` instead of `~/.tapline/maps/<app id>/`, so a team and both tools can share a folder |
+| `--no-dialog` | don't open the host's dialog for a person's OK or a "needs a person" moment; the live view still asks (`mcp`; for a host that hands dialogs to the model) |
+
+`tapline host` is a standalone host in the foreground: it takes all the options of `mcp`, serves the
+live view, and answers `tapline call <tool> '<json>' [--client NAME] [--json]`, which sends one call to
+it (exit 0 an answer, 2 a refusal, 3 no host). A phone pairs with that host, not with an agent's own
+MCP server. The host serves, on this computer only and with the bearer token:
+`POST /api/<tool>` (the wire of `tapline call`; only the standalone host) and `GET /place?app=<id>`
+(where the app is, from memory, without a call to the phone). [PROTOCOL.md](docs/PROTOCOL.md) has both.
 
 Every action returns what changed on screen (or the whole list when the screen changed),
 as text, so each step is one call. A change to something scrolled out of view is shown too,
@@ -224,11 +266,14 @@ order, pair again (or give each agent a fixed `--port`).
   builds you test with.
 - **A person's OK for risky touches.** A touch on an element whose label or text has Buy,
   Purchase, Subscribe, Pay, Delete, Remove, Send, Post, Publish, Sign out, Log out or Erase
-  answers `not_allowed: needs_confirmation`. The live view asks you (Allow once / Don't allow);
-  one allow lets the same call on the same element through once, within 120 seconds.
+  needs a person. The live view asks you (Allow once / Don't allow), and so does the host's own
+  dialog where the MCP client shows one (`--no-dialog` turns that off); the first answer wins, and
+  the agent's call waits up to 120 seconds for it. Without a dialog the call answers
+  `not_allowed: needs_confirmation` at once, and one allow lets the same call on the same element
+  through once, within 120 seconds.
   `tapline mcp --policy FILE` sets your own words to confirm or to block; `--no-policy` turns
   it off, for a test phone with test data. The answer must come from the live view page in a
-  browser, and when the check can't be made, nothing is touched. This guards against an agent's
+  browser or the host's dialog, and when the check can't be made, nothing is touched. This guards against an agent's
   mistakes. An agent that can run any command on your computer could still get around it (it could
   also edit the policy), so give such agents only the access you would give a person. The policy
   checks touches (`tap`, `long_press`, `toggle`, `swipe`); it doesn't check `type_text` with
@@ -306,7 +351,7 @@ order, pair again (or give each agent a fixed `--port`).
 
 | | |
 |---|---|
-| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.6 answers, the shared tool text and the agent skill with its installer; 1.1: `run`, scripts and replay, `audit`, `inspect`, the policy and a person's OK, dry runs, the action log, the shorter answers, pairing without a QR code, `init` and `doctor --app`; 1.2: visual checks with a pass bar and references next to scripts; 1.3: log filters, crash notes and `crash`, `performance` and its limits, logs on failed steps: 688 tests at 1.3; 749 at 1.4); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.6 behaviour, the viewer feed's pace, a person's touches, the native module, `swipe`, the keyboard lines, Expo Go links and reloads; 1.1: source locations, the audit, dry runs, development offers and the Metro helper's offer; 1.3: a fatal error kept for the next connection, the performance sampler: 738 tests at 1.3; 845 at 1.4); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (126 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
+| Tested | the host (protocol, pairing codes, ports, sessions, timeouts, MCP tools, screenshot files and labels, change lists, app state, commands and waiting, record and replay, reference pictures, filmstrips, doctor and dev, the live viewer (its page, access, stream, control queue, the video player in the page), the v1.3 to v1.6 answers, the shared tool text and the agent skill with its installer; 1.1: `run`, scripts and replay, `audit`, `inspect`, the policy and a person's OK, dry runs, the action log, the shorter answers, pairing without a QR code, `init` and `doctor --app`; 1.2: visual checks with a pass bar and references next to scripts; 1.3: log filters, crash notes and `crash`, `performance` and its limits, logs on failed steps: 688 tests at 1.3; 749 at 1.4; 1.6: `drive`, `map`, routes, reflexes, test accounts, the host's dialog, `tapline call`: 1799 at 1.6); the in-app agent (React tree, hidden screens, routes and tabs, the real-touch check, change lists, layout checks, test commands, waiting, alerts and the stand-in, network tracking, keeping awake, the Metro helper, targets, every action, client, pairing, logs, screenshots, the live feed, sheets and the native tab bar in the real-touch check, the navigation bar, the v1.3 to v1.6 behaviour, the viewer feed's pace, a person's touches, the native module, `swipe`, the keyboard lines, Expo Go links and reloads; 1.1: source locations, the audit, dry runs, development offers and the Metro helper's offer; 1.3: a fatal error kept for the next connection, the performance sampler: 738 tests at 1.3; 845 at 1.4; 1.6: places, `move`, fast animations, the idle flag, loading waits: 1141 at 1.6); the shared benchmark that scores Tapline and Tapwright against docs/QUALITY-BAR.md (126 tests); the two together over a real WebSocket, paired and driven through MCP (7 tests) |
 | On an iPhone | an Expo 57 app (React Native 0.86, new architecture) in a development build on iOS 26, on cellular through Tailscale: pairing (link, prompt, keychain, reconnect after a reload), `look` with positions, routes, native tabs and (labeled) screenshots, `tap` with the real-touch check (it caught a field scrolled under a large title), switching native tabs, `back`, `type_text`, `scroll`, changes after actions, `check_layout`, `open_url`, `logs`, `reload`; test commands (language switch to Arabic, right to left, and light mode), the stand-in alert (pressed, and taps behind it refused), `wait_for`, and background and foreground reports; loading Tapline through the Metro config, record and replay (also `tapline replay` without an agent), reference pictures and filmstrips; the live viewer in Chrome: frames, element boxes, the agent's actions, a person's taps, scrolls, typing and backspace from the viewer, closing a sheet and switching native tabs by clicking them in the viewer, the link opened from another site, the status while the app is in the background, closed and back (captures 30-65 ms once the app has settled, slower while it starts; no stutter from capturing, measured); `long_press` and `toggle`; the keyboard closing before a tap outside the focused field; `covered` for what an open sheet hides, and `back` closing the sheet; an app frozen for 20 seconds (`not_answering`, then working again by itself); the off-screen counts, the longer text cut and the in-app alert in front; scrolling to an element in one call, changes off screen, and the notes after a forced action and after actions without a list. Measured there by the shared benchmark over the local network: a tap, typing, a scroll and a toggle each answer in about 0.2 s, a look in 0.02 s, and the reliability checks (the right element, no false refusals, refusing what a person couldn't do) had no misses in three passes |
 | Also on that iPhone (2026-11-10 and 11) | the note after a person's real touch on the phone; the native module in a new development build: an alert from native code and the share sheet seen as `Alert:` lines with taps behind them refused, and the live viewer at 15 frames a second under the lab animation over Wi-Fi with every viewer row of the benchmark passing (the longest gap 0.07 s, the phone paying about 12% of one core); typing into the next field with the keyboard up, `Keyboard:` lines, `back` closing a sheet by its backdrop; `swipe` closing a sheet through React Native's touch system, and a person's drag in the viewer doing the same; the app turned to landscape (positions, taps, scrolling and sharp viewer frames); the viewer in Firefox; the app back in front and answering within 0.7 s |
 | A second app (2026-11-11) | a trip-planner demo app with React Navigation tabs, first in Expo Go (no build: pairing with Expo's exp:// address, reloads keeping the pairing, Tapline's own Connect prompt listed as an alert with taps behind it refused) and then in its own development build: routes on tab screens, ids on form fields and tab buttons, test commands (sample data, a test user, a reset), the live view's captions and steps in Firefox and Chromium, and a keyboard-hidden button tapped after closing the keyboard |

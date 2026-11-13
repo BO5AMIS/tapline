@@ -69,6 +69,11 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
+/** Called when an alert opens or closes (the place's layer follows it); returns a function that stops it. */
+export function onAlertsChange(listener: () => void): () => void {
+  return subscribe(listener);
+}
+
 function getVersion(): number {
   return version;
 }

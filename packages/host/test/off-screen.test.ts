@@ -132,7 +132,7 @@ describe("act after scroll: the policy first", () => {
     await tools.tap({ target: { id: "delete-trip" }, look: false });
     confirmations.answer(id, true);
     const answer = textOf(await tools.tap({ target: { id: "delete-trip" }, look: false }));
-    expect(answer).toBe('Scrolled to it, then tapped e42 button "Delete trip" id=delete-trip.\nNote: a person allowed this.');
+    expect(answer).toBe('Scrolled to it, then tapped e42 button "Delete trip" id=delete-trip.\nNote: allowed by a person (in the live view).');
     expect(app.requests.filter((r) => r.method === "press")).toHaveLength(1);
   });
 });

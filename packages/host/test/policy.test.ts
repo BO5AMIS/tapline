@@ -86,7 +86,7 @@ describe("the policy's words", () => {
       writeFileSync(bad, JSON.stringify({ confirm: "Pay" }));
       expect(() => loadPolicy(bad)).toThrow(/isn't a policy/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -165,7 +165,7 @@ describe("guarded touches (§11.2)", () => {
     confirmations.answer(asked.id, true);
     const allowed = await tools.tap({ target: { id: "delete-trip" }, look: false });
     expect(allowed.isError).not.toBe(true);
-    expect(textOf(allowed)).toBe(`Tapped e12 button "Delete trip" id=delete-trip.\nNote: a person allowed this.`);
+    expect(textOf(allowed)).toBe(`Tapped e12 button "Delete trip" id=delete-trip.\nNote: allowed by a person (in the live view).`);
     expect(app.requests.filter((r) => r.method === "press")).toHaveLength(1);
     // one use
     const third = await tools.tap({ target: { id: "delete-trip" }, look: false });

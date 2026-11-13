@@ -158,7 +158,9 @@ describe("press", () => {
     await tools.look({ screenshot: false });
     const text = textOf(await tools.tap({ target: { id: "login-button" } }));
     const lines = text.split("\n");
-    expect(lines.at(-1)).toBe("Settled in 0.31 s.");
+    // The no-change note closes the answer, after the Settled line (AGENT-TOOLS 1.13 §3).
+    expect(lines.at(-2)).toBe("Settled in 0.31 s.");
+    expect(lines.at(-1)).toMatch(/^Note: the tap was delivered, and nothing on screen changed within 0.5 s./);
     expect(text).not.toContain("\n\n");
     expect(textOf(await tools.tap({ target: { id: "login-button" }, look: false })).split("\n")).toHaveLength(1);
     expect(lines[0]).toBe('Tapped e3 button "Log in" id=login-button.');
@@ -518,7 +520,7 @@ describe("compare_screen and filmstrip", () => {
       expect(text).not.toContain("Everything on the page");
       expect(second.content.some((block) => block.type === "image")).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -531,7 +533,7 @@ describe("compare_screen and filmstrip", () => {
       // the reference is the settled screen, so the next look at the same screen matches
       expect(textOf(await tools.compareScreen({ name: "moving" }))).toContain('Matches the reference "moving": 0% changed.');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -543,7 +545,7 @@ describe("compare_screen and filmstrip", () => {
       expect(textOf(await tools.compareScreen({ name: "home", update: true }))).toContain("Saved");
       expect(textOf(await tools.compareScreen({ name: "home" }))).toContain('Matches the reference "home": 0% changed.');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -555,7 +557,7 @@ describe("compare_screen and filmstrip", () => {
       expect(result.content.filter((block) => block.type === "image")).toHaveLength(1);
       expect(textOf(result)).toContain("3 frames");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -566,7 +568,7 @@ describe("compare_screen and filmstrip", () => {
       expect(app.requests.map((r) => r.method).slice(0, 4)).toEqual(["screenshot", "press", "screenshot", "screenshot"]);
       expect(textOf(result)).toContain("frame 1 is just before the tap");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -635,7 +637,7 @@ describe("record and replay", () => {
         { tool: "wait_for", text: "Thanks", timeout: 5, route: ["basket"] },
       ]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -648,7 +650,7 @@ describe("record and replay", () => {
       const script = JSON.parse(readFileSync(join(dir, "kept.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
       expect(script.steps[0]).toMatchObject({ tool: "tap", target: { text: "Pay" } });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -666,7 +668,7 @@ describe("record and replay", () => {
       expect(app.requests.map((r) => r.method).filter((m) => m !== "tree")).toEqual(["reload", "press", "waitFor"]);
       expect(textOf(answer)).toMatch(/^Ran 1 of 1 steps in \d+\.\d s\./);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -682,7 +684,7 @@ describe("record and replay", () => {
       await tools.replay({ name: "waiting" });
       expect(app.requests.find((r) => r.method === "waitFor")?.params).toMatchObject({ testID: "done" });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -702,7 +704,7 @@ describe("record and replay", () => {
       expect(result.isError).toBe(true);
       expect(textOf(result).split("\n")[0]).toBe('Error not_found: Ran 0 of 2 steps; stopped at step 1 (tap id=save): No element matches testID "save"');
     } finally {
-      rmSync(first.dir, { recursive: true, force: true });
+      rmSync(first.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -721,7 +723,7 @@ describe("record and replay", () => {
       expect(result.isError).toBe(true);
       expect(textOf(result).split("\n")[0]).toBe("Error expect_failed: Ran 0 of 1 steps; stopped at step 1 (tap id=save): its action ran, but it ended on home; the recording ended on basket");
     } finally {
-      rmSync(first.dir, { recursive: true, force: true });
+      rmSync(first.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -735,7 +737,7 @@ describe("record and replay", () => {
       expect(textOf(answer)).toMatch(/^Ran 1 of 1 steps/);
       expect(app.requests.find((r) => r.method === "press")?.params).toMatchObject({ target: { testID: "save" } });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -750,7 +752,7 @@ describe("record and replay", () => {
       expect(textOf(await tools.replay({}))).toContain("one (1 step");
       expect((await tools.replay({ name: "missing" })).isError).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -1103,7 +1105,7 @@ describe("look", () => {
       expect(file.startsWith(dir)).toBe(true);
       expect(readFileSync(file).toString()).toBe("ABC");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -1128,7 +1130,7 @@ describe("look", () => {
       expect(new Set(paths).size).toBe(3);
       expect(paths.map((p) => existsSync(p))).toEqual([false, true, true]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -1185,7 +1187,7 @@ describe("no app connected", () => {
 describe("pair", () => {
   const dirs: string[] = [];
   afterEach(() => {
-    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   async function pairTools() {
@@ -1512,7 +1514,7 @@ describe("mcp server", () => {
     try {
       const listed = await client.listTools();
       expect(listed.tools.map((t) => t.name).sort()).toEqual(
-        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "ux_check", "media", "journey", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "crash", "reload", "performance", "wait", "session_report"].sort(),
+        ["apps", "open_app", "pair", "look", "tap", "long_press", "type_text", "scroll", "toggle", "open_url", "back", "swipe", "check_layout", "audit", "ux_check", "media", "journey", "inspect", "run", "app_command", "wait_for", "record", "replay", "compare_screen", "filmstrip", "viewer", "logs", "crash", "reload", "performance", "wait", "session_report", "map", "drive"].sort(),
       );
       const ok = await client.callTool({ name: "tap", arguments: { target: { id: "login-button" } } });
       expect(JSON.stringify(ok.content)).toContain("Tapped e3");

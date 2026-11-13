@@ -1,10 +1,13 @@
-import { audit, uxCheck, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
+import { audit, beginAction, uxCheck, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
 import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
 import { glassTree } from './glass';
 import { overlay, tree } from './inspect';
 import { media } from './media';
+import { move } from './move';
+import { placeData } from './place';
+import { knownPlaces } from './routetree';
 import { isRecord } from './types';
 import { feedMethod, frameAfterAction } from './live';
 import { perfStart, perfStop } from './perf';
@@ -18,6 +21,7 @@ onActed(frameAfterAction);
 /** An action changes the screen: let anyone watching see the result soon. */
 function action(fn: MethodFn): MethodFn {
   return async (params) => {
+    beginAction();
     try {
       return await fn(params);
     } finally {
@@ -58,4 +62,8 @@ export const methods: Record<string, MethodFn> = {
   screenshot: (params) => screenshot(params),
   feed: (params) => feedMethod(params),
   overlay: () => overlay(),
+  // AGENT-TOOLS 1.13 §18: where the app is, the places its route tree lists, and one move with the next target waited for.
+  place: async () => placeData(),
+  places: async () => knownPlaces(),
+  move: action((params) => move(params)),
 };

@@ -1,0 +1,85 @@
+# Compiles the SDK's native module (packages/react-native/ios) the way an app does: a blank Expo app on macOS
+# installs the packed react-native-tapline, generates its iOS project (autolinking adds TaplineNative) and builds it
+# for the simulator. The Linux and Windows test runs never compile Swift, so a mistake there would only show up in
+# a user's own iOS build. Runs when the SDK changes, and by hand.
+name: native
+
+on:
+  pull_request:
+    paths:
+      - "packages/react-native/**"
+      - ".github/workflows/native.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/react-native/**"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The newest Expo, and the oldest SDK an app is known to run Tapline on.
+        template: ["blank-typescript", "blank-typescript@sdk-55"]
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - name: Build and pack the SDK
+        run: |
+          npm run build --workspace packages/react-native
+          npm pack ./packages/react-native --pack-destination "$RUNNER_TEMP"
+
+      - name: Make a blank Expo app with the SDK
+        working-directory: ${{ runner.temp }}
+        run: |
+          npx --yes create-expo-app@latest nativecheck --template "${{ matrix.template }}" --yes
+          cd nativecheck
+          npm install "$RUNNER_TEMP"/react-native-tapline-*.tgz
+          node -e "const p=require('./package.json'); console.log('expo', p.dependencies.expo, 'react-native', p.dependencies['react-native'])"
+
+      - name: Generate the iOS project
+        working-directory: ${{ runner.temp }}/nativecheck
+        run: |
+          npx expo prebuild --platform ios --clean
+          if ! grep -q "TaplineNative" ios/Podfile.lock; then
+            echo "TaplineNative was not autolinked. What autolinking sees:"
+            ls node_modules/react-native-tapline
+            cat node_modules/react-native-tapline/expo-module.config.json
+            npx expo-modules-autolinking search --platform apple --json 2>&1 | head -c 4000 || true
+            echo
+            npx expo-modules-autolinking resolve --platform apple --json 2>&1 | grep -i -A5 tapline || echo "(not in resolve)"
+            npx expo-modules-autolinking search --platform ios --json 2>&1 | grep -i -A5 tapline || echo "(not in search for ios)"
+            exit 1
+          fi
+
+      - name: Build for the simulator (compiles TaplineNative)
+        working-directory: ${{ runner.temp }}/nativecheck/ios
+        run: |
+          set -o pipefail
+          WORKSPACE=$(ls -d *.xcworkspace | head -1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Debug -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning: .*TaplineNative|\*\* BUILD" || true
+          grep -q "\*\* BUILD SUCCEEDED \*\*" "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Show the Swift errors
+        if: failure()
+        run: grep -n -B2 -A6 "TaplineNative.*error:\|error:.*Tapline" "$RUNNER_TEMP/xcodebuild.log" | head -200 || tail -200 "$RUNNER_TEMP/xcodebuild.log"

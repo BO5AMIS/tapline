@@ -65,6 +65,10 @@ const requests = new WeakMap<object, RequestInfo>();
 let installed: Installed | null = null;
 let customIgnore: ((url: string) => boolean) | null = null;
 let pending = 0;
+/** Requests begun so far; the difference across an action is what the action started. */
+let began = 0;
+/** Each request still open, by its place in the order begun (the `began` count) with its start time: idle detection asks what an action started. */
+const openStarts = new Map<number, number>();
 let generation = 0;
 let condition: NetworkMode = 'normal';
 let random: () => number = Math.random;
@@ -131,11 +135,15 @@ function track(xhr: XhrLike & object): (() => void) | null {
   let aborted = false;
   let timedOut = false;
   pending += 1;
+  began += 1;
+  const openId = began;
+  openStarts.set(openId, startedAt);
 
   /** Stop counting this request; returns false if it was already finished. */
   const settle = (): boolean => {
     if (done) return false;
     done = true;
+    openStarts.delete(openId);
     if (forGeneration === generation && pending > 0) pending -= 1;
     return true;
   };
@@ -748,10 +756,14 @@ function wrapFetch(original: AnyFn): AnyFn {
     const startedAt = Date.now();
     const forGeneration = generation;
     pending += 1;
+    began += 1;
+    const openId = began;
+    openStarts.set(openId, startedAt);
     let done = false;
     const settle = (): void => {
       if (done) return;
       done = true;
+      openStarts.delete(openId);
       if (forGeneration === generation && pending > 0) pending -= 1;
     };
     const failed = (status: number | null, error: string | null): void => {
@@ -915,6 +927,7 @@ export function uninstallNetworkTracking(): void {
   installed = null;
   customIgnore = null;
   pending = 0;
+  openStarts.clear();
   generation += 1;
   condition = 'normal';
   // Held responses finish now and their wrappers come off: once the patched abort is gone, nothing else would clean
@@ -960,6 +973,20 @@ export function uninstallNetworkTracking(): void {
 export function inFlight(): number {
   ensureFetchWrapped();
   return pending;
+}
+
+/** How many requests begun after `mark` (a `startedRequests()` reading) are still open. */
+export function openRequestsAfter(mark: number): number {
+  ensureFetchWrapped();
+  let count = 0;
+  for (const id of openStarts.keys()) if (id > mark) count += 1;
+  return count;
+}
+
+/** How many requests have begun (dev-server traffic excluded). Two reads around an action tell what it started. */
+export function startedRequests(): number {
+  ensureFetchWrapped();
+  return began;
 }
 
 /** Be told about every failed request. Returns the unsubscribe function. */

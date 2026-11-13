@@ -8,17 +8,28 @@ import { annotateScreenshot, type ShotImage } from "./annotate.js";
 import type { ControlQueue } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
-import { composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
-import { alertNotes, networkLine, describeElement, filterLogs, formatChanges, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatTree } from "./format.js";
+import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
+import { briefLines, briefScreen } from "./brief.js";
+import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
+import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
+import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
+import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
+import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
+import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
+import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
   Journey,
+  DRIVE_ALLOWED,
+  REFLEXES_ALLOWED,
+  FAST_ANIMATIONS_ALLOWED,
   OPEN_URL,
   conditionsSchema,
   exportSchema,
@@ -36,11 +47,14 @@ import {
 import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourneys, screenSignature, writeReport, type FrameSource, type Touch } from "./journeyreport.js";
 import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
-import { Confirmations } from "./confirm.js";
-import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { Confirmations, type OkVia } from "./confirm.js";
+import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
+import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
-import { readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
+import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { escapeParams, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -50,7 +64,9 @@ import {
   UNDER_KEYS,
   describeRunStep,
   expectFailure,
+  ifSchema,
   parseError,
+  skippedLine,
   stepNotes,
   stepSchema,
   type Expect,
@@ -122,6 +138,15 @@ const lookField = z
 
 const screenshotField = z.boolean().optional().describe("Add a screenshot (default false)");
 
+/** AGENT-TOOLS 1.13 §13.4. What it does is in the instructions' Answers list (TOOL-TEXT, core answers). */
+const briefField = z.boolean().optional().describe("true: a short answer, as the instructions describe; false: the whole answer, also when the server runs with --brief");
+
+/** A test account's name (AGENT-TOOLS 1.13 §18.6); in `run` it is the default for its steps. */
+const accountField = z
+  .string()
+  .optional()
+  .describe("A test account's name: the text is then `${account.username}` or `${account.password}` alone, typed by the tool (you never see the password). A password stays out of pictures only while its field is secure; a \"show password\" toggle shows it. The accounts file belongs outside the folders you may read");
+
 const dryRunField = z
   .boolean()
   .optional()
@@ -169,7 +194,7 @@ export const toolShapes = {
       .describe("Which checks to run (default all): contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, overlap, duplicate_id"),
   },
   inspect: { target: targetField },
-  tap: { target: targetField, index: indexField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField },
+  tap: { target: targetField, index: indexField, force: forceField, dry_run: dryRunField, look: lookField, screenshot: screenshotField, brief: briefField },
   long_press: {
     target: targetField,
     index: indexField,
@@ -183,6 +208,7 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   type_text: {
     text: z.string().describe("Text to enter"),
@@ -190,10 +216,13 @@ export const toolShapes = {
     index: indexField,
     replace: z.boolean().optional().describe("Replace the current text (default true); false appends"),
     submit: z.boolean().optional().describe("Also submit (like pressing return) after typing (default false)"),
+    account: accountField,
+    as: z.string().optional().describe("While recording a route: save this text as the variable `${as}` (a name), which drive's `with` fills; the text typed now is not saved"),
     force: forceField,
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   scroll: {
     direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction (default down when no `to`)"),
@@ -208,6 +237,7 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   toggle: {
     target: targetField,
@@ -217,13 +247,15 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   open_url: {
     url: z.string().describe('URL or deep link to open, e.g. "myapp://settings"'),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
-  back: { dry_run: dryRunField, look: lookField, screenshot: screenshotField },
+  back: { dry_run: dryRunField, look: lookField, screenshot: screenshotField, brief: briefField },
   swipe: {
     x0: z.number().describe("Where the finger starts, in points from the left"),
     y0: z.number().describe("Where the finger starts, in points from the top"),
@@ -233,12 +265,14 @@ export const toolShapes = {
     dry_run: dryRunField,
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   app_command: {
     name: z.string().optional().describe("The command to run; omit to list the app's commands and what they take"),
     args: z.record(z.string(), z.unknown()).optional().describe("Arguments, as the command's description says"),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   compare_screen: {
     name: z.string().describe('A name for this screen\'s reference picture, e.g. "home" or "checkout-empty"'),
@@ -273,6 +307,7 @@ export const toolShapes = {
     stop: z.boolean().optional().describe("Stop and save the script (to path, else to the scripts folder under name)"),
     name: z.string().optional().describe("The script's name: letters, digits, '.', '_' and '-'"),
     path: z.string().optional().describe("Where stop saves the script file (optional)"),
+    route: z.string().optional().describe("Record a route for drive instead of a script: its name (letters, digits, '.', '_' and '-'). It starts from the place the app is at and is saved in the app's map folder"),
     action: z
       .enum(["start", "stop", "status", "discard"])
       .optional()
@@ -293,6 +328,7 @@ export const toolShapes = {
     timeout: z.number().min(0.5).max(30).optional().describe("Seconds to wait at most, 0.5 to 30 (default 10)"),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
   logs: {
     since: z.number().optional().describe("Only lines after this timestamp (epoch milliseconds)"),
@@ -317,6 +353,25 @@ export const toolShapes = {
   session_report: {
     since: z.number().min(0).optional().describe("Epoch milliseconds: report only calls from then on (default: the start of this session)"),
   },
+  map: {
+    to: z.string().optional().describe("A place's name: the shortest known way to it, and whether each road is proven"),
+    name: z.string().regex(/^[a-z0-9_]+$/).optional().describe("Names the current place: [a-z0-9_]"),
+    link: z.string().optional().describe("The link that reaches a place, kept as given: a pattern (wayfare://trips/[id]), never a real id"),
+    place: z.string().optional().describe("With link: the place (default the current one)"),
+    reflex: reflexSchema.optional().describe("Adds a rule that runs one step when its moment comes: name, when (text, label or id), do (one step), max (1 to 3), at (a place)"),
+    forget_reflex: z.string().optional().describe("Removes a reflex by name"),
+    forget: z.string().optional().describe("Drops a place, with its roads, routes and reflexes"),
+  },
+  drive: {
+    to: z.string().optional().describe("A place's name (map lists them)"),
+    route: z.string().optional().describe("A saved route's name; exactly one of to or route"),
+    with: z.record(z.string(), z.string()).optional().describe('Values for a link\'s params or a route\'s variables, like {"id": "42"}'),
+    account: z.string().optional().describe("With route: a test account's name; the tool types its values, you never see the password"),
+    then: z.array(stepSchema).optional().describe("run steps that go on after arriving, in the same call"),
+    by: z.enum(["any", "taps", "link"]).optional().describe('"any" (default), "taps" (roads only, never a jump) or "link" (a jump only)'),
+    brief: briefField,
+    dry_run: dryRunField,
+  },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
     goal: z.string().min(1).max(300).optional().describe('What the user wants to do, e.g. "log breakfast by scanning its barcode"'),
@@ -328,7 +383,7 @@ export const toolShapes = {
       .array(z.string().min(1).max(60))
       .max(30)
       .optional()
-      .describe('Shortcuts the journey may use: "open_url", and the names of app commands'),
+      .describe('Shortcuts the journey may use: "open_url", the names of app commands, and "drive" (a drive may jump by link), "reflexes" and "fast_animations"'),
     eyes: z.enum(EYES).optional().describe('"user" (default): see the screen as a user does; "agent" turns that off for the rest of the journey'),
     stop: z.boolean().optional().describe("End the journey (needs reached)"),
     reached: z.boolean().optional().describe("With stop: whether the goal was reached"),
@@ -347,12 +402,14 @@ export const toolShapes = {
         'The steps, in order: each is a tool call as an object, {"tool": "tap", "target": {...}, "expect": {...}}. Tools: tap, long_press, type_text, scroll, toggle, back, swipe, open_url, wait, wait_for, app_command, compare_screen (checks, never saves), performance. expect (optional): one of text, id or label, with gone, value and timeout (seconds, default 2); or matches (a reference name, alone or with one of them) with threshold; on a performance step, under: limits such as {"launch_s": 2, "drops": 0, "fps_min": 50, "busy_ms": 200, "js_heap_mb": 80}.',
       ),
     trace: z.boolean().optional().describe("Also list each step that ran, one line each"),
+    account: accountField,
     dry_run: z
       .boolean()
       .optional()
       .describe("Check every step's parameters and resolve step 1 (later steps depend on what it does), then touch nothing"),
     look: lookField,
     screenshot: screenshotField,
+    brief: briefField,
   },
 } as const;
 
@@ -396,8 +453,29 @@ type ReferenceCheck =
   | { kind: "missing"; shot: ShotImage }
   | { kind: "size"; message: string }
   | { kind: "error"; line: string }
-  | { kind: "match"; percent: number; notes: string[] }
+  | { kind: "match"; percent: number; notes: string[]; threshold: number; names: string[] }
   | { kind: "differs"; percent: number; lines: string[]; reason: string; image: ShotImage; notes: string[] };
+
+/** The first line of a match: today's, or with the clusters that changed under the threshold (1.13.1 item 2). */
+function matchLine(name: string, check: { percent: number; threshold: number; names: string[] }): string {
+  if (check.names.length === 0) return `Matches the reference "${name}": ${check.percent}% changed.`;
+  return `Matches the reference "${name}" (${check.percent}% changed, under the ${check.threshold}% threshold): changed at ${check.names.join(", ")}`;
+}
+
+/** Changed clusters of this size or more are named under the threshold, in percent of the screen (1.13.1 item 2). */
+const NAMED_CLUSTER_PERCENT = 0.1;
+
+/** The smallest named elements under a box in points: a page-sized container overlaps every change. */
+function elementsUnder(b: { x: number; y: number; width: number; height: number }, elements: TreeResult["elements"]): TreeResult["elements"] {
+  return elements
+    .filter((e) => e.frame && e.frame.x < b.x + b.width && e.frame.x + e.frame.width > b.x && e.frame.y < b.y + b.height && e.frame.y + e.frame.height > b.y)
+    .filter((e) => (e.text ?? "") !== "" || (e.label ?? "") !== "" || (e.testID ?? "") !== "")
+    .map((e) => ({ e, area: (e.frame?.width ?? 0) * (e.frame?.height ?? 0) }))
+    .filter(({ area }) => area <= Math.max(b.width * b.height * 4, 2500))
+    .sort((x, y) => x.area - y.area)
+    .slice(0, 2)
+    .map(({ e }) => e);
+}
 
 function describeIgnore(item: Target): string {
   if (item.id !== undefined) return `id=${item.id}`;
@@ -473,6 +551,8 @@ export interface ConnectInfo {
 
 export interface ToolsOptions {
   connect: ConnectInfo;
+  /** The server's `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). `look` is never brief. */
+  brief?: boolean;
   /**
    * Whether a phone has ever connected to this computer's host. When set, the first answer of the session says what
    * only a person can do (open the app, pair) if an app isn't connected: `Note: needs a person: …`, once.
@@ -486,10 +566,24 @@ export interface ToolsOptions {
   policy?: PolicyFile;
   /** The user's UX house rules (`--ux-rules FILE`, AGENT-TOOLS 1.12 §17.3). Default: none. */
   uxRules?: UxRules;
+  /** The test accounts (`--accounts FILE`, AGENT-TOOLS 1.13 §18.6): loaded, or refused with the reason. Default: none. */
+  accounts?: AccountsLoad;
+  /** The apps' maps (AGENT-TOOLS 1.13 §18.9): places, roads and links grow as the agent drives. Default: none (no `Place:` line). */
+  maps?: MapRegistry;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
   confirmations?: Confirmations;
   /** False when nobody can answer a request (--viewer off). Default true. */
   canConfirm?: boolean;
+  /** The host's dialog for a person's OK (AGENT-TOOLS 1.13 §11.3). Default: none, as when the client can't show one. */
+  dialogs?: Dialogs;
+  /** How long a needs-a-person moment waits for a person (AGENT-TOOLS 1.13 §11.5). Default 120 000 ms; tests set it low. */
+  personWaitMs?: number;
+  /** How often a moment checks whether it has cleared. Default 500 ms. */
+  personPollMs?: number;
+  /** After a person says Done, how long the app gets to show it (it connects within about 2 s). Default 4000 ms. */
+  personDoneGraceMs?: number;
+  /** Part of every OK's key: `mcp` for the agent's own MCP server (the default), `api` for thin calls, so the two never share an OK. */
+  confirmScope?: string;
   /**
    * Where `pair` writes the development offer for the Metro helper (`~/.tapline/offers`), so a phone that can
    * only reach Metro (a firewall in the way of 7210-7219) still finds it. None: only the host's own endpoint.
@@ -537,6 +631,8 @@ export interface ToolsOptions {
   viewerFeed?: () => { on: boolean; quality: QualityPreset };
   /** The clock a journey measures with, in ms (tests pass their own). Default: Date.now. */
   clock?: () => number;
+  /** Waits this many ms (tests pass one that moves their clock). Default: a timer. */
+  sleep?: (ms: number) => Promise<void>;
   /**
    * Called when a journey stops (AGENT-TOOLS 1.12 §17.5), with its state: the report writer's hook. The lines it
    * returns follow the summary in the answer (`Findings: …`, `Report: <folder>`).
@@ -562,9 +658,21 @@ const TAP_SLOP = 10;
 /** Held at least this long, a tap is a long press. */
 const LONG_PRESS_MS = 500;
 
+/** The requests whose call may be a road, or tell the map that text was typed (AGENT-TOOLS 1.13 §18.2). */
+const ROAD_METHODS: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "back", "openURL", "swipe", "type"]);
+
 const SCRIPT_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
 /** The answer to a reference name that isn't one: no slashes, so no way out of the references folder. */
-const BAD_REFERENCE_NAME = "Error bad_params: name the reference with letters, digits, '.', '_' and '-'.";
+/** The names (file names without `extension`) in a folder; none when it isn't there. */
+function stemsIn(dir: string, extension: string): string[] {
+  try {
+    return readdirSync(dir).filter((file) => file.endsWith(extension)).map((file) => file.slice(0, -extension.length));
+  } catch {
+    return [];
+  }
+}
+
+const BAD_REFERENCE_NAME ="Error bad_params: name the reference with letters, digits, '.', '_' and '-'.";
 
 /** One recorded request; `route` is the screen it ended on, `fragile` marks a target that only worked that run (a ref). */
 interface ScriptStep {
@@ -574,6 +682,8 @@ interface ScriptStep {
   fragile?: boolean;
   /** Typed into a password field: its text wasn't saved (never written to the file). */
   secret?: boolean;
+  /** A route's step whose text is a variable or an account's placeholder: `${` in it is not escaped. */
+  placeholder?: boolean;
 }
 
 const scriptSchema = z.object({
@@ -616,6 +726,30 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
   const kept = copy["target"];
   const fragile = typeof kept === "object" && kept !== null && "ref" in kept;
   return { params: copy, fragile };
+}
+
+/** A step that types an account's value: its text is a placeholder, kept in the script (the value never is). */
+function isAccountStep(step: ScriptStep): boolean {
+  return step.method === "type" && typeof step.params["text"] === "string" && step.params["text"].includes("${account.");
+}
+
+/**
+ * The app refused an account's value because of the kind of field (capability `typeKind`; its `data.secure` says
+ * which kind the field is). The answer says it in the words of AGENT-TOOLS 1.13 §18.6, with the field's ref and
+ * never anything the app wrote about its text.
+ */
+function kindRefusal(error: unknown, kind: unknown): string | null {
+  if (kind !== "secure" && kind !== "plain") return null;
+  if (!(error instanceof TaplineError) || error.code !== "bad_params") return null;
+  const details = error.details;
+  const data = typeof details === "object" && details !== null ? (details as { data?: unknown }).data : undefined;
+  const secure = typeof data === "object" && data !== null ? (data as { secure?: unknown }).secure : undefined;
+  if (typeof secure !== "boolean") return null;
+  const ref = /^(e\d+)\b/.exec(error.message)?.[1] ?? "the field";
+  const is = secure ? "a password field" : "a text field";
+  return kind === "secure"
+    ? `Error bad_params: an account's password goes only into a password field; ${ref} is ${is}.`
+    : `Error bad_params: an account's username goes only into a text field; ${ref} is ${is}.`;
 }
 
 /** A short description of a step, e.g. `press id=save` or `type "Ann" into label="Name"`. */
@@ -864,7 +998,56 @@ function appendNote(answer: CallToolResult, note: string): CallToolResult {
   return { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), note].join("\n") }, ...rest] };
 }
 
+/** The app's refusal when an alert it can't answer is open (a stand-in's own buttons are an ordinary screen). */
+const ALERT_IN_WAY = /behind_alert: (An alert is open|Tapline's own prompt is open)/;
+
+/** A needs-a-person moment: what the person does, when the tool goes on by itself, and how it sees the moment cleared. */
+interface Moment {
+  key: string;
+  what: string;
+  goOn?: string;
+  cleared: () => Promise<boolean> | boolean;
+}
+
+/** The dialog's text (§11.5): `Needs a person: <what>. I'll go on by myself when <it clears>.` */
+function momentMessage(moment: Pick<Moment, "what" | "goOn">): string {
+  return `Needs a person: ${moment.what}.${moment.goOn !== undefined ? ` I'll go on by myself when ${moment.goOn}.` : ""}`;
+}
+
+/** The step a batch (`run`, `replay`) stopped at, from its failure line; undefined for any other answer. */
+function batchStep(answer: CallToolResult): number | undefined {
+  const top = answer.content[0];
+  if (answer.isError !== true || top === undefined || top.type !== "text") return undefined;
+  const at = /^Error \w+: Ran \d+ of \d+ steps; stopped at step (\d+) /.exec(top.text)?.[1];
+  return at === undefined ? undefined : Number(at);
+}
+
+/**
+ * The error code of an answer that may be a needs-a-person moment (§11.5): the app isn't there, is in the background,
+ * stopped answering, or an alert is in the way. `busy` and `paused` are a person already at work, never such a moment.
+ */
+function momentCode(answer: CallToolResult): "not_connected" | "in_background" | "not_answering" | "not_actionable" | undefined {
+  const top = answer.content[0];
+  if (answer.isError !== true || top === undefined || top.type !== "text") return undefined;
+  const code = /^Error (not_connected|in_background|not_answering|not_actionable):/.exec(top.text)?.[1];
+  // A batch that stopped on one of these: `Error <code>: Ran 2 of 5 steps; stopped at step 3 (...): <message>`.
+  if (batchStep(answer) !== undefined) {
+    if (code === "not_actionable") return ALERT_IN_WAY.test(top.text) ? code : undefined;
+    return code === "not_connected" || code === "in_background" || code === "not_answering" ? code : undefined;
+  }
+  if (code === "not_actionable") return top.text.startsWith("Error not_actionable: behind_alert: ") && ALERT_IN_WAY.test(top.text) ? code : undefined;
+  // Only "no app is connected": an `app` argument naming an app that isn't there is the agent's mistake, not a moment.
+  if (code === "not_connected") return top.text.startsWith("Error not_connected: No app is connected to Tapline.") ? code : undefined;
+  return code === "not_connected" || code === "in_background" || code === "not_answering" ? code : undefined;
+}
+
 /** An app's dry-run answer (AGENT-TOOLS 1.8 §11.4). */
+/** Elements already read: as they may be shown, and raw (account values in) for the policy only. */
+interface KnownElements {
+  elements: TreeElement[];
+  raw: TreeElement[];
+}
+
 const dryRunResultSchema = z.object({
   element: elementSchema.nullish(),
   dryRun: z.literal(true),
@@ -880,6 +1063,11 @@ function scrolledFirst(result: unknown): boolean {
 }
 
 /** `Scrolled to it, then tapped …` when the action scrolled first: the sentence goes on after a lead-in. */
+/** The text of an answer: its text blocks, joined. */
+function answerText(answer: CallToolResult): string {
+  return answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+}
+
 function afterScroll(result: unknown, sentence: string): string {
   return scrolledFirst(result) ? `Scrolled to it, then ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}` : sentence;
 }
@@ -915,8 +1103,11 @@ function candidatesFor(target: unknown, elements: TreeElement[]): TreeElement[] 
 const CRASH_NOTED_TOOLS = [
   "apps", "openApp", "pair", "look", "run", "inspect", "audit", "uxCheck", "media", "checkLayout", "viewer", "compareScreen", "filmstrip",
   "record", "replay", "tap", "longPress", "typeText", "scroll", "toggle", "appCommand", "waitFor", "swipe", "back",
-  "openUrl", "logs", "reload", "performance", "wait",
+  "openUrl", "logs", "reload", "performance", "wait", "drive",
 ] as const satisfies readonly (keyof TaplineTools)[];
+
+/** The tools that measure or compare: fast animations are normal inside them (PLAN-1.6 F4, E8). `compareStep` is `run`'s own. */
+const PAUSED_TOOLS = ["compareScreen", "compareStep", "filmstrip", "performance"] as const;
 
 /** Every tool the agent calls, by handler name (the call log numbers these). */
 const CALL_TOOLS: Readonly<Record<string, string>> = {
@@ -924,12 +1115,12 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
   "look", "run", "inspect", "audit", "ux_check", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll",
-  "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
+  "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait", "drive",
 ]);
 /** A stress moment a person was asked to do: what must survive, when it was asked, and (rotate) the screen's size then. */
 interface StressWaiting {
@@ -941,12 +1132,12 @@ interface StressWaiting {
 const DOUBLE_TAP_GAP_MS = 80;
 /** What the app says of a double tap's second tap. */
 const pressSecondSchema = z.union([
-  z.object({ done: z.literal(true), afterMs: z.number() }),
+  z.object({ done: z.literal(true), afterMs: z.number(), threw: z.string().optional() }),
   z.object({ done: z.literal(false), reason: z.string().regex(/^[a-z_]{1,40}$/), afterMs: z.number() }),
 ]);
 /** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
 const FRAME_TOOLS: ReadonlySet<string> = new Set([
-  "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait",
+  "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait", "drive",
 ]);
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
@@ -966,14 +1157,35 @@ function pictureArgs(input: Record<string, unknown>): { screenshot?: boolean; wi
 const LISTING_TOOLS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "run"]);
 /** Tools that act on one element: after a run of scrolls they log whether the element was already in the list. */
 const ELEMENT_ACTIONS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "toggle"]);
+/** The logged touches that can take the app to another place (the known-way flag reads them). */
+const AGENT_TOUCHES: ReadonlySet<string> = new Set(["tap", "long_press", "toggle", "back", "open_url", "swipe"]);
 
 /** What a call in flight collects for the call log. */
+/** What the reflexes did in one call (AGENT-TOOLS 1.13 §18.7): the limit is per call, and every line is said in its answer. */
+interface ReflexCall {
+  fired: Map<string, number>;
+  lines: string[];
+}
+
 interface CallState {
   call: number;
   tool: string;
   /** The call before this one was a scroll. */
   afterScrolls: boolean;
+  /** The call came through the thin call. */
+  thin: boolean;
+  /** Fast animations were on when the call began (the report says how many calls they covered). */
+  fast: boolean;
   entries: Array<{ entry: Omit<ActionLogEntry, "t" | "source">; at: Date }>;
+}
+
+/** What a call answers when the screen is not what the person was asked about (§11.3). */
+const CHANGED_WHILE_WAITING = "Error not_allowed: needs_confirmation: the screen changed while waiting for the OK; ask again.";
+
+/** A person's OK given while the call waited: what the screen showed then, and where it was given. */
+interface Waited {
+  fp: string;
+  via: OkVia;
 }
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
@@ -987,12 +1199,31 @@ export class TaplineTools {
   private batch: { id: string; step: number } | undefined;
   /** Extra fields for the next log line (a dry run, a confirmed touch). */
   private logExtra: Partial<ActionLogEntry> | undefined;
+  /** The clusters the latest `expect.matches` check named under its threshold (1.13.1 item 2). */
+  private matchedNames: string[] = [];
   /** The call log (AGENT-TOOLS 1.11 §16.1): this run's id, when it began, and how many calls the agent has made. */
   private readonly sessionTag = randomBytes(4).toString("hex");
   private readonly startedAt = Date.now();
   private callCount = 0;
   /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
   private readonly callScope = new AsyncLocalStorage<CallState>();
+  private readonly thinScope = new AsyncLocalStorage<boolean>();
+  /** Takes this object's listeners off the host, so a dropped client is not kept alive by it. */
+  private readonly disposers: Array<() => void> = [];
+
+  dispose(): void {
+    for (const off of this.disposers.splice(0)) off();
+  }
+
+  /** A person used the app through another tools object (the live viewer): `{ref}` targets here are stale too. */
+  noteViewerInput(): void {
+    this.markPersonUsedApp();
+  }
+
+  /** Runs a call that came through the thin call, so its log entries say `via: "call"` (§16.1, §18.10). */
+  asThinCall<T>(run: () => T): T {
+    return this.thinScope.run(true, run);
+  }
   private clientIdFn: (() => string | undefined) | undefined;
   /** The tool of the previous call, for scroll runs. */
   private prevCallTool: string | undefined;
@@ -1005,6 +1236,9 @@ export class TaplineTools {
   /** The list as it was before the current run of scrolls began. */
   private scrollBase: { elements: TreeElement[]; stale: boolean; unseen: boolean } | undefined;
   readonly confirmations: Confirmations;
+  private dialogs: Dialogs | undefined;
+  /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
+  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal }>();
   private readonly policy: PolicyFile;
   private readonly uxRules: UxRules;
   /**
@@ -1029,8 +1263,42 @@ export class TaplineTools {
   private personActed = false;
   /** The next answer to the agent says a person used the app, once. */
   private personNotePending = false;
-  private recording: { name: string; app: { name: string; id?: string }; steps: ScriptStep[] } | null = null;
-  private replaying = false;
+  private recordingState: {
+    name: string;
+    app: { name: string; id?: string };
+    steps: ScriptStep[];
+    /** Set while recording a route (AGENT-TOOLS 1.13 §18.5): where it starts, the variables its steps use, and the app's map. */
+    route?: { start: string; variables: Set<string>; map: AppMap };
+  } | null = null;
+  private replayingState = false;
+  /** Set inside a reflex's own step (and what it awaits) only: other calls running beside it are not touched (§18.7). */
+  private readonly reflexStep = new AsyncLocalStorage<true>();
+
+  /** A reflex's step is no recorded step: inside it nothing is recording. */
+  private get recording(): NonNullable<typeof this.recordingState> | null {
+    return this.reflexStep.getStore() === true ? null : this.recordingState;
+  }
+  private set recording(value: typeof this.recordingState) {
+    this.recordingState = value;
+  }
+  /** A reflex's step changes no map (as in a replay): inside it the host reads as replaying. */
+  private get replaying(): boolean {
+    return this.replayingState || this.reflexStep.getStore() === true;
+  }
+  private set replaying(value: boolean) {
+    this.replayingState = value;
+  }
+  /** The place the latest element list showed, so an action's road doesn't read the app again (§18.2). */
+  private observedPlace: { sessionId: string; place: Place } | undefined;
+  /**
+   * Whether a person's OK was used for the action in progress: its move is no road (§18.2). Kept per action, so a reflex
+   * that runs inside it (its own action) can never reset or set the outer action's state.
+   */
+  private readonly okScope = new AsyncLocalStorage<{ used: boolean }>();
+  private setOk(used: boolean): void {
+    const state = this.okScope.getStore();
+    if (state !== undefined) state.used = used;
+  }
   /**
    * While a script replays (AGENT-TOOLS 1.9 §14.3): the references folder next to it (looked in first), where a
    * failed check puts its red picture, and whether the checks save instead of compare (`--update-references`).
@@ -1091,6 +1359,7 @@ export class TaplineTools {
   /** "starting" until a journey's set-up is done, "stopping" until its clean-up is done: no other start meanwhile. */
   private journeyBusy: "starting" | "stopping" | undefined;
   private readonly clock: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(
     private readonly host: TaplineHost,
@@ -1098,7 +1367,9 @@ export class TaplineTools {
   ) {
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.clock = options.clock ?? Date.now;
+    this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.confirmations = options.confirmations ?? new Confirmations();
+    this.dialogs = options.dialogs;
     this.policy = options.policy ?? DEFAULT_POLICY;
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
@@ -1108,36 +1379,57 @@ export class TaplineTools {
     this.stillCapMs = options.stillCapMs ?? 2000;
     // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
-    host.on("touch", (session) => {
+    const onTouch = (session: SessionInfo): void => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
-    });
+    };
     // What a stress moment a person does leaves behind, for `done` to check (AGENT-TOOLS 1.12 §17.4).
     // Kept per app, so another connected app's events never count for the journey's app.
-    host.on("appState", (session, state) => {
+    const onAppState = (session: SessionInfo, state: string): void => {
       if (state !== "active") this.appLeftAt.set(identityOf(session), Date.now());
-    });
-    host.on("disconnect", (session) => {
+    };
+    const onDisconnect = (session: SessionInfo): void => {
+      // The app puts its animations back by itself when it loses the host; the host forgets it was fast.
+      forgetAnimations(this.host, session.id);
       this.appLeftAt.set(identityOf(session), Date.now());
-    });
-    host.on("connect", (session) => {
+    };
+    const onConnect = (session: SessionInfo): void => {
       this.appConnectedAt.set(identityOf(session), Date.now());
-    });
+    };
     // The app's picker used the armed test pictures: that is when a pick was "skipped" (1.5 review, finding 5).
-    host.on("pickerSkipped", (session, count) => {
+    const onPickerSkipped = (session: SessionInfo, count: number): void => {
       this.pickerFrom = identityOf(session);
       try {
         this.mediaState.recordPickerSkipped(session.app.id, count);
       } finally {
         this.pickerFrom = undefined;
       }
+    };
+    host.on("touch", onTouch);
+    host.on("appState", onAppState);
+    host.on("disconnect", onDisconnect);
+    host.on("connect", onConnect);
+    host.on("pickerSkipped", onPickerSkipped);
+    this.disposers.push(() => {
+      host.off("touch", onTouch);
+      host.off("appState", onAppState);
+      host.off("disconnect", onDisconnect);
+      host.off("connect", onConnect);
+      host.off("pickerSkipped", onPickerSkipped);
     });
+    // The measuring tools run with fast animations paused (PLAN-1.6 F4, E8): innermost, so the note is part of the answer.
+    for (const name of PAUSED_TOOLS) {
+      const original: unknown = Reflect.get(this, name);
+      if (typeof original !== "function") continue;
+      const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
+      Reflect.set(this, name, (...args: unknown[]) => this.pausingAnimations(() => method.apply(this, args)));
+    }
     // Crashes before this agent's session began are not its news.
     this.crashBaseline = host.crashMark();
     for (const name of CRASH_NOTED_TOOLS) {
       const original: unknown = Reflect.get(this, name);
       if (typeof original !== "function") continue;
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
-      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args)));
+      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args), name === "drive"));
     }
     // Outermost: every call of the agent is numbered and logged (reads too) once its answer is known.
     for (const [name, tool] of Object.entries(CALL_TOOLS)) {
@@ -1154,6 +1446,18 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.journeyCall(tool, args[0], () => method.apply(this, args)));
     }
+  }
+
+  /** Whether fast animations are on for the app being driven now. */
+  private fastNow(): boolean {
+    const id = this.host.current()?.id;
+    return id !== undefined && animationsOn(this.host, id);
+  }
+
+  /** Runs a measuring call with fast animations normal, then puts them back, and says so in the answer (E8). */
+  private async pausingAnimations(run: () => CallToolResult | Promise<CallToolResult>): Promise<CallToolResult> {
+    const { value, paused, failed } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run());
+    return failed ? appendNote(value, ANIMATIONS_NOT_PAUSED_NOTE) : paused ? appendNote(value, ANIMATIONS_PAUSED_NOTE) : value;
   }
 
   /** The journey running now, for the stress moments and the report writer (AGENT-TOOLS 1.12 §17). */
@@ -1184,7 +1488,12 @@ export class TaplineTools {
       const answer = this.journeyScope.run("run", run);
       return answer instanceof Promise ? answer.then((a) => this.shownToUser(a)) : this.shownToUser(answer);
     }
-    if (scope === "run" || input["dry_run"] === true) return run();
+    if (scope === "run") return run();
+    // A dry run counts as nothing, but what it says is still shown as a person would see it (no ids; a drive's own words are eyes-safe).
+    if (input["dry_run"] === true) {
+      const dry = run();
+      return dry instanceof Promise ? dry.then((a) => this.shownToUser(a)) : this.shownToUser(dry);
+    }
     const at = this.clock();
     const pre = journey.pre();
     this.lastTouch = undefined;
@@ -1258,6 +1567,14 @@ export class TaplineTools {
     return null;
   }
 
+  /** In a user's eyes `animations fast` is off unless `allow` names fast_animations; `normal` always goes (PLAN-1.6 F4, E8). */
+  private animationsRefusal(args: unknown): string | null {
+    if (!this.userEyes()) return null;
+    const speed = typeof args === "object" && args !== null ? (args as { speed?: unknown }).speed : undefined;
+    if (speed === "normal" || this.journeyRun?.allows(FAST_ANIMATIONS_ALLOWED) === true) return null;
+    return "Error not_allowed: in a journey, fast animations are off: a user waits for them; the journey's allow can name fast_animations.";
+  }
+
   private static readonly SCROLL_TO_TARGET_OFF =
     'Error not_allowed: in a journey, scroll to: "target" is off: a person scrolls until they see it. Scroll down or up, then look.';
 
@@ -1268,7 +1585,7 @@ export class TaplineTools {
     const hidden = (value: unknown): boolean =>
       typeof value === "object" && value !== null && ("id" in value || "label" in value);
     const expect = s["expect"];
-    if (hidden(s["target"]) || hidden(s["tap"]) || hidden(expect) || (step.tool === "wait_for" && ("id" in s || "label" in s))) {
+    if (hidden(s["target"]) || hidden(s["tap"]) || hidden(expect) || hidden(s["if"]) || (step.tool === "wait_for" && ("id" in s || "label" in s))) {
       return IDS_HIDDEN.replace("Error bad_params: ", `Error bad_params: step ${index + 1}: `);
     }
     if (step.tool === "scroll" && s["to"] === "target") return TaplineTools.SCROLL_TO_TARGET_OFF.replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
@@ -1276,10 +1593,19 @@ export class TaplineTools {
       return this.shortcutWords("open_url", "").replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
     }
     const name = String(s["name"] ?? "");
+    // Fast animations have their own allow word (fast_animations), not the command's name.
+    if (step.tool === "app_command" && name === "animations") {
+      return this.animationsRefusal(s["args"])?.replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `) ?? null;
+    }
     if (step.tool === "app_command" && name !== "" && !this.shortcutAllowed("app_command", name)) {
       return this.shortcutWords("app_command", name).replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
     }
     return null;
+  }
+
+  /** The MCP server gives the dialog once it can ask its client (the client's capabilities are known after initialize). */
+  setDialogs(dialogs: Dialogs | undefined): void {
+    this.dialogs = dialogs;
   }
 
   /** The agent's client id for the call log; the MCP server passes the client's name once it is known. */
@@ -1303,7 +1629,14 @@ export class TaplineTools {
     const afterScrolls = this.prevCallTool === "scroll";
     if (tool === "scroll" && !afterScrolls) this.scrollBase = this.listBase;
     this.prevCallTool = tool;
-    const state: CallState = { call: ++this.callCount, tool, afterScrolls, entries: [] };
+    const state: CallState = {
+      call: ++this.callCount,
+      tool,
+      afterScrolls,
+      thin: this.thinScope.getStore() === true,
+      fast: this.fastNow(),
+      entries: [],
+    };
     const began = new Date();
     let result: CallToolResult | Promise<CallToolResult>;
     try {
@@ -1342,13 +1675,21 @@ export class TaplineTools {
       call: state.call,
       ...(client !== undefined && client !== "" ? { client } : {}),
       size,
+      v: 2 as const,
+      ...(state.thin ? { via: "call" as const } : {}),
+      ...(state.fast ? { animations: "fast" as const } : {}),
     };
     const code = failed ? /^Error (\w+):/.exec(said.join("\n"))?.[1] : undefined;
     if (state.entries.length > 0) {
       // Actions that went through, in a call that failed after them (an expectation that didn't hold): the call's
       // own outcome goes with them, so the report doesn't count it as a success (Codex review of 1.4.0).
       const callFailed = failed && state.entries.every(({ entry }) => entry.ok) ? { call_failed: code ?? "internal" } : {};
-      for (const { entry, at } of state.entries) this.actionLog.write({ ...entry, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, at);
+      for (const { entry, at } of state.entries) {
+        // `at` is when the action ended. The entry says when it began and how long it took (§16.1), reads and actions alike.
+        const ms = entry.ms ?? Math.max(0, at.getTime() - began.getTime());
+        const start = entry.ms !== undefined ? new Date(at.getTime() - entry.ms) : began;
+        this.actionLog.write({ ...entry, ms, ...common, ...callFailed, ...(listed ? { listed: true } : {}) }, start);
+      }
       return;
     }
     // A call that logged no action: a read, or an action refused before it began (then without `kind`).
@@ -1368,6 +1709,8 @@ export class TaplineTools {
         ...common,
         ...(listed ? { listed: true } : {}),
         ...(lookArgs !== undefined ? { look_args: lookArgs } : {}),
+        // A compare_screen that matched with named changes: the report asks the agent to look at them (1.13.1 item 2).
+        ...(state.tool === "compare_screen" && !failed && /^Matches the reference ".*" \([\d.]+% changed, under the /.test(said.join("\n")) ? { matched_with_changes: true } : {}),
       },
       began,
     );
@@ -1388,28 +1731,549 @@ export class TaplineTools {
     return base.stale ? undefined : false;
   }
 
+  /** `map` (AGENT-TOOLS 1.13 §18.8): reads and edits the app's map; never touches the app. The work is in mapcmd.ts. */
+  async map(args: Shape<"map">): Promise<CallToolResult> {
+    const refused = mapArgsError(args);
+    if (refused !== null) return fail(`Error bad_params: ${refused}`);
+    if (this.options.maps === undefined) return fail("Error unsupported: this server keeps no maps.");
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const map = this.mapOf(session);
+    if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
+    const source = this.placeSource(session);
+    const answer = await runMap(args, {
+      map,
+      app: { name: session.app.name, id: session.app.id },
+      here: async () => (await placeNow(source, map))?.place ?? null,
+      known: async () =>
+        session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] }),
+      lists: listsFor(this.policy, session.app),
+      accounts: this.options.accounts?.store?.names() ?? [],
+    });
+    return answer.error ? fail(answer.text) : text(answer.text);
+  }
+
+  /** `drive` (AGENT-TOOLS 1.13 §18.4): takes the app to a place along the map's roads. The work is in drive.ts. */
+  async drive(args: Shape<"drive">, options: { asStep?: boolean } = {}): Promise<CallToolResult> {
+    const refused = driveArgsError(args);
+    if (refused !== null) return fail(`Error bad_params: ${refused}`);
+    if (this.options.maps === undefined) return fail("Error unsupported: this server keeps no maps.");
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const map = this.mapOf(session);
+    if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
+    // As a `run` step a drive builds no screen of its own: the batch answers once (9.1).
+    const given: Shape<"drive"> & { quiet?: boolean } = options.asStep === true ? { ...args, quiet: true } : args;
+    const services = this.driveServices(session, map);
+    const routes = this.routeServices(session, args.account, args.brief);
+    const drove = (): Promise<CallToolResult> => (given.route !== undefined ? driveRoute(services, routes, given) : driveTo(services, given, routes));
+    // A batch keeps only `Note:` lines of a step's answer, so a repair is said as one there.
+    const go = async (): Promise<CallToolResult> => {
+      const answer = await drove();
+      if (options.asStep !== true) return answer;
+      return { ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: block.text.replace(/^Road repaired/gm, "Note: Road repaired") } : block)) };
+    };
+    // A wait for a person's OK is this call's own, as for `run`.
+    return this.holdScope.getStore() !== undefined ? go() : this.holdScope.run({ ms: 0 }, go);
+  }
+
+  /** Whether a journey's user's eyes keep a drive to roads: unless its `allow` names `drive` (AGENT-TOOLS 1.13 18.12). */
+  private driveRoadsOnly(): boolean {
+    const journey = this.journeyRun;
+    return journey !== undefined && journey.userEyes && !journey.allows(DRIVE_ALLOWED);
+  }
+
+  /** What drive needs from this host: reads, and one move that passes the policy and a person's OK like a single call. */
+  private driveServices(session: SessionInfo, map: AppMap): DriveServices {
+    const source = this.placeSource(session);
+    return {
+      map,
+      source,
+      capabilities: session.capabilities,
+      tapsOnly: this.driveRoadsOnly(),
+      eyes: this.userEyes(),
+      moved: (tool) => this.journeyRun?.noteMove(tool),
+      aborted: () => this.holdScope.getStore()?.signal?.aborted === true,
+      clock: this.clock,
+      sleep: this.sleep,
+      describe: describeError,
+      known: async () => (session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] })),
+      tree: async () => {
+        // In a user's eyes a drive reads only what is on the glass (17.1).
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", this.userEyes() ? { glass: true } : {}, { sessionId: session.id }));
+        if (!tree.success) throw new TaplineError("internal", "the app returned an element list the host could not read.");
+        return tree.data;
+      },
+      candidates: (target, elements) => candidatesFor(target, elements),
+      touch: (call) => this.driveTouch(session, call),
+      reflexes: (at) => this.checkReflexes(session, at),
+      screen: (line, brief) => this.withLook(session, line, false, this.briefOn(brief)),
+    };
+  }
+
+  private routeServices(session: SessionInfo, account: string | undefined, brief: boolean | undefined): RouteServices {
+    return {
+      accounts: this.options.accounts?.store ?? undefined,
+      probeAccount: (field, named) => {
+        const used = this.accountText("$" + "{account." + field + "}", named, session);
+        return used !== null && !used.ok ? used.message : null;
+      },
+      runSteps: (steps, look) => this.run({ steps, account, brief, ...(look ? {} : { look: false }) }),
+      checkSteps: (steps) => {
+        // The call's account is the steps' default account here too, as when `run` runs them.
+        const before = this.runAccount;
+        this.runAccount = account;
+        try {
+          return this.checkSteps(steps);
+        } finally {
+          this.runAccount = before;
+        }
+      },
+    };
+  }
+
+  /**
+   * One move of a drive. The policy and a person's OK are checked as for the same call alone, before the request is sent (§18.4):
+   * against the element the drive already read when there is one, else by a dry run. With the app's `move` capability the
+   * request also waits for the next target and holds the touch to the element that was checked (`guard`).
+   */
+  private async driveTouch(session: SessionInfo, call: TouchCall): Promise<TouchOutcome> {
+    this.logExtra = undefined;
+    this.actionStartedAt = Date.now();
+    const lists = listsFor(this.policy, session.app);
+    const { tool, method, params } = call;
+    const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
+    // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
+    const url = typeof params["url"] === "string" ? params["url"] : "";
+    // A link that can't be fully decoded can't be read for words: it goes to a person (the label is the reason).
+    let known =
+      tool === "open_url"
+        ? [{ ref: "", role: "link", text: linkWords(url), ...(linkReadable(url) ? {} : { label: UNREADABLE_LINK }) } satisfies TreeElement]
+        : call.known;
+    const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" || tool === "open_url" ? tool : short ? "swipe" : null;
+    const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
+    let guard = call.guard;
+    // What the drive read may hide account values; the policy and the guard get the raw element (see resolveForPolicy).
+    let knownRaw: TreeElement[] | undefined;
+    // The policy and the guard are about the element that receives the touch, which may be an ancestor of the one named (§18.4).
+    if (call.known !== undefined && (tool === "tap" || tool === "long_press" || tool === "toggle") && (checked || guard !== undefined)) {
+      const named = call.known[0];
+      const needs = tool === "tap" ? "press" : tool === "long_press" ? "longPress" : "toggle";
+      // With account values hidden in what the drive read, the policy and the guard need the raw element: ask the app (a dry run).
+      if (named !== undefined && (this.host.redacting || !(named.actions ?? []).includes(needs))) {
+        // Not an actor itself (or hidden): the app's own tap resolution (a dry run) says which element takes the touch.
+        const resolved = await this.resolveForPolicy(session, method, params);
+        if (resolved.kind === "error") {
+          this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
+          return { kind: "stop", answer: fail(resolved.text) };
+        }
+        if (resolved.elements.length !== 1 || resolved.elements[0] === undefined || resolved.raw[0] === undefined) return { kind: "stop", answer: fail("Error not_found: the touch's target could not be resolved for the policy check.") };
+        known = resolved.elements;
+        knownRaw = resolved.raw;
+        if (guard !== undefined) guard = guardOf(resolved.raw[0]);
+      }
+    }
+    let waited: Waited | null = null;
+    if (guardedTool !== null && checked) {
+      const pair = known === undefined ? undefined : { elements: known, raw: knownRaw ?? known };
+      const ready = await this.awaitOk(session, guardedTool, method, params, lists, pair);
+      if ("stop" in ready) return { kind: "stop", answer: ready.stop };
+      waited = ready.waited;
+    }
+    let granted: OkVia | undefined;
+    const wire = call.pipelined
+      ? { method: "move", params: { method, params, ...(guard !== undefined ? { guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
+      : { method, params };
+    const timeoutMs = call.pipelined ? (call.next?.capMs ?? 0) + 15_000 : undefined;
+    let raw: unknown;
+    try {
+      const run = async (): Promise<unknown> => {
+        this.setOk(false);
+        if (guardedTool !== null && checked) {
+          // After a wait for a person, the element is read again: a change during the wait must be caught (§11.3).
+          const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known === undefined ? undefined : { elements: known, raw: knownRaw ?? known });
+          if ("stop" in gate) throw new PolicyStop(gate.stop);
+          granted = gate.via;
+        }
+        return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+      };
+      raw = this.options.control ? await this.options.control.runAgent(run) : await run();
+    } catch (error) {
+      if (error instanceof PolicyStop) return { kind: "stop", answer: error.answer };
+      this.logExtra = undefined;
+      const code = error instanceof TaplineError ? error.code : "internal";
+      this.showAction("agent", method, undefined, params, code, error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
+      return { kind: "error", code, message: error instanceof TaplineError ? error.message : describeError(error) };
+    }
+    const done = call.pipelined && typeof raw === "object" && raw !== null && "done" in raw ? (raw as { done: unknown }).done : raw;
+    this.noteTouch(method, params, done);
+    this.showAction("agent", method, done, params);
+    if (granted !== undefined) this.journeyRun?.noteOk(granted);
+    // A jump is a shortcut a user doesn't have; a journey whose `allow` names drive says so in its report (AGENT-TOOLS 1.13 18.12).
+    if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
+    const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
+    return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}) };
+  }
+
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
   sessionReport(args: Shape<"session_report"> = {}): CallToolResult {
     const dir = this.options.logDir;
     if (dir === undefined) return fail("Error unsupported: the action log is off (--no-log), so there is nothing to report.");
-    return text(reportFor(dir, args.since ?? this.startedAt, this.sessionTag));
+    // Names only; a username or password never reaches a report (§18.6).
+    return text(reportFor(dir, args.since ?? this.startedAt, this.sessionTag, this.options.accounts?.store?.names()));
   }
 
   /**
    * Runs a tool call and ends its answer with a note when the app stopped (AGENT-TOOLS 15.2): during this
    * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
    */
-  private noting(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+  private noting(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false): CallToolResult | Promise<CallToolResult> {
     // Nesting belongs to the call and what it awaits (not to this object), so calls running side by side each
     // count as outermost, and only a step inside a call is skipped.
     if (this.noteScope.getStore() === true) return run();
     const mark = this.host.crashMark();
     const startedWith: AppIdentity | undefined = this.host.current();
-    return this.noteScope.run(true, () => {
-      const result = run();
-      if (result instanceof Promise) return result.then((answer) => this.withPersonNote(this.withCrashNotes(answer, mark, startedWith)));
-      return this.withPersonNote(this.withCrashNotes(result, mark, startedWith));
-    });
+    // Reflexes fired during the call are counted for it, and said in its answer (§18.7).
+    const reflexes: ReflexCall = { fired: new Map(), lines: [] };
+    return this.noteScope.run(true, () =>
+      this.reflexScope.run(reflexes, () => {
+        const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
+        if (result instanceof Promise) {
+          return result.then((answer) => this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))), reflexes));
+        }
+        return this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith))), reflexes);
+      }),
+    );
+  }
+
+  /** What reflexes did in the call in flight: how often each fired, and the lines the answer carries. */
+  private readonly reflexScope = new AsyncLocalStorage<ReflexCall>();
+  /** A reflex's own step is running (in this call only): it triggers no reflex, no road and no recorded step. */
+  private inReflexStep(): boolean {
+    return this.reflexStep.getStore() === true;
+  }
+
+  /** The `Reflex:` lines (and the notes of a reflex that didn't fire) go right under the answer's first line. */
+  private withReflexLines(answer: CallToolResult, call: ReflexCall): CallToolResult {
+    if (call.lines.length === 0) return answer;
+    const [first, ...rest] = answer.content;
+    if (first === undefined || first.type !== "text") return answer;
+    const [head = "", ...more] = first.text.split("\n");
+    return { ...answer, content: [{ type: "text", text: [head, ...call.lines, ...more].join("\n") }, ...rest] };
+  }
+
+  /**
+   * AGENT-TOOLS 1.13 §18.7: looks for a declared reflex whose moment has come, and fires it. Called at a place change and before a
+   * failure is answered (1.13.1 item 10), never in a dry run, never in a replay, and in a user's-eyes journey only when its
+   * `allow` names `reflexes`. Reads nothing unless the app's map holds a reflex. Answers how many fired.
+   */
+  private async checkReflexes(session: SessionInfo, at?: string): Promise<number> {
+    const call = this.reflexScope.getStore();
+    if (call === undefined || this.inReflexStep() || this.replaying) return 0;
+    const map = this.options.maps === undefined ? undefined : this.mapOf(session);
+    const reflexes = map?.data().reflexes ?? [];
+    if (map === undefined || reflexes.length === 0) return 0;
+    const eyes = this.userEyes() ? "user" : "agent";
+    const allows = this.journeyRun?.allows(REFLEXES_ALLOWED) === true;
+    if (eyes === "user" && !allows) return 0;
+    const lists = listsFor(this.policy, session.app);
+    const thisMoment = new Set<string>();
+    let fired = 0;
+    // A reflex that doesn't fire uses no firing of the moment's three; skips are bounded on their own.
+    let skipped = 0;
+    while (fired < MAX_REFLEX_FIRINGS && skipped < MAX_REFLEX_SKIPS) {
+      let tree: TreeResult;
+      let place: string | null;
+      try {
+        const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+        if (!read.success) break;
+        tree = read.data;
+        place = at ?? (await placeNow(this.placeSource(session), map))?.place.name ?? null;
+      } catch {
+        break;
+      }
+      const match = matchReflex(reflexes, tree.elements, {
+        place,
+        firedThisCall: call.fired,
+        eyes,
+        journeyAllowsReflexes: allows,
+        firedThisMoment: thisMoment,
+        alerts: tree.alerts,
+        screen: tree.screen,
+      });
+      if (match === null) break;
+      thisMoment.add(match.name);
+      // The reflex's step is no move of the agent's: it leaves no road, no recorded step and no map change, and it never asks a
+      // person (see `reflexStep`). The scope is this step's own, so a call running beside it is not touched.
+      const outcome = await this.reflexStep.run(true, () =>
+        fireReflex(
+          match,
+          (step) => this.runStepNow(step),
+          (step) => this.reflexVerdict(session, step, lists),
+        ),
+      );
+      if (!("line" in outcome)) skipped++;
+      if ("line" in outcome) {
+        call.fired.set(match.name, (call.fired.get(match.name) ?? 0) + 1);
+        call.lines.push(outcome.line);
+        fired++;
+        this.observedPlace = undefined;
+      } else if (!call.lines.includes(`Note: ${outcome.skipped}`)) {
+        call.lines.push(`Note: ${outcome.skipped}`);
+      }
+    }
+    return fired;
+  }
+
+  /**
+   * The policy's verdict on a reflex's step, made right before it fires (§18.7): by the words the map keeps, and by the element
+   * the app would touch now. It uses the same word lists and the same matching as a single call (`policyWords`).
+   */
+  private async reflexVerdict(session: SessionInfo, step: ReflexDo, lists: { confirm: string[]; block: string[] }): Promise<ReflexVerdict> {
+    if (step.tool === "open_url" && !linkReadable(step.url)) return { kind: "unresolved", why: "its link's percent escapes can't be decoded" };
+    const words = reflexWords(step);
+    const blockedWord = matchWord(lists.block, words);
+    if (blockedWord !== null) return { kind: "blocked", word: this.host.redactOut(blockedWord) };
+    const flaggedWord = matchWord(lists.confirm, words);
+    if (flaggedWord !== null) return { kind: "flagged", word: this.host.redactOut(flaggedWord) };
+    if (lists.confirm.length === 0 && lists.block.length === 0) return { kind: "none" };
+    if (step.tool !== "tap" && step.tool !== "long_press" && step.tool !== "toggle") return { kind: "none" };
+    const method = step.tool === "tap" ? "press" : step.tool === "long_press" ? "longPress" : "toggle";
+    const resolved = await this.resolveForPolicy(session, method, { target: toWireTarget(step.target) });
+    if (resolved.kind === "error") return { kind: "unresolved", why: `it can't be checked now (${resolved.text.replace(/^Error \w+: /, "").split("\n")[0]?.slice(0, 120) ?? ""})` };
+    const verdict = this.policyWords(lists, resolved);
+    return verdict.kind === "none" ? { kind: "none" } : { kind: verdict.kind === "blocked" ? "blocked" : "flagged", word: verdict.word };
+  }
+
+  /** The elements a plain id, label or text target means now; null for any other target (an index, a ref, a point) or no read. */
+  private async namedCandidates(session: SessionInfo, params: unknown): Promise<TreeElement[] | null> {
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (typeof target !== "object" || target === null) return null;
+    const t = target as Record<string, unknown>;
+    if ("index" in t || "ref" in t || "x" in t || !("testID" in t || "label" in t || "text" in t)) return null;
+    try {
+      const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+      return read.success ? candidatesFor(target, read.data.elements) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * After a reflex fired: whether the step may run again (1.13.1 item 10). Only when the target is the one element it was before
+   * (its id, role, label and text), or, for a target a sheet hid, the one that came carries the name the failure gave. An index
+   * target, an ambiguous one and a changed one are not retried: the original failure is answered, with the Reflex line.
+   */
+  private async sameTarget(session: SessionInfo, params: unknown, before: TreeElement[] | null, message: string): Promise<boolean> {
+    if (before === null || before.length > 1) return false;
+    const after = await this.namedCandidates(session, params);
+    const [now] = after ?? [];
+    if (after === null || after.length !== 1 || now === undefined) return false;
+    const [was] = before;
+    if (was !== undefined) {
+      const key = (e: TreeElement): string => [e.testID ?? "", e.role ?? "", e.label ?? "", e.text ?? ""].join("|");
+      return key(was) === key(now);
+    }
+    const named = /"([^"]+)"/.exec(message)?.[1];
+    return named === undefined || [now.text, now.label].some((v) => v?.toLowerCase() === named.toLowerCase());
+  }
+
+  /** After a touch that changed the place (§18.7): the arrival is looked at for a reflex before the list is built. */
+  private async reflexAtPlaceChange(session: SessionInfo, from: Place | null): Promise<void> {
+    if (this.inReflexStep() || this.replaying || this.reflexScope.getStore() === undefined) return;
+    const map = this.options.maps === undefined ? undefined : this.mapOf(session);
+    if (map === undefined || map.data().reflexes.length === 0) return;
+    let arrived: Place | undefined;
+    try {
+      arrived = (await placeNow(this.placeSource(session), map))?.place;
+    } catch {
+      return;
+    }
+    if (arrived === undefined || (from !== null && from.name === arrived.name)) return;
+    await this.checkReflexes(session, arrived.name);
+  }
+
+  /** The needs-a-person moments already asked about in this call: one dialog per moment per call (§11.5). */
+  private readonly personScope = new AsyncLocalStorage<Set<string>>();
+
+  /**
+   * AGENT-TOOLS 1.13 §11.5: a call that ended because only a person can go on (the app isn't there, an alert, an app that
+   * stopped answering) tells the person in the host's dialog and waits. When the moment clears, the call runs again, so it
+   * checks the screen afresh; nothing was done, as the call failed before it began. Without a dialog: today's answer, with a Note.
+   */
+  private afterMoments(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false): CallToolResult | Promise<CallToolResult> {
+    const wasNotAnswering = this.host.current() !== undefined && this.host.isNotAnswering(this.host.current()?.id ?? "");
+    const failedFor = this.host.current()?.id;
+    const actingBefore = this.host.actingMark();
+    const first = run();
+    // A tool that answers at once (apps, open_app) never waits for a person.
+    if (!(first instanceof Promise)) return first;
+    return first.then((answer) =>
+      momentCode(answer) === undefined ? answer : this.settleMoments(answer, run, wasNotAnswering ? failedFor : undefined, actingBefore, isDrive),
+    );
+  }
+
+  /**
+   * Runs the call again only when it did nothing: no request that may act on the app was sent, and it isn't a batch
+   * (a batch never runs again; the person is told where to continue). Anything else is answered as it failed.
+   */
+  private async settleMoments(
+    first: CallToolResult,
+    run: () => CallToolResult | Promise<CallToolResult>,
+    notAnsweringBefore: string | undefined,
+    actingBefore: number,
+    isDrive = false,
+  ): Promise<CallToolResult> {
+    let answer = first;
+    for (let round = 0; round < 4; round++) {
+      const moment = await this.momentOf(answer, notAnsweringBefore);
+      if (moment === null) return answer;
+      const dialogs = this.dialogs;
+      const asked = this.personScope.getStore();
+      if (dialogs === undefined || !dialogs.available()) return this.withMomentNote(answer, moment.what);
+      if (asked === undefined || asked.has(moment.key)) return answer;
+      asked.add(moment.key);
+      const outcome = await this.askPerson(dialogs, momentMessage(moment), moment.cleared);
+      if (outcome === "cant") return appendNote(answer, "They can't now. Ask your user what to do.");
+      if (outcome === "no_dialog") return this.withMomentNote(answer, moment.what);
+      if (outcome !== "cleared") return answer;
+      // The person may have said Done before the app shows it: give it a moment.
+      await this.untilTrue(moment.cleared, this.options.personDoneGraceMs ?? 4000);
+      const step = batchStep(answer);
+      // A drive plans from where the app is, so it is called again; a step number means nothing to it.
+      if (step !== undefined && isDrive) return appendNote(answer, "The person is done; run the drive again; it plans from where the app is.");
+      if (step !== undefined) return appendNote(answer, `The person is done; continue from step ${step}.`);
+      if (this.host.actingMark() !== actingBefore) return appendNote(answer, "The person is done; the call had already acted, so it was not run again. Repeat what is left.");
+      // Running it again is the re-check of the screen.
+      answer = await run();
+      if (momentCode(answer) === undefined) return answer;
+    }
+    return answer;
+  }
+
+  /** Waits for a person in the dialog; the time spent is not the batch's (§9.3). */
+  private async askPerson(dialogs: Dialogs, message: string, cleared: () => Promise<boolean> | boolean): Promise<MomentOutcome> {
+    const hold = this.holdScope.getStore();
+    const started = Date.now();
+    try {
+      return await askDone(dialogs, message, cleared, {
+        ttlMs: this.options.personWaitMs ?? 120_000,
+        ...(this.options.personPollMs !== undefined ? { pollMs: this.options.personPollMs } : {}),
+        ...(hold?.signal !== undefined ? { signal: hold.signal } : {}),
+      });
+    } finally {
+      if (hold !== undefined) hold.ms += Date.now() - started;
+    }
+  }
+
+  private async untilTrue(check: () => Promise<boolean> | boolean, forMs: number): Promise<boolean> {
+    const until = Date.now() + forMs;
+    for (;;) {
+      if (await check()) return true;
+      if (Date.now() >= until) return false;
+      await this.sleep(Math.min(this.options.personPollMs ?? 500, 100));
+    }
+  }
+
+  /**
+   * A host with no dialog keeps today's answer; it ends with what the person has to do. Not for not_connected and
+   * not_answering: their text already says it (and the first answer has its own `Note: needs a person`).
+   */
+  private withMomentNote(answer: CallToolResult, what: string): CallToolResult {
+    const code = momentCode(answer);
+    if (code === "not_connected" || code === "not_answering") return answer;
+    return appendNote(answer, `Note: needs a person: ${what}.`);
+  }
+
+  private appName(): string {
+    return this.host.current()?.app.name ?? this.host.lastDisconnect()?.session.app.name ?? "the app";
+  }
+
+  /** What a person has to do to let this answer's call go on, and how to see it is done; null when it is no such moment. */
+  private async momentOf(answer: CallToolResult, notAnsweringBefore: string | undefined): Promise<Moment | null> {
+    const code = momentCode(answer);
+    const connected = (): boolean => this.host.current() !== undefined;
+    const app = plainText(this.appName(), 40);
+    // §11.5 gives this line for Tapline word for word (the phone locked is the app not in front), with no "go on" sentence.
+    const open = { key: "app", what: `open ${app} on the phone (unlock it first if it's locked)` };
+    const restart = { key: "restart", what: `close ${app} and open it again`, goOn: "it connects again" };
+    if (code === "not_connected") {
+      if (this.options.pairedBefore !== undefined && !this.options.pairedBefore()) {
+        return { key: "pair", what: "pair the phone (scan the QR code, or open the app and tap Connect)", goOn: "the app connects", cleared: connected };
+      }
+      const last = this.host.lastDisconnect();
+      const crashed = last !== undefined && this.host.crashEventsAfter(this.notedSeqOf(last.session), last.session).some((event) => event.kind === "disconnect");
+      return crashed ? { ...restart, cleared: connected } : { ...open, cleared: connected };
+    }
+    if (code === "in_background") {
+      return { ...open, cleared: () => this.host.current()?.appState?.state !== undefined && this.host.current()?.appState?.state !== "background" };
+    }
+    if (code === "not_answering") {
+      // One that stopped answering twice, or dropped after going silent: the person closes it and opens it again.
+      const session = this.host.current();
+      if (session === undefined) return { ...restart, cleared: connected };
+      if (notAnsweringBefore !== session.id) return null;
+      return { ...restart, cleared: () => this.host.current() !== undefined && this.host.current()?.id !== session.id };
+    }
+    if (code === "not_actionable") {
+      const alert = await this.openOsAlert();
+      const seen = alert !== null;
+      const only = alert !== null && alert.buttons.length === 1 ? alert.buttons[0] : undefined;
+      const what =
+        only !== undefined
+          ? `tap "${plainText(only.text, 40)}" on the alert`
+          : alert !== null && alert.title !== ""
+            ? `answer the alert "${plainText(alert.title, 60)}" on the phone`
+            : "answer the alert on the phone";
+      return { key: "alert", what, goOn: "the alert is gone", cleared: this.alertGone(seen) };
+    }
+    return null;
+  }
+
+  /** The first alert over the app that the tool can't tap (an OS alert), or null. */
+  private async openOsAlert(): Promise<NonNullable<TreeResult["alerts"]>[number] | null> {
+    const session = this.host.current();
+    if (session === undefined) return null;
+    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    return tree.success ? (tree.data.alerts ?? []).find((alert) => !alert.standIn) ?? null : null;
+  }
+
+  /**
+   * Whether the alert is gone: seen only when the app reports it (a JavaScript alert, or a build with Tapline's native
+   * module). An alert never seen is cleared by the person's Done alone.
+   */
+  private alertGone(seenAtStart: boolean): () => Promise<boolean> {
+    let seen = seenAtStart;
+    return async () => {
+      if ((await this.openOsAlert()) !== null) {
+        seen = true;
+        return false;
+      }
+      return seen;
+    };
+  }
+
+  /** `media`'s own needs-a-person moment, through the same dialog (a photo-access prompt): true when it cleared or was answered Done. */
+  private async personForMedia(message: string): Promise<boolean> {
+    const dialogs = this.dialogs;
+    const asked = this.personScope.getStore();
+    if (dialogs === undefined || !dialogs.available() || asked === undefined || asked.has("media")) return false;
+    asked.add("media");
+    const outcome = await this.askPerson(dialogs, message, this.alertGone(false));
+    return outcome === "cleared";
+  }
+
+  private accountsNoteDone = false;
+
+  /** The first answer of the session says an accounts file was refused (it sits in a git repo), once (AGENT-TOOLS 1.13 §18.6). */
+  private withAccountsNote(answer: CallToolResult): CallToolResult {
+    const loaded = this.options.accounts;
+    if (this.accountsNoteDone || loaded === undefined || loaded.store !== null) return answer;
+    if (answer.content[0]?.type !== "text") return answer;
+    this.accountsNoteDone = true;
+    // An answer that is the refusal itself already says it.
+    if (answer.content[0].text.includes(loaded.blocked)) return answer;
+    return appendNote(answer, `Note: ${loaded.blocked}`);
   }
 
   /** The first call has been answered, so the "needs a person" note has had its turn. */
@@ -1697,17 +2561,50 @@ export class TaplineTools {
   // -- run (AGENT-TOOLS 1.8 §9): a batch of steps, answered once
 
   async run(args: Shape<"run">): Promise<CallToolResult> {
+    const before = this.runAccount;
+    this.runAccount = args.account;
+    try {
+      // The batch counts its own waits for a person's OK, unless the call already has a counter (§9.3).
+      return await (this.holdScope.getStore() !== undefined ? this.runBatch(args) : this.holdScope.run({ ms: 0 }, () => this.runBatch(args)));
+    } finally {
+      this.runAccount = before;
+    }
+  }
+
+  private async runBatch(args: Shape<"run">): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const steps = args.steps as Step[];
+    const problem = this.checkSteps(steps);
+    if (problem !== null) return problem;
+    return this.runChecked(args, steps, session);
+  }
+
+  /** `run`'s checks of its steps, made before any runs (a bad step is `bad_params`, naming its number); null when they all hold. */
+  private checkSteps(steps: Step[]): CallToolResult | null {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
     for (const [i, step] of steps.entries()) {
       if (!(RUN_TOOLS as readonly string[]).includes(step.tool)) {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, ...given } = step as Step & { route?: unknown };
-      // §9.1: a step's own look and screenshot are ignored (the batch answers once), whether its tool has them or not.
-      const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot") || key in shape));
+      const { tool: _tool, expect: _expect, route: _route, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown };
+      // §9.1: `if` needs exactly one of text, id or label.
+      if (given_if !== undefined && (typeof given_if !== "object" || given_if === null || Array.isArray(given_if))) {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): if is an object with one of text, id or label (and gone), not ${JSON.stringify(given_if)}.`);
+      }
+      if (_optional !== undefined && typeof _optional !== "boolean") {
+        return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): optional is true or false, not ${JSON.stringify(_optional)}.`);
+      }
+      if (given_if !== undefined) {
+        const checked = ifSchema.safeParse(given_if);
+        if (!checked.success) {
+          return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${checked.error.issues.map((issue) => issue.message).join("; ")}.`);
+        }
+      }
+      // §9.1: a step's own look, screenshot and brief are ignored (the batch answers once), whether its tool has them or not.
+      const params = Object.fromEntries(Object.entries(given).filter(([key]) => !(key === "look" || key === "screenshot" || key === "brief") || key in shape));
       if (step.tool === "compare_screen" && (params as { update?: unknown }).update !== undefined) {
         return fail(`Error bad_params: step ${i + 1}: update can't be used in run (a step never saves a reference)`);
       }
@@ -1739,6 +2636,7 @@ export class TaplineTools {
       if (step.tool === "performance") {
         delete params["look"];
         delete params["screenshot"];
+        delete params["brief"];
         // Checked before any step runs (and in a dry run), not when this step's turn comes.
         if (params["launch"] === true && params["tap"] !== undefined) {
           return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): launch reloads the app and tap taps in it; give one of them.`);
@@ -1753,6 +2651,25 @@ export class TaplineTools {
       const parsed = z.object(shape).strict().safeParse(params);
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
+      }
+      // A drive step needs a place or a route, and carries no `then` of its own: the steps after it are the batch's (18.4, 9.1).
+      if (step.tool === "drive") {
+        const wanted = parsed.data as unknown as DriveArgs;
+        const words = `step ${i + 1} (${describeRunStep(step)})`;
+        const wrong = driveArgsError(wanted);
+        if (wrong !== null) return fail(`Error bad_params: ${words}: ${wrong}`);
+        if (wanted.then !== undefined) return fail(`Error bad_params: ${words}: then goes on a drive call of its own; in run, put the steps after the drive step.`);
+      }
+      // A test account's value is checked before any step runs too (§18.6): whole text, a known account for this app.
+      if (step.tool === "type_text") {
+        const typed = (params as { text?: unknown }).text;
+        const named = (params as { account?: unknown }).account;
+        const used = typeof typed === "string" ? this.accountText(typed, typeof named === "string" ? named : undefined, session) : null;
+        if (used !== null && !used.ok) return fail(`Error ${used.code}: step ${i + 1} (${describeRunStep(step)}): ${used.message}`);
+        // `as` is checked before any step runs too (§18.5): it goes only while a route records.
+        const as = (params as { as?: unknown }).as;
+        const badAs = typeof as === "string" ? this.asRefusal(as, typeof typed === "string" ? typed : "", typeof named === "string" ? named : undefined) : null;
+        if (badAs !== null) return fail(badAs.replace("bad_params: ", `bad_params: step ${i + 1} (${describeRunStep(step)}): `));
       }
       // Every reference name is checked before any step runs: a name with a path in it never reaches the disk.
       const names = [step.tool === "compare_screen" ? (params as { name?: unknown }).name : undefined, step.expect?.matches];
@@ -1770,11 +2687,19 @@ export class TaplineTools {
       const refused = this.journeyStepRefusal(step, i);
       if (refused !== null) return fail(refused);
     }
+    return null;
+  }
+
+  private async runChecked(args: Shape<"run">, steps: Step[], session: SessionInfo): Promise<CallToolResult> {
     this.diffSaved = null;
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
     const started = Date.now();
+    const hold = this.holdScope.getStore() ?? { ms: 0 };
+    const heldAtStart = hold.ms;
     const batchId = `b${started.toString(36)}`;
+    // A drive step inside a batch may run a batch of its own (a route): the outer one is put back after it.
+    const outerBatch = this.batch;
     const notes: string[] = [];
     const trace: string[] = [];
     let ran = 0;
@@ -1782,15 +2707,31 @@ export class TaplineTools {
     // The newest log time when the current step began: a failed step shows the app's warnings since then (§15.4).
     let stepMark: number | undefined;
     for (const [i, step] of steps.entries()) {
-      if (Date.now() - started > RUN_TIMEOUT_MS) {
+      // Time spent waiting for a person's OK isn't counted (§9.3).
+      if (Date.now() - started - (hold.ms - heldAtStart) > RUN_TIMEOUT_MS) {
         stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
         break;
       }
+      if (this.holdScope.getStore()?.signal?.aborted === true) {
+        stop = { index: i, code: "cancelled", message: "the call was cancelled", rest: [] };
+        break;
+      }
       const at = Date.now();
+      // §9.1: one look, right after the step before settled; a skipped step counts as passed and its expect isn't checked.
+      const skipped = await this.skipReason(session, step, i + 1);
+      if (typeof skipped === "object" && skipped !== null) {
+        stop = { index: i, code: "bad_params", message: skipped.error, rest: [] };
+        break;
+      }
+      if (skipped !== null) {
+        trace.push(skipped);
+        ran++;
+        continue;
+      }
       stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
       const answer = await this.runStep(step).finally(() => {
-        this.batch = undefined;
+        this.batch = outerBatch;
       });
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       if (answer.isError === true) {
@@ -1813,10 +2754,14 @@ export class TaplineTools {
           break;
         }
       } else if (step.expect !== undefined) {
+        this.matchedNames = [];
         const missed = await this.expectMissed(step.expect);
         if (missed !== null) {
           stop = { index: i, code: "expect_failed", message: `its action ran, but ${missed}`, rest: [] };
           break;
+        }
+        if (step.expect.matches !== undefined && this.matchedNames.length > 0) {
+          notes.push(`Note (step ${i + 1}): the screen matches "${step.expect.matches}" with changes: changed at ${this.matchedNames.join(", ")}`);
         }
         // A picture check that held is kept in a recording, as compare_screen's is: right after the action, the
         // script makes it that step's `matches` again (AGENT-TOOLS 1.9 §14.2).
@@ -1860,13 +2805,43 @@ export class TaplineTools {
       this.markListUnseen();
       response = text([first, ...tail].join("\n"));
     } else {
-      response = await this.withLook(live, first, args.screenshot === true);
+      response = await this.withLook(live, first, args.screenshot === true, this.briefOn(args.brief));
       if (tail.length > 0) {
         const [top, ...rest] = response.content;
         if (top !== undefined && top.type === "text") response = { ...response, content: [{ type: "text", text: [top.text.trimEnd(), ...tail].join("\n") }, ...rest] };
       }
     }
     return failed ? { ...response, isError: true } : response;
+  }
+
+  /**
+   * AGENT-TOOLS 1.13 §9.1: the skipped line when a step's `if` or `optional` doesn't hold, else null. One look per
+   * check, no wait. The app answers a `waitFor` with `once`; an older app, or a `ref`, is read from one list.
+   */
+  private async skipReason(session: SessionInfo, step: Step, number: number): Promise<string | { error: string } | null> {
+    for (const condition of conditionsOf(step)) {
+      const params = waitParams(condition, this.userEyes());
+      const once = params !== null && session.capabilities.includes("waitOnce");
+      // The list cuts a long text on the wire (`…(+57)`), so the host can't match one longer than the cut itself.
+      if (!once && params !== null && "text" in condition.probe && condition.probe.text.length > WIRE_TEXT_MAX) {
+        return { error: `its ${condition.kind} text is longer than the app's list shows, and this app can't check it once; use a shorter text, or a wait_for first.` };
+      }
+      let holds: boolean;
+      if (once) {
+        try {
+          const raw = await this.host.request("waitFor", params, { sessionId: session.id });
+          holds = typeof raw === "object" && raw !== null && (raw as { found?: unknown }).found === true;
+        } catch {
+          // A check that couldn't be made doesn't hide the step: it runs and says what is wrong itself.
+          holds = true;
+        }
+      } else {
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        holds = tree.success ? holdsIn(tree.data.elements, condition) : true;
+      }
+      if (!holds) return skippedLine(number, condition.kind, condition.label, condition.gone);
+    }
+    return null;
   }
 
   /** The newest log time of a session (or of the app's current session), undefined without lines. */
@@ -1901,10 +2876,15 @@ export class TaplineTools {
     const total = steps.length;
     const first = steps[0] as Step;
     const head = `Would run ${total} step${total === 1 ? "" : "s"}`;
+    // §11.4: a dry run runs every check, the step's own if and optional too.
+    const live = this.host.current();
+    const skipped = live === undefined ? null : await this.skipReason(live, first, 1);
+    if (typeof skipped === "string") return text(`${head}; step 1 would be skipped (${skipped.replace(/^ {2}1\. skipped \(/, "").replace(/\)\.$/, "")}).`);
+    if (skipped !== null) return fail(`Error bad_params: ${head}; step 1 (${describeRunStep(first)}): ${skipped.error}`);
     // A performance step with a tap: the tap resolves like any touch; nothing is measured (AGENT-TOOLS §15.3).
     const perfTap = first.tool === "performance" ? (first as Record<string, unknown>)["tap"] : undefined;
     const probe = perfTap !== undefined ? ({ tool: "tap", target: perfTap } as Step) : first;
-    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(probe.tool)) {
+    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe", "drive"].includes(probe.tool)) {
       const answer = await this.runStep({ ...probe, dry_run: true } as Step);
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       const [line, ...rest] = said.split("\n");
@@ -1928,8 +2908,8 @@ export class TaplineTools {
   }
 
   private runStepNow(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, route: _route, ...rest } = step as Step & { route?: unknown };
-    const quiet = { ...rest, look: false, screenshot: false };
+    const { tool, expect: _expect, route: _route, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown };
+    const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
         return this.tap(quiet as Shape<"tap">);
@@ -1957,6 +2937,8 @@ export class TaplineTools {
         return this.compareStep(rest as Shape<"compare_screen">);
       case "performance":
         return this.performance(rest as Shape<"performance">);
+      case "drive":
+        return this.drive(rest as Shape<"drive">, { asStep: true });
     }
   }
 
@@ -2117,6 +3099,7 @@ export class TaplineTools {
       session,
       request: (params) => this.host.request("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
       describeError,
+      askPerson: (message) => this.personForMedia(message),
     });
   }
 
@@ -2170,7 +3153,9 @@ export class TaplineTools {
     width: number = DEFAULT_SCREENSHOT_WIDTH,
     onlyChanges = false,
     labels = false,
-  ): Promise<{ content: CallToolResult["content"]; isError: boolean }> {
+    /** A brief answer (AGENT-TOOLS 1.13 §13.4): the answer's first line; the text then starts with it. */
+    briefFirst?: string,
+  ): Promise<{ content: CallToolResult["content"]; isError: boolean; placeLine?: string }> {
     const sid = session.id;
     // Right after typing into a password field iOS may still show its last character: no picture then, and the note says why.
     const secureQuiet = wantScreenshot && this.secureWindow();
@@ -2204,23 +3189,44 @@ export class TaplineTools {
     }
 
     this.listed.add(sid);
+    const previousElements = this.listBase?.elements ?? [];
+    const seenPlace = this.observePlace(session, tree);
     this.lastLookRoute = tree.route?.names;
     if (tree.screen) this.lastScreen = { w: tree.screen.width, h: tree.screen.height };
     const alertsNow = (tree.alerts ?? []).length > 0;
     const alertGone = this.alertOpen.has(sid) && !alertsNow;
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
-    const changesText = askChanges ? formatChanges(tree, { alertGone, eyes }) : null;
+    const changeBlock = askChanges ? changeParts(tree, { alertGone, eyes }) : null;
+    const changesText = changeBlock === null ? null : [changeBlock.label, ...changeBlock.header, ...changeBlock.changes].join("\n");
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
     if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
     else if (this.listBase !== undefined) this.listBase = { elements: this.listBase.elements, stale: true, unseen: false };
     // A full list gives every ref a fresh meaning, so refs are trustworthy again.
     if (changesText === null) this.personActed = false;
-    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes })];
+    // §18.1: `Place:` goes on a full list (a new screen), never on a same-screen answer, and not on the glass of a user's eyes.
+    // `look` carries it in its header; an action's answer carries it after its first line (withLook).
+    const placeLine = changesText === null && !eyes ? (seenPlace?.line ?? null) : null;
+    const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes, ...(!onlyChanges && placeLine !== null ? { place: placeLine } : {}) })];
+    // Brief: the same facts, cut. The journey's copy of a full list below stays whole.
+    const briefed =
+      briefFirst === undefined
+        ? undefined
+        : changeBlock !== null
+          ? briefLines({ first: briefFirst, label: changeBlock.label, changes: changeBlock.changes, fixed: changeBlock.header })
+          : briefLines({
+              first: briefFirst,
+              ...(placeLine !== null ? { place: placeLine } : {}),
+              changes: [],
+              screen: briefScreen(tree.elements, previousElements, { eyes }),
+              // The off-screen count stays: what lies below or above is what an agent scrolls for.
+              fixed: [...formatStatus(tree), ...offScreenLine(tree, eyes)],
+            });
     // A journey keeps the first full list of each screen (and counts the screens entered) for its report.
     if (changesText === null) this.journeyRun?.noteFullList({ route: tree.route?.names ?? [], text: lines[0] ?? "", fromAction: onlyChanges });
     // A full list in place of the changes (most of the screen changed) still says what changed out of view.
-    if (askChanges && changesText === null && !eyes) lines.push(...formatOffScreenAfterList(tree));
+    if (askChanges && changesText === null && !eyes && briefed === undefined) lines.push(...formatOffScreenAfterList(tree));
+    if (briefed !== undefined) lines[0] = briefed.join("\n");
     const content: CallToolResult["content"] = [];
     // Notes come last (AGENT-TOOLS §3.6), after the list and any `Screenshot:` path line.
     const notes: string[] = [...alertNotes(tree)];
@@ -2268,7 +3274,103 @@ export class TaplineTools {
       notes.push(`Note: screenshot failed: ${shot.error instanceof Error ? shot.error.message : String(shot.error)}`);
     }
     lines.push(...notes, ...this.takePersonNote());
-    return { content: [{ type: "text", text: lines.join("\n") }, ...content], isError: false };
+    return {
+      content: [{ type: "text", text: lines.join("\n") }, ...content],
+      isError: false,
+      ...(onlyChanges && placeLine !== null && briefed === undefined ? { placeLine } : {}),
+    };
+  }
+
+  // -- places and roads (AGENT-TOOLS 1.13 §18.1 to §18.3)
+
+  /** The app's map, when this server keeps maps. */
+  private mapOf(session: SessionInfo): AppMap | undefined {
+    const map = this.options.maps?.forApp(session.app);
+    map?.useSession(session.id);
+    return map;
+  }
+
+  /** Where the app is, from what this host already holds, and how to ask it. */
+  private placeSource(session: SessionInfo): PlaceSource {
+    return {
+      capabilities: session.capabilities,
+      latest: () => this.host.sessions().find((s) => s.id === session.id)?.place,
+      request: (method, params) => this.host.request(method, params ?? {}, { sessionId: session.id }),
+    };
+  }
+
+  /** Notes the place a fresh list shows. A script that replays doesn't change the map (§18.9); a map that fails never fails a call. */
+  private observePlace(session: SessionInfo, tree: TreeResult): { line: string | null } | undefined {
+    if (this.replaying) return undefined;
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return undefined;
+      const seen = map.observe(tree);
+      this.observedPlace = { sessionId: session.id, place: seen.place };
+      return { line: seen.line };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Before a move: where the app is. Only for calls that can be roads (§18.2). */
+  private roadStart(session: SessionInfo, method: string): { map: AppMap; from: Place | null; typed: boolean } | null {
+    if (this.options.maps === undefined || this.replaying || !ROAD_METHODS.has(method)) return null;
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return null;
+      const from = placeBefore(this.placeSource(session), map);
+      // Asked now: the look after the move may arrive somewhere else, and that clears it.
+      return { map, from, typed: map.typedHere() };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * After a move: saves it as a road when it left a place and arrived at another, and says what the agent should
+   * know (a link that wasn't saved; a move that needed a person's OK). Never fails the call.
+   */
+  private async roadEnd(
+    session: SessionInfo,
+    start: { map: AppMap; from: Place | null; typed: boolean },
+    call: { method: string; params: unknown; result: unknown },
+    neededOk: boolean,
+  ): Promise<string[]> {
+    try {
+      const { map, from } = start;
+      if (call.method === "type") {
+        map.noteTyped();
+        return [];
+      }
+      const classified = classifyMove({ ...call, by: "agent", neededOk, replaying: this.replaying });
+      if ("skip" in classified && classified.skip !== "needed_ok") return [];
+      const source = this.placeSource(session);
+      const arrived = this.observedPlace?.sessionId === session.id ? this.observedPlace.place : (await placeNow(source, map))?.place;
+      if (arrived === undefined) return [];
+      const moved = from === null || from.name !== arrived.name;
+      if ("skip" in classified) return from !== null && moved ? ["Note: not saved as a road (it needed a person's OK)."] : [];
+      // The log keeps where this touch led and whether the map already knew the way, for the report's known-way flag (16.1).
+      if (from !== null && moved) {
+        const known = map.data().roads.some((road) => road.from === from.name && road.to === arrived.name && (road.by === "tapline" || road.by === "both") && map.isProven(road));
+        const logged = this.callScope.getStore()?.entries.at(-1);
+        if (logged !== undefined && logged.entry.of === undefined && AGENT_TOUCHES.has(logged.entry.tool)) logged.entry.way = { from: from.name, to: arrived.name, known };
+      }
+      let move = classified.move;
+      if (move.tool === "open_url") {
+        // Only a place the link reached keeps it, and only as a pattern, never the real url (§18.3).
+        if (!moved) return [];
+        if (session.capabilities.includes("places")) await map.ensureKnown(session.id, () => source.request("places", {}));
+        const url = (call.params as { url?: unknown }).url;
+        const link = typeof url === "string" ? map.rememberLink(url, arrived) : { saved: false as const, message: LINK_NOT_SAVED };
+        if (!link.saved) return [link.message];
+        move = { ...move, url: link.link };
+      }
+      map.recordMove(from, move, classified.names, arrived, Date.now() - (this.actionStartedAt ?? Date.now()), start.typed ? "typed" : undefined);
+      return [];
+    } catch {
+      return [];
+    }
   }
 
   // -- actions
@@ -2299,8 +3401,13 @@ export class TaplineTools {
     this.lastTouch = { ...(point !== undefined ? { point } : {}), ...(frame ? { frame } : {}) };
   }
 
+  /** Runs one action in its own approval scope (see `okScope`). */
+  private act(...args: Parameters<TaplineTools["actScoped"]>): ReturnType<TaplineTools["actScoped"]> {
+    return this.okScope.run({ used: false }, () => this.actScoped(...args));
+  }
+
   /** Runs a request, then (unless disabled) appends the fresh element list and how long the app took to settle. */
-  private async act(
+  private async actScoped(
     method: string,
     params: unknown,
     describe: (result: unknown) => string,
@@ -2311,36 +3418,70 @@ export class TaplineTools {
     nothingDone?: (result: unknown) => boolean,
     /** Runs inside the agent's turn, right before the request: an answer stops the call there (the policy). */
     preflight?: () => Promise<CallToolResult | null>,
+    /** The call's `brief` (else the server's `--brief`): a short answer, and no `Settled in` line (AGENT-TOOLS 1.13 §13.4). */
+    brief?: boolean,
+    /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
+    touch?: NoChangeAction,
+    /** What goes only to the app: a test account's value and the kind of field it may go into. Nothing else sees it (§18.6). */
+    wire?: { values: Record<string, unknown>; sessionId: string },
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
+    // The value was made for the app that was current when the account was checked; no other app gets it, and a
+    // placeholder never goes to any app as text (§18.6).
+    if (wire !== undefined && wire.sessionId !== session.id) {
+      return fail("Error not_connected: the app changed while the account's value was being prepared; try again.");
+    }
+    if (wire === undefined && method === "type" && typeof params === "object" && params !== null && String((params as { text?: unknown }).text ?? "").includes("${account.")) {
+      return fail("Error bad_params: an account value can't be typed as plain text; it needs a loaded account and a connected app.");
+    }
+    const shortAnswer = this.briefOn(brief);
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
     let result: unknown;
+    // Where the app is before the move; the road is saved after it (AGENT-TOOLS 1.13 §18.2).
+    const road = this.roadStart(session, method);
+    this.observedPlace = undefined;
     this.actionStartedAt = Date.now();
-    try {
-      const timeoutMs = answerTimeoutMs(method, params);
-      const run = async (): Promise<unknown> => {
-        if (preflight !== undefined) {
-          const stop = await preflight();
-          if (stop !== null) throw new PolicyStop(stop);
+    // A reflex gets one chance before a failure is answered (1.13.1 item 10); the step then runs again, its checks included.
+    let reflexTried = false;
+    for (;;) {
+      try {
+        const timeoutMs = answerTimeoutMs(method, params);
+        const run = async (): Promise<unknown> => {
+          this.setOk(false);
+          if (preflight !== undefined) {
+            const stop = await preflight();
+            if (stop !== null) throw new PolicyStop(stop);
+          }
+          // The app gets the value and the kind, not the account's name; the log, the viewer and a recording get `params`.
+          // `as` is a recording's name for the text, never the app's business.
+          const kept = typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "as" && (wire === undefined || key !== "account"))) : params;
+          const sent = wire === undefined ? kept : { ...(kept as Record<string, unknown>), ...wire.values };
+          return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        };
+        // With the live viewer, a person watching goes first.
+        result = this.options.control ? await this.options.control.runAgent(run) : await run();
+        break;
+      } catch (error) {
+        const failure = error instanceof PolicyStop ? parseError(answerText(error.answer)) : error instanceof TaplineError ? { code: error.code, message: error.message } : null;
+        if (!reflexTried && failure !== null && isReflexFailure(failure.code, failure.message)) {
+          reflexTried = true;
+          const before = this.mapOf(session)?.data().reflexes.length ? await this.namedCandidates(session, params) : null;
+          if ((await this.checkReflexes(session)) > 0 && (await this.sameTarget(session, params, before, failure.message))) continue;
         }
-        return this.host.request(method, params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
-      };
-      // With the live viewer, a person watching goes first.
-      result = this.options.control ? await this.options.control.runAgent(run) : await run();
-    } catch (error) {
-      if (error instanceof PolicyStop) return error.answer;
-      this.logExtra = undefined;
-      this.showAction(
-        "agent",
-        method,
-        undefined,
-        params,
-        error instanceof TaplineError ? error.code : "internal",
-        error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
-      );
-      return fail(describeError(error));
+        if (error instanceof PolicyStop) return error.answer;
+        this.logExtra = undefined;
+        this.showAction(
+          "agent",
+          method,
+          undefined,
+          params,
+          error instanceof TaplineError ? error.code : "internal",
+          error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
+        );
+        return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
+      }
     }
     const line = describe(result);
     this.noteTouch(method, params, result);
@@ -2349,7 +3490,15 @@ export class TaplineTools {
       return text([line, ...this.takePersonNote()].join("\n"));
     }
     this.showAction("agent", method, result, params);
+    // A touch that left the place it was at: a reflex may have its moment now, before the list is built (1.13.1 item 10).
+    if (road !== null) await this.reflexAtPlaceChange(session, road.from);
+    // A handler that threw: a step of `run` or `replay` fails (the touch happened, and the app's code is what is wrong);
+    // anywhere else every answer says so, whether the screen changed or not (lead's decision, review of 1.6 task 5).
+    const threwLine = touch !== undefined ? threwText(touch, readPressFacts(result)) : null;
+    if (threwLine !== null && this.batch !== undefined) return fail(`Error internal: ${threwLine}`);
+    let threwSaid = false;
     let response: CallToolResult;
+    const extra = [...(extraNotes?.(result) ?? [])];
     this.lastLookRoute = undefined;
     const settledMs =
       typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
@@ -2361,21 +3510,64 @@ export class TaplineTools {
       this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
       response = text([line, ...this.takePersonNote()].join("\n"));
     } else {
-      // The app already waited until it was still (AGENT-TOOLS §6), so the list is fresh.
-      response = await this.withLook(session, line, screenshot === true);
-      if (settled !== undefined) {
-        const [first, ...rest] = response.content;
-        if (first !== undefined && first.type === "text") {
-          // `Settled in` is the last line that isn't a note: it goes before the trailing `Note:` lines.
-          const all = first.text.trimEnd().split("\n");
-          let end = all.length;
-          while (end > 1 && all[end - 1]?.startsWith("Note: ") === true) end--;
-          all.splice(end, 0, settled);
-          response = { ...response, content: [{ type: "text", text: all.join("\n") }, ...rest] };
+      // The touch happened about `settledMs` before the answer came; every wait is counted from there.
+      const touchedAt = this.clock() - (typeof settledMs === "number" && Number.isFinite(settledMs) ? settledMs : 0);
+      // A touch that may change nothing is looked at without a picture first: the picture is for the final look.
+      const mayWait = touch !== undefined && this.batch === undefined && !this.replaying;
+      const lookAgain = async (shot: boolean): Promise<CallToolResult> => {
+        const looked = await this.withLook(session, line, shot, shortAnswer);
+        if (settled === undefined || shortAnswer) return looked;
+        const [first, ...rest] = looked.content;
+        if (first === undefined || first.type !== "text") return looked;
+        // `Settled in` is the last line that isn't a note: it goes before the trailing `Note:` lines.
+        const all = first.text.trimEnd().split("\n");
+        let end = all.length;
+        while (end > 1 && all[end - 1]?.startsWith("Note: ") === true) end--;
+        all.splice(end, 0, settled);
+        return { ...looked, content: [{ type: "text", text: all.join("\n") }, ...rest] };
+      };
+      // The app waited until it was still (AGENT-TOOLS §6), so the list is fresh.
+      response = await lookAgain(screenshot === true && !mayWait);
+      // A touch that changed nothing is watched a little longer before it is said so (§3). Not inside `run`
+      // (a batch answers once), and the app has to have answered with a list.
+      if (mayWait && response.isError !== true && !saysNoVisibleChange(answerText(response)) && screenshot === true) {
+        response = await this.withPicture(session, response);
+      }
+      if (mayWait && touch !== undefined && response.isError !== true && saysNoVisibleChange(answerText(response))) {
+        const wait = NO_CHANGE_WATCH_MS - (this.clock() - touchedAt);
+        if (wait > 0) await this.sleep(wait);
+        const later = await lookAgain(screenshot === true);
+        // What the first look said once stays said.
+        const carried = answerText(response).split("\n").filter((row) => /^Note: (changes are since your last list|a person used the app)/.test(row));
+        const missing = carried.filter((row) => !answerText(later).includes(row));
+        const [top, ...rest] = later.content;
+        const merged: CallToolResult =
+          missing.length > 0 && top !== undefined && top.type === "text"
+            ? { ...later, content: [{ type: "text", text: [top.text.trimEnd(), ...missing].join("\n") }, ...rest] }
+            : later;
+        if (later.isError === true) {
+          // The app crashed or went away while it was watched: that answer stands, not a note about a quiet screen.
+          response = later;
+        } else if (!saysNoVisibleChange(answerText(later))) {
+          // Something changed meanwhile: the normal answer, and no note.
+          response = merged;
+        } else {
+          response = merged;
+          const seconds = Math.max(this.clock() - touchedAt, 0) / 1000;
+          const clause = noChangeClause(
+            touch,
+            session.capabilities.includes("pressFacts") ? readPressFacts(result) : null,
+            saysRequestsRunning(answerText(later)),
+            (element) => this.shortName(element, true),
+          );
+          extra.push(`${noChangeNote(touch, seconds)}${clause !== null ? ` ${clause}` : ""}`);
+          // The clause already says a handler threw.
+          threwSaid = threwLine !== null;
         }
       }
     }
-    const extra = [...(extraNotes?.(result) ?? [])];
+    if (threwLine !== null && !threwSaid) extra.push(`Note: ${threwLine}`);
+    if (road !== null && response.isError !== true) extra.push(...(await this.roadEnd(session, road, { method, params, result }, this.okScope.getStore()?.used === true)));
     const capMs = typeof result === "object" && result !== null && "settleCapMs" in result ? (result as { settleCapMs: unknown }).settleCapMs : undefined;
     if (typeof capMs === "number" && Number.isFinite(capMs) && capMs > 0) {
       extra.push(`Note: the screen was still changing after ${Number((capMs / 1000).toFixed(3))} s (an animation or video); positions may be mid-change.`);
@@ -2397,10 +3589,16 @@ export class TaplineTools {
       const { params: chosen, fragile } = stableParams(params, result);
       // A ref saved as a label or text that several elements share needs its index (AGENT-TOOLS 1.8 §9.4).
       const stable = await this.withIndexIfShared(params, chosen, result, session.id);
-      // A password field's text is never saved in a script (Tapwright's review, M4).
-      const secret = method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
-      const step: ScriptStep = { method, params: secret ? { ...stable, text: "" } : stable };
+      // A password field's text is never saved in a script (Tapwright's review, M4). An account's value is a
+      // placeholder in `params`, so the script keeps it and replays with the account.
+      // `as` keeps a variable's placeholder instead, and a route keeps an account's too (AGENT-TOOLS 1.13 §18.5).
+      const typed = method === "type" && this.recording.route !== undefined ? routeTyped(stable) : null;
+      const secret = typed?.variable === undefined && wire === undefined && method === "type" && typeof result === "object" && result !== null && "secure" in result && result.secure === true;
+      const step: ScriptStep = { method, params: typed !== null && !secret ? typed.params : secret ? { ...stable, text: "" } : stable };
       if (secret) step.secret = true;
+      if (typed?.placeholder === true) step.placeholder = true;
+      if (typed?.variable !== undefined) this.recording.route?.variables.add(typed.variable);
+      if (typed?.account === true) this.recording.route?.variables.add("account");
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
@@ -2724,6 +3922,39 @@ export class TaplineTools {
     return parsed.data;
   }
 
+  /** A picture of the screen now, added to an answer that was made without one: its path line (file mode) or image, else a note. */
+  private async withPicture(session: SessionInfo, answer: CallToolResult): Promise<CallToolResult> {
+    const [first, ...rest] = answer.content;
+    if (first === undefined || first.type !== "text") return answer;
+    const rows = first.text.trimEnd().split("\n");
+    const notes: string[] = [];
+    const content: CallToolResult["content"] = [];
+    let line: string | undefined;
+    if (this.secureWindow()) notes.push(SECURE_QUIET_NOTE);
+    else if (this.noScreenshot.has(session.id)) notes.push(NO_SCREENSHOT_NOTE);
+    else {
+      try {
+        const image = await this.takeShot(session.id, DEFAULT_SCREENSHOT_WIDTH, 0.75);
+        if (this.options.screenshots === "file") {
+          const size = image.width !== undefined && image.height !== undefined ? ` (${image.width}x${image.height})` : "";
+          line = `Screenshot: ${this.saveShot(session.id, image.mime, image.data)}${size}`;
+        } else content.push({ type: "image", data: image.data, mimeType: image.mime });
+      } catch (error) {
+        if (error instanceof TaplineError && error.code === "unsupported") {
+          this.noScreenshot.add(session.id);
+          notes.push(NO_SCREENSHOT_NOTE);
+        } else notes.push(`Note: screenshot failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    // The path line goes before the Settled line and the notes.
+    let end = rows.length;
+    while (end > 1 && rows[end - 1]?.startsWith("Note: ") === true) end--;
+    if (rows[end - 1]?.startsWith("Settled in") === true) end--;
+    if (line !== undefined) rows.splice(end, 0, line);
+    rows.push(...notes);
+    return { ...answer, content: [{ type: "text", text: rows.join("\n") }, ...rest, ...content] };
+  }
+
   /** Adds an image to a result: inline, or saved with its path in file mode. */
   private deliver(sessionId: string, image: ShotImage, lines: string[], content: CallToolResult["content"]): void {
     if (this.options.screenshots === "file") {
@@ -2759,6 +3990,11 @@ export class TaplineTools {
    * folders to look in, in order. A missing reference hands back the screenshot, so the caller may save it.
    */
   private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
+    // A comparison, from a step's `expect` too, is made with animations normal (the tools that say so add the note).
+    return (await withNormalAnimations(this.host, session.id, () => this.checkAgainstReferenceNow(session, name, options))).value;
+  }
+
+  private async checkAgainstReferenceNow(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
     let shot: ShotImage;
     try {
       shot = await this.stillShot(session.id, options.width, 0.9);
@@ -2767,6 +4003,8 @@ export class TaplineTools {
     }
     this.lastMaskElements = undefined;
     if (!SCRIPT_NAME.test(name)) return { kind: "error", line: BAD_REFERENCE_NAME };
+    const clash = this.referenceClash(name, options.referencesDirs);
+    if (clash !== null) return { kind: "error", line: clash };
     const path = options.referencesDirs.map((dir) => join(dir, `${name}.jpg`)).find((candidate) => existsSync(candidate));
     if (path === undefined) return { kind: "missing", shot };
     let reference: ShotImage;
@@ -2813,7 +4051,8 @@ export class TaplineTools {
     // The pass bar compares the exact share; the rounded percent is only for showing (a few pixels round to 0%).
     const exactPercent = (diff.changedPixels / Math.max(1, diff.width * diff.height)) * 100;
     if (diff.changedPixels === 0 || exactPercent <= options.threshold) {
-      return { kind: "match", percent: diff.changedPercent, notes };
+      const names = diff.changedPixels === 0 ? [] : await this.changedClusterNames(session.id, diff, seen);
+      return { kind: "match", percent: diff.changedPercent, notes, threshold: options.threshold, names };
     }
 
     // Name the regions in points, with the elements they touch.
@@ -2822,15 +4061,7 @@ export class TaplineTools {
     const unit = scale === 1 ? "pixels" : "points";
     const regions = diff.boxes.map((box) => {
       const b = { x: box.x / scale, y: box.y / scale, width: box.width / scale, height: box.height / scale };
-      // The smallest named elements there: a page-sized container overlaps every change.
-      const near = found.elements
-        .filter((e) => e.frame && e.frame.x < b.x + b.width && e.frame.x + e.frame.width > b.x && e.frame.y < b.y + b.height && e.frame.y + e.frame.height > b.y)
-        .filter((e) => (e.text ?? "") !== "" || (e.label ?? "") !== "" || (e.testID ?? "") !== "")
-        .map((e) => ({ e, area: (e.frame?.width ?? 0) * (e.frame?.height ?? 0) }))
-        .filter(({ area }) => area <= Math.max(b.width * b.height * 4, 2500))
-        .sort((x, y) => x.area - y.area)
-        .slice(0, 2)
-        .map(({ e }) => describeElement(e));
+      const near = elementsUnder(b, found.elements).map((e) => describeElement(e));
       return { at: `@${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`, near };
     });
     const count = regions.length;
@@ -2843,6 +4074,29 @@ export class TaplineTools {
     const listed = regions.slice(0, MAX_REGION_LINES).map((region) => region.at).join(", ");
     const reason = `${diff.changedPercent}% changed from the reference "${name}" (threshold ${options.threshold}%), ${where}: ${listed}${count > MAX_REGION_LINES ? `, +${count - MAX_REGION_LINES} more` : ""}.`;
     return { kind: "differs", percent: diff.changedPercent, lines, reason, image: diff.image, notes };
+  }
+
+  /**
+   * The changed clusters of a match to name (1.13.1 item 2): each one that is at least 0.1% of the screen, and every
+   * one that overlaps a text element, whatever its size. An element's name, else the place in points. Never fails.
+   */
+  private async changedClusterNames(
+    sessionId: string,
+    diff: DiffResult,
+    seen: { scaleBase: number | undefined; elements: TreeResult["elements"] } | undefined,
+  ): Promise<string[]> {
+    const found = seen ?? (await this.peekElements(sessionId));
+    const scale = found.scaleBase === undefined ? 1 : diff.width / found.scaleBase;
+    const names: string[] = [];
+    for (const cluster of diff.clusters) {
+      const b = { x: cluster.x / scale, y: cluster.y / scale, width: cluster.width / scale, height: cluster.height / scale };
+      const near = elementsUnder(b, found.elements);
+      const overText = near.some((e) => (e.text ?? "") !== "");
+      if (!overText && clusterPercent(cluster, diff.width, diff.height) < NAMED_CLUSTER_PERCENT) continue;
+      names.push(near.length > 0 ? near.map((e) => describeElement(e)).join(", ") : `@${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)}`);
+    }
+    if (names.length <= MAX_REGION_LINES) return names;
+    return [...names.slice(0, MAX_REGION_LINES), `+${names.length - MAX_REGION_LINES} more`];
   }
 
   /** Why a check does not hold (for `run`, as a step or as `matches`), or null when it matches. */
@@ -2866,6 +4120,7 @@ export class TaplineTools {
   /** Whether the screen matches the reference `name` now (`expect.matches`): null when it does, else the reason. */
   private async matchMissed(name: string, threshold: number, ignore: IgnoreItem[]): Promise<string | null> {
     this.lastMaskElements = undefined;
+    this.matchedNames = [];
     if (!SCRIPT_NAME.test(name)) return parseError(BAD_REFERENCE_NAME).message;
     const session = this.host.current();
     if (session === undefined) return "the app isn't connected";
@@ -2883,6 +4138,7 @@ export class TaplineTools {
       referencesDirs: this.referencesDirs(folder),
     });
     this.keepDiff(check, name);
+    if (check.kind === "match") this.matchedNames = check.names;
     return this.referenceReason(check, name)?.message ?? null;
   }
 
@@ -2939,6 +4195,8 @@ export class TaplineTools {
   private writeReference(folder: string, name: string, shot: ShotImage): CallToolResult {
     // Every write checks the name itself, whatever the caller checked: no way out of the references folder.
     if (!SCRIPT_NAME.test(name)) return fail(BAD_REFERENCE_NAME);
+    const clash = this.referenceClash(name, [folder]);
+    if (clash !== null) return fail(clash);
     const path = join(folder, `${name}.jpg`);
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -2986,7 +4244,7 @@ export class TaplineTools {
       ...(args.width !== undefined ? { width: args.width } : {}),
     });
     if (recorded !== null) return fail(recorded);
-    return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+    return text([matchLine(name, check), ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
   }
 
   /**
@@ -3110,7 +4368,7 @@ export class TaplineTools {
       case "size":
         return fail(`Error bad_params: ${check.message}`);
       case "match":
-        return text([`Matches the reference "${name}": ${check.percent}% changed.`, ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
+        return text([matchLine(name, check), ...check.notes.map((n) => `Note: ${n}`)].join("\n"));
       case "differs": {
         const lines = [...check.lines, "The image shows the screen now, faded, with the changed pixels in red.", ...check.notes.map((n) => `Note: ${n}`)];
         const content: CallToolResult["content"] = [];
@@ -3136,10 +4394,13 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap), ...(this.userEyes() ? { noScroll: true } : {}) };
+        const tapLists = listsFor(this.policy, session.app);
+        const ready = await this.awaitOk(session, "tap", "press", pressParams, tapLists);
+        if ("stop" in ready) return ready.stop;
         // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
         // it, a person's input goes first, and the screen can't change between the check and the tap (PR #4 review).
         const turn = async (): Promise<CallToolResult | null> => {
-          const gate = await this.policyGate(session, "tap", "press", pressParams, listsFor(this.policy, session.app));
+          const gate = await this.policyGate(session, "tap", "press", pressParams, tapLists, ready.waited);
           if ("stop" in gate) return gate.stop;
           frames.push(await this.takeShot(session.id, frameWidth, 0.8));
           await this.host.request("press", pressParams, { sessionId: session.id });
@@ -3174,15 +4435,40 @@ export class TaplineTools {
     return dir === undefined || !SCRIPT_NAME.test(name) ? null : join(dir, `${name}.json`);
   }
 
+  /** `home` and `HOME` are one file on Windows and macOS: an error line when a saved script differs from `name` only in case. */
+  private scriptClash(name: string): string | null {
+    const dir = this.options.scriptsDir;
+    if (dir === undefined) return null;
+    const twin = caseTwin(name, stemsIn(dir, ".json"));
+    return twin === null ? null : `Error bad_params: the script "${name}" differs only in case from the existing "${twin}"; use that name.`;
+  }
+
+  /** The same for a reference name: against the pictures in `dirs`, then the compare steps earlier in this recording. */
+  private referenceClash(name: string, dirs: readonly string[]): string | null {
+    // One list for every folder and the recording: the exact name anywhere is the one meant, so it wins over a twin elsewhere.
+    const inFolders = dirs.flatMap((dir) => stemsIn(dir, ".jpg"));
+    const earlier =
+      this.recording !== null && !this.replaying
+        ? this.recording.steps.flatMap((step) => (step.method === "compareScreen" && typeof step.params["name"] === "string" ? [step.params["name"]] : []))
+        : [];
+    const twin = caseTwin(name, [...inFolders, ...earlier]);
+    if (twin === null) return null;
+    if (inFolders.includes(twin)) return `Error bad_params: the reference "${name}" differs only in case from the existing "${twin}"; use that name.`;
+    return `Error bad_params: the reference "${name}" differs only in case from "${twin}", used earlier in this recording; use that name.`;
+  }
+
   async record(args: Shape<"record">): Promise<CallToolResult> {
     const op = args.action ?? (args.start === true ? "start" : args.stop === true ? "stop" : "status");
     switch (op) {
       case "start": {
+        if (args.route !== undefined) return this.startRoute(args.route, args.name);
         const name = (args.name ?? "").trim() || `session-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
         if (this.scriptPath(name) === null) {
           return fail("Error bad_params: give the script a name of letters, digits, '.', '_' and '-' (e.g. \"checkout\").");
         }
         if (this.recording !== null) return fail(`Error bad_params: already recording "${this.recording.name}"; stop it first.`);
+        const scriptClash = this.scriptClash(name);
+        if (scriptClash !== null) return fail(scriptClash);
         const session = this.host.current();
         if (session === undefined) return this.notConnected();
         this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [] };
@@ -3194,7 +4480,7 @@ export class TaplineTools {
         return text(
           this.recording === null
             ? `Not recording.\n${this.scriptList()}`
-            : `Recording "${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
+            : `Recording ${this.recording.route !== undefined ? "route " : ""}"${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
         );
       case "discard": {
         const was = this.recording?.name;
@@ -3204,8 +4490,12 @@ export class TaplineTools {
       case "stop": {
         const recording = this.recording;
         if (recording === null) return fail("Error bad_params: not recording; start with record { start: true, name }.");
+        if (recording.route !== undefined) return this.stopRoute(recording, recording.route, args.path);
         const path = args.path !== undefined && args.path.trim() !== "" ? args.path.trim() : this.scriptPath(recording.name);
         if (path === null) return fail("Error internal: no scripts folder is configured; give a path.");
+        // A twin may have appeared while recording; nothing is written then, and the recording stays to stop again.
+        const stopClash = args.path !== undefined && args.path.trim() !== "" ? null : this.scriptClash(recording.name);
+        if (stopClash !== null) return fail(stopClash);
         const script: SharedScript = {
           format: "agent-tools-script",
           version: 1,
@@ -3238,12 +4528,69 @@ export class TaplineTools {
             `${secrets} step${secrets === 1 ? " types" : "s type"} into a password field: that text isn't saved. Put a test password into the script before you replay it.`,
           );
         }
-        if (recording.steps.some((step) => step.method === "type" && step.secret !== true)) {
+        if (recording.steps.some((step) => step.method === "type" && step.secret !== true && !isAccountStep(step))) {
           lines.push("The script keeps the other text typed in it: keep it private.");
         }
         return text(lines.join("\n"));
       }
     }
+  }
+
+  /** `record` with `route` (AGENT-TOOLS 1.13 §18.5): what follows is saved as a route from the place the app is at. */
+  private async startRoute(raw: string, given: string | undefined): Promise<CallToolResult> {
+    const name = routeSlug(raw);
+    if (name === null) return fail("Error bad_params: give the route a name of letters, digits, '.', '_' and '-' (e.g. \"sign_in\").");
+    if (given !== undefined && given.trim() !== "" && routeSlug(given) !== name) {
+      return fail(`Error bad_params: name the route in route only; name "${given}" isn't "${name}".`);
+    }
+    if (this.recording !== null) return fail(`Error bad_params: already recording "${this.recording.name}"; stop it first.`);
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const map = this.mapOf(session);
+    if (map === undefined) return fail("Error unsupported: this server keeps no map for this app, so a route can't be saved.");
+    const twin = caseTwin(name, Object.keys(map.data().routes));
+    if (twin !== null) return fail(`Error bad_params: the route "${name}" differs only in case from the existing "${twin}"; use that name.`);
+    const here = await placeNow(this.placeSource(session), map);
+    if (here === null) return fail("Error not_found: the app's current place isn't known, so a route can't start here; look at the screen first.");
+    this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [], route: { start: here.place.name, variables: new Set(), map } };
+    return text(
+      `Recording route "${name}" on ${session.app.name}, from ${here.place.name}. Every action from now on is a step; type_text with as saves its text as a variable. Stop with record { stop: true }.`,
+    );
+  }
+
+  /** `record` stop for a route: it ends at the place the app is at, and goes into the map folder's `routes/`. */
+  private async stopRoute(recording: NonNullable<TaplineTools["recording"]>, route: { start: string; variables: Set<string>; map: AppMap }, path: string | undefined): Promise<CallToolResult> {
+    if (path !== undefined && path.trim() !== "") return fail("Error bad_params: a route is saved in the app's map folder; path doesn't apply.");
+    const twin = caseTwin(recording.name, Object.keys(route.map.data().routes));
+    if (twin !== null) return fail(`Error bad_params: the route "${recording.name}" differs only in case from the existing "${twin}"; use that name.`);
+    const session = this.host.current();
+    const sameApp = session !== undefined && (session.app.id ?? session.app.name) === (recording.app.id ?? recording.app.name);
+    const end = sameApp ? await placeNow(this.placeSource(session), route.map) : null;
+    const steps = scriptSteps(recording.steps.map((step) => ({ ...step, params: escapeParams(step.params, step.placeholder === true) })));
+    const script = routeScript({ name: recording.name, app: recording.app.id ?? recording.app.name, start: route.start, end: end?.place.name, steps, variables: route.variables });
+    let saved: string;
+    try {
+      saved = await saveRoute(route.map.folder(), script, route.map);
+    } catch (error) {
+      // The recording stays, so stop can be tried again.
+      return fail(`Error internal: couldn't save the route: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.recording = null;
+    const way = end === null ? `from ${route.start}` : `${route.start} → ${end.place.name}`;
+    const lines = [`Saved route ${script.name} (${way}): ${steps.length} step${steps.length === 1 ? "" : "s"} to ${saved}.`];
+    if (route.variables.size > 0) lines.push(`Variables: ${[...route.variables].join(", ")}.`);
+    const ref = refStep(steps);
+    if (ref !== null) {
+      lines.push(`Note: step ${ref + 1} targets a ref, which won't exist on a new run, so replay refuses the route. Give that element a testID, or record it again by its text or label.`);
+    }
+    const secrets = recording.steps.filter((step) => step.secret === true).length;
+    if (secrets > 0) {
+      lines.push(`${secrets} step${secrets === 1 ? " types" : "s type"} into a password field: that text isn't saved. Use an account (\${account.password}) or as for it.`);
+    }
+    if (recording.steps.some((step) => step.method === "type" && step.secret !== true && step.placeholder !== true)) {
+      lines.push("The route keeps the other text typed in it (as makes a variable): keep it private.");
+    }
+    return text(lines.join("\n"));
   }
 
   /** `<script dir>/<script name>.references` and `.diff` for a script file. */
@@ -3299,7 +4646,12 @@ export class TaplineTools {
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
     if (this.recording !== null) return fail(`Error bad_params: stop recording "${this.recording.name}" before replaying.`);
-    const path = given !== "" ? given : this.scriptPath(name);
+    // On Windows and macOS a twin in another case would be found as if it were this name, and on Linux not: refuse it everywhere.
+    const scriptClash = given === "" ? this.scriptClash(name) : null;
+    if (scriptClash !== null) return fail(scriptClash);
+    let path = given !== "" ? given : this.scriptPath(name);
+    // A name that isn't a saved script may be a route in the app's map folder (§18.5).
+    if (given === "" && (path === null || !existsSync(path))) path = this.routePath(name) ?? path;
     if (path === null || !existsSync(path)) return fail(`Error not_found: no script "${given || name}".\n${this.scriptList()}`);
     let script: SharedScript | null;
     try {
@@ -3307,7 +4659,21 @@ export class TaplineTools {
     } catch (error) {
       return fail(`Error internal: couldn't read ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (script === null) return fail(`Error bad_params: ${path} isn't a script (format agent-tools-script, version 1).`);
+    if (script === null) return fail(`Error bad_params: ${path} isn't a script (format agent-tools-script, version 1 or 2).`);
+    // A route's variables are filled before anything runs; replay has no values to give, so one with a variable is refused (§18.5).
+    const accountStore = this.options.accounts?.store ?? undefined;
+    if (script.version === 2) {
+      const filled = substituteSteps(script.steps, {}, accountStore, script.variables ?? []);
+      if (!filled.ok) return fail(`Error ${filled.code}: ${filled.message}`);
+      // A start the app has no way to is refused before the fresh start restarts the app (18.5); at the start, nothing to check.
+      const live = this.host.current();
+      const liveMap = live === undefined || script.start === undefined ? undefined : this.mapOf(live);
+      if (live !== undefined && liveMap !== undefined && script.start !== undefined) {
+        const here = await placeSeen(this.placeSource(live), liveMap);
+        const problem = startProblem(liveMap, here, script.start, this.driveRoadsOnly());
+        if (problem !== null) return fail(`Error ${problem.code}: ${problem.message}`);
+      }
+    }
     const ref = refStep(script.steps);
     if (ref !== null) return fail(`Error bad_params: step ${ref + 1} targets a ref; a script needs an id, label, text or point.`);
     if (script.steps.length === 0) return text(`Ran 0 of 0 steps in 0.0 s.`);
@@ -3327,34 +4693,93 @@ export class TaplineTools {
       if (fresh.isError === true) notes.push("Note: couldn't start the app fresh (a release build has no reload); the script ran on the screen as it was.");
       else if (said.startsWith("Reload requested, but")) notes.push("Note: the app hadn't reconnected after starting fresh when the steps began.");
     }
-    this.replaying = true;
-    this.replayContext = {
-      referencesDir: this.scriptSideFolder(path, "references"),
-      diffDir: this.scriptSideFolder(path, "diff"),
-      update: options.updateReferences === true,
+    const scriptPath = path;
+    const execute = async (steps: Step[]): Promise<CallToolResult> => {
+      this.replaying = true;
+      this.replayContext = {
+        referencesDir: this.scriptSideFolder(scriptPath, "references"),
+        diffDir: this.scriptSideFolder(scriptPath, "diff"),
+        update: options.updateReferences === true,
+      };
+      try {
+        const answer = await this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false });
+        if (notes.length === 0) return answer;
+        const [top, ...rest] = answer.content;
+        return top !== undefined && top.type === "text"
+          ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] }
+          : answer;
+      } finally {
+        this.replaying = false;
+        this.replayContext = null;
+      }
     };
-    try {
-      const answer = await this.run({ steps: script.steps, look: args.look, screenshot: args.screenshot });
-      if (notes.length === 0) return answer;
-      const [top, ...rest] = answer.content;
-      return top !== undefined && top.type === "text"
-        ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...notes].join("\n") }, ...rest] }
-        : answer;
-    } finally {
-      this.replaying = false;
-      this.replayContext = null;
-    }
+    if (script.version !== 2) return execute(script.steps);
+    // A route starts at a place: after the fresh start the app is driven there (an `off_route` fails the replay), then it runs (18.5).
+    const outcome = await routeRunner.run(script, {}, this.routeContext(execute, (place) => this.replayDriveTo(place)), accountStore);
+    return outcome.kind === "ran" ? outcome.answer : fail(`Error ${outcome.code}: ${outcome.message}`);
   }
 
-  private async withLook(session: SessionInfo, line: string, screenshot = false): Promise<CallToolResult> {
+  /** Where a saved route of that name is, in the current app's map folder; null when there is none. */
+  private routePath(name: string): string | null {
+    const session = this.host.current();
+    const map = session === undefined ? undefined : this.mapOf(session);
+    return map === undefined ? null : routePathOf(map, name);
+  }
+
+  /**
+   * What a route needs from this host (§18.5). `here` reads the app's place and writes nothing, so a replay never changes
+   * the map. `driveTo` takes the app to a place by link or roads; without one a route runs only from its own start.
+   */
+  private routeContext<R>(runSteps: (steps: Step[]) => Promise<R>, driveTo?: RouteContext<R>["driveTo"]): RouteContext<R> {
+    return {
+      here: async () => {
+        const session = this.host.current();
+        const map = session === undefined ? undefined : this.mapOf(session);
+        return session === undefined || map === undefined ? null : placeSeen(this.placeSource(session), map);
+      },
+      ...(driveTo !== undefined ? { driveTo } : {}),
+      runSteps,
+    };
+  }
+
+  /**
+   * A replay's way to a route's start: a drive over a copy of the map that is never written, so a replay still changes nothing
+   * (18.9). Every move keeps its policy check and a person's OK.
+   */
+  private async replayDriveTo(place: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const session = this.host.current();
+    const map = session === undefined ? undefined : this.mapOf(session);
+    if (session === undefined || map === undefined) return { ok: false, message: "the app has no map to drive with." };
+    const frozen = await map.readOnlyCopy();
+    const go = async (): Promise<{ ok: true } | { ok: false; message: string }> => {
+      // The screen a stopped drive shows must not add to the map either.
+      const before = this.replaying;
+      this.replaying = true;
+      try {
+        return await driveQuietly(this.driveServices(session, frozen), { to: place, by: "any" });
+      } finally {
+        this.replaying = before;
+      }
+    };
+    return this.holdScope.getStore() !== undefined ? go() : this.holdScope.run({ ms: 0 }, go);
+  }
+
+  /** Whether an answer is brief: the call's own `brief`, else the server's `--brief` (AGENT-TOOLS 1.13 §13.4). */
+  private briefOn(arg: boolean | undefined): boolean {
+    return arg ?? this.options.brief === true;
+  }
+
+  private async withLook(session: SessionInfo, line: string, screenshot = false, brief = false): Promise<CallToolResult> {
     // The session may have been replaced (app restarted) in the meantime.
     const live = this.host.sessions().some((s) => s.id === session.id) ? session : this.host.current();
     if (live === undefined) return text(`${line}\nNote: the app disconnected, so there's no fresh element list.`);
     // Text only unless asked: a screenshot after every step would cost image tokens the agent rarely needs.
-    const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true);
+    const parts = await this.lookParts(live, screenshot, DEFAULT_SCREENSHOT_WIDTH, true, false, brief ? line : undefined);
     const [first, ...rest] = parts.content;
     const head = first !== undefined && first.type === "text" ? first.text : "";
-    return { content: [{ type: "text", text: `${line}\n${head}` }, ...rest] };
+    // A brief answer already carries the first line (and its `Place:` line). Otherwise `Place:` follows the first line (§18.1).
+    const top = parts.placeLine !== undefined ? `${line}\n${parts.placeLine}` : line;
+    return { content: [{ type: "text", text: brief ? head : `${top}\n${head}` }, ...rest], ...(parts.isError ? { isError: true } : {}) };
   }
 
   /**
@@ -3403,7 +4828,7 @@ export class TaplineTools {
         this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
         return fail(resolved.text);
       }
-      const verdict = this.policyWords(lists, resolved.elements);
+      const verdict = this.policyWords(lists, resolved);
       const shown = resolved.elements[0];
       if (verdict.kind === "blocked") {
         this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
@@ -3414,15 +4839,152 @@ export class TaplineTools {
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
     }
-    let granted = false;
+    // With a dialog the wait for a person's OK happens here, outside the live view's queue, so their own taps aren't held up.
+    const ready = await this.awaitOk(session, tool, method, params, lists);
+    if ("stop" in ready) return ready.stop;
+    let granted: OkVia | undefined;
     const answer = await perform(async () => {
-      const gate = await this.policyGate(session, tool, method, params, lists);
+      const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
       if ("stop" in gate) return gate.stop;
-      granted = gate.granted;
-      if (granted) this.logExtra = { confirmed: true };
+      granted = gate.via;
       return null;
     });
-    return granted && answer.isError !== true ? appendNote(answer, "Note: a person allowed this.") : answer;
+    if (granted === undefined || answer.isError === true) return answer;
+    this.journeyRun?.noteOk(granted);
+    return appendNote(answer, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
+  }
+
+  /**
+   * The check right before a touch, shared by a single call and a drive's move: the policy's verdict, the person's OK used up,
+   * and what the log and the road rules need to know about it (§18.2: a move that needed an OK is never saved as a road).
+   */
+  private async gatePreflight(
+    session: SessionInfo,
+    tool: string,
+    method: string,
+    params: Record<string, unknown>,
+    lists: { confirm: string[]; block: string[] },
+    waited: Waited | null,
+    known?: KnownElements,
+  ): Promise<{ stop: CallToolResult } | { via?: OkVia }> {
+    const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
+    if ("stop" in gate) return gate;
+    if (gate.via === undefined) return {};
+    this.logExtra = { confirmed: true, confirmed_by: gate.via };
+    this.setOk(true);
+    return { via: gate.via };
+  }
+
+  /** What the person was asked for and what the screen showed then; the touch is checked against it right before it happens. */
+  private fingerprint(element: TreeElement): string {
+    return `${elementKey(element)}|${element.label ?? ""}|${element.text ?? ""}`;
+  }
+
+  /**
+   * AGENT-TOOLS 1.13 §11.3: when the policy flags this touch and the host can show a dialog, ask there and wait for
+   * the first answer, from the dialog or the live view, up to the request's 120 s. Runs before the touch's turn in
+   * the live view's queue. `waited` carries the OK, used up, to the check right before the touch. Without a dialog,
+   * or when nothing needs an OK, `waited` is null and the touch goes the old way.
+   */
+  private async awaitOk(
+    session: SessionInfo,
+    tool: string,
+    method: string,
+    params: Record<string, unknown>,
+    lists: { confirm: string[]; block: string[] },
+    /** Elements a drive already read: the policy is checked against them instead of a dry run (§18.4). */
+    known?: KnownElements,
+  ): Promise<{ stop: CallToolResult } | { waited: Waited | null }> {
+    const dialogs = this.dialogs;
+    if (dialogs === undefined || !dialogs.available() || lists.confirm.length === 0) return { waited: null };
+    const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
+    // A target that can't be checked is answered by the check right before the touch.
+    if (resolved.kind === "error") return { waited: null };
+    const verdict = this.policyWords(lists, resolved);
+    if (verdict.kind !== "confirm") return { waited: null };
+    if (this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
+    const label = verdict.element.label ?? verdict.element.text ?? undefined;
+    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
+    const key = this.confirmKey(session, tool, verdict.raw);
+    const ask = { kind: tool, caption, word: verdict.word };
+    const fp = this.fingerprint(verdict.raw);
+    const name = this.shortName(verdict.element, false);
+    const refuse = (tail: string): { stop: CallToolResult } => {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return { stop: fail(`Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${tail}`) };
+    };
+    const hold = this.holdScope.getStore();
+    const cancelled = hold?.signal;
+    const wasCancelled = (): boolean => cancelled?.aborted === true;
+    if (wasCancelled()) return refuse("The call was cancelled before anyone answered.");
+    const check = this.confirmations.check(key, ask);
+    if (check.granted) return { waited: { fp, via: check.via } };
+    if ("held" in check) {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return {
+        stop: fail(
+          `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
+        ),
+      };
+    }
+    const abort = new AbortController();
+    const waitStarted = Date.now();
+    // The dialog's answer goes through the same request the live view answers: the first one wins, the other is closed.
+    const noDialog = new Promise<"no_dialog">((resolve) => {
+      void dialogs
+        .askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
+        .then((answer) => {
+          if (answer === "unavailable") resolve("no_dialog");
+          else if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
+        });
+    });
+    // A cancelled or timed-out call closes the dialog and the request, and never touches.
+    const onCancel = (): void => this.confirmations.withdraw(check.request.id);
+    cancelled?.addEventListener("abort", onCancel, { once: true });
+    const settled = await Promise.race([this.confirmations.wait(check.request.id), noDialog]);
+    cancelled?.removeEventListener("abort", onCancel);
+    abort.abort();
+    // Time spent waiting for a person isn't the batch's time (§9.3); it is counted for this call only.
+    if (hold !== undefined) hold.ms += Date.now() - waitStarted;
+    if (settled === "no_dialog") {
+      // The client can't show the dialog (it answered an error, not a choice): the live-view-only answer, no hold.
+      return refuse(this.liveViewLine());
+    }
+    if (wasCancelled()) {
+      if (settled.allow) this.confirmations.check(key, ask);
+      return refuse("The call was cancelled before anyone answered.");
+    }
+    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
+    if (!settled.allow) return refuse("They declined. Ask your user what to do.");
+    const used = this.confirmations.check(key, ask);
+    if (!used.granted) return { stop: fail(CHANGED_WHILE_WAITING) };
+    return { waited: { fp, via: used.via } };
+  }
+
+  /** The answer of a reflex's step that the policy flags at the moment it runs: skipped, never asked (§18.7). */
+  private reflexNeedsPerson(element: TreeElement, word: string): CallToolResult {
+    return fail(`Error not_allowed: needs_confirmation: ${this.shortName(element, false)} needs a person's OK (policy word ${JSON.stringify(word)}); a reflex never asks.`);
+  }
+
+  /** Where an OK is given when no dialog can be shown (AGENT-TOOLS 1.8 §11.2). */
+  private liveViewLine(): string {
+    return this.options.canConfirm === false
+      ? "The live view is off, so nobody can allow it here; ask your user."
+      : "The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.";
+  }
+
+  /** An OK is for this server, this client, this app, this tool and this element only (Tapwright's review, M1). */
+  private confirmKey(session: SessionInfo, tool: string, element: TreeElement): string {
+    const client = (this.clientIdFn ?? this.options.clientId)?.() ?? "";
+    return `${this.options.confirmScope ?? "mcp"}|${client}|${session.app.id}|${tool}|${elementKey(element)}`;
+  }
+
+  /**
+   * Runs a call of the agent with its own wait counter and, when there is one, the request's abort signal, so a
+   * wait for a person's OK is counted for this call only and closes when the call is cancelled.
+   */
+  withCall<T>(signal: AbortSignal | undefined, run: () => T): T {
+    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}) }, run);
   }
 
   /**
@@ -3435,25 +4997,45 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
     lists: { confirm: string[]; block: string[] },
-  ): Promise<{ stop: CallToolResult } | { granted: boolean }> {
+    /** An OK the person gave while the call waited (`awaitOk`): used up, and checked against the screen as it is now. */
+    waited?: Waited | null,
+    /** Elements a drive already read: checked instead of a dry run; the app's guard holds the touch to them (§18.4). */
+    known?: KnownElements,
+  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
-    const resolved = await this.resolveForPolicy(session, method, params);
+    const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
       // Fail closed: what can't be checked isn't touched. The answer is the one the touch would give.
       this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
       return { stop: fail(resolved.text) };
     }
-    const verdict = this.policyWords(lists, resolved.elements);
+    const verdict = this.policyWords(lists, resolved);
     if (verdict.kind === "blocked") {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
       return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
     }
+    // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
+    if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
+    if (waited !== undefined && waited !== null) {
+      // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
+      // A call that was cancelled while it waited never touches.
+      const same =
+        verdict.kind === "confirm" &&
+        this.fingerprint(verdict.raw) === waited.fp &&
+        this.host.current()?.id === session.id &&
+        this.holdScope.getStore()?.signal?.aborted !== true;
+      if (!same) {
+        this.showAction("agent", method, undefined, params, "not_allowed", "needs_confirmation");
+        return { stop: fail(CHANGED_WHILE_WAITING) };
+      }
+      return { granted: true, via: waited.via };
+    }
     if (verdict.kind === "none") return { granted: false };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    // An OK is for this app, this tool and this element only (Tapwright's review, M1).
-    const check = this.confirmations.check(`${session.app.id}|${tool}|${elementKey(verdict.element)}`, { kind: tool, caption, word: verdict.word });
-    if (check.granted) return { granted: true };
+    // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
+    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.raw), { kind: tool, caption, word: verdict.word });
+    if (check.granted) return { granted: true, via: check.via };
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
@@ -3463,14 +5045,10 @@ export class TaplineTools {
         ),
       };
     }
-    const where =
-      this.options.canConfirm === false
-        ? "The live view is off, so nobody can allow it here; ask your user."
-        : "The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.";
     this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
     return {
       stop: fail(
-        `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${where}${check.suffix}`,
+        `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${this.liveViewLine()}${check.suffix}`,
       ),
     };
   }
@@ -3478,15 +5056,24 @@ export class TaplineTools {
   /** Which policy word, if any, the elements the target could mean carry: a block word first, then a confirm word. */
   private policyWords(
     lists: { confirm: string[]; block: string[] },
-    elements: TreeElement[],
-  ): { kind: "blocked" | "confirm"; element: TreeElement; word: string } | { kind: "none" } {
-    for (const element of elements) {
-      const word = matchWord(lists.block, element);
-      if (word !== null) return { kind: "blocked", element, word };
+    resolved: { elements: TreeElement[]; raw: TreeElement[] },
+  ): { kind: "blocked" | "confirm"; element: TreeElement; raw: TreeElement; word: string } | { kind: "none" } {
+    // The words are matched on the raw elements, so a label an account value hides is still the word it is. What the
+    // verdict carries for showing (`element`, `word`) is scrubbed; `raw` stays inside, for the key and the fingerprint.
+    for (const [i, raw] of resolved.raw.entries()) {
+      const word = matchWord(lists.block, raw);
+      const element = resolved.elements[i];
+      if (word !== null && element !== undefined) return { kind: "blocked", element, raw, word: this.host.redactOut(word) };
     }
-    for (const element of elements) {
-      const word = matchWord(lists.confirm, element);
-      if (word !== null) return { kind: "confirm", element, word };
+    // A link that couldn't be decoded needs a person's OK, whatever the word lists say.
+    for (const [i, raw] of resolved.raw.entries()) {
+      const element = resolved.elements[i];
+      if (raw.role === "link" && raw.label === UNREADABLE_LINK && element !== undefined) return { kind: "confirm", element, raw, word: UNREADABLE_LINK };
+    }
+    for (const [i, raw] of resolved.raw.entries()) {
+      const word = matchWord(lists.confirm, raw);
+      const element = resolved.elements[i];
+      if (word !== null && element !== undefined) return { kind: "confirm", element, raw, word: this.host.redactOut(word) };
     }
     return { kind: "none" };
   }
@@ -3546,27 +5133,30 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
   ): Promise<
-    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown; scrolls?: true }
+    | { kind: "ok"; elements: TreeElement[]; raw: TreeElement[]; point?: { x: number; y: number }; value?: unknown; scrolls?: true }
     | { kind: "error"; text: string; code: string; reason?: string }
   > {
+    // `raw` still holds the account values, for the policy and the guard only; `elements` is what may be shown or kept.
     if (session.capabilities.includes("dryRun")) {
       let raw: unknown;
       try {
-        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id });
+        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id, internal: true });
       } catch (error) {
         const reason = error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined;
         return {
           kind: "error",
-          text: describeError(error),
+          text: kindRefusal(error, params["kind"]) ?? describeError(error),
           code: error instanceof TaplineError ? error.code : "internal",
           ...(reason !== undefined ? { reason } : {}),
         };
       }
       const parsed = dryRunResultSchema.safeParse(raw);
       if (!parsed.success) return { kind: "error", text: "Error internal: the app didn't answer the dry run.", code: "internal" };
+      const found = parsed.data.element ? [parsed.data.element] : [];
       return {
         kind: "ok",
-        elements: parsed.data.element ? [parsed.data.element] : [],
+        elements: this.host.redactOut(found),
+        raw: found,
         ...(parsed.data.point !== undefined ? { point: parsed.data.point } : {}),
         ...(parsed.data.value !== undefined ? { value: parsed.data.value } : {}),
         ...(parsed.data.scrolls === true ? { scrolls: true } : {}),
@@ -3579,7 +5169,7 @@ export class TaplineTools {
     }
     let raw: unknown;
     try {
-      raw = await this.host.request("tree", {}, { sessionId: session.id });
+      raw = await this.host.request("tree", {}, { sessionId: session.id, internal: true });
     } catch (error) {
       return { kind: "error", text: describeError(error), code: error instanceof TaplineError ? error.code : "internal" };
     }
@@ -3593,7 +5183,8 @@ export class TaplineTools {
     const frame = elements.length === 1 && first !== undefined ? first.frame : null;
     return {
       kind: "ok",
-      elements,
+      elements: this.host.redactOut(elements),
+      raw: elements,
       ...(frame ? { point: { x: Math.round(frame.x + frame.width / 2), y: Math.round(frame.y + frame.height / 2) } } : {}),
     };
   }
@@ -3657,7 +5248,7 @@ export class TaplineTools {
     if (hiddenTap !== null) return Promise.resolve(hiddenTap);
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("tap", "press", params, args.dry_run === true, (preflight) =>
-      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("press", params, (r) => afterScroll(r, `Tapped ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief, "tap"),
     );
   }
 
@@ -3667,26 +5258,47 @@ export class TaplineTools {
     if (hiddenPress !== null) return Promise.resolve(hiddenPress);
     const params = { target: toWireTarget(withIndex(args.target, args.index)), ...(args.force === true ? { force: true } : {}), ...(this.userEyes() ? { noScroll: true } : {}) };
     return this.guarded("long_press", "longPress", params, args.dry_run === true, (preflight) =>
-      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight),
+      this.act("longPress", params, (r) => afterScroll(r, `Long-pressed ${this.elementName(r)}.`), args.look, args.screenshot, undefined, undefined, preflight, args.brief, "long_press"),
     );
   }
 
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
     const hiddenField = this.hiddenTarget(args.target);
     if (hiddenField !== null) return Promise.resolve(hiddenField);
+    const badAs = this.asRefusal(args.as, args.text, args.account);
+    if (badAs !== null) return Promise.resolve(fail(badAs));
+    // A test account's value (§18.6): `params` keeps the placeholder for the log, the viewer and a recording; the
+    // value goes to the app only, through `wire`.
+    const session = this.host.current();
+    const account = this.accountText(args.text, args.account, session);
+    if (account !== null && !account.ok) return Promise.resolve(fail(`Error ${account.code}: ${account.message}`));
     const params: Record<string, unknown> = {
       text: args.text,
       replace: args.replace ?? true,
       submit: args.submit ?? false,
+      ...(account !== null ? { account: args.account ?? this.runAccount } : {}),
       ...(this.userEyes() ? { noScroll: true } : {}),
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
+    const wire =
+      account !== null && account.ok && session !== undefined
+        ? { values: { text: account.value, kind: account.kind }, sessionId: session.id }
+        : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
-    if (args.dry_run === true) return this.dryRun("type_text", "type", params);
+    if (args.dry_run === true) {
+      if (wire === undefined) {
+        // A placeholder with no checked account is never sent, not even to be resolved.
+        if (args.text.includes("${account.")) return Promise.resolve(this.notConnected());
+        return this.dryRun("type_text", "type", params);
+      }
+      const { account: _account, ...plain } = params;
+      return this.dryRun("type_text", "type", { ...plain, text: "", kind: wire.values.kind });
+    }
     return this.act(
       "type",
-      params,
+      // `as` is for the recording only: `act` keeps it out of what goes to the app.
+      args.as !== undefined ? { ...params, as: args.as } : params,
       (r) => {
         const value = typeof r === "object" && r !== null && "value" in r ? (r as { value: unknown }).value : undefined;
         // AGENT-TOOLS 1.8 §3.3: a secure field's value is never shown, not even as bullets in this line
@@ -3698,7 +5310,59 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
+      undefined,
+      wire,
     );
+  }
+
+  /** Why `as` can't be used on this typed text (AGENT-TOOLS 1.13 §18.5), or null: it goes only while a route records. */
+  private asRefusal(as: string | undefined, text: string, account: string | undefined): string | null {
+    if (as === undefined) return null;
+    if (this.recording?.route === undefined) return "Error bad_params: as goes only while recording a route (record with route).";
+    const problem = variableProblem(as);
+    if (problem !== null) return `Error bad_params: ${problem}`;
+    if (account !== undefined || text.includes("${account.")) return "Error bad_params: as can't go with an account's value; the route keeps its placeholder already.";
+    return null;
+  }
+
+  /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
+  private runAccount: string | undefined;
+
+  /**
+   * What a `type_text` types when its text is a test account's value (AGENT-TOOLS 1.13 §18.6): null when it isn't one,
+   * else the value with the kind of field it may go into, or why not. The words carry no `Error code:` start, so `run`
+   * can say which step.
+   *
+   * Hook for `drive` (task 15): its `account` argument goes through here too, as `named`, for the steps it types.
+   */
+  private accountText(
+    text: string,
+    named: string | undefined,
+    session: SessionInfo | undefined,
+  ): { ok: true; value: string; kind: "secure" | "plain" } | { ok: false; code: string; message: string } | null {
+    const mentions = text.includes("${account.");
+    if (!mentions && named === undefined) return null;
+    const loaded = this.options.accounts;
+    if (loaded === undefined) return { ok: false, code: "bad_params", message: "no accounts are loaded; start Tapline with --accounts FILE." };
+    if (loaded.store === null) return { ok: false, code: "bad_params", message: loaded.blocked };
+    if (!mentions) {
+      return { ok: false, code: "bad_params", message: `account "${named ?? ""}" is named but the text has no \${account.username} or \${account.password}; the text is the whole value.` };
+    }
+    // Without an app there is nothing to type into: the call answers `not_connected` before anything is sent.
+    if (session === undefined) return null;
+    const substituted = substituteAccount(text, loaded.store, named ?? this.runAccount, session.app.id ?? session.app.name);
+    if (!substituted.ok) return substituted;
+    if (substituted.field === null) return null;
+    // An older app ignores the kind and would type a password into any field.
+    if (!session.capabilities.includes("typeKind")) {
+      return { ok: false, code: "unsupported", message: "this app's Tapline is too old to type an account's value safely; update react-native-tapline." };
+    }
+    const field: AccountField = substituted.field;
+    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : "plain" };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {
@@ -3759,6 +5423,9 @@ export class TaplineTools {
         if (direction === "left") return ["Note: the scroll view is already at the start."];
         return ["Note: the scroll view is already at the end."];
       },
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
@@ -3784,6 +5451,7 @@ export class TaplineTools {
         undefined,
         unchanged,
         preflight,
+        args.brief,
       ),
     );
   }
@@ -3808,11 +5476,18 @@ export class TaplineTools {
       );
     }
     const name = args.name.trim();
-    const shortcut = this.shortcutRefusal("app_command", name);
+    if (name === "animations") {
+      const refused = this.animationsRefusal(args.args);
+      if (refused !== null) return fail(refused);
+    }
+    const shortcut = name === "animations" ? null : this.shortcutRefusal("app_command", name);
     if (shortcut !== null) return shortcut;
     const blocked = name === "network" ? this.networkRefusal((args.args as { mode?: unknown } | undefined)?.mode) : null;
     if (blocked !== null) return blocked;
-    return this.act(
+    const sessionId = this.host.current()?.id;
+    // A measurement holds animations at normal: an explicit switch to fast waits for it to end.
+    if (name === "animations" && sessionId !== undefined && (args.args as { speed?: unknown } | undefined)?.speed === "fast") await afterPause(this.host, sessionId);
+    const answer = await this.act(
       "command",
       { name, args: args.args ?? {} },
       (r) => {
@@ -3829,7 +5504,17 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
+    // What the app says it is now: the host remembers it, to pause it for a measurement and to end it with the session.
+    const speed = (args.args as { speed?: unknown } | undefined)?.speed;
+    if (name === "animations" && answer.isError !== true && sessionId !== undefined && (speed === "fast" || speed === "normal")) {
+      noteAnimations(this.host, sessionId, speed);
+    }
+    return answer;
   }
 
   /** AGENT-TOOLS 1.11 §16.4: a policy whose block list holds `network` refuses a condition; `normal` always goes. */
@@ -3863,6 +5548,10 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
@@ -3890,6 +5579,7 @@ export class TaplineTools {
       undefined,
       undefined,
       preflight,
+      args.brief,
     );
     return short ? this.guarded("swipe", "swipe", params, false, perform) : perform();
   }
@@ -3914,13 +5604,17 @@ export class TaplineTools {
       },
       args.look,
       args.screenshot,
+      undefined,
+      undefined,
+      undefined,
+      args.brief,
     );
   }
 
   async openUrl(args: Shape<"open_url">): Promise<CallToolResult> {
     const refused = this.shortcutRefusal("open_url", args.url);
     if (refused !== null) return refused;
-    const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot);
+    const answer = await this.act("openURL", { url: args.url }, () => `Opened ${args.url}.`, args.look, args.screenshot, undefined, undefined, undefined, args.brief);
     // The app's own forget link unpairs it, so it drops the connection before answering: that is the link working.
     if (answer.isError === true && /(^|\/)tapline\/forget\/?$/.test(args.url.replace(/[?#].*$/, ""))) {
       const said = answer.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
@@ -4102,13 +5796,19 @@ export class TaplineTools {
           const stale = this.staleRef(press);
           if (stale !== null) return stale;
         }
+        let ready: { waited: Waited | null } = { waited: null };
+        if (press !== undefined) {
+          const waitedFor = await this.awaitOk(session, "tap", "press", press, listsFor(this.policy, session.app));
+          if ("stop" in waitedFor) return waitedFor.stop;
+          ready = waitedFor;
+        }
         // With a tap, the policy check and the whole window are one turn of the live view's queue: a pause refuses
         // it, a person's input goes first and waits for the window, and the screen can't change between the check
         // and the tap (Codex and CodeRabbit reviews of 1.3.0).
         const tapped = press;
         const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
           if (tapped !== undefined) {
-            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app));
+            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app), ready.waited);
             if ("stop" in gate) return { stop: gate.stop };
           }
           return { result: await this.measureWindow(session, seconds, tapped) };
@@ -4222,6 +5922,10 @@ export class TaplineTools {
       journey.state.conditionRecords.push(record);
       if (!record.applied) notes.push(`Note: condition ${name} ${value} was not applied: ${record.failure ?? "the app refused"}.`);
     }
+    // A user waits for animations: fast ones end here unless the journey's allow keeps them (PLAN-1.6 F4, E8).
+    if (journey.userEyes && !journey.allows(FAST_ANIMATIONS_ALLOWED) && (await endAnimations(this.host, session.id))) {
+      notes.push("Note: animations were turned off for this journey: a user waits for them. allow fast_animations keeps them on.");
+    }
     this.journeyRun = journey;
     this.journeyDone = undefined;
     this.stressWaiting.clear();
@@ -4314,7 +6018,8 @@ export class TaplineTools {
         // Right after a password was typed iOS may still show its last character: no picture then, from any path (a ux_check's too).
         if (this.secureWindow()) return undefined;
         try {
-          return await this.takeShot(session.id, width, quality);
+          // The picture is taken with fast animations paused, as a user would see the screen (PLAN-1.6 F4, E8).
+          return (await withNormalAnimations(this.host, session.id, () => this.takeShot(session.id, width, quality))).value;
         } catch {
           return undefined;
         }
@@ -4479,13 +6184,7 @@ export class TaplineTools {
       if (asked === undefined) {
         return fail(`Error bad_params: no ${kind} moment is waiting for a person; ask for it first with journey { stress: { kind: "${kind}" } }.`);
       }
-      await this.reconnected();
-      // Done is checked, not taken on the agent's word: the app must show that the moment happened.
-      // An app that is gone by then is judged by survives (it did not survive), not by what it left behind.
-      const unseen = this.host.current() === undefined ? null : await this.stressUnseen(kind, asked);
-      if (unseen !== null) return fail(`Error bad_params: ${unseen} Ask the person again, then say done.`);
-      this.stressWaiting.delete(kind);
-      return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked.survives));
+      return this.confirmStress(running, kind, asked, survives);
     }
     if (this.host.current() === undefined) return this.notConnected();
     switch (kind) {
@@ -4498,7 +6197,7 @@ export class TaplineTools {
         const before = this.host.current()?.id;
         const answer = await this.reload({ look: true });
         const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
-        if (answer.isError === true && /^Error unsupported/.test(said)) return this.waitForPerson(kind, "close the app and open it again", survives);
+        if (answer.isError === true && /^Error unsupported/.test(said)) return this.waitForPerson(running, kind, "close the app and open it again", survives);
         if (answer.isError === true) return answer;
         await this.reconnected();
         // A reload that timed out leaves the old session: that is no relaunch to record.
@@ -4509,14 +6208,41 @@ export class TaplineTools {
         return this.stressDone(running, kind, " (reload, not a relaunch)", await this.survivalOf(running, survives));
       }
       case "background":
-        return this.waitForPerson(kind, "switch to another app and back", survives);
+        return this.waitForPerson(running, kind, "switch to another app and back", survives);
       case "rotate":
-        return this.waitForPerson(kind, "turn the phone and keep it turned", survives);
+        return this.waitForPerson(running, kind, "turn the phone and keep it turned", survives);
     }
   }
 
-  private async waitForPerson(kind: string, what: string, survives: Survives | undefined): Promise<CallToolResult> {
-    this.stressWaiting.set(kind, { survives, askedAt: Date.now(), size: kind === "rotate" ? await this.freshScreenSize() : null });
+  /** `done: true`, or the person's Done in the dialog: counted only when the app shows the moment happened. */
+  private async confirmStress(running: Journey, kind: Stress["kind"], asked: StressWaiting, survives: Survives | undefined): Promise<CallToolResult> {
+    await this.reconnected();
+    // Done is checked, not taken on the agent's word: the app must show that the moment happened.
+    // An app that is gone by then is judged by survives (it did not survive), not by what it left behind.
+    const unseen = this.host.current() === undefined ? null : await this.stressUnseen(kind, asked);
+    if (unseen !== null) return fail(`Error bad_params: ${unseen} Ask the person again, then say done.`);
+    this.stressWaiting.delete(kind);
+    return this.stressDone(running, kind, "", await this.survivalOf(running, survives ?? asked.survives));
+  }
+
+  private async waitForPerson(running: Journey, kind: Stress["kind"], what: string, survives: Survives | undefined): Promise<CallToolResult> {
+    const asked: StressWaiting = { survives, askedAt: Date.now(), size: kind === "rotate" ? await this.freshScreenSize() : null };
+    this.stressWaiting.set(kind, asked);
+    // §11.5: with a dialog the person is told there, and the call waits until the app shows the moment (or they say Done).
+    const dialogs = this.dialogs;
+    if (dialogs !== undefined && dialogs.available()) {
+      const cleared = async (): Promise<boolean> => {
+        if ((await this.stressUnseen(kind, asked)) !== null) return false;
+        // Left the front is not enough for `background`: the person comes back, so the app can be read again.
+        return kind !== "background" || this.host.current()?.appState?.state === "active";
+      };
+      const outcome = await this.askPerson(dialogs, `Needs a person: ${what}. I'll go on by myself when the app shows it.`, cleared);
+      if (outcome === "cleared") return this.confirmStress(running, kind, asked, survives);
+      if (outcome === "cant") {
+        this.stressWaiting.delete(kind);
+        return fail(`Error not_allowed: stress ${kind} needs a person: ${what}. They can't now. Ask your user what to do.`);
+      }
+    }
     return text(
       [
         `Stress: ${kind} needs a person: ${what}, then say done.`,
@@ -4592,7 +6318,7 @@ export class TaplineTools {
       const resolved = await this.resolveForPolicy(session, "press", { target: toWireTarget(target) });
       if (resolved.kind === "error") refusal.answer = fail(resolved.text);
       else {
-        const verdict = this.policyWords(lists, resolved.elements);
+        const verdict = this.policyWords(lists, resolved);
         if (verdict.kind === "blocked") refusal.answer = fail(this.blockedLine(verdict.element, verdict.word));
         else if (verdict.kind === "confirm") {
           refusal.answer = fail(
@@ -4625,9 +6351,7 @@ export class TaplineTools {
     const checked = await this.survivalOf(running, survives);
     const done = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
     const s = second.data;
-    const how = s.done
-      ? `Both taps went through, ${s.afterMs} ms apart.`
-      : `The first tap went through; the second, ${s.afterMs} ms later, didn't land (${s.reason}).`;
+    const how = secondTapSentence(s);
     return text(`${line(done)}\n${how}`);
   }
 

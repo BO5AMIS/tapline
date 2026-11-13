@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'unsupported'
   | 'bad_params'
   | 'timeout'
+  | 'stale'
   | 'internal';
 
 export interface WireError {
@@ -18,6 +19,8 @@ export interface WireError {
   refs?: string[];
   /** The candidates as elements (role, id, actions, frame), only for `ambiguous`. */
   candidates?: TaplineElement[];
+  /** Facts about a refusal that carry no text from the app (whether a field is secure, never its value). */
+  data?: { secure: boolean };
 }
 
 /** An error that maps 1:1 onto a protocol error response. */
@@ -25,19 +28,22 @@ export class TaplineError extends Error {
   readonly code: ErrorCode;
   readonly refs: string[] | undefined;
   readonly candidates: TaplineElement[] | undefined;
+  readonly data: { secure: boolean } | undefined;
 
-  constructor(code: ErrorCode, message: string, refs?: string[], candidates?: TaplineElement[]) {
+  constructor(code: ErrorCode, message: string, refs?: string[], candidates?: TaplineElement[], data?: { secure: boolean }) {
     super(message);
     this.name = 'TaplineError';
     this.code = code;
     this.refs = refs;
     this.candidates = candidates;
+    this.data = data;
   }
 
   toWire(): WireError {
     const wire: WireError = { code: this.code, message: this.message };
     if (this.refs) wire.refs = this.refs;
     if (this.candidates) wire.candidates = this.candidates;
+    if (this.data) wire.data = this.data;
     return wire;
   }
 }
@@ -72,6 +78,8 @@ export interface TaplineElement {
   selected: boolean;
   /** true / false / 'mixed' for checkable controls (Switch, checkbox role), else null. */
   checked: boolean | 'mixed' | null;
+  /** Inside a virtualized list's item: its text is content, so the host never saves it (AGENT-TOOLS 1.13 §18.2). */
+  row?: true;
 }
 
 export interface ScreenInfo {
@@ -136,12 +144,23 @@ export interface TreeResult {
   alerts?: TreeAlert[];
   /** Network requests still running (fetch / XMLHttpRequest) and the condition Tapline put on them; absent when neither. */
   network?: { inFlight?: number; condition?: 'offline' | '3g' | 'lossy' };
+  /** Present (as "fast") while the `animations` command has fast-forwarded animations. */
+  animations?: 'fast';
   /** True while the software keyboard is up; absent when it is down or isn't known. */
   keyboard?: true;
   /** The focused screen, when the app uses React Navigation (Expo Router included). */
   route?: RouteInfo;
   /** With `changes: true` and a previous tree: what changed since then. */
   changes?: TreeChanges;
+  /** Where the app is: route pattern, tab and layer, never params (AGENT-TOOLS 1.13 §18.1). Always present: `route` is empty without a router. */
+  place?: PlaceState;
+}
+
+/** A place as a route key: route patterns only, never a param's value or any screen text. */
+export interface PlaceState {
+  route: string[];
+  tab?: string;
+  layer?: string;
 }
 
 export type Target =

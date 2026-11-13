@@ -18,11 +18,20 @@ export interface ActionLogEntry {
   ok: boolean;
   code?: string;
   reason?: string;
+  /** The time in the tool, in ms: an action's own, a read's whole call (AGENT-TOOLS 1.13 §16.1). `t` is when it began. */
   ms?: number;
+  /** 2: `t` is when the call began and `ms` its time. Older entries stamped the end, so the Time line leaves them out. */
+  v?: 2;
+  /** `"call"` when the call came through the thin call, a new process each time (§18.10). */
+  via?: "call";
+  /** `"fast"` when fast-forwarded animations were on while the call ran (PLAN-1.6 F4); the report says how many calls. */
+  animations?: "fast";
   app?: string;
   batch?: { id: string; step: number };
   dry_run?: boolean;
   confirmed?: boolean;
+  /** Where a person's OK came from: the host's dialog or the live view (AGENT-TOOLS 1.13 §11.3). */
+  confirmed_by?: "chat" | "live view";
   /** For typing: how many characters, never the text. */
   chars?: number;
   /** AGENT-TOOLS 1.11 §16.1: `"read"` for a call that isn't an action (look, wait_for, logs, ...). */
@@ -48,6 +57,13 @@ export interface ActionLogEntry {
    * Set on the call's action entries, so a report counts the call as failed (Codex review of 1.4.0).
    */
   call_failed?: string;
+  /** A `compare_screen` that matched under its threshold but named changed clusters (AGENT-TOOLS 1.13.1 item 2). */
+  matched_with_changes?: boolean;
+  /**
+   * A touch that took the app from one place to another: their names (the map's own, never screen text), and whether the map
+   * already held a proven road between them. The report uses it to say a way was known (AGENT-TOOLS 1.13 16.1).
+   */
+  way?: { from: string; to: string; known: boolean };
 }
 
 export const LOG_KEEP_DAYS = 14;

@@ -61,6 +61,23 @@ One of `token` and `pairCode` (with both, the host checks `pairCode`). `device.i
 install and keeps; it tells apart phones that send no `name` or `model` (iOS sends
 neither). Android may also send `model`.
 
+`app.id` is the app's own id, never its container's (AGENT-TOOLS 1.13 §18.9): what the app passes to
+`startTapline`, else, from the app's config (`expo-constants`), `expoConfig.ios.bundleIdentifier ??
+expoConfig.android.package ?? expoConfig.slug`, so an app in Expo Go has its own id and not Expo Go's. `app.build` is
+`<version> (<build number>)`, the native version and build number (`CFBundleShortVersionString (CFBundleVersion)`);
+in Expo Go, whose own build isn't the app's, the config's version and build number. A JavaScript reload is not a new build.
+
+Optional capabilities added in 1.6 (a host checks for them and does without when they're absent):
+`place` (the `place` request and event, and `tree.place`), `places` (the `places` request) and `move` (the
+`move` request) and `waitOnce` (`waitFor` with `once`, below). A host without it reads one `tree` instead.
+`pressFacts` (the `handler` and `startedRequests` fields of a `press` or `longPress` result, below): a host without it
+says a tap that changed nothing without a clause about the handler (AGENT-TOOLS 1.13 §3).
+`typeKind` (the `kind` param of `type`, below): a host without it never sends a test account's value, since an older app would type it into any field (AGENT-TOOLS 1.13 §18.6).
+
+`idle` (know-don't-watch, F1): the app can answer an action's settle as soon as the animations, interactions and requests it can see are idle, a frame or two later, instead of after 100 ms without a commit. It is off unless the app starts with `knowIdle: true`. The built-in app command `settle {mode: "quiet"}` switches it off for the session (it can never switch it on), and the app's own setting comes back when the session ends. After the idle hold the app reads the visible positions twice, a frame apart, and keeps today's poll when they differ. The settle result keeps its shape (`settledMs`, `settleCapMs`); a host needs to do nothing. What the app can't see (Reanimated, a sheet or modal, native work) keeps the 100 ms window.
+
+`animations` (fast-forwarded animations, F4, AGENT-TOOLS 1.13 18.12): the built-in app command `animations {speed: "fast" | "normal"}` (a `command` request) and `tree.animations`. It is never on by default and is switched on only by an agent. While on, the tree result carries `"animations": "fast"` and the host says `Animations: fast (Tapline).` in every answer that shows the tree (the shape of the network line). The command answers `{ speed, layers: { native, javascript, reanimated }, say }`: `say` starts with that line and names the layers that are on and, for each that is off, why. Layers: (1) the native module's `setAnimationSpeed(speed)` sets the layer speed of the app's windows (100 while fast, 1 normal); a build without that function reports the native layer as off; (2) `Animated.timing` and `LayoutAnimation` durations and delays are scaled to 2 percent (at least 1 ms), and `Animated.spring` becomes a 1 ms timing to the same value in the same driver mode; (3) Reanimated's reduce-motion switch, when the app has Reanimated and this version has one. Timers are never touched. The app puts everything back on `normal`, on a disconnect and when Tapline stops; the native module also resets the windows when it is created or destroyed (a JavaScript reload). A host without the capability does without: it never sends the command. The host pauses it (sends `normal`, then `fast` again) inside `performance`, `filmstrip`, `compare_screen`, a step's `expect.matches` and a journey's pictures, and sends `normal` when its runtime closes.
+
 ### Host → app: `welcome`
 
 ```json
@@ -85,8 +102,9 @@ it for every later connection.
 ```
 
 Error codes: `not_found`, `ambiguous`, `not_actionable`, `unsupported`, `bad_params`,
-`timeout`, `internal`. The host adds its own codes for the agent (`stale`, `busy`,
-`paused`, `in_background`, `reconnecting`, `not_connected`); they don't travel on this wire.
+`timeout`, `stale` (only from `move`, when its guard doesn't hold), `internal`. The host adds its own codes for the
+agent (`busy`, `paused`, `in_background`, `reconnecting`, `not_connected`; it also says `stale` for a ref);
+they don't travel on this wire.
 A `not_actionable` message starts with a reason word: `disabled`, `off_screen`, `covered`,
 `under_tab_bar`, `behind_alert` or `no_action` (for example `covered: e47 … is covered by …`).
 A `{x, y}` target where nothing takes the action is `not_actionable` with
@@ -213,6 +231,10 @@ result:
 - `route` (only in apps using React Navigation, Expo Router included): the focused screen's
   route names from the outermost navigator in, and its simple params (strings, numbers,
   booleans, null).
+- `place` (1.6, capability `place`): where the app is, as a route key (see `place` below): `{ "route": ["(tabs)",
+  "settings"], "tab": "settings", "layer": "sheet:Filters" }`. Always present; `route` is `[]` without a router.
+- `row` (1.6): `true` on an element inside a virtualized list's item (React Native's cell renderer, FlashList's cell
+  container). Its text is content, so a host never saves what a row said (AGENT-TOOLS 1.13 §18.2).
 - `changes: true` asks for the difference from the previous `tree` call (on this
   connection). Refs of elements still on screen are kept, new ones get new numbers, and the
   result adds `"changes": { "sameRoute": true, "added": ["e58"], "removed": [<element as it
@@ -237,8 +259,17 @@ target's `onPress` / `onLongPress` with a synthetic press event (`nativeEvent` w
 `locationX/Y`, `pageX/Y`, `timestamp`; `persist()`, `preventDefault()`,
 `stopPropagation()` no-ops). A disabled element: `not_actionable`.
 
-Real-touch check (unless `force`): an element entirely off screen is `not_actionable`
-("scroll to it first"). Otherwise the app hit-tests the centre of the element's visible
+With `pressFacts`, the result also says what the touch did (AGENT-TOOLS 1.13 §3; not on a dry run):
+`"handler": { "kind": "own" }` when the touched element's own handler took it, `{ "kind": "own", "threw": "<message>" }`
+when that handler threw (the press still answers, the message is also logged as `[tapline] onPress threw: …`), and
+`{ "kind": "parent", "element": <element> }` when the element has none and an ancestor's took the touch (`threw` may be there
+too). `"startedRequests": 2` counts the requests that began during the action (a counter next to the in-flight one; dev-server
+traffic excluded). The host turns these into the clause of the "tap that changed nothing" note.
+
+Real-touch check (unless `force`): an element entirely off screen is `not_actionable` (`off_screen`). The action scrolls an
+element into view itself (§16.2), so `off_screen` means no scroll can bring it on screen, and the message says so: it lies in
+a part of the screen that nothing scrolls (behind a fixed bar, or outside every list), so look at the screen, then target
+something else or report it (AGENT-TOOLS 1.13.1 item 3). Otherwise the app hit-tests the centre of the element's visible
 part with Fabric's `findNodeAtPoint` (as React Native's element inspector does); when the
 touch would land on something that is neither inside the element nor one of its ancestors,
 it's `not_actionable` and the message names what covers it. An open React Native `Modal` is
@@ -260,6 +291,8 @@ inputs, and with `submit` calls `onSubmitEditing` / `onEndEditing`.
 `backspace: n` (a whole number) first deletes the last n characters (code points, so 😀 is
 one) and then appends `text`, if any; it never replaces. The live viewer's backspace key
 sends `{ "backspace": 1 }`.
+`kind` (capability `typeKind`): `"secure"` or `"plain"`. The app resolves the input first and refuses before it types or scrolls
+when the field is the other kind: `bad_params` with `data: { "secure": true | false }` (whether the field is secure; no text).
 → result: `{ "element": <element>, "value": "hello" }`.
 
 ### `scroll`
@@ -298,6 +331,11 @@ params: `{ "text" | "testID" | "label": "…", "gone": false, "networkIdle": fal
 250 ms until an element matches (text contains, case-insensitive; testID equal; label
 equal, case-insensitive), or none does with `gone`, and, with `networkIdle`, no request is in
 flight. → `{ "met": true, "waitedMs": 1240 }`, or error `timeout`.
+
+`once: true` (1.6, capability `waitOnce`; AGENT-TOOLS 1.13 §9.1) makes it one read for the host's `if` and
+`optional` steps: no poll, no timeout, the same matching (the whole element list counts, so an element below
+the fold is there). → `{ "found": true }`: the condition holds (with `gone`, the element is gone).
+`timeout` is still checked if given; `once` with `networkIdle` only reads the network once.
 
 ### Status in `tree`
 
@@ -353,3 +391,117 @@ the entries with `ts` after `since` (epoch milliseconds; all of them without `si
 ### `reload`
 
 Development builds only (`__DEV__`): `DevSettings.reload()`. Otherwise `unsupported`.
+
+### `place` (request and event; capability `place`)
+
+AGENT-TOOLS 1.13 §18.1 and §18.11. Where the app is, as a route key. Names are route *patterns*, never params; nothing from
+the screen's text is in it.
+
+```json
+{ "route": ["(tabs)", "settings", "language"], "tab": "settings", "layer": "sheet:Filters", "seenAt": 1731500000000 }
+```
+
+- `route`: the focused screen's route names from the outermost navigator in, each split on `/` (so `trips/[id]` is
+  `["trips", "[id]"]`). `[]` when the app has no router or no screen yet. `/user/123` and `/user/456` are one place.
+- `tab`: the selected tab's route name (a tab navigator's selected route, else a native tab bar's selected tab by its
+  key, never its title); absent when there are no tabs.
+- `layer`: what lies on top. `alert` for an open alert; `modal:<name>` or `sheet:<name>` for a navigation route
+  presented as a modal or sheet (`<name>` is its route name; `stackPresentation` `formSheet`, `pageSheet` and `sheet` are
+  sheets); for a bare `Modal`, `modal:<testID of its root>` or just `modal`. Never text from the screen. Absent when
+  nothing lies on top.
+- `seenAt`: epoch milliseconds when it was read.
+
+The request `place` (params `{}`) answers it now. The event `place` is sent once right after `welcome`, then whenever the
+route, the tab or the layer changes (about 40 ms after the commit, one per burst, never on a repeat; an alert opening or
+closing counts). It is not sent while the app is disconnected. The host keeps the latest and answers `GET /place`
+from memory (§18.11).
+
+### `places` (capability `places`)
+
+params: `{}` → `{ "source": "expo-router" | "react-navigation" | "none", "places": [ { "route": [...], "link": "wayfare://trips/[id]", "params": ["id"] } ] }`.
+
+The places the app's route tree lists, before any visit (AGENT-TOOLS 1.13 §18.1, "Known before any visit"). `params` are
+names only. `link` is `<scheme>://<path>` with `[id]` where a param goes, from the app's own scheme (a custom scheme
+beats an `https` prefix); absent when the app has no scheme or the screen has no path. Expo Router's route tree is read
+from its internal API behind a guard: any failure answers `source: "none"`. Supported: Expo Router 58, whose route tree
+is `routerConfig.routeNode`, the value of the `RouterConfigContext` provider (read through the fibers); and Expo Router 55,
+whose store (`expo-router/build/global-state/router-store.js`, with the `.js`) has `routeNode`. Other versions may answer
+`none`, and then the `linking` route below is tried. React Navigation's comes from the
+`linking` prop of the `NavigationContainer`, found through the fibers. Never throws.
+
+### `move` (capability `move`)
+
+AGENT-TOOLS 1.13 §18.4 (F7). Act, then wait until the next move's target is ready, in one request. The host checks its
+policy and confirmation against what comes back before it sends the next move, so the app never decides what a person must
+OK, and a move never navigates by itself: it is the ordinary `press`, `longPress`, `toggle`, `back`, `openURL` or
+`swipe`.
+
+params:
+```json
+{ "method": "press", "params": { "target": { "testID": "language-row" } },
+  "guard": { "id": "language-row", "label": "Language", "text": "Language" },
+  "next": { "target": { "testID": "language-list" }, "capMs": 1500 } }
+```
+
+- `method` and `params`: exactly what the plain method takes (`dryRun` passes through; nothing is waited for then).
+- `guard` (optional): the host's policy check was made against this element. Before acting, the `target` is resolved again;
+  if its `id`, `label` or `text` is not what the guard says, nothing is done and the answer is `stale`. Only for
+  methods with a `target`.
+- `next` (optional): wait up to `capMs` (at most 10 000) until this target is on screen, steady (the same frame on two
+  looks 40 ms apart) and touchable (the `press` dry run's checks pass; a switch is looked at with a `toggle` dry run). A
+  target below the fold that a scroll reaches counts as on screen.
+
+result:
+```json
+{ "done": { "element": { … }, "settledMs": 120 },
+  "place": { "route": ["(tabs)", "settings", "language"] },
+  "next": { "state": "ready", "element": { … }, "waitedMs": 80 } }
+```
+
+- `done`: what the plain method returns, settle fields included.
+- `place`: the place after the move (`null` only when it can't be read).
+- How `drive` uses it (AGENT-TOOLS 1.13 §18.4): the first move is checked against one `tree` read. Move k is one `move` request whose
+  `next` is move k+1's target; before the host sends move k+1 it checks its policy (and asks for a person's OK) against
+  `next.element`, and sends `guard` with what it checked, so a target that is another element by then answers `stale` and nothing is
+  done. `capMs` is the next road's own time times 3, at least 2 s, at most 10 s. Without the capability the host sends the plain
+  method and reads the screen between moves, with the same checks. The arrival check uses `place` (or a read when the route is
+  empty); a drive never claims an arrival it has not checked.
+- `next.state`: `ready`; `missing` (not there at the cap, or refused for another reason); `covered` (covered by something,
+  under the tab bar or behind an alert); `moving` (there but its frame still changing at the cap, with `element`).
+  `element` is present for `ready` and `moving`. `waitedMs` is how long the wait took.
+
+## Host endpoints for tools on this computer
+
+Plain HTTP on the host's port, only from this computer (a peer that isn't loopback gets 403), with the host's token as
+`Authorization: Bearer <token>` (401 without it). The token is never in an answer. These are not part of the
+app's wire; they are how a script or another tool talks to the host (AGENT-TOOLS 1.13 §18.10, §18.11).
+
+### `POST /api/<tool>`
+
+The thin call (`tapline call <tool> '<json>'`). Served only by a standalone `tapline host`; a host inside an agent's MCP
+server answers 404 (`The thin call is served by "tapline host" only ...`), so one agent's session can't be driven by
+another's calls. The body is a JSON object of at most 1 MB (an empty body is `{}`): the tool's own arguments. An
+argument the tool doesn't have, or one of the wrong kind, is an `Error bad_params` answer, as over MCP.
+
+- `X-Agent-Client: <name>` (optional): the caller's name, so its session report, journey and person's OK stay its own.
+  A call with none shares one anonymous caller, which never uses a dialog or another caller's OK.
+- 200 with `{ "text": "...", "isError": false, "image": { "mimeType", "dataBase64" } }` (`image` only when the answer
+  has a picture). A tool's refusal is also 200 with `isError: true`; the text is what MCP would have returned.
+- 400 a bad body, 401 no token, 403 not this computer, 404 an unknown tool (or an MCP host), 405 not POST.
+- A call that needs a person's OK has no host dialog here: it answers `needs_confirmation` at once and the live view asks.
+- `tapline call` prints `text` and exits 0 for an answer, 2 for a refusal, 3 when no host answers; `--json` prints
+  `{"text", "image_path"}`, and a picture is saved to a file whose path `image_path` gives.
+
+### `GET /place?app=<app id>`
+
+Where the app is, from the host's memory of its latest `place` event: no call goes to the phone.
+
+```json
+{ "app": "com.example.wayfare", "route": ["(tabs)", "settings"], "tab": "settings", "layer": "sheet:Filters", "seenAt": 1731500000000, "inFront": true }
+```
+
+`route` is a route pattern (names split on `/`), never params or text; `tab` and `layer` are present only when there is
+one. `seenAt` is the host's clock when the event arrived. `inFront` is false when the app reported that it is in the
+background. 400 without `app`, 404 `{"error":"no app"}` when no session has that app id, and 404 `{"error":"no place"}`
+when the app (an older SDK, without the `place` capability) has sent none. When several sessions have the app, the one
+with the newest place answers.

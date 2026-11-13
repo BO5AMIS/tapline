@@ -10,8 +10,10 @@ import {
   type FiberRootLike,
 } from './fiber';
 import { openAlerts } from './alerts';
+import { placeFrom, type PlaceParts } from './placekey';
 import { keyboardState } from './keyboard';
 import { refreshCover } from './native';
+import { animationsFast } from './anim';
 import { inFlight, networkCondition } from './network';
 import { commitRevision, getRoots } from './register';
 import {
@@ -69,6 +71,8 @@ export interface HostNode {
   text: string;
   isText: boolean;
   insideText: boolean;
+  /** Inside a virtualized list's item (AGENT-TOOLS 1.13 §18.2: the host never saves what a row said). */
+  row?: true;
 }
 
 /** Invisible direction marks (AGENT-TOOLS v1.3): U+200E, U+200F, U+202A–U+202E, U+2066–U+2069. */
@@ -133,6 +137,10 @@ export interface RouteFound {
   focused: boolean;
   /** Route names from the outermost navigator to this one. */
   chain: string[];
+  /** How the screen is presented when it isn't a plain push (React Native Screens' `stackPresentation`), for the place's layer. */
+  presentation?: string;
+  /** The screen component's fiber, to tell which of a route and a bare Modal lies on top of the other. */
+  fiber?: Fiber;
 }
 
 /** One tab of a native tab bar (drawn by the OS, so not in the host tree as a button). */
@@ -153,7 +161,7 @@ interface Collected {
   behind?: { sheet: Fiber; nodes: HostNode[] };
 }
 
-function routeOf(fiber: Fiber, chain: RouteFound[]): RouteFound | null {
+function routeOf(fiber: Fiber, chain: RouteFound[], presentation: string | undefined): RouteFound | null {
   const props = propsOf(fiber);
   const route = props.route;
   const nav = props.navigation;
@@ -181,6 +189,8 @@ function routeOf(fiber: Fiber, chain: RouteFound[]): RouteFound | null {
     navigation,
     focused,
     chain: [...chain.map((r) => r.name), route.name],
+    fiber,
+    ...(presentation !== undefined ? { presentation } : {}),
   };
 }
 
@@ -200,6 +210,12 @@ function collectTabs(first: Fiber | null, tabs: TabFound[]): void {
   }
 }
 
+/** The component a virtualized list wraps each item in: React Native's cell renderer, FlashList's cell container. */
+function isListItemOwner(owner: Fiber): boolean {
+  const name = fiberName(owner);
+  return name !== null && (name.endsWith('CellRenderer') || name === 'CellContainer');
+}
+
 function walk(
   first: Fiber | null,
   parent: number,
@@ -207,6 +223,8 @@ function walk(
   insideText: boolean,
   out: Collected,
   chain: RouteFound[],
+  presentation?: string,
+  inRow = false,
 ): string[] {
   const segments: string[] = [];
   for (let fiber = first; fiber; fiber = fiber.sibling) {
@@ -219,6 +237,12 @@ function walk(
       if (hidesSubtree(hostType, propsOf(fiber))) continue;
       if (MODAL_HOSTS.has(hostType)) out.modals.push(fiber);
       const isText = TEXT_HOSTS.has(hostType);
+      const row = inRow || owners.some(isListItemOwner);
+      let shown = presentation;
+      if (hostType === 'RNSScreen') {
+        const stack = propsOf(fiber).stackPresentation;
+        shown = typeof stack === 'string' && stack !== 'push' ? stack : undefined;
+      }
       const node: HostNode = {
         index: out.nodes.length,
         parent,
@@ -228,19 +252,20 @@ function walk(
         text: '',
         isText,
         insideText,
+        ...(row ? { row: true as const } : {}),
       };
       out.nodes.push(node);
-      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain);
+      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row);
       node.text = normalizeText(isText ? inner.join('') : inner.join(' '), isText);
       if (isText) segments.push(inner.join(''));
       else for (const piece of inner) segments.push(piece);
     } else if (isCompositeTag(fiber.tag)) {
-      const route = routeOf(fiber, chain);
+      const route = routeOf(fiber, chain, presentation);
       if (route) out.routes.push(route);
-      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain);
+      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow);
       for (const piece of inner) segments.push(piece);
     } else {
-      const inner = walk(fiber.child, parent, owners, insideText, out, chain);
+      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow);
       for (const piece of inner) segments.push(piece);
     }
   }
@@ -257,6 +282,13 @@ function collect(roots: FiberRootLike[]): Collected {
   const only: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
   walk(top.child, -1, [], false, only, []);
   return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, behind: { sheet: top, nodes: out.nodes } };
+}
+
+/** What the place is made of, without describing any element (cheap enough for every commit); null without React roots. */
+export function placeParts(roots: FiberRootLike[] = getRoots()): PlaceParts | null {
+  if (roots.length === 0) return null;
+  const { routes, tabs, behind } = collect(roots);
+  return { routes, tabs, modal: behind ? behind.sheet : null };
 }
 
 export function collectNodes(roots: FiberRootLike[] = getRoots()): HostNode[] {
@@ -913,6 +945,8 @@ export interface Snapshot {
   screen: ScreenInfo;
   /** Visible screens that got React Navigation's props, in tree order. */
   routes: RouteFound[];
+  /** What the place (AGENT-TOOLS 1.13 §18.1) is made of. */
+  parts: PlaceParts;
   /**
    * Set while a modal (a sheet) is open: what the open sheet hides, worked out on first call. The
    * look leaves the screen behind a sheet out, so `entries` don't hold it; this does, with the
@@ -1013,7 +1047,7 @@ export function takeSnapshot(): Snapshot {
       },
     });
   }
-  const snapshot: Snapshot = { nodes, entries, screen: getScreen(), routes };
+  const snapshot: Snapshot = { nodes, entries, screen: getScreen(), routes, parts: { routes, tabs, modal: behind ? behind.sheet : null } };
   if (behind) {
     let worked: BehindSheet | undefined;
     snapshot.behind = () => {
@@ -1274,6 +1308,7 @@ export function toElement(entry: Entry, frame: Frame | null, ref: string = refFo
     disabled: info.disabled,
     selected: info.selected,
     checked: info.checked,
+    ...(entry.node.row === true ? { row: true as const } : {}),
   };
 }
 
@@ -1496,6 +1531,7 @@ export async function tree(params: unknown = {}, glass?: GlassPass): Promise<Tre
     const params = simpleParams(current.params);
     result.route = params ? { names: current.chain, params } : { names: current.chain };
   }
+  result.place = placeFrom(snapshot.parts);
   const alerts = openAlerts();
   if (alerts.length > 0) {
     result.alerts = alerts.map(({ kind, title, message, buttons, standIn }) => ({ kind, title, message, buttons, standIn }));
@@ -1505,6 +1541,8 @@ export async function tree(params: unknown = {}, glass?: GlassPass): Promise<Tre
   if (busy > 0 || mode !== 'normal') {
     result.network = { ...(busy > 0 ? { inFlight: busy } : {}), ...(mode !== 'normal' ? { condition: mode } : {}) };
   }
+  // Said in every answer while fast animations are on (PLAN-1.6 F4); the host prints `Animations: fast (Tapline).`.
+  if (animationsFast()) result.animations = 'fast';
   // `Keyboard: shown` in the header while it is up; in a change block only when it came or went.
   const keyboard = keyboardState()?.shown;
   if (keyboard === true) result.keyboard = true;

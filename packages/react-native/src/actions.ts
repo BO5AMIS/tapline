@@ -1,5 +1,8 @@
 import { DevSettings, Keyboard, Linking, Platform, TextInput } from 'react-native';
 import { keyboardState } from './keyboard';
+import { assertRecipient, parseRecipientGuard, type RecipientGuard } from './guard';
+import { startedRequests } from './network';
+import { waitWhileLoading } from './loading';
 import { nativeModule } from './native';
 import {
   closingModalHosts,
@@ -45,7 +48,8 @@ import { uxScreen, type UxAction, type UxCheckName, type UxKind } from './uxchec
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
-import { onCommit } from './register';
+import { commitRevision, onCommit } from './register';
+import { isKnowIdle, waitUntilIdle } from './idle';
 import { waitUntilSteady, waitUntilStill } from './settle';
 import {
   TaplineError,
@@ -163,14 +167,94 @@ async function sheetProbe(): Promise<Fiber | null> {
   return null;
 }
 
+/**
+ * Where `startedRequests()` stood when the action began (or when the last settle ended): a request begun after
+ * it is one the action started (F1).
+ */
+let requestMark = 0;
+
+/** An action is starting: only requests begun from now on count as its own. */
+export function beginAction(): void {
+  requestMark = startedRequests();
+}
+
+const FRAME_MS = 16;
+
+/** Whether an open or closing sheet hides the app's motion from the SDK. */
+function sheetPresent(): boolean {
+  return openModalHosts().length > 0 || closingModalHosts().length > 0;
+}
+
+/** The elements whose positions say the screen has stopped: the acting ones and the outermost. */
+function watchedFibers(): Fiber[] {
+  try {
+    const entries = takeSnapshot().entries;
+    const picked = new Map<number, Fiber>();
+    for (const entry of [...entries.filter((e) => e.info.actions.length > 0).slice(0, 6), ...entries.slice(0, 6)]) {
+      picked.set(entry.node.index, entry.node.fiber);
+    }
+    return [...picked.values()];
+  } catch {
+    return [];
+  }
+}
+
+function sameFrame(a: Frame | null, b: Frame | null): boolean {
+  if (a === null || b === null) return a === b;
+  return Math.abs(a.x - b.x) <= 1 && Math.abs(a.y - b.y) <= 1 && Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1;
+}
+
+/**
+ * A native push, a Lottie or a gesture-handler sheet moves without a commit or an Animated call, so after the
+ * idle hold the visible positions are read twice, a frame apart. Says which element moved, and whether React
+ * committed in between.
+ */
+async function positionsMoved(): Promise<{ moving: Fiber | null; committed: boolean }> {
+  const before = commitRevision();
+  const fibers = watchedFibers();
+  const read = (): Promise<Array<Frame | null>> => Promise.all(fibers.map((fiber) => measureFiber(fiber).catch(() => null)));
+  const first = await read();
+  await new Promise<void>((resolve) => setTimeout(resolve, FRAME_MS));
+  const second = await read();
+  const at = first.findIndex((frame, i) => !sameFrame(frame, second[i] ?? null));
+  return { moving: at >= 0 ? (fibers[at] ?? null) : null, committed: commitRevision() !== before };
+}
+
 async function settleNow(): Promise<SettleOutcome> {
   const started = Date.now();
   let capped = false;
   const onCap = (): void => {
     capped = true;
   };
+  // Know-don't-watch (off unless `knowIdle`): answer when every signal the SDK can see is idle and still.
+  // An open sheet is out of its sight, so that keeps today's window and position poll.
+  let knowSpentMs = 0;
+  if (isKnowIdle() && settings.capMs > 0 && !sheetPresent()) {
+    const known = await waitUntilIdle({ frames: 2, capMs: settings.capMs, requestMark });
+    let moving: Fiber | null = null;
+    let steady = !known.usedFallback && !known.capped;
+    if (steady && !sheetPresent()) {
+      const check = await positionsMoved();
+      moving = check.moving;
+      steady = moving === null && !check.committed;
+    }
+    if (!known.usedFallback && !sheetPresent() && (steady || known.capped)) {
+      requestMark = startedRequests();
+      const settledMs = Math.max(0, Math.min(settings.capMs, Date.now() - started));
+      return known.capped ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
+    }
+    if (known.capped) onCap();
+    knowSpentMs = Math.max(0, Date.now() - started);
+    // Something moved without a commit: today's poll waits for it to stop.
+    const left = settings.capMs - knowSpentMs;
+    if (moving && left > 0) {
+      await waitUntilSteady(() => measureFiber(moving), { pollMs: SHEET_POLL_MS, capMs: left, now: Date.now, onCap });
+      knowSpentMs = Math.max(0, Date.now() - started);
+    }
+  }
   await waitUntilStill({
     ...settings,
+    capMs: settings.capMs - knowSpentMs,
     onCommit: (listener) => onCommit(() => listener()),
     now: Date.now,
     onCap,
@@ -204,6 +288,7 @@ async function settleNow(): Promise<SettleOutcome> {
     }
   }
   const settledMs = Math.max(0, Math.min(settings.capMs, Date.now() - started));
+  requestMark = startedRequests();
   return capped && settings.capMs > 0 ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
 }
 
@@ -239,6 +324,22 @@ function callHandler(name: string, handler: (...args: unknown[]) => unknown, arg
       console.error(`[tapline] ${name} rejected:`, error);
     });
   }
+}
+
+/**
+ * Calls a press handler as `callHandler` does, but a throw is not an error of the action: a person's tap
+ * on a button whose handler throws still happened. The message goes to the logs and to the answer's facts
+ * (AGENT-TOOLS 1.13 §3). Returns the message, or undefined when the handler didn't throw.
+ */
+function callHandlerCaught(name: string, handler: (...args: unknown[]) => unknown, args: unknown[]): string | undefined {
+  try {
+    callHandler(name, handler, args);
+  } catch (error) {
+    const message = error instanceof TaplineError ? error.message.replace(/^[^:]*threw: /, '') : String(error);
+    console.error(`[tapline] ${name} threw: ${message}`);
+    return message.slice(0, 500);
+  }
+  return undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -543,8 +644,41 @@ function inFrontLayer(matches: Entry[]): Entry[] {
   return inAlert.length > 0 ? inAlert : matches;
 }
 
-/** Resolve a protocol target to exactly one element, or throw not_found / ambiguous. */
-export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
+/**
+ * Resolve a protocol target to exactly one element, or throw not_found / ambiguous. A target that isn't there while the screen
+ * is loading (a request in flight, a spinner) is waited for up to the settle cap before `not_found` is answered (AGENT-TOOLS
+ * 1.13 §18.7); the answer after the wait is made from the screen as it is then, so its closest matches are unchanged.
+ */
+export async function resolveTarget(raw: unknown, hint?: ActionHint, glassOnly = false, loadingWait = true): Promise<Resolved> {
+  try {
+    return await resolveNow(raw, hint, glassOnly);
+  } catch (error) {
+    if (!(error instanceof TaplineError) || error.code !== 'not_found' || !loadingWait || !isNamedTarget(raw) || settings.capMs <= 0) throw error;
+    await waitWhileLoading({
+      requestMark,
+      capMs: settings.capMs,
+      // Anything but `not_found` (ambiguous, covered) means the target has come.
+      isThere: () =>
+        resolveNow(raw, hint, glassOnly).then(
+          () => true,
+          (again: unknown) => !(again instanceof TaplineError && again.code === 'not_found'),
+        ),
+    });
+    return resolveNow(raw, hint, glassOnly);
+  }
+}
+
+/** A target by id, label or text: the kinds a screen can still be loading. A ref or a point is never waited for. */
+function isNamedTarget(raw: unknown): boolean {
+  try {
+    const kind = parseTarget(raw).kind;
+    return kind === 'testID' || kind === 'label' || kind === 'text';
+  } catch {
+    return false;
+  }
+}
+
+async function resolveNow(raw: unknown, hint?: ActionHint, glassOnly = false): Promise<Resolved> {
   const target = parseTarget(raw);
   const snapshot = takeSnapshot();
 
@@ -818,7 +952,8 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
     throw notActionable(
       'off_screen',
       `${name} is off screen (at ${Math.round(frame.x)},${Math.round(frame.y)}; the screen is ${width}x${height}). ` +
-        `Scroll to it first ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
+        'It lies in a part of the screen that nothing scrolls (behind a fixed bar, or outside every list); look at the screen, then target something else or report it. ' +
+        'Pass force: true to call its handler anyway.',
     );
   }
   const bar = nativeTabBar(snapshot);
@@ -1033,21 +1168,29 @@ function focusInput(entry: Entry, frame: Frame | null): void {
   }
 }
 
+/** The guard a `move` hands to the touch it makes, never part of a plain call. */
+function recipientGuardOf(params: Record<string, unknown>): RecipientGuard | undefined {
+  return params.recipientGuard === undefined ? undefined : parseRecipientGuard(params.recipientGuard);
+}
+
 async function pressLike(
   kind: 'press' | 'longPress',
   rawParams: unknown,
 ): Promise<PressResult> {
   const params = paramsOf(rawParams);
   const afterMs = kind === 'press' ? againAfter(params.again) : undefined;
-  const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true);
+  const guard = recipientGuardOf(params);
+  const { snapshot, entry } = await resolveTarget(params.target, kind, params.noScroll === true, params.dryRun !== true);
   if (entry.tab) {
     if (kind === 'longPress') throw notActionable('no_action', `${describe(entry)} has no long-press action`);
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
+    assertRecipient(guard, entry);
     selectTab(snapshot, entry.tab);
     return { element: toElement(entry, null), ...keyboardNote(closeKeyboardFor(entry)), ...(await settleOutcome()) };
   }
   if (entry.navBack) {
     if (params.dryRun === true) return { element: toElement(entry, null), dryRun: true, settledMs: 0 };
+    assertRecipient(guard, entry);
     const { route: _route, ...outcome } = await back({});
     return { element: toElement(entry, null), ...outcome };
   }
@@ -1071,6 +1214,8 @@ async function pressLike(
     return { actor: found, handler: own, focusing: isInput };
   };
   let planned = plan(snapshot, entry);
+  // The element the agent named; a scroll may find it again.
+  let touched = entry;
   // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2). The policy ran before this call.
   let reach: Reach = {};
   let current = snapshot;
@@ -1081,33 +1226,50 @@ async function pressLike(
     if (reach.scrolled) {
       const again = await reresolve(planned.actor, kind, params.target);
       current = again.snapshot;
+      touched = again.entry;
       planned = plan(again.snapshot, again.entry);
       await assertRefoundOnScreen(current, planned.actor, reach);
     }
   }
-  const { actor, handler, focusing } = planned;
+  const { actor, handler } = planned;
   const { element, frame } = await elementFor(actor);
   if (reach.scrolls) return { element, dryRun: true, scrolls: true, ...(reach.point ? { point: reach.point } : {}), settledMs: 0 };
   const forced = await checkedAfterScroll(params.force === true, reach, () => assertReachable(current, actor, frame));
   // A dry run (AGENT-TOOLS 1.8 §11.4): every check ran; nothing is touched.
   if (params.dryRun === true) return { element, dryRun: true, ...pointOf(frame), ...forced, settledMs: 0 };
+  // The policy checked this very element: refuse when the one that takes the touch is another now (§18.4).
+  assertRecipient(guard, actor);
   const closedKeyboard = closeKeyboardFor(actor);
-  if (handler) callHandler(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
+  const requestsBefore = startedRequests();
+  let threw: string | undefined;
+  // An input with no onPress of its own was only focused: no handler ran, so none is reported.
+  let handled = handler !== null;
+  if (handler) threw = callHandlerCaught(handlerName, handler, [pressEvent(actor.node.fiber, frame)]);
   else {
     // A finger focuses the input and also fires the input's own onPress (not an ancestor's: the
     // input takes the touch).
     focusInput(actor, frame);
     const own = appHandler(actor, 'onPress');
-    if (own) callHandler('onPress', own, [pressEvent(actor.node.fiber, frame)]);
+    if (own) {
+      handled = true;
+      threw = callHandlerCaught('onPress', own, [pressEvent(actor.node.fiber, frame)]);
+    }
   }
+  // Whose handler it was: the touched element's own, or an ancestor's that took the touch (§3).
+  const facts: HandlerFacts | undefined = !handled ? undefined : sameFiber(actor.node.fiber, touched.node.fiber)
+    ? { kind: 'own', ...(threw !== undefined ? { threw } : {}) }
+    : { kind: 'parent', element, ...(threw !== undefined ? { threw } : {}) };
   const second = afterMs === undefined ? undefined : await pressAgain(actor, params, afterMs);
+  const settled = await settleOutcome();
   return {
+    ...(facts !== undefined ? { handler: facts } : {}),
+    startedRequests: Math.max(0, startedRequests() - requestsBefore),
     element,
     ...(reach.scrolled ? { scrolled: true as const } : {}),
     ...keyboardNote(closedKeyboard),
     ...forced,
     ...(second !== undefined ? { second } : {}),
-    ...(await settleOutcome()),
+    ...settled,
   };
 }
 
@@ -1142,8 +1304,9 @@ async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs
     const { frame } = await elementFor(found);
     if (params.force !== true) await assertReachable(again.snapshot, found, frame);
     const at = Date.now() - started;
-    callHandler('onPress', handler, [pressEvent(found.node.fiber, frame)]);
-    return { done: true, afterMs: at };
+    // A handler that throws on the second tap was reached: that is the app's failure, not a tap that didn't land.
+    const threw = callHandlerCaught('onPress', handler, [pressEvent(found.node.fiber, frame)]);
+    return threw === undefined ? { done: true, afterMs: at } : { done: true, afterMs: at, threw };
   } catch (error) {
     const reason =
       error instanceof TaplineError
@@ -1156,7 +1319,7 @@ async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs
 }
 
 /** What happened to a double tap's second tap, and how long after the first it came. */
-export type PressSecond = { done: true; afterMs: number } | { done: false; reason: string; afterMs: number };
+export type PressSecond = { done: true; afterMs: number; threw?: string } | { done: false; reason: string; afterMs: number };
 
 /**
  * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
@@ -1174,7 +1337,14 @@ export type PressResult = {
   point?: { x: number; y: number };
   /** With `again`: the second tap of a double tap. */
   second?: PressSecond;
+  /** Whose handler took the touch, and its message if it threw (AGENT-TOOLS 1.13 §3). Absent on a dry run. */
+  handler?: HandlerFacts;
+  /** Requests that began during the action. Absent on a dry run. */
+  startedRequests?: number;
 } & SettleOutcome;
+
+/** An own handler (`threw`: its message), or an ancestor's (`element`: that ancestor) that took the touch. */
+export type HandlerFacts = { kind: 'own'; threw?: string } | { kind: 'parent'; element: TaplineElement; threw?: string };
 
 /** Where a finger would land: the middle of the element (points, rounded). */
 function pointOf(frame: Frame | null): { point?: { x: number; y: number } } {
@@ -1319,9 +1489,9 @@ function keyboardNote(closed: boolean): { closedKeyboard?: true } {
   return closed ? { closedKeyboard: true } : {};
 }
 
-async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown, glassOnly = false): Promise<Resolved> {
+async function resolveInput(snapshot: Snapshot | null, rawTarget: unknown, glassOnly = false, loadingWait = true): Promise<Resolved> {
   if (rawTarget !== undefined && rawTarget !== null) {
-    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type', glassOnly);
+    const { snapshot: snap, entry } = await resolveTarget(rawTarget, 'type', glassOnly, loadingWait);
     const input = findActionable(snap, entry, 'type', true);
     if (!input) throw notActionable('no_action', `${describe(entry)} is not an input`);
     return { snapshot: snap, entry: input };
@@ -1356,6 +1526,19 @@ function setNativeText(entry: Entry, text: string): void {
   }
 }
 
+function assertFieldKind(entry: Entry, kind: 'secure' | 'plain' | undefined): void {
+  const isSecure = isSecureInput(entry.node);
+  if (kind !== undefined && (kind === 'secure') !== isSecure) {
+    throw new TaplineError(
+      'bad_params',
+      `${describe(entry)} is ${isSecure ? 'a secure field' : 'not a secure field'}, not a ${kind} field`,
+      undefined,
+      undefined,
+      { secure: isSecure },
+    );
+  }
+}
+
 export async function typeText(
   rawParams: unknown,
 ): Promise<{ element: TaplineElement; value: string; secure?: true; closedKeyboard?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
@@ -1371,7 +1554,13 @@ export async function typeText(
   // Deleting from the end edits what is there, so it never replaces the whole text.
   const replace = params.replace !== false && !deleting;
 
-  let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true);
+  const kind = params.kind;
+  if (kind !== undefined && kind !== 'secure' && kind !== 'plain') throw badParams('kind is "secure" or "plain"');
+
+  let { snapshot, entry } = await resolveInput(null, params.target, params.noScroll === true, params.dryRun !== true);
+  // A test account's value goes only into the kind of field it is for (AGENT-TOOLS 1.13 §18.6). The refusal
+  // comes before anything is typed or scrolled, and says only whether the field is secure, never its text.
+  assertFieldKind(entry, kind);
   if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
   // Off screen, in the tree: scroll it into view first (AGENT-TOOLS 1.12 §16.2; the policy ran before this
   // call). The input that already has focus is typed into without touching it, so it is not scrolled to.
@@ -1390,6 +1579,8 @@ export async function typeText(
         again = await resolveInput(null, refind);
       }
       assertSameTarget(entry, again.entry);
+      // A recycled row may hold another kind of field under the same names.
+      assertFieldKind(again.entry, kind);
       snapshot = again.snapshot;
       entry = again.entry;
       if (entry.info.disabled) throw notActionable('disabled', `${describe(entry)} is not editable; ${ENABLE_FIRST}.`);
@@ -1935,7 +2126,7 @@ export async function scroll(rawParams: unknown): Promise<ScrollResult> {
   let entry: Entry;
   let frame: Frame | null = null;
   if (params.target !== undefined && params.target !== null) {
-    const resolved = await resolveTarget(params.target, 'scroll');
+    const resolved = await resolveTarget(params.target, 'scroll', undefined, params.dryRun !== true);
     const scroller = findActionable(resolved.snapshot, resolved.entry, 'scroll', true);
     if (!scroller) throw notActionable('no_action', `${describe(resolved.entry)} is not inside a scroll view`);
     entry = scroller;
@@ -2110,7 +2301,7 @@ export async function toggle(
 ): Promise<{ element: TaplineElement; value: boolean; closedKeyboard?: true; unchanged?: true; forced?: string; dryRun?: true; scrolled?: true; scrolls?: true; point?: { x: number; y: number } } & SettleOutcome> {
   const params = paramsOf(rawParams);
   if (params.value !== undefined && typeof params.value !== 'boolean') throw badParams('value must be a boolean');
-  const first = await resolveTarget(params.target, 'toggle', params.noScroll === true);
+  const first = await resolveTarget(params.target, 'toggle', params.noScroll === true, params.dryRun !== true);
   const plan = (snap: Snapshot, picked: Entry): { control: Entry; handler: NonNullable<ReturnType<typeof findHandler>> } => {
     const found = findActionable(snap, picked, 'toggle', true);
     if (!found) throw notActionable('no_action', `${describe(picked)} is not a switch`);
@@ -2152,6 +2343,7 @@ export async function toggle(
     const { element } = await elementFor(control);
     return { element, value: params.value, unchanged: true, ...(reach.scrolled ? { scrolled: true as const } : {}), settledMs: 0 };
   }
+  assertRecipient(recipientGuardOf(params), control);
   const closedKeyboard = closeKeyboardFor(control);
   callHandler('onValueChange', handler, [next]);
   const outcome = await settleOutcome();

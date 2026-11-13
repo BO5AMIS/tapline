@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ShotImage } from "./annotate.js";
 import { jpegOf, markBox, markRing, readPixels, type ShareBox } from "./images.js";
 import { GIF_MAX_BYTES, encodeJourneyGif, type GifFrame } from "./journeygif.js";
-import { formatDuration, personaWords, summaryLine, summaryNotes, type JourneyState, type JourneyStep } from "./journey.js";
+import { formatDuration, okLine, personaWords, summaryLine, summaryNotes, type JourneyState, type JourneyStep } from "./journey.js";
 import type { UxAction, UxFindingSummary } from "./uxcheck.js";
 
 /**
@@ -530,6 +530,7 @@ function numbersTable(state: JourneyState): Array<[string, string]> {
 function usedLines(state: JourneyState, rec: JourneyRecorder): string[] {
   const lines: string[] = [];
   if (state.shortcuts.length > 0) lines.push(`Shortcuts used (a person doesn't have these): ${state.shortcuts.map((s) => `${s.tool} ${JSON.stringify(s.what)}`).join(", ")}.`);
+  if (state.oks.length > 0) lines.push(okLine(state.oks));
   if (rec.pickerSkips > 0) lines.push(`Photo picker skipped ${rec.pickerSkips === 1 ? "once" : `${rec.pickerSkips} times`} (${rec.pickerPictures} picture${rec.pickerPictures === 1 ? "" : "s"} handed over without the OS picker): picker skipped.`);
   if (state.eyesSwitchedAt !== undefined) lines.push("Eyes: agent. The agent turned a user's eyes off during the journey (it saw ids, labels and everything in the tree and could jump), so the numbers after that are not a user's.");
   return lines;
@@ -574,7 +575,7 @@ function pathScreens(ctx: Ctx): Array<{ n: number; title: string; picture?: stri
 
 /** One step as a line; `esc` makes the app's words safe for the format (Markdown escaping, none for HTML that escapes later). */
 function stepLine(step: JourneyStep, esc: (value: string) => string = (v) => v): string {
-  return `${step.n}. ${esc(stepWords(step))}${step.ok ? "" : ` (failed${step.code !== undefined ? `: ${esc(step.code)}` : ""})`} — ${esc(step.said)}`;
+  return `${step.n}. ${esc(stepWords(step))}${step.ok ? "" : ` (failed${step.code !== undefined ? `: ${esc(step.code)}` : ""})`} — ${esc(step.said)}${step.travel !== undefined ? ` ${esc(step.travel.join(" "))}` : ""}`;
 }
 
 function rulesLines(ctx: Ctx): string[] {

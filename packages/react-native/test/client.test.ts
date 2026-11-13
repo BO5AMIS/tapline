@@ -1,4 +1,5 @@
-import { Platform } from 'react-native';
+import { Animated, Platform } from 'react-native';
+import { animationsFast, setAnimationSpeed } from '../src/anim';
 import {
   HOST_SILENCE_MS,
   PING_INTERVAL_MS,
@@ -12,6 +13,7 @@ import {
   type ClientDeps,
   type WebSocketLike,
 } from '../src/client';
+import { configureKnowIdle, isKnowIdle, setKnowIdle } from '../src/idle';
 import { media, setMediaModules } from '../src/media';
 import { installNetworkTracking, networkCondition, setNetworkCondition, uninstallNetworkTracking } from '../src/network';
 import { addLog, clearLogs, getLogEntries, uninstallLogs } from '../src/logs';
@@ -349,6 +351,40 @@ describe('keepalive', () => {
       setNetworkCondition('3g');
       harness.client.stop();
       expect(networkCondition()).toBe('normal');
+    });
+
+    test("the settle mode goes back to the app's own setting when the connection ends", () => {
+      configureKnowIdle(true);
+      try {
+        const socket = connect(makeClient());
+        setKnowIdle(false); // the agent chose quiet for this session
+        socket.drop(1006);
+        expect(isKnowIdle()).toBe(true);
+        const harness = makeClient();
+        connect(harness);
+        setKnowIdle(false);
+        harness.client.stop();
+        expect(isKnowIdle()).toBe(true);
+      } finally {
+        configureKnowIdle(false);
+      }
+    });
+
+    test('fast animations go back to normal when the socket drops or Tapline stops, and the app announces the capability', async () => {
+      expect(defaultCapabilities()).toContain('animations');
+      const timing = Animated.timing;
+      const socket = connect(makeClient());
+      await setAnimationSpeed('fast');
+      expect(animationsFast()).toBe(true);
+      socket.drop(1006);
+      expect(animationsFast()).toBe(false);
+      expect(Animated.timing).toBe(timing);
+      const harness = makeClient();
+      connect(harness);
+      await setAnimationSpeed('fast');
+      harness.client.stop();
+      expect(animationsFast()).toBe(false);
+      expect(Animated.timing).toBe(timing);
     });
 
     test('the host going silent puts the network back to normal', () => {

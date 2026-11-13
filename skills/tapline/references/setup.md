@@ -110,6 +110,11 @@ tapline mcp
 - `--policy FILE` sets the words that need a person's OK or are blocked (JSON, per app);
   `--no-policy` turns the policy off, only for a test phone with test data. `--no-log` turns
   off the action log in `~/.tapline/log/`.
+- `--no-dialog` keeps a person's OK to the live view (the host's own dialog is off), for a host that
+  hands dialogs to the model instead of a person. `--brief` makes actions answer briefly.
+  `--accounts FILE` loads test accounts (outside any git repository, or ignored by it; never print
+  it). `--maps DIR` keeps each app's map in `DIR/<app id>/`. `tapline host` takes the same options
+  and serves `tapline call`.
 
 **Claude Code**
 
@@ -155,7 +160,7 @@ Run `tapline doctor` first.
 | the phone can't connect, on Windows | the firewall: `tapline doctor` names the rule for ports 7210 to 7219 (it allows the local subnet and Tailscale) |
 | the phone can't connect, on any computer | the phone and the computer are on different networks, or the Wi-Fi blocks devices from each other (guest networks do) |
 | the app doesn't ask to connect after `pair` with no scheme | the offer lasts 10 minutes: call `pair` again. `metro.config.js` needs `withTapline`; same Wi-Fi; the code must load from this computer's Metro, not a tunnel. TestFlight and release builds need the QR code |
-| `not_allowed: needs_confirmation` | a policy word (Buy, Delete, Send …) is on the element: the user allows it in the live view (`viewer`), then repeat the call within 120 s. Use `--no-policy` only on a test phone, with the user's OK |
+| `not_allowed: needs_confirmation` | a policy word (Buy, Delete, Send …) is on the element: the user allows it in the host's dialog or the live view (`viewer`); with no dialog, repeat the call within 120 s after they have. Use `--no-policy` only on a test phone, with the user's OK |
 | the list is empty, "No React roots recorded" | the `register` import isn't the first line of the entry file |
 | a pairing link opens a "not found" screen | Expo Router: `app/+native-intent.ts` is missing |
 | every call answers `in_background` | the app isn't in front: the user opens it again |

@@ -8,15 +8,32 @@ import { stepSchema, type Step } from "./run.js";
  * still reads Tapline's own scripts from before 1.1.
  */
 
-export const sharedScriptSchema = z.object({
+const scriptBase = {
   format: z.literal("agent-tools-script"),
-  version: z.literal(1),
   name: z.string(),
   app: z.string().optional(),
   fresh: z.boolean().optional(),
   steps: z.array(stepSchema),
+};
+
+export const sharedScriptV1Schema = z.object({ ...scriptBase, version: z.literal(1) });
+
+/** A route's variable: a name, or `account` (the test account a route types, §18.6). Never a value. */
+export const variableNameSchema = z.string().regex(/^[A-Za-z_]\w*$/, "a variable's name is letters, digits and '_'");
+
+/** AGENT-TOOLS 1.13 §18.5: version 2 adds where a route starts and ends, and the variables its steps use. */
+export const sharedScriptV2Schema = z.object({
+  ...scriptBase,
+  version: z.literal(2),
+  start: z.string().min(1).optional(),
+  end: z.string().min(1).optional(),
+  variables: z.array(variableNameSchema).optional(),
 });
-export type SharedScript = z.infer<typeof sharedScriptSchema>;
+
+export const sharedScriptSchema = z.union([sharedScriptV1Schema, sharedScriptV2Schema]);
+export type SharedScriptV1 = z.infer<typeof sharedScriptV1Schema>;
+export type SharedScriptV2 = z.infer<typeof sharedScriptV2Schema>;
+export type SharedScript = SharedScriptV1 | SharedScriptV2;
 
 /** Tapline's script before 1.1: the app's methods and their parameters. */
 export const legacyScriptSchema = z.object({
@@ -56,6 +73,24 @@ const TOOL_OF: Record<string, string> = {
   sleep: "wait",
   performance: "performance",
 };
+
+/** ASCII letters folded to lower case, and nothing else: names are ASCII, and `K` (Kelvin) is not a `k`. */
+function asciiLower(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => String.fromCharCode(letter.charCodeAt(0) + 32));
+}
+
+/**
+ * The existing name that differs from `name` only in case, else null (AGENT-TOOLS 1.13.1 item 5). `home` and `HOME` are
+ * one file on Windows and macOS, so the second is refused before anything is written. It compares names, never the
+ * file system, so it means the same on every OS.
+ */
+export function caseTwin(name: string, existing: Iterable<string>): string | null {
+  const others = [...existing];
+  // The exact name exists: it is the one meant, even when a twin from another OS sits next to it.
+  if (others.includes(name)) return null;
+  const folded = asciiLower(name);
+  return others.find((other) => asciiLower(other) === folded) ?? null;
+}
 
 /** The app's target (`testID`) as a tool target (`id`). */
 function toolTarget(target: unknown): unknown {
@@ -120,7 +155,7 @@ export function scriptSteps(calls: MethodStep[]): Step[] {
   return steps;
 }
 
-export function fromLegacy(script: LegacyScript): SharedScript {
+export function fromLegacy(script: LegacyScript): SharedScriptV1 {
   return {
     format: "agent-tools-script",
     version: 1,

@@ -19,7 +19,7 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const SAVE = { ref: "e3", type: "Pressable", role: "button", testID: "save", text: "Save", frame: { x: 24, y: 610, width: 354, height: 48 }, actions: ["press"] };
@@ -229,14 +229,38 @@ describe("session_report waste flags", () => {
   });
 
   it("flags a retry after not_found that found the same element by another target", () => {
-    const failed = entry(1, "tap", { target: { id: "save" }, ok: false, code: "not_found" });
-    const flagged = flagsOf([failed, entry(2, "tap", { target: { text: "Save" }, element: 'button "Save" id=save' })]);
-    expect(flagged).toEqual(["1 retry after not_found that found the same element by another target (calls 2): use its id first"]);
+    const byText = entry(1, "tap", { target: { text: "Sav" }, ok: false, code: "not_found" });
+    expect(flagsOf([byText, entry(2, "tap", { target: { id: "save" }, element: 'button "Sav" id=save' })])).toEqual([
+      "1 retry after not_found that found the same element by another target (calls 2): use its id first",
+    ]);
+    const failedById = entry(1, "tap", { target: { id: "save" }, ok: false, code: "not_found" });
     // a different element, the same target again, another tool: not a match
-    expect(flagsOf([failed, entry(2, "tap", { target: { text: "Cancel" }, element: 'button "Cancel" id=cancel' })])).toEqual([]);
-    expect(flagsOf([failed, entry(2, "tap", { target: { id: "save" }, element: 'button "Save" id=save' })])).toEqual([]);
-    expect(flagsOf([failed, entry(2, "long_press", { target: { text: "Save" }, element: 'button "Save" id=save' })])).toEqual([]);
+    expect(flagsOf([failedById, entry(2, "tap", { target: { text: "Cancel" }, element: 'button "Cancel" id=cancel' })])).toEqual([]);
+    expect(flagsOf([failedById, entry(2, "tap", { target: { id: "save" }, element: 'button "Save" id=save' })])).toEqual([]);
+    expect(flagsOf([failedById, entry(2, "long_press", { target: { text: "Save" }, element: 'button "Save" id=save' })])).toEqual([]);
     expect(flagsOf([entry(1, "tap", { target: { id: "save" }, ok: false, code: "covered" }), entry(2, "tap", { target: { text: "Save" }, element: 'button "Save" id=save' })])).toEqual([]);
+  });
+
+  it("a retry after an id failure ends: target what the latest look shows (its id there, when it has one)", () => {
+    const failed = entry(1, "tap", { target: { id: "save" }, ok: false, code: "not_found" });
+    expect(flagsOf([failed, entry(2, "tap", { target: { text: "Save" }, element: 'button "Save" id=save' })])).toEqual([
+      "1 retry after not_found that found the same element by another target (calls 2): target what the latest look shows (its id there, when it has one)",
+    ]);
+  });
+
+  it("a non-id failure keeps: use its id first; both kinds get their own line", () => {
+    const byText = entry(1, "tap", { target: { text: "Sav" }, ok: false, code: "not_found" });
+    const byId = entry(3, "tap", { target: { id: "go" }, ok: false, code: "not_found" });
+    const flagged = flagsOf([
+      byText,
+      entry(2, "tap", { target: { id: "save" }, element: 'button "Sav" id=save' }),
+      byId,
+      entry(4, "tap", { target: { text: "Go" }, element: 'button "Go" id=go' }),
+    ]);
+    expect(flagged).toEqual([
+      "1 retry after not_found that found the same element by another target (calls 2): use its id first",
+      "1 retry after not_found that found the same element by another target (calls 4): target what the latest look shows (its id there, when it has one)",
+    ]);
   });
 
   it("flags 3 or more scrolls then a touch on an element that was in the list; maybe when that is unknown; not when it wasn't", () => {

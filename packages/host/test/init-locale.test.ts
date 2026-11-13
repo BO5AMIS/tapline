@@ -32,7 +32,7 @@ const pkgWith = (extra: Record<string, string>): string =>
   JSON.stringify({ name: "demo", main: "index.js", dependencies: { expo: "~54.0.0", "react-native": "0.81.0", ...extra } }, null, 2);
 
 afterEach(() => {
-  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("tapline init: language and region commands", () => {

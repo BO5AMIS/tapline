@@ -2,9 +2,12 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { redactValue } from "./accounts.js";
+import { handleApi, safeEqual, type ApiHandler } from "./api.js";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { createPairCode, pairCodeExpiry, verifyPairCode } from "./pairing.js";
+import { placeAnswer } from "./places.js";
 import {
   CLOSE_BAD_PAIR_CODE,
   CLOSE_BAD_PROTOCOL,
@@ -17,10 +20,12 @@ import {
   eventSchema,
   appFrameSchema,
   logEntrySchema,
+  placeStateSchema,
   responseSchema,
   type AppInfo,
   type DeviceInfo,
   type LogEntry,
+  type PlaceState,
 } from "./protocol.js";
 
 export const CLOSE_REPLACED = 4010;
@@ -35,6 +40,11 @@ export interface SessionInfo {
   lastSeen: number;
   /** The app's last reported state ("active", "background", "inactive"), when it sent one. */
   appState?: { state: string; at: number };
+  /**
+   * The app's latest `place` event (AGENT-TOOLS 1.13 §18.11): route patterns, tab and layer, never params. `seenAt` is
+   * this host's clock when it arrived, the same computer's time as the tool that asks.
+   */
+  place?: PlaceState & { seenAt: number };
   /** How the app reaches this host, from the address it connected from. */
   via?: "tailscale" | "wifi";
 }
@@ -152,6 +162,13 @@ export interface TaplineHostOptions {
    * (the report crosses the network, and the app passes on at most one touch per 500 ms). Default 1500 ms.
    */
   agentTouchSlackMs?: number;
+  /** Serves `POST /api/<tool>` (the thin call, AGENT-TOOLS 1.13 §18.10). Only a standalone `tapline host` sets it. */
+  api?: ApiHandler;
+  /**
+   * Scrubs the text of everything the app sends back (answers, errors, log lines, crashes) before anything else reads
+   * it: how test accounts' values stay out of every answer (AGENT-TOOLS 1.13 §18.6).
+   */
+  redact?: (text: string) => string;
 }
 
 /** The longest touch another tool may announce (`POST /agent-touch`), in milliseconds. */
@@ -160,6 +177,29 @@ export const MAX_AGENT_TOUCH_MS = 10_000;
 /** Whether a socket's peer is this computer. */
 export function isLoopback(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+/** The checks and the answer of `GET /place`, apart from the socket so a test can use a peer that isn't this computer. */
+export function handlePlaceRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  context: { token: string; loopback: boolean; sessions: () => SessionInfo[] },
+): boolean {
+  const answer = (status: number, body: string, type = "text/plain"): boolean => {
+    res.writeHead(status, { "content-type": type });
+    res.end(body);
+    return true;
+  };
+  if (!context.loopback) return answer(403, "Only from this computer.\n");
+  if (req.method !== "GET") return answer(405, "GET only.\n");
+  const auth = req.headers.authorization;
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ") || !safeEqual(auth.slice(7).trim(), context.token)) {
+    return answer(401, "Bearer token required.\n");
+  }
+  const app = new URL(req.url ?? "/", "http://host").searchParams.get("app");
+  if (app === null || app === "") return answer(400, '{"error":"app is required"}\n', "application/json");
+  const found = placeAnswer(context.sessions(), app);
+  return answer(found.status, `${JSON.stringify(found.body)}\n`, "application/json");
 }
 
 /**
@@ -213,6 +253,11 @@ export interface DevOffer {
 export interface RequestOptions {
   sessionId?: string;
   timeoutMs?: number;
+  /**
+   * The answer comes back with account values still in it, for the host's own safety checks (the policy, the guard).
+   * It never goes outward: show it only through `redactOut`.
+   */
+  internal?: boolean;
 }
 
 export interface ListenResult {
@@ -226,6 +271,7 @@ export type TaplineErrorCode =
   | "reconnecting"
   | "not_answering"
   | "send_failed"
+  | "off_route"
   | (string & {});
 
 /** An error from the host itself or relayed from the app (`code` is then the app's code). */
@@ -261,6 +307,8 @@ interface HostEvents {
 
 interface Pending {
   method: string;
+  /** The caller asked for the unredacted answer (`RequestOptions.internal`). */
+  internal: boolean;
   resolve: (value: unknown) => void;
   reject: (error: TaplineError) => void;
   timer: NodeJS.Timeout;
@@ -280,13 +328,6 @@ interface Session {
   expectedEnd?: boolean;
 }
 
-function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, "utf8");
-  const right = Buffer.from(b, "utf8");
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
-}
-
 function rawToString(data: RawData): string {
   if (typeof data === "string") return data;
   if (Array.isArray(data)) return Buffer.concat(data).toString("utf8");
@@ -301,6 +342,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Identity of "the same app on the same phone", used to replace stale sessions. */
 /** How many ended sessions' logs the host keeps. */
 const GONE_LOGS_KEPT = 8;
+
+/** Requests that only read the app: sending one never changes what a call has done (`actingMark`). */
+const READ_METHODS = new Set(["tree", "screenshot", "logs", "inspect", "audit", "check", "overlay", "commands", "waitFor", "feed", "perfSettle", "place", "places"]);
 
 export function identityOf(info: AppIdentity): string {
   const device = info.device.id ?? info.device.name ?? info.device.model ?? "";
@@ -344,12 +388,16 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly crashMap = new Map<string, CrashRecord[]>();
   private readonly crashLog: CrashEvent[] = [];
   private crashSeq = 0;
+  /** Requests that may have acted on the app (not reads, not dry runs), once past the checks that refuse before sending. */
+  private actingSent = 0;
   private httpExtension: HttpExtension | undefined;
+  private readonly api: ApiHandler | undefined;
   /** Open after `pair`: development builds on the local network may fetch this code (one use, 10 minutes). */
   private devOffer: DevOffer | undefined;
   private sweeper: NodeJS.Timeout | undefined;
   private listenCalled = false;
   private closed = false;
+  private readonly redact: ((text: string) => string) | undefined;
 
   constructor(options: TaplineHostOptions) {
     super();
@@ -363,6 +411,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     this.helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
     this.logBufferSize = options.logBufferSize ?? 500;
     this.agentTouchSlackMs = options.agentTouchSlackMs ?? 1500;
+    this.api = options.api;
+    this.redact = options.redact;
   }
 
   /**
@@ -419,6 +469,16 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       answer(204);
     });
     return true;
+  }
+
+  /**
+   * `GET /place?app=<app id>` with `Authorization: Bearer <the host token>` (AGENT-TOOLS 1.13 §18.11): only from this
+   * computer, answered from memory with no request to the phone. Returns false for any other path.
+   */
+  private handlePlace(req: IncomingMessage, res: ServerResponse): boolean {
+    const url = new URL(req.url ?? "/", "http://host");
+    if (url.pathname !== "/place") return false;
+    return handlePlaceRequest(req, res, { token: this.token, loopback: isLoopback(req.socket.remoteAddress), sessions: () => this.sessions() });
   }
 
   // ---- lifecycle ------------------------------------------------------------
@@ -558,6 +618,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const http = createServer((req, res) => {
         try {
           if (this.handleAgentTouch(req, res)) return;
+          if (this.handlePlace(req, res)) return;
+          if (handleApi(req, res, { token: this.token, loopback: isLoopback(req.socket.remoteAddress), handler: this.api })) return;
           if (this.handleDevOffer(req, res)) return;
           if (this.httpExtension?.onRequest(req, res) === true) return;
         } catch {
@@ -691,6 +753,14 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     if (session !== undefined) session.expectedEnd = expected;
   }
 
+  /**
+   * How many requests that may have acted on an app were sent so far. A call whose mark didn't move did nothing, so
+   * it is safe to run it again (AGENT-TOOLS 1.13 §11.5).
+   */
+  actingMark(): number {
+    return this.actingSent;
+  }
+
   /** The number of crash events so far; pass it to `crashEventsAfter` later. */
   crashMark(): number {
     return this.crashSeq;
@@ -759,6 +829,16 @@ export class TaplineHost extends EventEmitter<HostEvents> {
 
   // ---- requests -------------------------------------------------------------
 
+  /** Whether account values are scrubbed from what the apps send (a test accounts file is loaded). */
+  get redacting(): boolean {
+    return this.redact !== undefined;
+  }
+
+  /** Scrubs a value (text and property names) the way every answer from an app is; for what an `internal` request gave. */
+  redactOut<T>(value: T): T {
+    return this.redact === undefined ? value : (redactValue(value, this.redact) as T);
+  }
+
   /** Sends a request to an app and resolves with its `result` (or rejects with a TaplineError). */
   request(method: string, params: unknown = {}, options: RequestOptions = {}): Promise<unknown> {
     const session =
@@ -786,6 +866,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       );
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+    const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
+    if (!dry && !READ_METHODS.has(method)) this.actingSent++;
     const id = session.nextId++;
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -807,7 +889,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
           ),
         );
       }, timeoutMs);
-      session.pending.set(id, { method, resolve, reject, timer });
+      session.pending.set(id, { method, internal: options.internal === true, resolve, reject, timer });
       const frame = JSON.stringify({ type: "request", id, method, params });
       session.socket.send(frame, (error) => {
         if (error !== undefined && error !== null) {
@@ -960,10 +1042,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
         if (pending === undefined) return;
         clearTimeout(pending.timer);
         session.pending.delete(parsed.data.id);
+        const redact = this.redact;
         if (parsed.data.ok) {
-          pending.resolve(parsed.data.result ?? {});
+          pending.resolve(redact === undefined || pending.internal ? (parsed.data.result ?? {}) : redactValue(parsed.data.result ?? {}, redact));
         } else {
-          const error = parsed.data.error;
+          const error = redact === undefined || parsed.data.error === undefined ? parsed.data.error : (redactValue(parsed.data.error, redact) as typeof parsed.data.error);
           pending.reject(
             new TaplineError(
               error?.code ?? "internal",
@@ -985,7 +1068,9 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     }
   }
 
-  private recordEvent(session: Session, event: string, data: unknown): void {
+  private recordEvent(session: Session, event: string, raw: unknown): void {
+    // Pictures are skipped: they are large, and a username may show in one anyway (§18.6).
+    const data = this.redact === undefined || event === "frame" ? raw : redactValue(raw, this.redact);
     if (event === "frame") {
       const frame = appFrameSchema.safeParse(data);
       // Acknowledged on arrival, valid or not: the app counts frames in flight.
@@ -1010,6 +1095,12 @@ export class TaplineHost extends EventEmitter<HostEvents> {
       const where = state === "active" ? "came back to the front" : state === "background" ? "went to the background" : `is ${state}`;
       this.pushEntry(session, { level: "info", message: `[tapline] the app ${where}`, ts: at });
       this.safely(() => this.emit("appState", { ...session.info }, state));
+      return;
+    }
+    if (event === "place") {
+      // Kept for GET /place and the Place: line. Only the route key is stored: the schema drops anything else (params).
+      const place = placeStateSchema.safeParse(data);
+      if (place.success) session.info.place = { route: place.data.route, ...(place.data.tab ? { tab: place.data.tab } : {}), ...(place.data.layer ? { layer: place.data.layer } : {}), seenAt: Date.now() };
       return;
     }
     if (event === "pickerSkipped") {

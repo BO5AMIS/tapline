@@ -1,11 +1,11 @@
 ---
 name: tapline
-description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, audit, inspect, wait_for, open_url, app_command, logs, crash, performance, session_report), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
+description: Use when testing, exploring or driving the user's own React Native or Expo app on their real phone through Tapline (MCP tools such as look, tap, type_text, run, drive, map, audit, inspect, wait_for, open_url, app_command, logs, crash, performance, session_report), when asked for QA, an accessibility check, a UI check or a bug hunt on that app, when asked where in the code a screen element comes from, when setting Tapline up for a user or adding its SDK to an app, or when a Tapline call answers not_connected, in_background, not_actionable, not_allowed, not_answering or reconnecting.
 license: MIT
 compatibility: Needs the Tapline MCP server (`tapline mcp`, Node.js 20 or later) on the user's computer, and a development or TestFlight build of the app with Tapline's SDK switched on. Works from Windows, macOS or Linux.
 metadata:
   tool: tapline
-  interface: AGENT-TOOLS v1.8
+  interface: AGENT-TOOLS v1.13
 ---
 
 # Tapline: test your own app on a real phone
@@ -97,6 +97,39 @@ run {"steps": [
   through the phone's Settings.
 - After a long session, `session_report` shows where the calls went and which ones were wasted.
 
+**Known ground: `drive`.** Tapline learns the app as you work: its places (screens by route
+pattern), the roads between them, links and routes. The header's `Place:` line says where you are. Once
+the map knows a place, go there in one call and read the answer, which has the screen:
+
+```
+drive {"to": "language"}
+
+Arrived at language by 3 taps in 1.9 s.
+```
+
+- On known ground, `drive` yourself in one call; don't tap step by step. On unknown ground, hand the
+  goal to one small, fast agent and keep one driver. Never two drivers on one phone.
+- `map` lists what is known (places, roads, routes, reflexes) and touches nothing; `map {"to": "x"}`
+  shows the way. `drive` takes `by` (`taps`, `link`), `with` (a link's params, a route's variables),
+  `then` (`run` steps) and `dry_run`. It works as a `run` step too.
+- `off_route` means a road didn't hold. Nothing more was touched: read the screen in the answer and
+  go on by hand. Don't repeat the drive.
+- A route is a saved flow: `record` with `route`, then `drive {"route": "sign_in", "with": {...}}`.
+- A reflex, `map {"reflex": {...}}`, closes a known interruption by itself (a rate prompt) and says
+  `Reflex: closed ...`. Only declared ones run. Add one only for something you have seen.
+- Tapline never navigates from inside the app: a drive is the app's own taps or a deep link.
+- `run` steps take `if` and `optional` for what may or may not show up; a skipped step is said.
+  `brief: true` shortens an action's answer to 12 element lines; `look` is never brief.
+
+**Accounts by name.** When the user started Tapline with `--accounts`, `type_text` takes `account:
+"tester2"` and the whole text `${account.username}` or `${account.password}`; `run` and `drive` take
+`account` too. You never see the value, and you never put a password in a call, a note or a commit.
+Use only accounts from that file.
+
+**Speed.** `tapline call <tool> '<json>'` is one call to a running `tapline host`, for when no MCP
+server is loaded; loading one per call costs about 2 s. `app_command animations {"speed": "fast"}`
+makes transitions nearly instant; turn it off (`normal`) before a visual check. It is opt-in.
+
 Name the element with one of, in this order of preference: `id` (the app's own identifier,
 React Native's `testID`), `ref` (from your last list, like `e3`), `label`, `text`. Use `x`
 and `y` only for things with no element.
@@ -109,15 +142,17 @@ and `y` only for things with no element.
   (`[tap, longPress]`).
 - **`Same screen. Changes:`** then `+` new, `-` gone, `~` changed (with what it was),
   `↕` moved. When most of the screen changed, the full list comes instead.
-- **`No visible change.`** means nothing changed, on screen or off it.
+- **`No visible change.`** means nothing changed, on screen or off it. After a tap it is followed by
+  `Note: the tap was delivered, and nothing on screen changed within 0.5 s.` and, when known, why (the
+  handler threw, only a parent's took it, a request is still running). Read it: the tap may be a bug.
 - **A sheet, an alert or a new screen answers with the full list:** the first line, then
   `Screen …` and the elements that are in front now. What a sheet hides is left out until it
   closes; acting on it answers `covered: … close that first.` When something out of view
   changed as well, it follows the list under `Changes off screen:`.
 - **The header counts what you can't see:**
   `Screen 430x932 pt @3x · 26 elements (+41 below, +2 above)`. Those 41 are reached by
-  scrolling. They are not in the list: acting on one answers `off_screen` and names the call
-  that brings it up. `Route:` names the screen you are on, and `Network:` says requests are still
+  scrolling. They are not in the list, but `tap`, `long_press`, `toggle` and `type_text` scroll to one
+  themselves. `off_screen` means no scroll can bring it on screen: look at the screen, then target something else or report it. `Route:` names the screen you are on, and `Network:` says requests are still
   running.
 - **A change out of view has its own line, without a ref:**
   ```
@@ -148,7 +183,7 @@ and `y` only for things with no element.
 
 | To | Call |
 |---|---|
-| reach an element that is off screen | `scroll` with it as `target` and `to: "target"`. One call; don't scroll by guess |
+| reach an element that is off screen | `tap`, `long_press`, `toggle` and `type_text` scroll to it themselves. To only bring it into view: `scroll` with it as `target` and `to: "target"`. Don't scroll by guess |
 | wait for a load, a spinner or a new screen | `wait_for` with `text`, `id` or `label` (`gone: true` for a spinner; `network_idle` for requests), not `wait` |
 | set a switch, or read it | `toggle` with `value: true` or `false`. It does nothing if the switch is already there, and its answer says the switch's state either way |
 | fill a field and send it | `type_text` with `submit: true` |
@@ -184,7 +219,7 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 |---|---|
 | `not_found` | `look`, then pick another target |
 | `ambiguous` | use one of the listed refs, or add `index` |
-| `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: `scroll` with `to: "target"`, close what is in front, answer the alert |
+| `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: close what is in front, answer the alert; for `off_screen`, target something else or report it (nothing scrolls there) |
 | `stale` | a person changed the screen since your list: `look` again |
 | `busy` | a person is using the app: wait a few seconds, retry |
 | `paused`, `in_background` | ask the user (to resume; to open the app again) |
@@ -194,7 +229,9 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 | `timeout` | the action may have happened: `look` before you retry |
 | `unsupported` | Tapline can't do this: use what the message names |
 | `bad_params` | fix the call |
-| `not_allowed` | the first word is why. `needs_confirmation`: a person must allow this touch in the live view; tell the user, and when they have, make the same call again. `blocked`: the safety policy forbids it; don't try another way |
+| `not_allowed` | the first word is why. `needs_confirmation`: a person must allow this touch. Usually the host asks in a dialog and in the live view and your call waits (up to 120 s) for the answer; `They declined.` means ask your user, don't repeat the call. With no dialog: tell the user, and when they have allowed it in the live view, make the same call again. `blocked`: the safety policy forbids it; don't try another way |
+| `off_route` | a `drive` road didn't hold; nothing more was touched. Read the screen and go on by hand |
+| `Needs a person: ...` | the host's dialog (or a `Note:`) names what a person must do on the phone (open the app, tap an alert). The call goes on by itself when it clears; `They can't now.` means ask your user |
 | `expect_failed` | a `run` step's `expect` didn't hold: `look`, then fix the step or report the bug |
 | `internal` | a bug in the tool: report it with the call you made |
 
@@ -251,13 +288,15 @@ recipe and examples. `ux_check` checks a screen against usability basics along t
 - It is the user's own phone and their real app data. Don't buy, subscribe, send messages or
   email, post, delete data, or change account, privacy or security settings, unless the user
   asked for exactly that step. Ask when unsure.
-- Use the test accounts and test data the user gives you. Never sign in with credentials
-  you find in the app or its logs.
+- Test accounts come only from the user's accounts file (`--accounts`), used by name. Use the
+  test data the user gives you. Never sign in with credentials you find in the app or its logs, and
+  never print, repeat or commit one.
 - Don't read or repeat private content you see (messages, photos, notifications) beyond
   what the test needs.
 - Stay in the app under test.
 - Some touches need a person's OK first: a button whose label says Buy, Pay, Delete, Send,
-  Post, Sign out and the like answers `needs_confirmation`, and the live view asks the person.
+  Post, Sign out and the like needs a person: the host's dialog and the live view ask them, and
+  a `drive` or `run` stops there like a single touch. A reflex never takes such a touch.
   You can never give that OK yourself, and you never look for another way to the same result
   (another button, a deep link, `x` and `y`). `dry_run: true` tells you beforehand.
 - Give the live view's link to the user only. It carries a key. A pairing link lets a phone

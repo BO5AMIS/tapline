@@ -1,3 +1,4 @@
+import { ANIMATIONS_LINE } from "./animations.js";
 import type { LogEntry, TreeElement, TreeResult } from "./protocol.js";
 
 /** How much of a text a line shows (AGENT-TOOLS v1.5). */
@@ -207,7 +208,7 @@ const MAX_ELEMENTS = 200;
  * The whole screen as text (AGENT-TOOLS §3.2): the screen line, the app, route, alert and network
  * lines, then one line per element in tree order, up to 200.
  */
-export function formatTree(tree: TreeResult, app?: { name: string; id?: string }, options: { eyes?: boolean } = {}): string {
+export function formatTree(tree: TreeResult, app?: { name: string; id?: string }, options: { eyes?: boolean; place?: string } = {}): string {
   const eyes = options.eyes === true;
   const screen = tree.screen;
   const size = screen
@@ -219,6 +220,8 @@ export function formatTree(tree: TreeResult, app?: { name: string; id?: string }
   // A route name is the app's own naming, not on the glass: a user's eyes don't get it (tree.route stays for the journey's measures).
   const route = eyes ? null : formatRoute(tree.route);
   if (route !== null) lines.push(route);
+  // `Place:` (AGENT-TOOLS 1.13 §18.1) is a line of the header, after the route.
+  if (options.place !== undefined) lines.push(options.place);
   lines.push(...formatStatus(tree));
   if (count === 0) return [...lines, "(nothing visible; the app may still be loading)"].join("\n");
   lines.push(...tree.elements.slice(0, MAX_ELEMENTS).map((element) => formatElement(element, { eyes })));
@@ -242,6 +245,12 @@ function formatOffScreen(offScreen: TreeResult["offScreen"]): string {
     if (offScreen.above > 0) parts.push(`+${offScreen.above} above`);
   }
   return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+}
+
+/** The off-screen count as a line of its own, for a brief new-screen answer: `(+41 below, +2 above)`; none when there is nothing off screen. */
+export function offScreenLine(tree: TreeResult, eyes = false): string[] {
+  const counts = (eyes ? formatGlassMore(tree.glass) : formatOffScreen(tree.offScreen)).trim();
+  return counts === "" ? [] : [counts];
 }
 
 /** A gone element as `<role> "<name>"`. It omits the ref and position on purpose: neither means anything now. */
@@ -327,6 +336,15 @@ const MAX_MOVED_LINES = 5;
  * route, or most elements new or gone) and the full list reads better.
  */
 export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; eyes?: boolean } = {}): string | null {
+  const parts = changeParts(tree, options);
+  return parts === null ? null : [parts.label, ...parts.header, ...parts.changes].join("\n");
+}
+
+/** The change block in its parts, for a brief answer: the label, the header lines (never cut) and the change lines. */
+export function changeParts(
+  tree: TreeResult,
+  options: { alertGone?: boolean; eyes?: boolean } = {},
+): { label: string; header: string[]; changes: string[] } | null {
   const eyes = options.eyes === true;
   const changes = tree.changes;
   if (changes === undefined || !changes.sameRoute) return null;
@@ -342,8 +360,7 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; 
   const header = formatStatus(tree, changes.keyboard ?? null);
   const alertGone = options.alertGone === true && (tree.alerts ?? []).length === 0;
   if (alertGone) header.unshift("Alert: gone");
-  const lines = ["Same screen. Changes:", ...header];
-  const statusLines = lines.length;
+  const lines: string[] = [];
   for (const ref of changes.added) {
     const element = byRef.get(ref);
     if (element !== undefined) lines.push(`+ ${formatElement(element, { eyes })}`);
@@ -368,8 +385,8 @@ export function formatChanges(tree: TreeResult, options: { alertGone?: boolean; 
     }
   }
   // A closed alert is itself a change, and so is the keyboard coming or going.
-  if (lines.length === statusLines && !alertGone && changes.keyboard == null) lines.push("No visible change.");
-  return lines.join("\n");
+  if (lines.length === 0 && !alertGone && changes.keyboard == null) lines.push("No visible change.");
+  return { label: "Same screen. Changes:", header, changes: lines };
 }
 
 /**
@@ -392,6 +409,8 @@ export function formatStatus(tree: TreeResult, keyboard: "shown" | "hidden" | nu
   if (condition !== undefined) lines.push(networkLine(condition));
   const busy = tree.network?.inFlight ?? 0;
   if (busy > 0) lines.push(`Network: ${busy} request${busy === 1 ? "" : "s"} in flight`);
+  // Said in every answer while fast animations are on (PLAN-1.6 F4).
+  if (tree.animations === "fast") lines.push(ANIMATIONS_LINE);
   return lines;
 }
 

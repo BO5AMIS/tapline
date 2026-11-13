@@ -17,6 +17,8 @@ export const ERROR_CODES = [
   "bad_params",
   "timeout",
   "internal",
+  // A `move` whose guard no longer matches the element (AGENT-TOOLS 1.13 §18.4): a refusal, not a protocol error.
+  "stale",
 ] as const;
 export type AppErrorCode = (typeof ERROR_CODES)[number];
 
@@ -115,8 +117,28 @@ export const elementSchema = z.object({
   disabled: z.boolean().nullish(),
   selected: z.boolean().nullish(),
   checked: z.union([z.boolean(), z.string()]).nullish(),
+  /** Inside a virtualized list item: its text is content, so a road never keeps it (AGENT-TOOLS 1.13 §18.2). */
+  row: z.boolean().nullish(),
 });
 export type TreeElement = z.infer<typeof elementSchema>;
+
+/**
+ * Whether a piece of a place key looks like a value (an id, a number, a UUID, long hex) and not a name. A place holds
+ * patterns, never values, so such a piece is dropped or refused (AGENT-TOOLS 1.13 §18.1, lead's decision 2026-11-13).
+ */
+export function looksLikeValue(piece: string): boolean {
+  return /^\d+$/.test(piece) || /\d{4,}/.test(piece) || /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(piece) || /[0-9a-f]{16,}/i.test(piece);
+}
+
+const pieceSchema = z.string().max(200).refine((piece) => !looksLikeValue(piece), "looks like a value, not a name");
+
+/** Where the app is: route patterns, never params, and no screen text (AGENT-TOOLS 1.13 §18.1). A piece that looks like a value refuses the whole place. */
+export const placeStateSchema = z.object({
+  route: z.array(pieceSchema).max(32),
+  tab: pieceSchema.nullish(),
+  layer: pieceSchema.nullish(),
+});
+export type PlaceState = z.infer<typeof placeStateSchema>;
 
 export const treeResultSchema = z.object({
   screen: z
@@ -131,6 +153,9 @@ export const treeResultSchema = z.object({
   offScreen: z.object({ above: z.number(), below: z.number() }).nullish(),
   /** Only for a request with `glass: true` (a journey in a user's eyes): whether a scroll view can really go further. */
   glass: z.object({ moreAbove: z.boolean(), moreBelow: z.boolean() }).optional(),
+  /** Where the app is as a route key (capability `place`). `route` is empty without a router. */
+  // A place with a value in it is dropped, not an error: the rest of the tree is fine and the host uses a signature.
+  place: placeStateSchema.optional().catch(undefined),
   /** The focused screen (apps using React Navigation / Expo Router). */
   route: z
     .object({
@@ -158,6 +183,8 @@ export const treeResultSchema = z.object({
       condition: z.string().optional(), // any string: a mode a newer SDK adds must not make the whole tree unreadable
     })
     .optional(),
+  /** "fast" while the app's fast-forwarded animations are on (capability `animations`); absent otherwise. */
+  animations: z.string().optional(),
   /** True while the software keyboard is up (absent from older SDKs and when it is down). */
   keyboard: z.boolean().nullish(),
   /** With `changes: true`: what changed since the previous tree call. */

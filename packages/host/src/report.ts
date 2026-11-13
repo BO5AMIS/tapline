@@ -33,8 +33,24 @@ export interface CallRecord {
   target?: unknown;
   /** After scrolls: true (target was in the list before), false (it wasn't), absent (unknown). */
   inList?: boolean;
+  /** A compare_screen that matched with named changes (1.13.1 item 2). */
+  matchedWithChanges?: boolean;
+  /** Where each person's OK this call used came from (§11.3). */
+  approvals?: Array<"chat" | "live view">;
   /** For a look: it asked for a screenshot, a width or labels, which the answer of the action before it could not give. */
   askedPicture?: boolean;
+  /** For a single touch: where it led, and whether the map already held a proven road there (AGENT-TOOLS 1.13 16.1). */
+  way?: { from: string; to: string; known: boolean };
+  /** The agent's client id, so thinking time is measured within one client. */
+  client?: string;
+  /** Epoch ms when the call's last entry ended; absent when the log line has no `ms` (older logs). */
+  end?: number;
+  /** The call's time in the tool, in ms; absent for older logs. */
+  ms?: number;
+  /** The call came through the thin call (§16.1). */
+  via?: "call";
+  /** Fast animations were on when the call began. */
+  fastAnimations?: true;
 }
 
 export interface Flag {
@@ -49,6 +65,12 @@ export interface Report {
   failed: number;
   failedCodes: Array<[string, number]>;
   flags: Flag[];
+  /** The `Time:` line; absent when no call has a time (older logs). */
+  time?: string;
+  /** Person's OKs used, by where they were given; absent when none (§11.3). */
+  approvals?: { chat: number; liveView: number };
+  /** Calls that ran with fast animations on; absent when none did (PLAN-1.6 F4). */
+  fastAnimations?: number;
 }
 
 /** Groups the log's agent entries into calls, in order. Entries from before the call log have no call number: each is a call, a batch is one. */
@@ -76,19 +98,34 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
     const callFailed = failedEntry === undefined ? group.find((e) => e.call_failed !== undefined)?.call_failed : undefined;
     const tool = first.of ?? (group.some((e) => e.batch !== undefined) ? "run" : first.tool);
     const single = group.length === 1 && first.batch === undefined && tool !== "run";
+    // Every entry's `t` is when it began and `ms` how long it took; the call ends when its last entry does.
+    // Only v 2 entries stamp the start; older ones stamped the end of an action, so they give no time.
+    const timed = group.filter((e) => e.v === 2 && typeof e.ms === "number" && Number.isFinite(e.ms) && e.ms >= 0);
+    const start = Math.min(...group.map((e) => Date.parse(e.t)));
+    const end = timed.length > 0 ? Math.max(...timed.map((e) => Date.parse(e.t) + (e.ms as number))) : undefined;
+    const client = group.find((e) => e.client !== undefined)?.client;
+    const approvals = group.flatMap((e) => (e.confirmed_by !== undefined ? [e.confirmed_by] : []));
     calls.push({
       n: 0,
       session: first.session ?? "legacy",
       tool,
       ok: failedEntry === undefined && callFailed === undefined,
       ...(failedEntry?.code !== undefined ? { code: failedEntry.code } : callFailed !== undefined ? { code: callFailed } : {}),
-      t: Date.parse(first.t),
+      t: start,
+      ...(end !== undefined ? { end, ms: end - start } : {}),
+      ...(client !== undefined ? { client } : {}),
+      ...(group.some((e) => e.via === "call") ? { via: "call" as const } : {}),
+      ...(group.some((e) => e.animations === "fast") ? { fastAnimations: true as const } : {}),
       listed: group.some((e) => e.listed === true),
       dryRun: group.some((e) => e.dry_run === true),
       ...(single && first.element !== undefined ? { element: first.element } : {}),
       ...(single && first.target !== undefined ? { target: first.target } : {}),
       ...(single && first.in_list !== undefined ? { inList: first.in_list } : {}),
+      // A drive's own moves are the cure, not the waste: only a plain call carries its way (16.1).
+      ...(single && first.way !== undefined && first.of === undefined ? { way: first.way } : {}),
       ...(single && askedPicture(first) ? { askedPicture: true } : {}),
+      ...(first.matched_with_changes === true ? { matchedWithChanges: true } : {}),
+      ...(approvals.length > 0 ? { approvals } : {}),
     });
   }
   // Sessions in the order they began; inside one, the call numbers (legacy: the order read).
@@ -166,8 +203,12 @@ export function analyze(calls: readonly CallRecord[]): Report {
 
   const looks: number[] = [];
   const retries: number[] = [];
+  /** Retries whose failed target was itself an id: "use its id first" doesn't help them (1.13.1 item 4). */
+  const idRetries: number[] = [];
   const hunts: Array<{ from: number; to: number; exact: boolean }> = [];
   const chains: Array<{ from: number; to: number }> = [];
+  /** Touches made one by one along a way the map already knew (§16.1): where they began, ended and the place they reached. */
+  const ways: Array<{ from: number; to: number; place: string; calls: number }> = [];
   for (const seq of splitBySession(calls)) {
     for (let i = 0; i < seq.length; i++) {
       const c = seq[i] as CallRecord;
@@ -181,7 +222,9 @@ export function analyze(calls: readonly CallRecord[]): Report {
         for (let j = i + 1; j <= i + 3 && j < seq.length; j++) {
           const r = seq[j] as CallRecord;
           if (r.tool !== c.tool || !r.ok) continue;
-          if (JSON.stringify(r.target) !== JSON.stringify(c.target) && sameElement(c.target, r.element)) retries.push(r.n);
+          if (JSON.stringify(r.target) !== JSON.stringify(c.target) && sameElement(c.target, r.element)) {
+            (stringField(c.target, "id") !== undefined ? idRetries : retries).push(r.n);
+          }
           break;
         }
       }
@@ -216,8 +259,36 @@ export function analyze(calls: readonly CallRecord[]): Report {
       if (end - i >= 3) chains.push({ from: c.n, to: (seq[end - 1] as CallRecord).n });
       i = end;
     }
+    // 5. 3 or more touches in a row, each starting where the one before ended, every road one the map had proven: one drive
+    // (1.13.1 item 11). Looks between them don't break it; the count is every call from the first touch to the last.
+    for (let i = 0; i < seq.length; ) {
+      const first = seq[i] as CallRecord;
+      if (!(first.ok && first.way?.known === true)) {
+        i++;
+        continue;
+      }
+      let last = first;
+      let lastAt = i;
+      let touches = 1;
+      let next = i + 1;
+      while (next < seq.length) {
+        const e = seq[next] as CallRecord;
+        if (e.tool === "look") {
+          next++;
+          continue;
+        }
+        if (!(e.ok && e.way?.known === true && e.way.from === last.way?.to)) break;
+        last = e;
+        lastAt = next;
+        touches++;
+        next++;
+      }
+      if (touches >= KNOWN_WAY_TOUCHES) ways.push({ from: first.n, to: last.n, place: last.way?.to ?? "", calls: lastAt - i + 1 });
+      i = lastAt + 1;
+    }
   }
 
+  const withChanges = calls.filter((c) => c.matchedWithChanges === true).map((c) => String(c.n));
   const flags: Flag[] = [];
   const numbers = (items: string[]): string => `${items.slice(0, REPORT_MAX_NUMBERS).join(", ")}${items.length > REPORT_MAX_NUMBERS ? ", …" : ""}`;
   const range = (r: { from: number; to: number }): string => (r.from === r.to ? String(r.from) : `${r.from}–${r.to}`);
@@ -229,6 +300,14 @@ export function analyze(calls: readonly CallRecord[]): Report {
   if (retries.length > 0) {
     flags.push({
       text: `${retries.length} ${retries.length === 1 ? "retry" : "retries"} after not_found that found the same element by another target (calls ${numbers(retries.map(String))}): use its id first`,
+    });
+  }
+  if (withChanges.length > 0) {
+    flags.push({ text: `${withChanges.length} compare_screen ${withChanges.length === 1 ? "match" : "matches"} with text changes (calls ${numbers(withChanges)}): look at them` });
+  }
+  if (idRetries.length > 0) {
+    flags.push({
+      text: `${idRetries.length} ${idRetries.length === 1 ? "retry" : "retries"} after not_found that found the same element by another target (calls ${numbers(idRetries.map(String))}): target what the latest look shows (its id there, when it has one)`,
     });
   }
   if (hunts.length > 0) {
@@ -243,6 +322,22 @@ export function analyze(calls: readonly CallRecord[]): Report {
       text: `${chains.length} ${chains.length === 1 ? "run" : "runs"} of 3 or more actions with no answer read in between (calls ${numbers(chains.map(range))}): one run each`,
     });
   }
+  for (const w of ways.slice(0, REPORT_MAX_NUMBERS)) {
+    flags.push({ text: `${w.calls} calls in a row on a way the map knows (calls ${range(w)}): drive {"to": ${JSON.stringify(w.place)}} is one call` });
+  }
+  // Thin calls: each started a new process. Consecutive call numbers read as a range.
+  const thin = calls.filter((c) => c.via === "call");
+  if (thin.length >= THIN_CALLS_FLAGGED) {
+    const ranges: Array<{ from: number; to: number }> = [];
+    for (const c of thin) {
+      const open = ranges[ranges.length - 1];
+      if (open !== undefined && open.to + 1 === c.n) open.to = c.n;
+      else ranges.push({ from: c.n, to: c.n });
+    }
+    flags.push({ text: `${thin.length} calls each from a new process (calls ${numbers(ranges.map(range))}): load the MCP server once; each call paid about 2 s` });
+  }
+  const time = timeLine(calls);
+  const given = calls.flatMap((c) => c.approvals ?? []);
   return {
     calls: calls.length,
     minutes,
@@ -250,20 +345,87 @@ export function analyze(calls: readonly CallRecord[]): Report {
     failed,
     failedCodes: [...codes].sort(byCount),
     flags,
+    ...(time !== undefined ? { time } : {}),
+    ...(calls.some((c) => c.fastAnimations === true) ? { fastAnimations: calls.filter((c) => c.fastAnimations === true).length } : {}),
+    ...(given.length > 0 ? { approvals: { chat: given.filter((v) => v === "chat").length, liveView: given.filter((v) => v === "live view").length } } : {}),
   };
+}
+
+/** Three touches in a row on a way the map knows are enough to say "drive is one call" (1.13.1 item 11). */
+const KNOWN_WAY_TOUCHES = 3;
+/** Five thin calls are enough to say "load the MCP server once" (1.13.1 item 11). */
+const THIN_CALLS_FLAGGED = 5;
+/** A gap longer than this is the agent away, not thinking (§16.1). */
+const IDLE_GAP_MS = 2 * 60_000;
+
+function median(values: readonly number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? (sorted[mid] as number) : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2;
+}
+
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+/** A total: seconds under a minute, else whole minutes. */
+const span = (ms: number): string => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`);
+
+/** AGENT-TOOLS 1.13 §16.1: where the seconds went. Calls with no `ms` (older logs) are left out. */
+function timeLine(calls: readonly CallRecord[]): string | undefined {
+  const timed = calls.filter((c) => c.ms !== undefined && c.end !== undefined);
+  if (timed.length === 0) return undefined;
+  const gaps: number[] = [];
+  const byClient = new Map<string, CallRecord[]>();
+  for (const c of timed) {
+    // A client name can repeat across sessions; their calls never follow one another.
+    const key = `${c.session}\0${c.client ?? ""}`;
+    const list = byClient.get(key);
+    if (list === undefined) byClient.set(key, [c]);
+    else list.push(c);
+  }
+  for (const list of byClient.values()) {
+    list.sort((a, b) => a.t - b.t);
+    for (let i = 1; i < list.length; i++) {
+      const gap = (list[i] as CallRecord).t - ((list[i - 1] as CallRecord).end as number);
+      if (gap >= 0 && gap <= IDLE_GAP_MS) gaps.push(gap);
+    }
+  }
+  const tool = timed.map((c) => c.ms as number);
+  const perTool = new Map<string, number[]>();
+  for (const c of timed) perTool.set(c.tool, [...(perTool.get(c.tool) ?? []), c.ms as number]);
+  const top = [...perTool]
+    .map(([name, values]) => ({ name, total: values.reduce((a, b) => a + b, 0), median: median(values) }))
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+  const shown = top.slice(0, 3).map((t) => `${t.name} ${seconds(t.median)}`);
+  if (top.length > 3) shown.push("…");
+  const thinking = gaps.reduce((a, b) => a + b, 0);
+  const inTool = tool.reduce((a, b) => a + b, 0);
+  return `Time: ${span(thinking + inTool)}: thinking between calls ${span(thinking)} (median ${seconds(median(gaps))}), in the tool ${span(inTool)} (median ${seconds(median(tool))}; ${shown.join(", ")}).`;
 }
 
 const MAX_TOOLS_SHOWN = 8;
 
-export function formatReport(report: Report): string {
-  if (report.calls === 0) return "Session: 0 calls.\nWaste: none.";
+/** `accounts` are the loaded test accounts' names (§18.6); never their values. */
+export function formatReport(report: Report, accounts: readonly string[] = []): string {
+  const accountsLine = accounts.length > 0 ? `Accounts: ${accounts.join(", ")}.` : undefined;
+  if (report.calls === 0) return ["Session: 0 calls.", ...(accountsLine !== undefined ? [accountsLine] : []), "Waste: none."].join("\n");
   const shown = report.toolCounts.slice(0, MAX_TOOLS_SHOWN).map(([tool, n]) => `${tool} ${n}`);
   if (report.toolCounts.length > MAX_TOOLS_SHOWN) shown.push("…");
   const failed =
     report.failed === 0 ? "Failed: 0." : `Failed: ${report.failed} (${report.failedCodes.map(([code, n]) => `${code} ${n}`).join(", ")}).`;
   const head = `Session: ${report.calls} ${report.calls === 1 ? "call" : "calls"} in ${report.minutes} min (${shown.join(", ")}). ${failed}`;
-  if (report.flags.length === 0) return `${head}\nWaste: none.`;
-  return [head, "Waste:", ...report.flags.map((f) => `- ${f.text}`)].join("\n");
+  const a = report.approvals;
+  const approvalsLine =
+    a === undefined ? undefined : `Approvals: ${[...(a.chat > 0 ? [`${a.chat} in chat`] : []), ...(a.liveView > 0 ? [`${a.liveView} in the live view`] : [])].join(", ")}.`;
+  const animationsLine = report.fastAnimations === undefined ? undefined : `Animations: fast for ${report.fastAnimations} of ${report.calls} ${report.calls === 1 ? "call" : "calls"}.`;
+  const top = [
+    head,
+    ...(report.time !== undefined ? [report.time] : []),
+    ...(approvalsLine !== undefined ? [approvalsLine] : []),
+    ...(animationsLine !== undefined ? [animationsLine] : []),
+    ...(accountsLine !== undefined ? [accountsLine] : []),
+  ];
+  if (report.flags.length === 0) return [...top, "Waste: none."].join("\n");
+  return [...top, "Waste:", ...report.flags.map((f) => `- ${f.text}`)].join("\n");
 }
 
 // ---- reading the log ---------------------------------------------------------
@@ -302,9 +464,9 @@ export function readLogEntries(dir: string, sinceMs: number): ActionLogEntry[] {
 }
 
 /** The report text for a log folder: `since` on, optionally only one session's calls. */
-export function reportFor(dir: string, sinceMs: number, onlySession?: string): string {
+export function reportFor(dir: string, sinceMs: number, onlySession?: string, accounts?: readonly string[]): string {
   const entries = readLogEntries(dir, sinceMs).filter((e) => onlySession === undefined || e.session === onlySession);
-  return formatReport(analyze(buildCalls(entries)));
+  return formatReport(analyze(buildCalls(entries)), accounts);
 }
 
 /** `--since`: epoch ms, an ISO date or time, or how long ago (`90m`, `2h`, `1d`). Null when it isn't one. */

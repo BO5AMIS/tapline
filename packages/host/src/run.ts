@@ -7,11 +7,11 @@ import { z } from "zod";
  * the whole batch.
  */
 
-export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "app_command", "compare_screen", "performance"] as const;
+export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "app_command", "compare_screen", "performance", "drive"] as const;
 export type RunTool = (typeof RUN_TOOLS)[number];
 
 /** Tools a step may not be (they read or manage, rather than act): `bad_params`. */
-export const NOT_IN_RUN = ["look", "run", "audit", "ux_check", "media", "apps", "viewer", "record", "replay", "inspect", "check_layout", "pair", "open_app", "logs", "crash", "reload", "filmstrip", "session_report", "journey"];
+export const NOT_IN_RUN = ["look", "run", "audit", "ux_check", "media", "apps", "viewer", "record", "replay", "inspect", "check_layout", "pair", "open_app", "logs", "crash", "reload", "filmstrip", "session_report", "journey", "map"];
 
 /** AGENT-TOOLS §15.3: the limits a `performance` step may carry in `expect.under`. */
 export const UNDER_KEYS = ["launch_s", "memory_mb", "js_heap_mb", "cpu_percent", "fps_min", "drops", "busy_ms"] as const;
@@ -48,10 +48,35 @@ export const expectSchema = z
   .refine((e) => e.value === undefined || e.text === undefined, { message: "expect.value goes with id or label" });
 export type Expect = z.infer<typeof expectSchema>;
 
+/** AGENT-TOOLS 1.13 §9.1: a step's `if`, one of text, id or label (as in `expect`), `gone: true` for when it isn't there. */
+export const ifSchema = z
+  .object({
+    text: z.string().min(1, "if text can't be empty").optional(),
+    id: z.string().min(1, "if id can't be empty").optional(),
+    label: z.string().min(1, "if label can't be empty").optional(),
+    gone: z.boolean().optional(),
+  })
+  .strict()
+  .refine((c) => [c.text, c.id, c.label].filter((v) => v !== undefined).length === 1, { message: "if needs exactly one of text, id or label" });
+export type If = z.infer<typeof ifSchema>;
+
 export const stepSchema = z
-  .object({ tool: z.string(), expect: expectSchema.optional() })
+  .object({ tool: z.string(), expect: expectSchema.optional(), if: ifSchema.optional(), optional: z.boolean().optional() })
   .passthrough();
 export type Step = z.infer<typeof stepSchema>;
+
+/** How a probe reads in the skipped line: `"Not now"` for a text or a label, `id=save`, or a ref as it is. */
+export function describeProbe(probe: { text: string } | { testID: string } | { label: string } | { ref: string }): string {
+  if ("text" in probe) return JSON.stringify(probe.text);
+  if ("testID" in probe) return `id=${probe.testID}`;
+  if ("label" in probe) return JSON.stringify(probe.label);
+  return probe.ref;
+}
+
+/** The line that says a step didn't run (AGENT-TOOLS 1.13 §9.1): `  3. skipped (if: "Not now" isn't on screen).` */
+export function skippedLine(index: number, kind: "if" | "optional", what: string, gone?: boolean): string {
+  return `  ${index}. skipped (${kind}: ${what} ${gone === true ? "is on screen" : "isn't on screen"}).`;
+}
 
 export const MAX_STEPS = 50;
 export const RUN_TIMEOUT_MS = 120_000;
@@ -87,6 +112,11 @@ export function describeRunStep(step: Step): string {
       return p["launch"] === true ? "performance launch" : `performance ${Number(p["seconds"] ?? 3)} s`;
     case "back":
       return "back";
+    case "drive": {
+      // A drive step reads as the place or route it goes to (AGENT-TOOLS 1.13 9.1: it counts as one step).
+      const where = typeof p["to"] === "string" ? p["to"] : typeof p["route"] === "string" ? `route ${p["route"]}` : "";
+      return `drive${where !== "" ? ` ${where}` : ""}`;
+    }
     case "compare_screen":
       return `compare_screen ${JSON.stringify(p["name"] ?? "")}`;
     default:

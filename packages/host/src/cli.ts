@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { realpathSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { toString as qrText } from "qrcode";
@@ -20,6 +21,7 @@ import { formatLogs } from "./format.js";
 import { runInit } from "./init.js";
 import { runReport } from "./report.js";
 import { runMcp } from "./mcp.js";
+import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
@@ -32,7 +34,10 @@ Usage: tapline <command> [options]
 
 Commands:
   mcp      Run the host plus an MCP server on stdio (for Claude Code and other agents)
-  host     Run the host in the foreground and log connections and app logs
+  host     Run a standalone host in the foreground: apps connect to it, and it serves the live view and
+           "tapline call" (it takes the options of mcp)
+  call     Send one tool call to a running "tapline host": tapline call <tool> '<json>' [--client NAME] [--json]
+           (exit 0: an answer, 2: a refusal, 3: no host reachable)
   pair     Print a pairing link and QR code for a phone (needs --scheme)
   info     Show this computer's address and how to add Tapline to an app
   doctor   Check the setup (Node, the Wi-Fi address, Tailscale if used, token, ports, firewall);
@@ -58,11 +63,22 @@ Options:
   --screenshots <inline|file>
                  For mcp: put screenshots in the tool result (default), or save them in
                  ~/.tapline/shots and return the path (or TAPLINE_SCREENSHOTS)
+  --client <name>  For call: the agent's name, so its report and journey stay its own (default: the parent process id)
+  --json         For call: print {"text", "image_path"} instead of the text
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
   --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
   --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
+  --no-dialog    For mcp: don't ask a person's OK in the host's dialog, only in the live view (for a host that
+                 passes dialogs to the model instead of showing them to a person)
+  --brief        For mcp and host: actions answer briefly (a call's brief: false overrides it); look is never brief
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
+  --accounts <file>  For mcp and host: test accounts (JSON; the tool types an account's username and password so the
+                 agent never sees them). The file must sit outside any git repo, or be ignored by it.
+                 A password stays out of pictures only while its field is secure (a "show password" toggle shows it).
+                 Keep the file outside the folders the agent may read
+  --maps <dir>   For mcp and host: keep each app's map (its places, roads and links) in <dir>/<app id>/ instead of
+                 ~/.tapline/maps/<app id>/, so a team and both tools can share one folder with a project
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
                  default it opens the live view in a browser here and keeps the link (its key) from the agent
                  (or TAPLINE_VIEWER_LINK=1)
@@ -111,40 +127,34 @@ async function printPairing(config: HostConfig, url: string, scheme: string): Pr
   out.write(`${link}\n\nTo unpair the phone, open ${forgetLink(scheme)} on it.\n`);
 }
 
-async function runHost(config: HostConfig, scheme: string | undefined): Promise<void> {
-  const host = new TaplineHost({
-    token: config.token,
-    port: config.port,
-    portFallback: config.portFallback,
-    hosts: config.hosts,
-  });
+/**
+ * The standalone host: apps connect to it, it serves the live viewer (a person's OK is given there) and the thin
+ * call, `POST /api/<tool>` (AGENT-TOOLS 1.13 §18.10). It takes the options `mcp` takes.
+ */
+async function runHost(options: RuntimeOptions, scheme: string | undefined): Promise<boolean> {
   const stamp = (): string => new Date().toISOString().slice(11, 19);
-  host.on("connect", (s) => {
-    // A phone connected through this host is paired too, as with the MCP server and replay (CodeRabbit, PR #5).
-    markPaired();
-    console.log(`${stamp()} connected    ${s.id} ${s.app.name} ${s.app.version ?? ""} on ${s.device.name ?? s.device.platform}`);
-  });
-  host.on("disconnect", (s, reason) => console.log(`${stamp()} disconnected ${s.id} ${s.app.name}: ${reason}`));
+  let runtime: Runtime;
+  try {
+    runtime = await createRuntime({ ...options, api: true, log: (message) => console.log(`${stamp()} ${message}`) });
+  } catch (error) {
+    for (const line of (error instanceof Error ? error.message : String(error)).split("\n")) console.error(line);
+    return false;
+  }
+  const { host, config } = runtime;
   host.on("log", (s, entry) => console.log(`${stamp()} [${s.app.name}] ${formatLogs([entry])}`));
-  host.on("warning", (message) => console.warn(`${stamp()} warning: ${message}`));
-
-  const result = await host.listen();
-  const port = host.boundPort() ?? config.port;
-  const url = hostUrl({ advertisedHost: reachableHost(config, result.listening) }, port);
-  console.log("Tapline host running.\n");
-  console.log(`  Apps connect to ${url}`);
-  for (const note of config.notes) console.log(`\n  Note: ${note}`);
-  for (const { host: h, port: p } of result.listening) console.log(`  listening on ws://${h}:${p}/`);
-  for (const { host: h, error } of result.failed) console.warn(`  could not listen on ${h}: ${error}`);
-  if (scheme !== undefined) await printPairing(config, url, scheme);
-  else console.log(`\n  Pair a phone: tapline pair --scheme <your app's scheme> --port ${port}`);
+  console.log("\nTapline host running.\n");
+  console.log(`  Apps connect to ${runtime.url}`);
+  console.log(`  Agents without an MCP connection: tapline call <tool> '<json>' (port ${runtime.port})`);
+  if (scheme !== undefined) await printPairing(config, runtime.url, scheme);
+  else console.log(`\n  Pair a phone: tapline pair --scheme <your app's scheme> --port ${runtime.port}`);
   console.log("\nWaiting for apps. Ctrl+C to stop.\n");
 
   const stop = (): void => {
-    void host.close().finally(() => process.exit(0));
+    void runtime.close().finally(() => process.exit(0));
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  return true;
 }
 
 function portOption(raw: string | undefined, name: string): number | undefined {
@@ -244,8 +254,9 @@ async function runReplay(
   }
 }
 
-async function main(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({
+/** The command line's words and options, in one place so a test can read them without starting a host. */
+export function parseCli(argv: string[]) {
+  return parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
@@ -264,7 +275,11 @@ async function main(argv: string[]): Promise<number> {
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
+      "no-dialog": { type: "boolean" },
+      brief: { type: "boolean" },
       "ux-rules": { type: "string" },
+      accounts: { type: "string" },
+      maps: { type: "string" },
       "viewer-link": { type: "boolean" },
       project: { type: "string" },
       "dry-run": { type: "boolean" },
@@ -273,6 +288,33 @@ async function main(argv: string[]): Promise<number> {
       help: { type: "boolean", short: "h" },
     },
   });
+}
+
+/** What `mcp` and the standalone host both take, from the parsed options (`--brief` and the rest). */
+export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], options: { port?: string; host?: string }): RuntimeOptions {
+  return {
+    ...options,
+    ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}),
+    ...(values.viewer !== undefined ? { viewer: values.viewer } : {}),
+    ...(values["no-log"] === true ? { noLog: true } : {}),
+    ...(values.policy !== undefined ? { policy: values.policy } : {}),
+    ...(values["no-policy"] === true ? { noPolicy: true } : {}),
+    ...(values["no-dialog"] === true ? { noDialog: true } : {}),
+    ...(values.brief === true ? { brief: true } : {}),
+    ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
+    ...(values.accounts !== undefined ? { accounts: values.accounts } : {}),
+    ...(values.maps !== undefined ? { maps: values.maps } : {}),
+    ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
+  };
+}
+
+export async function main(argv: string[]): Promise<number> {
+  // The thin call has its own light entry (bin.ts); this keeps "node dist/cli.js call" working too.
+  if (argv[0] === "call") {
+    const { runThinCall } = await import("./thincall.js");
+    return runThinCall(argv.slice(1));
+  }
+  const { values, positionals } = parseCli(argv);
   const command = positionals[0];
   if (values.help === true || command === undefined || command === "help") {
     process.stdout.write(HELP);
@@ -284,23 +326,13 @@ async function main(argv: string[]): Promise<number> {
     ...(values.host !== undefined ? { host: values.host } : {}),
   };
 
+  const runtimeOptions = runtimeOptionsOf(values, options);
+
   switch (command) {
     case "mcp":
-      return (await runMcp({
-        ...options,
-        ...(values.screenshots !== undefined ? { screenshots: values.screenshots } : {}),
-        ...(values.viewer !== undefined ? { viewer: values.viewer } : {}),
-        ...(values["no-log"] === true ? { noLog: true } : {}),
-        ...(values.policy !== undefined ? { policy: values.policy } : {}),
-        ...(values["no-policy"] === true ? { noPolicy: true } : {}),
-        ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
-        ...(values["viewer-link"] === true ? { viewerLink: true } : {}),
-      }))
-        ? -1 // keep running
-        : 1;
+      return (await runMcp(runtimeOptions)) ? -1 /* keep running */ : 1;
     case "host":
-      await runHost(await resolveConfig(options), values.scheme);
-      return -1;
+      return (await runHost(runtimeOptions, values.scheme)) ? -1 : 1;
     case "pair": {
       if (values.scheme === undefined) {
         process.stderr.write(`pair needs the app's URL scheme: tapline pair --scheme myapp\n`);
@@ -317,7 +349,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "doctor": {
-      const results = await runDoctor();
+      const results = await runDoctor(values.accounts !== undefined ? { accountsFile: values.accounts } : {});
       process.stdout.write(`${formatDoctor(results, needsAPerson(results))}\n`);
       let failed = results.some((r) => r.status === "fail");
       if (values.app === true) {
@@ -383,12 +415,25 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-main(process.argv.slice(2)).then(
-  (code) => {
-    if (code >= 0) process.exit(code);
-  },
-  (error: unknown) => {
-    process.stderr.write(`tapline: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
-  },
-);
+/** Runs the command line and exits with its code (a negative code means a host keeps running). */
+export function runMain(argv: string[]): void {
+  main(argv).then(
+    (code) => {
+      if (code >= 0) process.exit(code);
+    },
+    (error: unknown) => {
+      process.stderr.write(`tapline: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exit(1);
+    },
+  );
+}
+
+// "node dist/cli.js ..." still works; the tapline bin is bin.js, which loads this file only for commands other than call.
+const entry = process.argv[1];
+if (entry !== undefined) {
+  try {
+    if (realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) runMain(process.argv.slice(2));
+  } catch {
+    // not run as a script
+  }
+}

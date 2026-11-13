@@ -67,6 +67,29 @@ describe('press with again', () => {
     expect(result.second).toEqual({ done: true, afterMs: expect.any(Number) });
   });
 
+  test('a handler that throws on the second tap is reported as reached and threw, not as a tap that missed', async () => {
+    let calls = 0;
+    function Thrower() {
+      return (
+        <Pressable
+          testID="add"
+          onPress={() => {
+            calls += 1;
+            if (calls === 2) throw new Error('second press broke');
+          }}
+        >
+          <Text>Add</Text>
+        </Pressable>
+      );
+    }
+    await mount(<Thrower />);
+    useFrames({ add: frame(0, 100, 400, 50) });
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const result = await run(() => press({ target: { testID: 'add' }, again: 80 }));
+    expect(calls).toBe(2);
+    expect(result.second).toEqual({ done: true, afterMs: expect.any(Number), threw: expect.stringContaining('second press broke') });
+  });
+
   test('a control the app disabled after the first tap takes no second one, and that is not an error', async () => {
     await mount(<Counter guard />);
     useFrames({ add: frame(0, 100, 400, 50) });
