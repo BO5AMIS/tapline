@@ -111,6 +111,21 @@ export function signatureKey(tree: TreeResult): PlaceKey {
  * Whether two keys are one place. Route keys are equal parts for parts; signature keys agree when at least `threshold`
  * of their parts do. A route key and a signature key never match, and neither do keys from two sources.
  */
+/**
+ * The link the app declares up front for the place with this key (§18.1: listed "each with its link"), when `given`
+ * holds every param it needs; else null. A visited place keeps it: the map stores only links it learned, so this is
+ * read from the app's list each time.
+ */
+export function declaredLink(key: PlaceKey, known: KnownPlaces, given: Record<string, unknown> = {}): string | null {
+  if (!("route" in key)) return null;
+  const declared = known.places.find((place) => samePlace(key, { route: place.route }));
+  const link = declared?.link;
+  if (link === undefined || link === null || link === "") return null;
+  const needs = declared?.params ?? [];
+  // As fillLink: a value that is missing or empty doesn't count, so taps stay the way.
+  return needs.every((param) => Object.hasOwn(given, param) && given[param] !== undefined && given[param] !== "") ? link : null;
+}
+
 export function samePlace(a: PlaceKey, b: PlaceKey, threshold = 0.75): boolean {
   if ("route" in a || "route" in b) return "route" in a && "route" in b && stable(a) === stable(b);
   if (a.signature === b.signature) return true;

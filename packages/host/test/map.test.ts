@@ -238,6 +238,13 @@ describe("map to", () => {
     expect(await call(s, { to: "general" })).toBe("Error not_found: no known way from language to general; drive it once (the driver), and it is remembered.");
   });
 
+  it("a visited place keeps the link the app declares up front for it (found on the phone, 1.6.1)", async () => {
+    // `general` is saved without a link of its own; the app declares one for its route.
+    const known = { source: "react-navigation", places: [{ route: ["settings", "general"], link: "wayfare://general", params: [] }] };
+    const s = await setup({ route: ["settings", "general", "language"], known });
+    expect(await call(s, { to: "general" })).toMatch(/^Would drive to general by link \(wayfare:\/\/general/);
+  });
+
   it("answers not_found for a place it doesn't know", async () => {
     const s = await setup({ route: ["settings"] });
     expect(await call(s, { to: "nowhere" })).toBe('Error not_found: no place named "nowhere"; map lists the places.');

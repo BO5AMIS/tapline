@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readRouteSync, type MapReflex, type MapRoad } from "./mapfile.js";
-import { placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
+import { declaredLink, placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
 import { asWords, decodeComplete, decodePath, linkReadable, linkWords, matchWord } from "./policy.js";
 import { looksLikeValue } from "./protocol.js";
 import { routeEdges, type RouteEdge } from "./routes.js";
@@ -265,12 +265,13 @@ export const isRouteLeg = (leg: MapRoad | RouteEdge): leg is RouteEdge => typeof
 async function way(to: string, ctx: MapContext): Promise<MapAnswer> {
   const { map } = ctx;
   const saved = map.data().places[to];
-  const up = saved === undefined ? (await ctx.known()).places.find((place) => placeNameFromRoute(place.route) === to) : undefined;
+  const known = await ctx.known();
+  const up = saved === undefined ? known.places.find((place) => placeNameFromRoute(place.route) === to) : undefined;
   if (saved === undefined && up === undefined) return notFoundPlace(to);
   const here = await ctx.here();
   if (here?.name === to) return said(`Already at ${to}.`);
-  // A jump goes to a place's link from wherever the app is (§18.4).
-  const link = saved !== undefined ? saved.link : (up?.link ?? null);
+  // A jump goes to a place's link from wherever the app is (§18.4), or to the one the app declares for it.
+  const link = saved !== undefined ? (saved.link ?? declaredLink(saved.key, known)) : (up?.link ?? null);
   if (link !== null && link !== "") return said(describeWay(to, here?.name ?? "?", [{ from: here?.name ?? "?", to, kind: "link", url: link, proven: true }], map.currentBuild(), false));
   if (here === null) return { text: "Error not_found: the app's current place isn't known, so no way can be planned; look at the screen first.", error: true };
   const chain = cheapestWay(map.data().roads, here.name, to, (road) => map.isProven(road), routeEdges(map));

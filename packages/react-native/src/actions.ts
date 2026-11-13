@@ -968,19 +968,22 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
     return hit;
   };
   // Why a touch at (x, y) would not reach the actor, or null when it would (an unknown hit lets it through).
+  // Outside every scroll view (a button under a fixed bar), no scroll can bring it out: don't suggest one.
+  const scrolls = scrollersOf(snapshot, actor).length > 0;
+  const clearOfBar = scrolls
+    ? `Scroll it clear of the bar ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`
+    : "It isn't inside a scroll view, so it can't be scrolled clear of the bar; target something else or report it, or pass force: true to call its handler anyway.";
   const refusalAt = async (x: number, y: number): Promise<TaplineError | null> => {
     if (bar && y >= bar.top) {
       return notActionable(
         'under_tab_bar',
-        `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` +
-          `Scroll it clear of the bar ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
+        `${name} is under the tab bar iOS draws, at (${x}, ${y}): a real tap would switch tabs instead. ` + clearOfBar,
       );
     }
     if (underNavBar(y)) {
       return notActionable(
         'covered',
-        `${name} is under the navigation bar iOS draws, at (${x}, ${y}): a real tap would hit the bar instead. ` +
-          `Scroll it clear of the bar ${SCROLL_TO_TARGET_HINT}, or pass force: true to call its handler anyway.`,
+        `${name} is under the navigation bar iOS draws, at (${x}, ${y}): a real tap would hit the bar instead. ` + clearOfBar,
       );
     }
     const hit = await hitAt(x, y);
@@ -988,7 +991,9 @@ async function assertReachable(snapshot: Snapshot, actor: Entry, frame: Frame | 
     return notActionable(
       'covered',
       `${name} is covered at (${x}, ${y}) by ${describeHit(snapshot, hit, actor)}: a real tap would land there instead. ` +
-        'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.',
+        (scrolls
+          ? 'Dismiss or scroll it out of the way, or pass force: true to call the handler anyway.'
+          : "It isn't inside a scroll view, so it can't be scrolled clear of what covers it; dismiss the cover, target something else or report it, or pass force: true to call the handler anyway."),
     );
   };
   const refusal = await refusalAt(Math.round((left + right) / 2), Math.round((top + bottom) / 2));

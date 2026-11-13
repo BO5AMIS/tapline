@@ -106,7 +106,7 @@ describe('an element under the navigation bar iOS draws', () => {
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^covered: /);
     expect(error.message).toContain('is under the navigation bar iOS draws, at (200, 77): a real tap would hit the bar instead.');
-    expect(error.message).toContain('Scroll it clear of the bar (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
+    expect(error.message).toContain("It isn't inside a scroll view, so it can't be scrolled clear of the bar; target something else or report it, or pass force: true to call its handler anyway.");
     expect(onLab).not.toHaveBeenCalled();
     await run(() => press({ target: { testID: 'lab-under-header' }, force: true }));
     expect(onLab).toHaveBeenCalledTimes(1);

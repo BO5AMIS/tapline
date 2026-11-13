@@ -61,7 +61,7 @@ export function elicitClientFor(server: McpServer): ElicitClient {
 
 /** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. `noDialog` is `--no-dialog`. */
 export function createMcpServer(tools: TaplineTools, options: { noDialog?: boolean } = {}): McpServer {
-  const server = new McpServer({ name: "tapline", version: "1.6.1" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: "1.6.2" }, { instructions: INSTRUCTIONS });
 
   for (const name of Object.keys(TOOL_META) as ToolName[]) {
     const meta = TOOL_META[name];
