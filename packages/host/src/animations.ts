@@ -19,6 +19,9 @@ const on = new WeakMap<TaplineHost, Set<string>>();
 interface Pause {
   count: number;
   ready: Promise<boolean>;
+  /** Settles when the last overlapping pause has ended and fast is back. */
+  over: Promise<void>;
+  end: () => void;
 }
 const pauses = new WeakMap<TaplineHost, Map<string, Pause>>();
 
@@ -50,6 +53,11 @@ export function noteAnimations(host: TaplineHost, sessionId: string, speed: "fas
   else sessions.delete(sessionId);
 }
 
+/** Waits while a measurement holds the session at normal: an explicit switch to fast must not land inside it. */
+export async function afterPause(host: TaplineHost, sessionId: string): Promise<void> {
+  for (let pause = pausesOf(host).get(sessionId); pause !== undefined; pause = pausesOf(host).get(sessionId)) await pause.over;
+}
+
 async function send(host: TaplineHost, sessionId: string, speed: "fast" | "normal"): Promise<boolean> {
   try {
     await host.request("command", { name: "animations", args: { speed } }, { sessionId });
@@ -74,7 +82,9 @@ export async function withNormalAnimations<T>(
   const all = pausesOf(host);
   let pause = all.get(sessionId);
   if (pause === undefined) {
-    pause = { count: 0, ready: send(host, sessionId, "normal") };
+    let end: () => void = () => undefined;
+    const over = new Promise<void>((resolve) => (end = resolve));
+    pause = { count: 0, ready: send(host, sessionId, "normal"), over, end };
     all.set(sessionId, pause);
   }
   pause.count += 1;
@@ -87,15 +97,24 @@ export async function withNormalAnimations<T>(
     if (mine.count === 0) {
       if (all.get(sessionId) === mine) all.delete(sessionId);
       // A switch made during the call wins: only put fast back when it is still meant to be on.
-      if (animationsOn(host, sessionId)) await send(host, sessionId, "fast");
+      try {
+        if (animationsOn(host, sessionId)) await send(host, sessionId, "fast");
+      } finally {
+        mine.end();
+      }
     }
   }
 }
 
-/** Puts one session back to normal for good (a journey in a user's eyes starts). False when they were not on. */
+/**
+ * Puts one session back to normal for good (a journey in a user's eyes starts). False when they were not on, or when
+ * the app refused the switch: the session then stays tracked as fast, so nothing reports animations as normal.
+ */
 export async function endAnimations(host: TaplineHost, sessionId: string): Promise<boolean> {
-  if (!setOf(on, host).delete(sessionId)) return false;
-  await send(host, sessionId, "normal");
+  const sessions = setOf(on, host);
+  if (!sessions.has(sessionId)) return false;
+  if (!(await send(host, sessionId, "normal"))) return false;
+  sessions.delete(sessionId);
   return true;
 }
 
@@ -103,8 +122,12 @@ export async function endAnimations(host: TaplineHost, sessionId: string): Promi
 export async function restoreAnimations(host: TaplineHost): Promise<void> {
   const sessions = setOf(on, host);
   const ids = [...sessions];
-  sessions.clear();
-  await Promise.all(ids.map((id) => send(host, id, "normal")));
+  // A session the app would not put back stays tracked as fast.
+  await Promise.all(
+    ids.map(async (id) => {
+      if (await send(host, id, "normal")) sessions.delete(id);
+    }),
+  );
 }
 
 /** Forgets a session that ended (the app restores itself on a disconnect). */

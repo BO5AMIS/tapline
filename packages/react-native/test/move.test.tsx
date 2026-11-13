@@ -363,6 +363,29 @@ describe('move', () => {
     expect(result.next?.state).toBe('ready');
   });
 
+  test('a long-press-only next target is ready when the next move is a long press', async () => {
+    await mount(
+      <View>
+        <Pressable testID="go" onPress={() => undefined}>
+          <Text>Go</Text>
+        </Pressable>
+        <Pressable testID="hold" onLongPress={() => undefined}>
+          <Text>Hold</Text>
+        </Pressable>
+      </View>,
+    );
+    useFrames({ go: frame(20, 100, 200, 40), hold: frame(20, 200, 200, 40) });
+    const result = await run(() =>
+      move({ method: 'press', params: { target: { testID: 'go' } }, next: { target: { testID: 'hold' }, capMs: 300, kind: 'longPress' } }),
+    );
+    expect(result.next?.state).toBe('ready');
+    expect(result.next?.waitedMs).toBeLessThan(250);
+    const refused = await failure(
+      run(() => move({ method: 'press', params: { target: { testID: 'go' } }, next: { target: { testID: 'hold' }, capMs: 10, kind: 'swipe' } })),
+    );
+    expect(refused.code).toBe('bad_params');
+  });
+
   test('result parity with the plain back and openURL', async () => {
     const goBack = jest.fn();
     const nav = { isFocused: () => true, canGoBack: () => true, goBack, navigate: jest.fn(), getState: () => ({ routes: [] }) };

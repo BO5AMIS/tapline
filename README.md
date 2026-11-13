@@ -152,8 +152,9 @@ something is on screen. Actions take `brief: true` for an answer of at most 12 e
   interruption, such as a rate prompt, at a place change or before a failure answer. Only declared
   reflexes run, and none that would need a person's OK.
 - **Test accounts.** `--accounts FILE` holds usernames and passwords by name. The agent says
-  `account: "tester2"` and the host types the value: it never reaches the agent, a log, a report or a
-  recording. The file must be outside a git repository, or ignored by it.
+  `account: "tester2"` and the host types the value: it never reaches the agent as text, a log, a report or a
+  recording. Screenshots show what the screen shows: a username in a plain field, and a password only if
+  its field's "show password" toggle is on. The file must be outside a git repository, or ignored by it.
 - **A person's OK in the chat.** A touch that needs one opens the host's own dialog (Allow once /
   Don't allow) as well as the live view; the first answer wins. The same dialog says what to do when
   the app isn't open or an alert needs a person (`Needs a person: ...`), and the call goes on by

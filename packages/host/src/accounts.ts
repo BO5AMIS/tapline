@@ -108,6 +108,8 @@ function variantsOf(value: string): string[] {
     const percent = encodeURIComponent(base);
     forms.add(percent);
     forms.add(percent.replace(/%20/g, "+"));
+    // URLSearchParams encodes more than encodeURIComponent does (`~` becomes %7E).
+    forms.add(new URLSearchParams({ k: base }).toString().slice(2));
   }
   return [...forms].filter((form) => form !== "");
 }

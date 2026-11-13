@@ -39,7 +39,7 @@ describe("drive: pipelined moves", () => {
     expect(first?.method).toBe("press");
     expect(first?.params).toEqual({ target: { testID: "general-row" } });
     // The second move's target is asked for with the first, as `next`, with the road's own time times 3 (at least 2 s).
-    expect(first?.next).toEqual({ target: { testID: "language-row" }, capMs: 2000 });
+    expect(first?.next).toEqual({ target: { testID: "language-row" }, capMs: 2000, kind: "press" });
     expect(second?.next).toBeUndefined();
   });
 
@@ -104,7 +104,8 @@ describe("drive: pipelined moves", () => {
     expect(textOf(answer)).not.toContain("Arrived");
     const [first] = moves(s);
     expect(first?.guard).toEqual({ id: "general-row", label: "General", text: "General", role: "button" });
-    // The road isn't blamed for a stale target.
+    // The road isn't blamed for a stale target. Saves run in the background: wait for them.
+    await s.registry.flushAll();
     expect(s.file().roads.every((r) => r.failed === 0)).toBe(true);
   });
 

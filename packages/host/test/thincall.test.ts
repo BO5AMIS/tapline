@@ -1,6 +1,7 @@
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
+import { createHmac } from "node:crypto";
 import { createServer as createNetServer } from "node:net";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,10 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((resolve) => { s.closeAllConnections(); s.close(() => resolve()); })));
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
+
+/** What a real host sends back: an HMAC of the caller's challenge, keyed by the token. */
+const proofFor = (req: IncomingMessage, token = FAKE_TOKEN): string =>
+  createHmac("sha256", token).update(`tapline-proof-v1\n${String(req.headers["x-tapline-challenge"])}\n${req.socket.localAddress}\n${req.socket.localPort}`).digest("hex");
 
 interface Seen {
   path: string;
@@ -40,7 +45,7 @@ async function stub(respond: (seen: Seen) => { status: number; body: string }): 
       if (req.method === "GET") {
         const asked = respond({ path: req.url ?? "", headers: req.headers, body });
         const status = asked.status === 404 && asked.body.includes("MCP server") ? 404 : 405;
-        res.writeHead(status);
+        res.writeHead(status, status === 405 ? { "x-tapline-proof": proofFor(req) } : {});
         res.end(status === 405 ? "POST only.\n" : asked.body);
         return;
       }
@@ -274,7 +279,7 @@ describe("tapline call", () => {
   it("a confirmed host's answer may take longer than the probe", async () => {
     const delayed = createServer((req, res) => {
       if (req.method === "GET") {
-        res.writeHead(405);
+        res.writeHead(405, { "x-tapline-proof": proofFor(req) });
         res.end("POST only.\n");
         return;
       }
@@ -299,15 +304,89 @@ describe("tapline call", () => {
     const names = new Set<string>();
     const realNow = Date.now;
     Date.now = () => 1_700_000_000_000;
+    // One shots folder for all three calls, so the names alone must differ.
+    const run = io([s.port]);
     try {
-      for (let i = 0; i < 3; i++) {
-        const run = io([s.port]);
-        await runThinCall(["look", "--json"], run.io);
-        names.add((JSON.parse(run.out.join("")) as { image_path: string }).image_path);
-      }
+      for (let i = 0; i < 3; i++) await runThinCall(["look", "--json"], run.io);
     } finally {
       Date.now = realNow;
     }
+    for (const line of run.out) names.add((JSON.parse(line) as { image_path: string }).image_path);
     expect(names.size).toBe(3);
+  });
+
+  it("never sends the token to a port that can't prove it holds it", async () => {
+    let posted = false;
+    const impostor = createServer((req, res) => {
+      if (req.method === "POST") posted = true;
+      res.writeHead(405);
+      res.end("POST only.\n");
+    });
+    await new Promise<void>((resolve) => impostor.listen(0, "127.0.0.1", resolve));
+    servers.push(impostor);
+    const a = impostor.address();
+    const run = io([typeof a === "object" && a !== null ? a.port : 0]);
+    expect(await runThinCall(["apps"], run.io)).toBe(3);
+    expect(posted).toBe(false);
+    // A proof made with another token is no proof either.
+    const wrong = createServer((req, res) => {
+      if (req.method === "POST") posted = true;
+      res.writeHead(405, { "x-tapline-proof": proofFor(req, "another-token") });
+      res.end("POST only.\n");
+    });
+    await new Promise<void>((resolve) => wrong.listen(0, "127.0.0.1", resolve));
+    servers.push(wrong);
+    const b = wrong.address();
+    const second = io([typeof b === "object" && b !== null ? b.port : 0]);
+    expect(await runThinCall(["apps"], second.io)).toBe(3);
+    expect(posted).toBe(false);
+  });
+
+  it("a call whose answer is lost is not sent to the next host", async () => {
+    const dropping = createServer((req, res) => {
+      if (req.method === "GET") {
+        res.writeHead(405, { "x-tapline-proof": proofFor(req) });
+        res.end("POST only.\n");
+        return;
+      }
+      req.resume();
+      req.on("end", () => req.socket.destroy());
+    });
+    await new Promise<void>((resolve) => dropping.listen(0, "127.0.0.1", resolve));
+    servers.push(dropping);
+    const a = dropping.address();
+    const next = await stub(() => answer("second host"));
+    const run = io([typeof a === "object" && a !== null ? a.port : 0, next.port]);
+    expect(await runThinCall(["tap", "{}"], run.io)).toBe(1);
+    expect(run.err.join("")).toContain("may have run");
+    expect(next.seen).toEqual([]);
+  });
+
+  it("an unreadable 200 answer is not sent to the next host either", async () => {
+    const first = await stub(() => ({ status: 200, body: "not json" }));
+    const next = await stub(() => answer("second host"));
+    const run = io([first.port, next.port]);
+    expect(await runThinCall(["tap", "{}"], run.io)).toBe(1);
+    expect(next.seen).toEqual([]);
+  });
+
+  it("TAPLINE_PORT is tried before the default ports", async () => {
+    const early = await stub(() => answer("from the default"));
+    const chosen = await stub(() => answer("from TAPLINE_PORT"));
+    const run = io([early.port, chosen.port]);
+    run.io.env = { ...run.io.env, TAPLINE_PORT: String(chosen.port) };
+    expect(await runThinCall(["apps"], run.io)).toBe(0);
+    expect(run.out.join("")).toBe("from TAPLINE_PORT\n");
+    expect(early.seen).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("pictures are saved readable by this user only", async () => {
+    const s = await stub(() => answer("a look", false, { mimeType: "image/png", dataBase64: "QUJD" }));
+    const run = io([s.port]);
+    mkdirSync(join(run.home, "shots"), { mode: 0o755 });
+    await runThinCall(["look", "--json"], run.io);
+    const path = (JSON.parse(run.out.join("")) as { image_path: string }).image_path;
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(statSync(join(run.home, "shots")).mode & 0o777).toBe(0o700);
   });
 });

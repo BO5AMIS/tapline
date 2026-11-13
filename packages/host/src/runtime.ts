@@ -33,6 +33,9 @@ import { VIEWER_HTML } from "./viewer-page.js";
 /** How long a client of the thin call may stay silent before its tools (its report, its journey) are dropped. */
 export const CLIENT_IDLE_MS = 30 * 60 * 1000;
 
+/** What a queued call answers when its client left before it started (nobody reads it). */
+const CANCELLED: CallToolResult = { content: [{ type: "text", text: "Error cancelled: the client left before this call started, so it never ran." }], isError: true };
+
 /** The client id of a thin call that names none. */
 export const ANONYMOUS_CLIENT = "anonymous";
 
@@ -137,8 +140,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     hosts: config.hosts,
     ...(options.api === true
       ? {
-          api: async (tool: string, args: Record<string, unknown>, clientId: string | undefined) =>
-            isToolName(tool) ? thinCall(tool, args, clientId) : undefined,
+          api: async (tool: string, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal) =>
+            isToolName(tool) ? thinCall(tool, args, clientId, signal) : undefined,
         }
       : {}),
   });
@@ -217,16 +220,26 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const primary = new TaplineTools(host, toolsOptions);
 
   /** Every call through `/api` is a thin call: the log says so, and the report flags a run of them (§16.1). */
-  function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined): Promise<CallToolResult> {
+  function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal): Promise<CallToolResult> {
     // A thin call never uses the MCP server's tools: those hold its dialog and the OKs given for its calls.
     const tools = toolsFor(clientId ?? ANONYMOUS_CLIENT);
-    return tools.asThinCall(() => callTool(tools, tool, args));
+    // Calls that share a tools object run one after another: they share its per-call state (a run's account).
+    const before = lanes.get(tools) ?? Promise.resolve();
+    // A call whose client left while it waited in the line is dropped before it starts; a running one is told to stop waiting.
+    const answer = before.then(() => (signal.aborted ? CANCELLED : tools.withCall(signal, () => tools.asThinCall(() => callTool(tools, tool, args)))));
+    lanes.set(tools, answer.then(() => undefined, () => undefined));
+    return answer;
   }
+  const lanes = new WeakMap<TaplineTools, Promise<void>>();
 
   function toolsFor(clientId: string | undefined): TaplineTools {
     if (clientId === undefined) return primary;
     const now = clock();
-    for (const [id, entry] of clients) if (now - entry.lastUsed > CLIENT_IDLE_MS) clients.delete(id);
+    for (const [id, entry] of clients) {
+      if (now - entry.lastUsed <= CLIENT_IDLE_MS) continue;
+      entry.tools.dispose();
+      clients.delete(id);
+    }
     const known = clients.get(clientId);
     if (known !== undefined) {
       known.lastUsed = now;
@@ -255,7 +268,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
         });
       },
       readOverlay: () => primary.readOverlay(),
-      runInput: (input) => primary.personInput(input),
+      runInput: async (input) => {
+        const outcome = await primary.personInput(input);
+        // The request reached the app: every client's refs from before it are stale.
+        if (outcome.action !== undefined) for (const entry of clients.values()) entry.tools.noteViewerInput();
+        return outcome;
+      },
       confirmations,
     });
     hub = live;
@@ -291,6 +309,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
       await maps.flushAll().catch(() => undefined);
       // The phone is never left fast-forwarded with nobody watching (PLAN-1.6 F4, E8).
       await restoreAnimations(host).catch(() => undefined);
+      for (const entry of clients.values()) entry.tools.dispose();
+      clients.clear();
+      primary.dispose();
       await host.close();
     },
   };

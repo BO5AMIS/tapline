@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readRouteSync, type MapReflex, type MapRoad } from "./mapfile.js";
 import { placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
-import { asWords, linkWords, matchWord } from "./policy.js";
+import { asWords, decodeComplete, decodePath, linkReadable, linkWords, matchWord } from "./policy.js";
 import { looksLikeValue } from "./protocol.js";
 import { routeEdges, type RouteEdge } from "./routes.js";
 import { describeRunStep } from "./run.js";
@@ -123,6 +123,13 @@ export async function runMap(args: MapArgs, ctx: MapContext): Promise<MapAnswer>
   // An edit is written now, so a person or the other tool sees it; a failed write is kept and tried again.
   await ctx.map.flush();
   const failed = ctx.map.lastError();
+  // The merge with the file keeps what has newer evidence, so a removal may not hold: say so instead of "Forgot".
+  if (!answer.error && args.forget !== undefined && ctx.map.data().places[args.forget] !== undefined) {
+    answer = { text: `Error stale: place ${args.forget} was kept; the map file holds newer evidence for it. Look at it again and forget it once it is quiet.`, error: true };
+  }
+  if (!answer.error && args.forget_reflex !== undefined && ctx.map.data().reflexes.some((reflex) => reflex.name === args.forget_reflex)) {
+    answer = { text: `Error stale: reflex ${args.forget_reflex} was kept; the map file holds a newer one.`, error: true };
+  }
   return failed === null ? answer : { ...answer, text: `${answer.text}\nNote: the map file wasn't written (${failed}); the change is kept and written when it can be.` };
 }
 
@@ -215,26 +222,41 @@ export function cheapestWay(roads: MapRoad[], from: string, to: string, isProven
     ...roads.filter(driveable).map((road) => ({ leg: road, from: road.from, to: road.to, cost: isProven(road) ? 1 : 2 })),
     ...routes.map((route) => ({ leg: route, from: route.from, to: route.to, cost: route.moves })),
   ];
-  const found: { best: { cost: number; used: number; chain: Array<MapRoad | RouteEdge> } | null } = { best: null };
-  let budget = 20_000;
-  const walk = (at: string, seen: Set<string>, chain: Array<MapRoad | RouteEdge>, cost: number, used: number): void => {
-    const { best } = found;
-    if (budget-- <= 0 || (best !== null && cost > best.cost)) return;
-    if (at === to) {
-      if (best === null || cost < best.cost || (cost === best.cost && used > best.used)) found.best = { cost, used, chain: [...chain] };
-      return;
+  // One best label per place (a shortest-path search), so a tangled group of places can't use up a budget before a direct
+  // road is looked at. At equal cost a way with more saved routes wins (a person recorded it on purpose), and only then the
+  // most recently used: the time alone made the choice depend on which millisecond a road and a route were saved in.
+  interface Label {
+    cost: number;
+    routeLegs: number;
+    used: number;
+    chain: Array<MapRoad | RouteEdge>;
+  }
+  const better = (a: Label, b: Label): boolean => a.cost < b.cost || (a.cost === b.cost && (a.routeLegs > b.routeLegs || (a.routeLegs === b.routeLegs && a.used > b.used)));
+  const labels = new Map<string, Label>([[from, { cost: 0, routeLegs: 0, used: 0, chain: [] }]]);
+  const settled = new Set<string>();
+  for (;;) {
+    let at: string | null = null;
+    let label: Label | undefined;
+    for (const [place, candidate] of labels) {
+      if (settled.has(place) || (label !== undefined && !better(candidate, label))) continue;
+      at = place;
+      label = candidate;
     }
+    if (at === null || label === undefined) return null;
+    if (at === to) return label.chain;
+    settled.add(at);
     for (const next of legs) {
-      if (next.from !== at || seen.has(next.to)) continue;
-      seen.add(next.to);
-      chain.push(next.leg);
-      walk(next.to, seen, chain, cost + next.cost, Math.max(used, recent(next.leg)));
-      chain.pop();
-      seen.delete(next.to);
+      if (next.from !== at || settled.has(next.to)) continue;
+      const reached: Label = {
+        cost: label.cost + next.cost,
+        routeLegs: label.routeLegs + (isRouteLeg(next.leg) ? 1 : 0),
+        used: Math.max(label.used, recent(next.leg)),
+        chain: [...label.chain, next.leg],
+      };
+      const known = labels.get(next.to);
+      if (known === undefined || better(reached, known)) labels.set(next.to, reached);
     }
-  };
-  walk(from, new Set([from]), [], 0, 0);
-  return found.best === null ? null : found.best.chain;
+  }
 }
 
 /** A leg that is a saved route rather than a road. */
@@ -282,6 +304,9 @@ async function nameHere(name: string, ctx: MapContext): Promise<[MapAnswer, bool
 
 const PARAM_PIECE = /^\[(?:\.\.\.)?[A-Za-z0-9_]+\]$/;
 
+/** A segment as written and as the router reads it: `%34%38%32` is 482, so both are looked at. */
+const valueIn = (segment: string): boolean => holdsValue(segment) || decodePath(segment).split("/").some(holdsValue);
+
 /** A segment that holds a value: a number, a uuid, long hex (§18.1), or a long mixed run that looks like a token. */
 function holdsValue(segment: string): boolean {
   if (PARAM_PIECE.test(segment)) return false;
@@ -301,12 +326,15 @@ function linkProblem(link: string): string | null {
   if (found === null) return "a link is scheme://path, like wayfare://settings.";
   const [, scheme = "", rest = ""] = found;
   const authority = rest.split("/")[0] ?? "";
-  if (/[?#]/.test(rest) || authority.includes("@")) {
+  // A link that can't be fully decoded is refused: what a router would make of it is unknown. The link isn't repeated.
+  if (!decodeComplete(rest).complete) return "a link whose percent escapes can't be decoded (invalid or too deeply encoded) isn't kept; write it plainly.";
+  const unescaped = decodePath(rest);
+  if (/[?#]/.test(unescaped) || (decodePath(authority)).includes("@")) {
     return "a link holds only a scheme and a path: no query, no fragment, no credentials. A value there may be a secret; drop it.";
   }
   const segments = rest.split("/").filter((segment) => segment !== "");
-  if (!segments.some(holdsValue)) return null;
-  const suggestion = `${scheme}://${segments.map((segment) => (holdsValue(segment) ? "[id]" : segment)).join("/")}`;
+  if (!segments.some(valueIn)) return null;
+  const suggestion = `${scheme}://${segments.map((segment) => (valueIn(segment) ? "[id]" : segment)).join("/")}`;
   return `a segment of the link looks like a value (an id, a uuid or a token), and a link holds a pattern; write it as ${suggestion}.`;
 }
 
@@ -343,6 +371,9 @@ export function reflexWords(step: ReflexInput["do"]): { label?: string; text?: s
 
 function addReflex(input: ReflexInput, ctx: MapContext): [MapAnswer, boolean] {
   if (input.at !== undefined && ctx.map.data().places[input.at] === undefined) return [notFoundPlace(input.at), false];
+  if (input.do.tool === "open_url" && !linkReadable(input.do.url)) {
+    return [{ text: `Error not_allowed: blocked: reflex "${input.name}" would open a link whose percent escapes can't be decoded, so the policy can't check it. Nothing was saved.`, error: true }, false];
+  }
   const words = reflexWords(input.do);
   const blocked = matchWord(ctx.lists.block, words);
   const flagged = blocked === null ? matchWord(ctx.lists.confirm, words) : null;

@@ -11,14 +11,14 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
-import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
+import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
-import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
+import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
@@ -49,7 +49,7 @@ import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
 import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
-import { DEFAULT_POLICY, elementKey, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
@@ -1132,7 +1132,7 @@ interface StressWaiting {
 const DOUBLE_TAP_GAP_MS = 80;
 /** What the app says of a double tap's second tap. */
 const pressSecondSchema = z.union([
-  z.object({ done: z.literal(true), afterMs: z.number() }),
+  z.object({ done: z.literal(true), afterMs: z.number(), threw: z.string().optional() }),
   z.object({ done: z.literal(false), reason: z.string().regex(/^[a-z_]{1,40}$/), afterMs: z.number() }),
 ]);
 /** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
@@ -1208,6 +1208,17 @@ export class TaplineTools {
   /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
   private readonly callScope = new AsyncLocalStorage<CallState>();
   private readonly thinScope = new AsyncLocalStorage<boolean>();
+  /** Takes this object's listeners off the host, so a dropped client is not kept alive by it. */
+  private readonly disposers: Array<() => void> = [];
+
+  dispose(): void {
+    for (const off of this.disposers.splice(0)) off();
+  }
+
+  /** A person used the app through another tools object (the live viewer): `{ref}` targets here are stale too. */
+  noteViewerInput(): void {
+    this.markPersonUsedApp();
+  }
 
   /** Runs a call that came through the thin call, so its log entries say `via: "call"` (§16.1, §18.10). */
   asThinCall<T>(run: () => T): T {
@@ -1368,30 +1379,42 @@ export class TaplineTools {
     this.stillCapMs = options.stillCapMs ?? 2000;
     // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
-    host.on("touch", (session) => {
+    const onTouch = (session: SessionInfo): void => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
-    });
+    };
     // What a stress moment a person does leaves behind, for `done` to check (AGENT-TOOLS 1.12 §17.4).
     // Kept per app, so another connected app's events never count for the journey's app.
-    host.on("appState", (session, state) => {
+    const onAppState = (session: SessionInfo, state: string): void => {
       if (state !== "active") this.appLeftAt.set(identityOf(session), Date.now());
-    });
-    host.on("disconnect", (session) => {
+    };
+    const onDisconnect = (session: SessionInfo): void => {
       // The app puts its animations back by itself when it loses the host; the host forgets it was fast.
       forgetAnimations(this.host, session.id);
       this.appLeftAt.set(identityOf(session), Date.now());
-    });
-    host.on("connect", (session) => {
+    };
+    const onConnect = (session: SessionInfo): void => {
       this.appConnectedAt.set(identityOf(session), Date.now());
-    });
+    };
     // The app's picker used the armed test pictures: that is when a pick was "skipped" (1.5 review, finding 5).
-    host.on("pickerSkipped", (session, count) => {
+    const onPickerSkipped = (session: SessionInfo, count: number): void => {
       this.pickerFrom = identityOf(session);
       try {
         this.mediaState.recordPickerSkipped(session.app.id, count);
       } finally {
         this.pickerFrom = undefined;
       }
+    };
+    host.on("touch", onTouch);
+    host.on("appState", onAppState);
+    host.on("disconnect", onDisconnect);
+    host.on("connect", onConnect);
+    host.on("pickerSkipped", onPickerSkipped);
+    this.disposers.push(() => {
+      host.off("touch", onTouch);
+      host.off("appState", onAppState);
+      host.off("disconnect", onDisconnect);
+      host.off("connect", onConnect);
+      host.off("pickerSkipped", onPickerSkipped);
     });
     // The measuring tools run with fast animations paused (PLAN-1.6 F4, E8): innermost, so the note is part of the answer.
     for (const name of PAUSED_TOOLS) {
@@ -1822,7 +1845,11 @@ export class TaplineTools {
     const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
     // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
     const url = typeof params["url"] === "string" ? params["url"] : "";
-    let known = tool === "open_url" ? [{ ref: "", role: "link", text: linkWords(url) } satisfies TreeElement] : call.known;
+    // A link that can't be fully decoded can't be read for words: it goes to a person (the label is the reason).
+    let known =
+      tool === "open_url"
+        ? [{ ref: "", role: "link", text: linkWords(url), ...(linkReadable(url) ? {} : { label: UNREADABLE_LINK }) } satisfies TreeElement]
+        : call.known;
     const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" || tool === "open_url" ? tool : short ? "swipe" : null;
     const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
     let guard = call.guard;
@@ -2003,6 +2030,7 @@ export class TaplineTools {
    * the app would touch now. It uses the same word lists and the same matching as a single call (`policyWords`).
    */
   private async reflexVerdict(session: SessionInfo, step: ReflexDo, lists: { confirm: string[]; block: string[] }): Promise<ReflexVerdict> {
+    if (step.tool === "open_url" && !linkReadable(step.url)) return { kind: "unresolved", why: "its link's percent escapes can't be decoded" };
     const words = reflexWords(step);
     const blockedWord = matchWord(lists.block, words);
     if (blockedWord !== null) return { kind: "blocked", word: this.host.redactOut(blockedWord) };
@@ -5037,6 +5065,11 @@ export class TaplineTools {
       const element = resolved.elements[i];
       if (word !== null && element !== undefined) return { kind: "blocked", element, raw, word: this.host.redactOut(word) };
     }
+    // A link that couldn't be decoded needs a person's OK, whatever the word lists say.
+    for (const [i, raw] of resolved.raw.entries()) {
+      const element = resolved.elements[i];
+      if (raw.role === "link" && raw.label === UNREADABLE_LINK && element !== undefined) return { kind: "confirm", element, raw, word: UNREADABLE_LINK };
+    }
     for (const [i, raw] of resolved.raw.entries()) {
       const word = matchWord(lists.confirm, raw);
       const element = resolved.elements[i];
@@ -5452,6 +5485,8 @@ export class TaplineTools {
     const blocked = name === "network" ? this.networkRefusal((args.args as { mode?: unknown } | undefined)?.mode) : null;
     if (blocked !== null) return blocked;
     const sessionId = this.host.current()?.id;
+    // A measurement holds animations at normal: an explicit switch to fast waits for it to end.
+    if (name === "animations" && sessionId !== undefined && (args.args as { speed?: unknown } | undefined)?.speed === "fast") await afterPause(this.host, sessionId);
     const answer = await this.act(
       "command",
       { name, args: args.args ?? {} },
@@ -6316,9 +6351,7 @@ export class TaplineTools {
     const checked = await this.survivalOf(running, survives);
     const done = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
     const s = second.data;
-    const how = s.done
-      ? `Both taps went through, ${s.afterMs} ms apart.`
-      : `The first tap went through; the second, ${s.afterMs} ms later, didn't land (${s.reason}).`;
+    const how = secondTapSentence(s);
     return text(`${line(done)}\n${how}`);
   }
 

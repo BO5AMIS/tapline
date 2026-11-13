@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -7,7 +7,13 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
  * `api` handler; a host inside an agent's MCP server has none and answers 404, so one agent's session can't be
  * driven by another's thin calls. The handler returns undefined for a tool that doesn't exist.
  */
-export type ApiHandler = (tool: string, args: Record<string, unknown>, clientId: string | undefined) => Promise<CallToolResult | undefined>;
+export type ApiHandler = (
+  tool: string,
+  args: Record<string, unknown>,
+  clientId: string | undefined,
+  /** Aborts when the client disconnects before the answer: queued work that nobody waits for is skipped. */
+  signal: AbortSignal,
+) => Promise<CallToolResult | undefined>;
 
 /** The most a call's JSON may be. */
 export const MAX_API_BODY = 1024 * 1024;
@@ -17,6 +23,23 @@ export function safeEqual(a: string, b: string): boolean {
   const right = Buffer.from(b, "utf8");
   if (left.length !== right.length) return false;
   return timingSafeEqual(left, right);
+}
+
+/** An address as one spelling: no brackets, lower case, and an IPv4-mapped IPv6 address as plain IPv4. */
+export function normalizeAddress(address: string): string {
+  const plain = address.toLowerCase().replace(/^\[|\]$/g, "");
+  return plain.startsWith("::ffff:") && plain.includes(".") ? plain.slice("::ffff:".length) : plain;
+}
+
+/**
+ * The host's proof that it holds the token: an HMAC of the caller's fresh challenge and of the address and port the request
+ * arrived on, keyed by the token. They are in it so that a listener on another port, or on another address with the same
+ * port (::1 against 127.0.0.1), can't relay the probe to the real host and hand its proof back: a proof made for one
+ * endpoint never verifies for another. The token itself never leaves; thincall.ts computes the same value from the socket
+ * it connected to and sends the token only to a host that proves it for that endpoint.
+ */
+export function hostProof(token: string, challenge: string, address: string, port: number): string {
+  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${normalizeAddress(address)}\n${port}`).digest("hex");
 }
 
 /** What goes back as JSON: the answer's text, whether it is a refusal, and the first picture when there is one. */
@@ -69,7 +92,16 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
     return true;
   }
   if (req.method !== "POST") {
-    plain(res, 405, "POST only.");
+    // A thin call asks who it is talking to before it sends the token: only a host that holds the token can answer.
+    const challenge = req.headers["x-tapline-challenge"];
+    const port = req.socket.localPort;
+    const address = req.socket.localAddress;
+    const proof =
+      typeof challenge === "string" && port !== undefined && address !== undefined && /^[0-9a-f]{16,128}$/.test(challenge)
+        ? hostProof(context.token, challenge, address, port)
+        : undefined;
+    res.writeHead(405, { "content-type": "text/plain; charset=utf-8", ...(proof !== undefined ? { "x-tapline-proof": proof } : {}) });
+    res.end("POST only.\n");
     return true;
   }
   const auth = req.headers.authorization;
@@ -89,13 +121,20 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
   let size = 0;
   let tooLong = false;
   let gone = false;
+  // A client that leaves before its answer is cancelled: queued work for it is never started.
+  const cancel = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) cancel.abort();
+  });
   // A peer that drops mid-body or resets: stop quietly, never throw an unhandled error event.
   req.on("error", () => {
     gone = true;
+    cancel.abort();
     if (!res.writableEnded) res.destroy();
   });
   req.on("aborted", () => {
     gone = true;
+    cancel.abort();
   });
   req.on("data", (chunk: Buffer) => {
     size += chunk.length;
@@ -116,8 +155,9 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
       plain(res, 400, "Body: a JSON object of at most 1 MB.");
       return;
     }
-    handler(tool, args, client).then(
+    handler(tool, args, client, cancel.signal).then(
       (result) => {
+        if (cancel.signal.aborted) return; // nobody is waiting for the answer
         if (result === undefined) {
           plain(res, 404, `Unknown tool "${tool}".`);
           return;
@@ -126,6 +166,7 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
         res.end(JSON.stringify(toApiAnswer(result)));
       },
       (error: unknown) => {
+        if (cancel.signal.aborted) return;
         if (res.headersSent) {
           res.end();
           return;

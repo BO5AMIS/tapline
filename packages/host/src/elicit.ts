@@ -153,7 +153,10 @@ export async function askDone(
       return false;
     }
   };
-  if (await check()) return "cleared";
+  const first = await check();
+  // The caller may have cancelled while the first check ran.
+  if (isAborted(signal)) return "cancelled";
+  if (first) return "cleared";
   const own = new AbortController();
   const stopOwn = (): void => own.abort();
   signal?.addEventListener("abort", stopOwn, { once: true });

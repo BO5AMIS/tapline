@@ -139,6 +139,8 @@ export interface RouteFound {
   chain: string[];
   /** How the screen is presented when it isn't a plain push (React Native Screens' `stackPresentation`), for the place's layer. */
   presentation?: string;
+  /** The screen component's fiber, to tell which of a route and a bare Modal lies on top of the other. */
+  fiber?: Fiber;
 }
 
 /** One tab of a native tab bar (drawn by the OS, so not in the host tree as a button). */
@@ -187,6 +189,7 @@ function routeOf(fiber: Fiber, chain: RouteFound[], presentation: string | undef
     navigation,
     focused,
     chain: [...chain.map((r) => r.name), route.name],
+    fiber,
     ...(presentation !== undefined ? { presentation } : {}),
   };
 }

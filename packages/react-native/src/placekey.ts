@@ -81,6 +81,22 @@ function layerOf(kind: 'sheet' | 'modal', name: string | undefined): string {
   return name === undefined || looksLikeValue(name) ? kind : `${kind}:${plain(name)}`;
 }
 
+/** Whether `fiber` lies inside `outer` (either copy of it). */
+function inside(fiber: Fiber, outer: Fiber): boolean {
+  for (let up: Fiber | null = fiber.return; up; up = up.return) {
+    if (up === outer || up === outer.alternate) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a bare Modal lies above a presented route: the Modal is inside that route's screen (opened from it) and the
+ * route is not inside the Modal. When the order can't be told, the route stays the layer, as before.
+ */
+function modalAbove(modal: Fiber, route: RouteFound): boolean {
+  return route.fiber !== undefined && inside(modal, route.fiber) && !inside(route.fiber, modal);
+}
+
 export function placeFrom(parts: PlaceParts): PlaceState {
   const current = focusedRoute(parts.routes);
   const chain = current ? current.chain : [];
@@ -113,7 +129,7 @@ export function placeFrom(parts: PlaceParts): PlaceState {
     place.layer = 'alert';
   } else {
     const presented = [...onPath].reverse().find((route) => route.presentation !== undefined);
-    if (presented?.presentation !== undefined) {
+    if (presented?.presentation !== undefined && !(parts.modal && modalAbove(parts.modal, presented))) {
       place.layer = layerOf(SHEET_PRESENTATIONS.has(presented.presentation) ? 'sheet' : 'modal', presented.name);
     } else if (parts.modal) {
       place.layer = layerOf('modal', modalName(parts.modal));

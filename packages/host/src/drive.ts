@@ -90,7 +90,7 @@ export interface TouchCall {
   /** The app refuses (`stale`) when the target is another element than this one. */
   guard?: Guard;
   /** Wait for this target after the move (the app's `move` request). */
-  next?: { target: Record<string, unknown>; capMs: number };
+  next?: { target: Record<string, unknown>; capMs: number; kind: "press" | "longPress" | "toggle" };
   /** Which call made this touch: only a drive's own jump is noted as a journey shortcut (a plain open_url is noted by its own call). */
   of?: "drive";
   /** Send one `move` request (the app has the capability), else the plain method. */
@@ -477,6 +477,23 @@ async function driveCore(svc: DriveServices, args: DriveArgs, rs: RouteServices 
   }
 }
 
+/** The routes that are running now, by map folder: a route that comes back to itself would never end. */
+const activeRoutes = new Map<string, Set<string>>();
+
+/** Marks a route as running; null when it already is. Call the returned function when it ends. */
+function enterRoute(folder: string, name: string): (() => void) | null {
+  const set = activeRoutes.get(folder) ?? new Set<string>();
+  if (set.has(name)) return null;
+  set.add(name);
+  activeRoutes.set(folder, set);
+  return () => {
+    set.delete(name);
+    if (set.size === 0 && activeRoutes.get(folder) === set) activeRoutes.delete(folder);
+  };
+}
+
+const repeatedRoute = (name: string): string => `route "${name}" is already running; a route can't run itself, so this drive was refused.`;
+
 async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | undefined, quiet: boolean): Promise<Core> {
   const { map } = svc;
   const started = svc.clock();
@@ -592,7 +609,9 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         if (rs === undefined || steps === undefined) return finish("off_route", "the route can't be run here", leg, here, false);
         waiting = undefined;
         fresh = null;
-        const ran = await rs.runSteps(steps, false);
+        const leave = enterRoute(svc.map.folder(), planned.route.route);
+        if (leave === null) return finish("bad_params", repeatedRoute(planned.route.route), leg, here, false);
+        const ran = await rs.runSteps(steps, false).finally(leave);
         if (ran.isError === true) {
           const body = ran.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
           const found = /^Error (\w+): ([\s\S]*)$/.exec(body);
@@ -655,6 +674,8 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
       const nextBuilt = nextRoad === undefined || nextPlanned?.viaLink === true || nextPlanned?.route !== undefined ? undefined : build(nextRoad.move, values, nextRoad.names, eyes);
       const nextWire = nextBuilt?.ok === true && nextBuilt.wire !== undefined && !("x" in nextBuilt.wire) ? nextBuilt.wire : undefined;
       const capMs = nextRoad === undefined ? 0 : Math.min(10_000, Math.max(2000, nextRoad.ms * 3));
+      // The next target is dry-run with its own action: a long press or a toggle isn't a press.
+      const nextKind = nextBuilt?.ok === true && (nextBuilt.method === "longPress" || nextBuilt.method === "toggle") ? nextBuilt.method : "press";
 
       const touched = element !== undefined && repaired !== undefined ? moveTargetOf(element) : null;
       // A repaired target in a user's eyes is aimed by its text too, and the app doesn't scroll for the person.
@@ -671,7 +692,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         params,
         ...(pipelined && element !== undefined ? { known: [element] } : {}),
         ...(guard !== undefined ? { guard } : {}),
-        ...(pipelined && nextWire !== undefined ? { next: { target: nextWire, capMs } } : {}),
+        ...(pipelined && nextWire !== undefined ? { next: { target: nextWire, capMs, kind: nextKind } } : {}),
         pipelined,
         of: "drive",
       };
@@ -728,6 +749,8 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         if (viaLink) run.path = [here.name];
         else run.path.push(here.name);
         plan = again;
+        // A new plan's legs each get their own reflex retry.
+        reflexTried.clear();
         replanned = true;
         break;
       }
@@ -954,7 +977,9 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
     },
     runSteps: (steps: Step[]) => rs.runSteps(steps, !quiet),
   };
-  const outcome = await routeRunner.run(route, args.with ?? {}, ctx, rs.accounts);
+  const leave = enterRoute(svc.map.folder(), route.name);
+  if (leave === null) return failed(`Error bad_params: ${repeatedRoute(route.name)}`);
+  const outcome = await routeRunner.run(route, args.with ?? {}, ctx, rs.accounts).finally(leave);
   if (outcome.kind === "refused") return startFailure ?? failed(`Error ${outcome.code}: ${outcome.message}`);
   const ran = outcome.answer;
   if (ran.isError === true) return ran;

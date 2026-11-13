@@ -80,10 +80,59 @@ export function matchWord(words: string[], element: { label?: string | null; tex
 /** An id or a path as words: `deleteAccountButton` and `delete-account` both read "delete account". */
 export const asWords = (piece: string): string => piece.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[-_./]+/g, " ");
 
-/** The words a policy could match in a link: its path only (no scheme, query or fragment), as words. */
-export function linkWords(url: string): string {
-  return asWords(url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/[?#].*$/, ""));
+/** How many times a link may be percent-encoded and still be read. */
+const DECODE_ROUNDS = 3;
+
+/** One escape run undone. Invalid UTF-8 keeps its plain-ASCII escapes decoded (best effort) and says it failed. */
+function decodeRun(run: string): { text: string; ok: boolean } {
+  try {
+    return { text: decodeURIComponent(run), ok: true };
+  } catch {
+    return { text: run.replace(/%([0-7][0-9a-f])/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), ok: false };
+  }
 }
+
+/**
+ * Percent escapes undone, as the router does before it matches a segment, twice-encoded text too. `complete` is false when an
+ * escape isn't valid UTF-8 or when escapes are still there after the round limit: then what a router would make of it is unknown.
+ */
+export function decodeComplete(text: string): { text: string; complete: boolean } {
+  let now = text;
+  let complete = true;
+  for (let round = 0; round < DECODE_ROUNDS; round++) {
+    const next = now.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+      const done = decodeRun(run);
+      if (!done.ok) complete = false;
+      return done.text;
+    });
+    if (next === now) break;
+    now = next;
+  }
+  // Escapes still there after the round limit (or an undecodable one): the link is not fully read.
+  if (/%[0-9a-f]{2}/i.test(now)) complete = false;
+  return { text: now, complete };
+}
+
+/** Percent escapes undone as far as they can be; see decodeComplete for whether that was all of them. */
+export function decodePath(text: string): string {
+  return decodeComplete(text).text;
+}
+
+/** A link's path (no scheme, query or fragment). The query is cut first: decoding first would turn %3F into a `?` and cut the path short. */
+const pathOf = (url: string): string => url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/[?#].*$/, "");
+
+/** Whether a link's path decodes fully. A link that doesn't can't be read for policy words, so it is never trusted. */
+export function linkReadable(url: string): boolean {
+  return decodeComplete(pathOf(url)).complete;
+}
+
+/** The words a policy could match in a link: its path only (no scheme, query or fragment), decoded, as words. */
+export function linkWords(url: string): string {
+  return asWords(decodePath(pathOf(url)));
+}
+
+/** What the policy says about a link it couldn't decode: a person decides. It is the word and the element's label. */
+export const UNREADABLE_LINK = "link that can't be decoded";
 
 /** What a person's OK is tied to: the same tool on the same element (its id, else its role, label and text). */
 export function elementKey(element: { testID?: string | null; role?: string | null; label?: string | null; text?: string | null }): string {

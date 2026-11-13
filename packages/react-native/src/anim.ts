@@ -301,8 +301,9 @@ export async function setAnimationSpeed(speed: AnimationSpeed): Promise<Animatio
   nativeAsked = true;
   const native = await nativeSpeed(NATIVE_FAST_SPEED);
   if (generation !== mine) {
-    // Normal or a disconnect came while the native call was out: it may have landed after that reset, so put 1 back.
-    await nativeSpeed(1);
+    // Normal or a disconnect came while the native call was out: it may have landed after that reset. Put back the
+    // speed the current state wants, so an old request never undoes a newer fast one.
+    await nativeSpeed(fast ? NATIVE_FAST_SPEED : 1);
     return layers;
   }
   layers = { native: native.ok, javascript: true, reanimated: reanimated.on };

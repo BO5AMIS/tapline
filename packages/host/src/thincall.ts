@@ -1,7 +1,7 @@
 // The thin call (AGENT-TOOLS 1.13 §18.10): `tapline call <tool> '<json>'`.
 // It imports only node: modules, so it starts in a few milliseconds; a test checks that.
-import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ const USAGE = `Usage: tapline call <tool> ['<json>'] [--client NAME] [--json] [-
 
 Sends one tool call to a running "tapline host" on this computer and prints the answer's text.
 Exit 0: an answer. Exit 2: a refusal (its first line is on stderr). Exit 3: no host could be reached.
+Exit 1: the call was sent and its outcome is unknown (no answer came back); it may have run, so look before you repeat it.
 `;
 
 export interface ThinCallIO {
@@ -58,7 +59,14 @@ interface Reply {
   body: string;
 }
 
-/** One POST; rejects when nothing listens. The token goes in the header and nowhere else. */
+/** A POST that failed: `sent` is false only when the connection was refused, so the call can't have run. */
+class PostError extends Error {
+  constructor(readonly sent: boolean) {
+    super("the request failed");
+  }
+}
+
+/** One POST; rejects with a PostError. The token goes in the header and nowhere else. */
 function post(address: string, port: number, tool: string, body: string, token: string, client: string): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = request(
@@ -79,22 +87,44 @@ function post(address: string, port: number, tool: string, body: string, token: 
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
-        res.on("error", reject);
+        res.on("error", () => reject(new PostError(true)));
       },
     );
-    req.on("error", reject);
+    req.on("error", (error: NodeJS.ErrnoException) => reject(new PostError(error.code !== "ECONNREFUSED")));
     req.end(body);
   });
 }
 
 type Probe = "host" | "mcp" | "none";
 
+/** An address as one spelling: no brackets, lower case, an IPv4-mapped IPv6 address as plain IPv4 (the same as in api.ts). */
+function normalizeAddress(address: string): string {
+  const plain = address.toLowerCase().replace(/^\[|\]$/g, "");
+  return plain.startsWith("::ffff:") && plain.includes(".") ? plain.slice("::ffff:".length) : plain;
+}
+
+/** What a host must send back to prove it holds the token at this endpoint (the same formula as hostProof in api.ts). */
+function proofOf(token: string, challenge: string, address: string, port: number): string {
+  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${normalizeAddress(address)}\n${port}`).digest("hex");
+}
+
+/** The proof must be made for the address and port of the socket this client is connected to: one relayed from another endpoint fails here. */
+function provesToken(header: string | string[] | undefined, token: string, challenge: string, address: string, port: number): boolean {
+  if (typeof header !== "string") return false;
+  const given = Buffer.from(header, "utf8");
+  const wanted = Buffer.from(proofOf(token, challenge, address, port), "utf8");
+  return given.length === wanted.length && timingSafeEqual(given, wanted);
+}
+
 /**
  * Asks a port who it is with a GET (no token, no side effect), bounded by PROBE_MS: a process that accepts and never
- * answers can't hang the search. A Tapline host answers 405 "POST only"; one inside an MCP server answers 404 with
- * its own text. The real call that follows waits without a limit, since it may be held for a person's OK.
+ * answers can't hang the search. The GET carries a fresh random challenge; a Tapline host answers 405 "POST only" with
+ * an HMAC of it keyed by the token, which only a holder of the token can make. A port that doesn't prove it (another
+ * program that borrowed the port) never sees the token. One inside an MCP server answers 404 with its own text. The
+ * real call that follows waits without a limit, since it may be held for a person's OK.
  */
-function probe(address: string, port: number): Promise<Probe> {
+function probe(address: string, port: number, token: string): Promise<Probe> {
+  const challenge = randomBytes(16).toString("hex");
   return new Promise((resolve) => {
     let done = false;
     const finish = (result: Probe): void => {
@@ -104,12 +134,12 @@ function probe(address: string, port: number): Promise<Probe> {
       req.destroy();
       resolve(result);
     };
-    const req = request({ host: address, port, path: "/api/", method: "GET", agent: false }, (res) => {
+    const req = request({ host: address, port, path: "/api/", method: "GET", agent: false, headers: { "x-tapline-challenge": challenge } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf8");
-        if (res.statusCode === 405 && text.startsWith("POST only")) finish("host");
+        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge, res.socket.remoteAddress ?? "", res.socket.remotePort ?? 0)) finish("host");
         else if (res.statusCode === 404 && text.includes("MCP server")) finish("mcp");
         else finish("none");
       });
@@ -204,6 +234,16 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     return 2;
   }
   let ports = io.ports;
+  const fromEnv = io.env["TAPLINE_PORT"];
+  if (values.port === undefined && fromEnv !== undefined && fromEnv !== "") {
+    // The host started with TAPLINE_PORT sits on that port and nowhere else: look there first.
+    const port = Number(fromEnv);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      io.err(`Error bad_params: TAPLINE_PORT must be a port number, not "${fromEnv}".\n`);
+      return 2;
+    }
+    ports = [port, ...io.ports.filter((other) => other !== port)];
+  }
   if (values.port !== undefined) {
     const port = Number(values.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -234,10 +274,14 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     return 3;
   }
 
+  // One concrete loopback address per endpoint: a name is never sent to twice, so it can't resolve differently later.
+  const name = normalizeAddress(address);
+  const addresses = name === "localhost" ? ["127.0.0.1", "::1"] : [name];
+  const endpoints = ports.flatMap((port) => addresses.map((concrete) => ({ address: concrete, port })));
   let mcpHostSeen = false;
   let tokenRefused = false;
-  for (const port of ports) {
-    const who = await probe(address, port);
+  for (const { address, port } of endpoints) {
+    const who = await probe(address, port, token);
     if (who === "mcp") {
       mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls
       continue;
@@ -246,8 +290,9 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     let reply: Reply;
     try {
       reply = await post(address, port, tool, body, token, client);
-    } catch {
-      continue; // nothing listens there
+    } catch (error) {
+      if (error instanceof PostError && !error.sent) continue; // nothing listens there
+      return unknownOutcome(io);
     }
     if (reply.status === 200) {
       let answer: Answer | null = null;
@@ -256,7 +301,7 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
       } catch {
         answer = null;
       }
-      if (answer === null) continue; // not a Tapline host
+      if (answer === null) return unknownOutcome(io); // the host ran it, and the answer can't be read
       return finish(answer, values.json === true, home, io);
     }
     if (reply.status === 401) {
@@ -275,6 +320,7 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
       io.err(`Error bad_params: ${reply.body.trim()}\n`);
       return 2;
     }
+    if (reply.status >= 500) return unknownOutcome(io);
   }
   io.err(noHost);
   if (tokenRefused) io.err("A host answered but refused this computer's token.\n");
@@ -282,13 +328,21 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
   return 3;
 }
 
+/** The call was sent and no usable answer came back: never sent again to another host. */
+function unknownOutcome(io: ThinCallIO): number {
+  io.err("Error unknown_outcome: the call was sent but no answer came back, so it may have run. Look at the app before you repeat it.\n");
+  return 1;
+}
+
 function finish(answer: Answer, asJson: boolean, home: string, io: ThinCallIO): number {
   let imagePath: string | null = null;
   if (answer.image !== undefined) {
     const dir = join(home, "shots");
-    mkdirSync(dir, { recursive: true });
+    // Pictures can show private screens and pairing codes: only this user may read them.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     imagePath = join(dir, `thin-${Date.now()}-${randomBytes(4).toString("hex")}.${extensionFor(answer.image.mimeType)}`);
-    writeFileSync(imagePath, Buffer.from(answer.image.dataBase64, "base64"));
+    writeFileSync(imagePath, Buffer.from(answer.image.dataBase64, "base64"), { mode: 0o600 });
   }
   const firstLine = answer.text.split("\n")[0] ?? "";
   if (asJson) io.out(`${JSON.stringify({ text: answer.text, image_path: imagePath })}\n`);

@@ -328,6 +328,14 @@ describe("a route as a way", () => {
     expect(way).toEqual(edges);
   });
 
+  it("at equal cost takes the saved route, whichever was used more recently", () => {
+    const edges = [{ route: "sign_in", from: "welcome", to: "home", moves: 1, last: "2026-11-01T00:00:00.000Z" }];
+    const newer = { ...road("welcome", "home"), last: "2026-11-02T00:00:00.000Z" };
+    expect(cheapestWay([newer], "welcome", "home", () => true, edges)).toEqual(edges);
+    const sameTime = { ...road("welcome", "home"), last: "2026-11-01T00:00:00.000Z" };
+    expect(cheapestWay([sameTime], "welcome", "home", () => true, edges)).toEqual(edges);
+  });
+
   it("prefers two roads over a five-step route, and the route over an unproven long road chain", () => {
     const edges = [{ route: "sign_in", from: "welcome", to: "home", moves: 5, last: "2026-11-01T00:00:00.000Z" }];
     const roads = [road("welcome", "mid"), road("mid", "home")];

@@ -351,7 +351,7 @@ export class Journey {
     // A link may carry a sign-in token (`myapp://login?token=…`): only its scheme, host and path stay.
     const first = withoutUrlSecrets(withoutFieldText((outcome.text.split("\n")[0] ?? "").replace(tool === "type_text" ? / Value is now .*$/ : /(?!)/, "")));
     // A drive's first line says how it went (`by 3 taps`); a repair is the other thing the report keeps (18.12).
-    const travel = tool === "drive" ? outcome.text.split("\n").filter((line) => line.startsWith("Road repaired")).map((line) => withoutUrlSecrets(withoutIds(line))) : [];
+    const travel = tool === "drive" ? outcome.text.split("\n").filter((line) => /^(Note: )?Road repaired/.test(line)).map((line) => withoutUrlSecrets(withoutIds(line.replace(/^Note: /, "")))) : [];
     const step: JourneyStep = {
       n: this.state.steps.length + 1,
       tool,

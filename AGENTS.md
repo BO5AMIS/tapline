@@ -258,9 +258,10 @@ Tapline on. Read its output, then go on with step 6. By hand:
 17. **Test accounts.** The user keeps them in an accounts file, outside any git repository or ignored
    by it, and starts Tapline with `--accounts FILE`. You use one by name: `type_text` with `account:
    "tester2"` and the text `${account.username}` or `${account.password}` (the whole text, never part
-   of it); `run` and `drive` take `account` too. Tapline types the value; you never see it: every
+   of it); `run` and `drive` take `account` too. Tapline types the value, and no text it gives you holds it: every
    answer, log, report and recording shows `<tester2's password>`. A password goes only into a
-   password field. `map` and `session_report` list the names. **Never print, repeat, write down or
+   password field. A picture is another matter: a screenshot shows a username that sits in a plain
+   field, and a password whose field has its "show password" toggle on. `map` and `session_report` list the names. **Never print, repeat, write down or
    commit a credential, and never put one in a call.** If a call refuses (`no account "x"`, `isn't
    for this app`), ask the user; don't look for the file.
 18. **Reflexes.** A reflex is a rule in the map that closes a known interruption by itself: `map
