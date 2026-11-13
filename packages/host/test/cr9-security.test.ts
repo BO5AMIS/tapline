@@ -122,8 +122,8 @@ describe("forget: a removal the merge rejects", () => {
 
 describe("hostProof", () => {
   it("depends on the token and the challenge", () => {
-    expect(hostProof("t", "aa")).toMatch(/^[0-9a-f]{64}$/);
-    expect(hostProof("t", "aa")).not.toBe(hostProof("u", "aa"));
-    expect(hostProof("t", "aa")).not.toBe(hostProof("t", "ab"));
+    expect(hostProof("t", "aa", 7210)).toMatch(/^[0-9a-f]{64}$/);
+    expect(hostProof("t", "aa", 7210)).not.toBe(hostProof("u", "aa", 7210));
+    expect(hostProof("t", "aa", 7210)).not.toBe(hostProof("t", "ab", 7210));
   });
 });

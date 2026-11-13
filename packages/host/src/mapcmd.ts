@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readRouteSync, type MapReflex, type MapRoad } from "./mapfile.js";
 import { placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
-import { asWords, decodePath, linkWords, matchWord } from "./policy.js";
+import { asWords, decodeComplete, decodePath, linkReadable, linkWords, matchWord } from "./policy.js";
 import { looksLikeValue } from "./protocol.js";
 import { routeEdges, type RouteEdge } from "./routes.js";
 import { describeRunStep } from "./run.js";
@@ -326,6 +326,8 @@ function linkProblem(link: string): string | null {
   if (found === null) return "a link is scheme://path, like wayfare://settings.";
   const [, scheme = "", rest = ""] = found;
   const authority = rest.split("/")[0] ?? "";
+  // A link that can't be fully decoded is refused: what a router would make of it is unknown. The link isn't repeated.
+  if (!decodeComplete(rest).complete) return "a link whose percent escapes can't be decoded (invalid or too deeply encoded) isn't kept; write it plainly.";
   const unescaped = decodePath(rest);
   if (/[?#]/.test(unescaped) || (decodePath(authority)).includes("@")) {
     return "a link holds only a scheme and a path: no query, no fragment, no credentials. A value there may be a secret; drop it.";
@@ -369,6 +371,9 @@ export function reflexWords(step: ReflexInput["do"]): { label?: string; text?: s
 
 function addReflex(input: ReflexInput, ctx: MapContext): [MapAnswer, boolean] {
   if (input.at !== undefined && ctx.map.data().places[input.at] === undefined) return [notFoundPlace(input.at), false];
+  if (input.do.tool === "open_url" && !linkReadable(input.do.url)) {
+    return [{ text: `Error not_allowed: blocked: reflex "${input.name}" would open a link whose percent escapes can't be decoded, so the policy can't check it. Nothing was saved.`, error: true }, false];
+  }
   const words = reflexWords(input.do);
   const blocked = matchWord(ctx.lists.block, words);
   const flagged = blocked === null ? matchWord(ctx.lists.confirm, words) : null;

@@ -7,7 +7,13 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
  * `api` handler; a host inside an agent's MCP server has none and answers 404, so one agent's session can't be
  * driven by another's thin calls. The handler returns undefined for a tool that doesn't exist.
  */
-export type ApiHandler = (tool: string, args: Record<string, unknown>, clientId: string | undefined) => Promise<CallToolResult | undefined>;
+export type ApiHandler = (
+  tool: string,
+  args: Record<string, unknown>,
+  clientId: string | undefined,
+  /** Aborts when the client disconnects before the answer: queued work that nobody waits for is skipped. */
+  signal: AbortSignal,
+) => Promise<CallToolResult | undefined>;
 
 /** The most a call's JSON may be. */
 export const MAX_API_BODY = 1024 * 1024;
@@ -20,11 +26,14 @@ export function safeEqual(a: string, b: string): boolean {
 }
 
 /**
- * The host's proof that it holds the token: an HMAC of the caller's fresh challenge, keyed by the token. The token itself
- * never leaves; thincall.ts computes the same value and sends the token only to a host that proves it.
+ * The host's proof that it holds the token: an HMAC of the caller's fresh challenge and of the port the request arrived
+ * on, keyed by the token. The port is in it so that a listener on another port can't relay the probe to the real host and
+ * hand its proof back: a proof made on port B never verifies for port A. The host is always this computer (the client
+ * refuses any other name), so it is the fixed word "loopback". The token itself never leaves; thincall.ts computes the
+ * same value and sends the token only to a host that proves it for the port it connected to.
  */
-export function hostProof(token: string, challenge: string): string {
-  return createHmac("sha256", token).update(`tapline-thin-call-v1\n${challenge}`).digest("hex");
+export function hostProof(token: string, challenge: string, port: number): string {
+  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${port}\nloopback`).digest("hex");
 }
 
 /** What goes back as JSON: the answer's text, whether it is a refusal, and the first picture when there is one. */
@@ -79,7 +88,8 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
   if (req.method !== "POST") {
     // A thin call asks who it is talking to before it sends the token: only a host that holds the token can answer.
     const challenge = req.headers["x-tapline-challenge"];
-    const proof = typeof challenge === "string" && /^[0-9a-f]{16,128}$/.test(challenge) ? hostProof(context.token, challenge) : undefined;
+    const port = req.socket.localPort;
+    const proof = typeof challenge === "string" && port !== undefined && /^[0-9a-f]{16,128}$/.test(challenge) ? hostProof(context.token, challenge, port) : undefined;
     res.writeHead(405, { "content-type": "text/plain; charset=utf-8", ...(proof !== undefined ? { "x-tapline-proof": proof } : {}) });
     res.end("POST only.\n");
     return true;
@@ -101,13 +111,20 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
   let size = 0;
   let tooLong = false;
   let gone = false;
+  // A client that leaves before its answer is cancelled: queued work for it is never started.
+  const cancel = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) cancel.abort();
+  });
   // A peer that drops mid-body or resets: stop quietly, never throw an unhandled error event.
   req.on("error", () => {
     gone = true;
+    cancel.abort();
     if (!res.writableEnded) res.destroy();
   });
   req.on("aborted", () => {
     gone = true;
+    cancel.abort();
   });
   req.on("data", (chunk: Buffer) => {
     size += chunk.length;
@@ -128,8 +145,9 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
       plain(res, 400, "Body: a JSON object of at most 1 MB.");
       return;
     }
-    handler(tool, args, client).then(
+    handler(tool, args, client, cancel.signal).then(
       (result) => {
+        if (cancel.signal.aborted) return; // nobody is waiting for the answer
         if (result === undefined) {
           plain(res, 404, `Unknown tool "${tool}".`);
           return;
@@ -138,6 +156,7 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
         res.end(JSON.stringify(toApiAnswer(result)));
       },
       (error: unknown) => {
+        if (cancel.signal.aborted) return;
         if (res.headersSent) {
           res.end();
           return;

@@ -1,4 +1,4 @@
-import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
 import { createHmac } from "node:crypto";
 import { createServer as createNetServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -20,8 +20,11 @@ afterEach(async () => {
 });
 
 /** What a real host sends back: an HMAC of the caller's challenge, keyed by the token. */
-const proofFor = (challenge: string | string[] | undefined, token = FAKE_TOKEN): string =>
-  createHmac("sha256", token).update(`tapline-thin-call-v1\n${String(challenge)}`).digest("hex");
+const proofFor = (req: IncomingMessage, token = FAKE_TOKEN): string =>
+  createHmac("sha256", token).update(`tapline-proof-v1
+${String(req.headers["x-tapline-challenge"])}
+${req.socket.localPort}
+loopback`).digest("hex");
 
 interface Seen {
   path: string;
@@ -45,7 +48,7 @@ async function stub(respond: (seen: Seen) => { status: number; body: string }): 
       if (req.method === "GET") {
         const asked = respond({ path: req.url ?? "", headers: req.headers, body });
         const status = asked.status === 404 && asked.body.includes("MCP server") ? 404 : 405;
-        res.writeHead(status, status === 405 ? { "x-tapline-proof": proofFor(req.headers["x-tapline-challenge"]) } : {});
+        res.writeHead(status, status === 405 ? { "x-tapline-proof": proofFor(req) } : {});
         res.end(status === 405 ? "POST only.\n" : asked.body);
         return;
       }
@@ -279,7 +282,7 @@ describe("tapline call", () => {
   it("a confirmed host's answer may take longer than the probe", async () => {
     const delayed = createServer((req, res) => {
       if (req.method === "GET") {
-        res.writeHead(405, { "x-tapline-proof": proofFor(req.headers["x-tapline-challenge"]) });
+        res.writeHead(405, { "x-tapline-proof": proofFor(req) });
         res.end("POST only.\n");
         return;
       }
@@ -331,7 +334,7 @@ describe("tapline call", () => {
     // A proof made with another token is no proof either.
     const wrong = createServer((req, res) => {
       if (req.method === "POST") posted = true;
-      res.writeHead(405, { "x-tapline-proof": proofFor(req.headers["x-tapline-challenge"], "another-token") });
+      res.writeHead(405, { "x-tapline-proof": proofFor(req, "another-token") });
       res.end("POST only.\n");
     });
     await new Promise<void>((resolve) => wrong.listen(0, "127.0.0.1", resolve));
@@ -345,7 +348,7 @@ describe("tapline call", () => {
   it("a call whose answer is lost is not sent to the next host", async () => {
     const dropping = createServer((req, res) => {
       if (req.method === "GET") {
-        res.writeHead(405, { "x-tapline-proof": proofFor(req.headers["x-tapline-challenge"]) });
+        res.writeHead(405, { "x-tapline-proof": proofFor(req) });
         res.end("POST only.\n");
         return;
       }

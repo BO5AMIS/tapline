@@ -97,15 +97,16 @@ function post(address: string, port: number, tool: string, body: string, token: 
 
 type Probe = "host" | "mcp" | "none";
 
-/** What a host must send back to prove it holds the token (the same formula as hostProof in api.ts). */
-function proofOf(token: string, challenge: string): string {
-  return createHmac("sha256", token).update(`tapline-thin-call-v1\n${challenge}`).digest("hex");
+/** What a host must send back to prove it holds the token on this port (the same formula as hostProof in api.ts). */
+function proofOf(token: string, challenge: string, port: number): string {
+  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${port}\nloopback`).digest("hex");
 }
 
-function provesToken(header: string | string[] | undefined, token: string, challenge: string): boolean {
+/** The proof must be made for the port this client connected to: a proof relayed from another port fails here. */
+function provesToken(header: string | string[] | undefined, token: string, challenge: string, port: number): boolean {
   if (typeof header !== "string") return false;
   const given = Buffer.from(header, "utf8");
-  const wanted = Buffer.from(proofOf(token, challenge), "utf8");
+  const wanted = Buffer.from(proofOf(token, challenge, port), "utf8");
   return given.length === wanted.length && timingSafeEqual(given, wanted);
 }
 
@@ -132,7 +133,7 @@ function probe(address: string, port: number, token: string): Promise<Probe> {
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf8");
-        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge)) finish("host");
+        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge, port)) finish("host");
         else if (res.statusCode === 404 && text.includes("MCP server")) finish("mcp");
         else finish("none");
       });

@@ -49,7 +49,7 @@ import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
 import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
-import { DEFAULT_POLICY, elementKey, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
@@ -1845,7 +1845,11 @@ export class TaplineTools {
     const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
     // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
     const url = typeof params["url"] === "string" ? params["url"] : "";
-    let known = tool === "open_url" ? [{ ref: "", role: "link", text: linkWords(url) } satisfies TreeElement] : call.known;
+    // A link that can't be fully decoded can't be read for words: it goes to a person (the label is the reason).
+    let known =
+      tool === "open_url"
+        ? [{ ref: "", role: "link", text: linkWords(url), ...(linkReadable(url) ? {} : { label: UNREADABLE_LINK }) } satisfies TreeElement]
+        : call.known;
     const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" || tool === "open_url" ? tool : short ? "swipe" : null;
     const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
     let guard = call.guard;
@@ -2026,6 +2030,7 @@ export class TaplineTools {
    * the app would touch now. It uses the same word lists and the same matching as a single call (`policyWords`).
    */
   private async reflexVerdict(session: SessionInfo, step: ReflexDo, lists: { confirm: string[]; block: string[] }): Promise<ReflexVerdict> {
+    if (step.tool === "open_url" && !linkReadable(step.url)) return { kind: "unresolved", why: "its link's percent escapes can't be decoded" };
     const words = reflexWords(step);
     const blockedWord = matchWord(lists.block, words);
     if (blockedWord !== null) return { kind: "blocked", word: this.host.redactOut(blockedWord) };
@@ -5059,6 +5064,11 @@ export class TaplineTools {
       const word = matchWord(lists.block, raw);
       const element = resolved.elements[i];
       if (word !== null && element !== undefined) return { kind: "blocked", element, raw, word: this.host.redactOut(word) };
+    }
+    // A link that couldn't be decoded needs a person's OK, whatever the word lists say.
+    for (const [i, raw] of resolved.raw.entries()) {
+      const element = resolved.elements[i];
+      if (raw.role === "link" && raw.label === UNREADABLE_LINK && element !== undefined) return { kind: "confirm", element, raw, word: UNREADABLE_LINK };
     }
     for (const [i, raw] of resolved.raw.entries()) {
       const word = matchWord(lists.confirm, raw);
