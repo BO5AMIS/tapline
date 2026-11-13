@@ -278,6 +278,14 @@ order, pair again (or give each agent a fixed `--port`).
   also edit the policy), so give such agents only the access you would give a person. The policy
   checks touches (`tap`, `long_press`, `toggle`, `swipe`); it doesn't check `type_text` with
   `submit`, `open_url` or `app_command`.
+  **Grants (1.7).** A grant in the policy file (version 2) is your standing OK for a kind of touch, with limits
+  (`perDay`, `perHour`, `until` within 30 days, quiet hours, a saved route). Only you make one: by editing the file,
+  or by saying Allow to the host's dialog, which offers a grant after you allow a touch there. Payments, purchases and
+  account deletion are never grantable. `tapline grants --policy FILE` lists the grants with today's counts and the last
+  uses; `tapline grants --policy FILE --revoke-all` revokes them all at once (the live view's Pause only pauses: the
+  grants stand when you resume). `tapline audit-log [--since <date or ISO time>]` shows what was done under a
+  grant or your OK (in `~/.tapline/audit/`, 90 days); `tapline audit-log --delete` deletes it. `tapline doctor --policy FILE`
+  says which grant is refused. These are commands for you, not tools the agent can call.
 - **Action log.** Every action, by the agent or a person, is one JSON line in
   `~/.tapline/log/`. Typed text is logged only as its length. Files are kept for 14 days;
   `--no-log` turns it off.

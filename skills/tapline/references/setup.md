@@ -110,6 +110,11 @@ tapline mcp
 - `--policy FILE` sets the words that need a person's OK or are blocked (JSON, per app);
   `--no-policy` turns the policy off, only for a test phone with test data. `--no-log` turns
   off the action log in `~/.tapline/log/`.
+- Grants (1.7) are in the policy file, version 2: a person's standing OK for a touch, with limits. A covered touch
+  answers `Note: allowed by grant "name" (2 of 3 today).` and asks no one; you never create, change or revoke one (only
+  the person does). For the person, in a terminal: `tapline grants --policy FILE` (the grants, today's counts, the last
+  uses), `tapline grants --policy FILE --revoke-all` (the kill switch), `tapline audit-log [--since <date>]` and
+  `--delete`, and `tapline doctor --policy FILE` (a refused grant, a broken state file).
 - `--no-dialog` keeps a person's OK to the live view (the host's own dialog is off), for a host that
   hands dialogs to the model instead of a person. `--brief` makes actions answer briefly.
   `--accounts FILE` loads test accounts (outside any git repository, or ignored by it; never print

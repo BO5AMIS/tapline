@@ -95,7 +95,11 @@ run {"steps": [
 - Put steps you are sure of in one `run`.
 - Set language, text size and the network with `app_command` (`language`, `text_size`, `network`), not
   through the phone's Settings.
-- After a long session, `session_report` shows where the calls went and which ones were wasted.
+- After a long session, `session_report` shows where the calls went and which ones were wasted (and a `Grants:` line
+  when a grant was involved).
+- A grant (the person's standing OK in the policy file) lets a touch through with `Note: allowed by grant "name" (2 of 3
+  today).` You can't make, change or revoke one, and never edit the policy file; the person uses `tapline grants` and
+  `tapline audit-log`.
 
 **Known ground: `drive`.** Tapline learns the app as you work: its places (screens by route
 pattern), the roads between them, links and routes. The header's `Place:` line says where you are. Once

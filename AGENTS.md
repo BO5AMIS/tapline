@@ -202,6 +202,11 @@ Tapline on. Read its output, then go on with step 6. By hand:
    to the same result, and never confirm for them. The user can change the words with `tapline mcp
    --policy FILE`, turn the dialog off with `--no-dialog` (the live view still asks), or turn the
    check off for a test phone with `--no-policy`.
+   **Grants (1.7).** A grant in the policy file is a person's standing OK for a kind of touch, with limits; a covered
+   touch asks no one and ends `Note: allowed by grant "name" (2 of 3 today).` One that matched but ran out, ended or
+   was revoked adds a note and asks a person as above. You can't make, change, answer or revoke a grant: only the person
+   does, by editing the file, through the host's dialog, or with `tapline grants` and `tapline audit-log` in a
+   terminal. Never edit the policy file's grants yourself.
    **Needs a person.** When the app isn't open, was sent to the background, shows an alert you can't
    tap, or stopped answering, the same dialog says what to do (`Needs a person: open Wayfare on the
    phone ...`) and your call goes on by itself when it clears. `Can't now` ends the call with
@@ -408,8 +413,8 @@ not on driving.
 tool, failures by code, and the waste to cut (a `look` right after an answer that had the changes, a
 retry after `not_found`, scroll hunts, actions that could have been one `run`, calls that each started a
 new process, and three or more taps on a way the map knows that one `drive` would have made). It also
-has a `Time:` line (your thinking between calls, and the time in the tool), `Accounts:` (names) and
-`Approvals:`. Read it after a long session.
+has a `Time:` line (your thinking between calls, and the time in the tool), `Grants:` (when a grant let a touch
+through, or matched and didn't cover it), `Accounts:` (names) and `Approvals:`. Read it after a long session.
 
 For each problem: what you did (the steps, short), what you expected, what happened, and
 where (screen, element `id` or text). Quote the relevant log lines. Separate real bugs
