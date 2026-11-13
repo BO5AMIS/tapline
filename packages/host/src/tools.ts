@@ -49,6 +49,7 @@ import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
 import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
+import { GrantBook, type GrantDecision } from "./grants.js";
 import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
@@ -564,6 +565,8 @@ export interface ToolsOptions {
   clientId?: () => string | undefined;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
   policy?: PolicyFile;
+  /** The policy file's grants (AGENT-TOOLS 1.14 §19): read again at every touch. None: no grants (the built-in policy has none). */
+  grants?: GrantBook;
   /** The user's UX house rules (`--ux-rules FILE`, AGENT-TOOLS 1.12 §17.3). Default: none. */
   uxRules?: UxRules;
   /** The test accounts (`--accounts FILE`, AGENT-TOOLS 1.13 §18.6): loaded, or refused with the reason. Default: none. */
@@ -998,6 +1001,24 @@ function appendNote(answer: CallToolResult, note: string): CallToolResult {
   return { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), note].join("\n") }, ...rest] };
 }
 
+/** Several notes at the end of an answer, in order. */
+function appendNotes(answer: CallToolResult, notes: string[]): CallToolResult {
+  return notes.reduce((done, note) => appendNote(done, note), answer);
+}
+
+/** Takes the notes collected so far (a call's grant notes) onto the end of the answer and empties the list. */
+function flushNotes(answer: CallToolResult, notes: string[]): CallToolResult {
+  return appendNotes(answer, notes.splice(0));
+}
+
+/** A grant that let a touch through: what its answer says, and what a failed touch gives back (§19.3, §19.4). */
+interface GrantUse {
+  name: string;
+  line: string;
+  stamp: string;
+  date: string;
+}
+
 /** The app's refusal when an alert it can't answer is open (a stand-in's own buttons are an ordinary screen). */
 const ALERT_IN_WAY = /behind_alert: (An alert is open|Tapline's own prompt is open)/;
 
@@ -1295,6 +1316,11 @@ export class TaplineTools {
    * that runs inside it (its own action) can never reset or set the outer action's state.
    */
   private readonly okScope = new AsyncLocalStorage<{ used: boolean }>();
+  /** The saved routes running in this call (a drive, a replay): a grant with a `route` covers touches made inside it only (§19.1). */
+  private readonly routeScope = new AsyncLocalStorage<string[]>();
+  /** The grant notes of the call in flight (§19.3): they end its answer, before the call's other closing notes. */
+  private readonly grantNotes = new AsyncLocalStorage<string[]>();
+  private grantNoticeDone = false;
   private setOk(used: boolean): void {
     const state = this.okScope.getStore();
     if (state !== undefined) state.used = used;
@@ -1811,6 +1837,11 @@ export class TaplineTools {
     };
   }
 
+  /** Runs what a saved route does with its name in scope: a grant that names the route covers touches made inside it (§19.1). */
+  private inRoute<T>(route: string | undefined, run: () => T): T {
+    return route === undefined ? run() : this.routeScope.run([...(this.routeScope.getStore() ?? []), route], run);
+  }
+
   private routeServices(session: SessionInfo, account: string | undefined, brief: boolean | undefined): RouteServices {
     return {
       accounts: this.options.accounts?.store ?? undefined,
@@ -1818,7 +1849,7 @@ export class TaplineTools {
         const used = this.accountText("$" + "{account." + field + "}", named, session);
         return used !== null && !used.ok ? used.message : null;
       },
-      runSteps: (steps, look) => this.run({ steps, account, brief, ...(look ? {} : { look: false }) }),
+      runSteps: (steps, look, route) => this.inRoute(route, () => this.run({ steps, account, brief, ...(look ? {} : { look: false }) })),
       checkSteps: (steps) => {
         // The call's account is the steps' default account here too, as when `run` runs them.
         const before = this.runAccount;
@@ -1881,6 +1912,7 @@ export class TaplineTools {
       waited = ready.waited;
     }
     let granted: OkVia | undefined;
+    let covered: GrantUse | undefined;
     const wire = call.pipelined
       ? { method: "move", params: { method, params, ...(guard !== undefined ? { guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
       : { method, params };
@@ -1894,12 +1926,15 @@ export class TaplineTools {
           const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known === undefined ? undefined : { elements: known, raw: knownRaw ?? known });
           if ("stop" in gate) throw new PolicyStop(gate.stop);
           granted = gate.via;
+          covered = gate.grant;
         }
         return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
       };
       raw = this.options.control ? await this.options.control.runAgent(run) : await run();
     } catch (error) {
       if (error instanceof PolicyStop) return { kind: "stop", answer: error.answer };
+      // The touch wasn't made: the grant's use is given back (§19.4).
+      if (covered !== undefined) await this.releaseGrant(covered);
       this.logExtra = undefined;
       const code = error instanceof TaplineError ? error.code : "internal";
       this.showAction("agent", method, undefined, params, code, error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
@@ -1909,6 +1944,7 @@ export class TaplineTools {
     this.noteTouch(method, params, done);
     this.showAction("agent", method, done, params);
     if (granted !== undefined) this.journeyRun?.noteOk(granted);
+    if (covered !== undefined) this.grantNotes.getStore()?.push(covered.line);
     // A jump is a shortcut a user doesn't have; a journey whose `allow` names drive says so in its report (AGENT-TOOLS 1.13 18.12).
     if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
@@ -1935,14 +1971,22 @@ export class TaplineTools {
     const startedWith: AppIdentity | undefined = this.host.current();
     // Reflexes fired during the call are counted for it, and said in its answer (§18.7).
     const reflexes: ReflexCall = { fired: new Map(), lines: [] };
-    return this.noteScope.run(true, () =>
-      this.reflexScope.run(reflexes, () => {
-        const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
-        if (result instanceof Promise) {
-          return result.then((answer) => this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))), reflexes));
-        }
-        return this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith))), reflexes);
-      }),
+    const grantLines: string[] = [];
+    return this.grantNotes.run(grantLines, () =>
+      this.noteScope.run(true, () =>
+        this.reflexScope.run(reflexes, () => {
+          const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
+          const finish = (answer: CallToolResult): CallToolResult =>
+            this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes);
+          // The first answer of a session with grants says which grant is refused, and whether the state file is broken (§19.1, §19.4).
+          if (this.options.grants !== undefined && !this.grantNoticeDone) {
+            this.grantNoticeDone = true;
+            const grants = this.options.grants;
+            return Promise.resolve(result).then(async (answer) => finish(appendNotes(answer, GrantBook.noticeLines(await grants.inspect()))));
+          }
+          return result instanceof Promise ? result.then(finish) : finish(result);
+        }),
+      ),
     );
   }
 
@@ -4402,8 +4446,14 @@ export class TaplineTools {
         const turn = async (): Promise<CallToolResult | null> => {
           const gate = await this.policyGate(session, "tap", "press", pressParams, tapLists, ready.waited);
           if ("stop" in gate) return gate.stop;
-          frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-          await this.host.request("press", pressParams, { sessionId: session.id });
+          try {
+            frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+            await this.host.request("press", pressParams, { sessionId: session.id });
+          } catch (error) {
+            if (gate.grant !== undefined) await this.releaseGrant(gate.grant);
+            throw error;
+          }
+          if (gate.grant !== undefined) this.grantNotes.getStore()?.push(gate.grant.line);
           return null;
         };
         const stopped = this.options.control ? await this.options.control.runAgent(turn) : await turn();
@@ -4702,7 +4752,7 @@ export class TaplineTools {
         update: options.updateReferences === true,
       };
       try {
-        const answer = await this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false });
+        const answer = await this.inRoute(script.version === 2 ? script.name : undefined, () => this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false }));
         if (notes.length === 0) return answer;
         const [top, ...rest] = answer.content;
         return top !== undefined && top.type === "text"
@@ -4835,7 +4885,12 @@ export class TaplineTools {
         return fail(this.blockedLine(verdict.element, verdict.word));
       }
       const would = this.wouldLine(tool, shown, resolved.point, resolved.value, resolved.scrolls);
-      const needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
+      let needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
+      if (verdict.kind === "confirm") {
+        // §19.3: a dry run says a grant would allow it, and counts nothing.
+        const grant = await this.grantFor(session, tool, verdict.raw, verdict.word, "peek");
+        if (grant !== null) needs = ` It is allowed by grant ${JSON.stringify(grant.name)} (${grant.counts} today).`;
+      }
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
     }
@@ -4843,15 +4898,22 @@ export class TaplineTools {
     const ready = await this.awaitOk(session, tool, method, params, lists);
     if ("stop" in ready) return ready.stop;
     let granted: OkVia | undefined;
+    let covered: GrantUse | undefined;
     const answer = await perform(async () => {
       const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
       if ("stop" in gate) return gate.stop;
       granted = gate.via;
+      covered = gate.grant;
       return null;
     });
-    if (granted === undefined || answer.isError === true) return answer;
+    // A use is counted when the touch is made: one that wasn't made gives its use back (§19.4).
+    if (covered !== undefined && answer.isError === true) await this.releaseGrant(covered);
+    const notes = this.grantNotes.getStore();
+    const withNotes = notes !== undefined ? flushNotes(answer, notes) : answer;
+    if (covered !== undefined && answer.isError !== true) return appendNote(withNotes, covered.line);
+    if (granted === undefined || answer.isError === true) return withNotes;
     this.journeyRun?.noteOk(granted);
-    return appendNote(answer, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
+    return appendNote(withNotes, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
   }
 
   /**
@@ -4866,9 +4928,15 @@ export class TaplineTools {
     lists: { confirm: string[]; block: string[] },
     waited: Waited | null,
     known?: KnownElements,
-  ): Promise<{ stop: CallToolResult } | { via?: OkVia }> {
+  ): Promise<{ stop: CallToolResult } | { via?: OkVia; grant?: GrantUse }> {
     const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
     if ("stop" in gate) return gate;
+    if (gate.grant !== undefined) {
+      // A grant is a person's standing OK: like an OK given now, its move is no road (§18.2).
+      this.logExtra = { grant: gate.grant.name };
+      this.setOk(true);
+      return { grant: gate.grant };
+    }
     if (gate.via === undefined) return {};
     this.logExtra = { confirmed: true, confirmed_by: gate.via };
     this.setOk(true);
@@ -4903,6 +4971,8 @@ export class TaplineTools {
     const verdict = this.policyWords(lists, resolved);
     if (verdict.kind !== "confirm") return { waited: null };
     if (this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
+    // A grant that covers the touch asks no one; the check right before the touch uses it up (§19.3).
+    if ((await this.grantFor(session, tool, verdict.raw, verdict.word, "peek")) !== null) return { waited: null };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
     const key = this.confirmKey(session, tool, verdict.raw);
@@ -5001,7 +5071,7 @@ export class TaplineTools {
     waited?: Waited | null,
     /** Elements a drive already read: checked instead of a dry run; the app's guard holds the touch to them (§18.4). */
     known?: KnownElements,
-  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia }> {
+  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia; grant?: GrantUse }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
     const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
@@ -5031,6 +5101,9 @@ export class TaplineTools {
       return { granted: true, via: waited.via };
     }
     if (verdict.kind === "none") return { granted: false };
+    // §19.3: where the policy says a person must OK, a grant may stand in for them: it is used up here, right before the touch.
+    const grant = await this.grantFor(session, tool, verdict.raw, verdict.word, "use");
+    if (grant !== null) return { granted: false, grant };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
     // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
@@ -5051,6 +5124,38 @@ export class TaplineTools {
         `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${this.liveViewLine()}${check.suffix}`,
       ),
     };
+  }
+
+  /**
+   * AGENT-TOOLS 1.14 §19.3: whether a grant covers this touch, which the policy says needs a person. `use` records the use (and
+   * the audit line) and `peek` counts nothing. A grant that matched but can't cover the touch adds its note to the call's answer.
+   * A touch that is never grantable, or has no grant, answers null: it asks as before.
+   */
+  private async grantFor(session: SessionInfo, tool: string, element: TreeElement, word: string, mode: "use" | "peek"): Promise<(GrantUse & { counts: string }) | null> {
+    const book = this.options.grants;
+    if (book === undefined || word === UNREADABLE_LINK) return null;
+    const shown = this.host.redactOut((element.label ?? element.text ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim()).slice(0, 80);
+    let decision: GrantDecision;
+    try {
+      decision = await book.decide({ app: session.app, element, routes: this.routeScope.getStore() ?? [] }, mode, `${tool} ${JSON.stringify(shown)}`);
+    } catch {
+      return null;
+    }
+    if (decision.kind === "ask") {
+      const notes = this.grantNotes.getStore();
+      if (notes !== undefined) for (const note of decision.notes) if (!notes.includes(note)) notes.push(note);
+      return null;
+    }
+    return { name: decision.name, line: decision.line, stamp: decision.stamp, date: decision.date, counts: decision.counts };
+  }
+
+  /** The touch wasn't made: its use is given back (§19.4). */
+  private async releaseGrant(use: GrantUse): Promise<void> {
+    try {
+      await this.options.grants?.release(use);
+    } catch {
+      // a use that can't be given back stays counted: the safe side
+    }
   }
 
   /** Which policy word, if any, the elements the target could mean carry: a block word first, then a confirm word. */
@@ -5810,6 +5915,14 @@ export class TaplineTools {
           if (tapped !== undefined) {
             const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app), ready.waited);
             if ("stop" in gate) return { stop: gate.stop };
+            try {
+              const result = await this.measureWindow(session, seconds, tapped);
+              if (gate.grant !== undefined) this.grantNotes.getStore()?.push(gate.grant.line);
+              return { result };
+            } catch (error) {
+              if (gate.grant !== undefined) await this.releaseGrant(gate.grant);
+              throw error;
+            }
           }
           return { result: await this.measureWindow(session, seconds, tapped) };
         };

@@ -613,7 +613,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         fresh = null;
         const leave = enterRoute(svc.map.folder(), planned.route.route);
         if (leave === null) return finish("bad_params", repeatedRoute(planned.route.route), leg, here, false);
-        const ran = await rs.runSteps(steps, false).finally(leave);
+        const ran = await rs.runSteps(steps, false, planned.route.route).finally(leave);
         if (ran.isError === true) {
           const body = ran.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
           const found = /^Error (\w+): ([\s\S]*)$/.exec(body);
@@ -892,7 +892,7 @@ export interface RouteServices {
   /** Whether the account can be typed here: the message when it can't (never a value). */
   probeAccount(field: string, account: string | undefined): string | null;
   /** The steps, the way `run` runs them, with the call's account as their default; `look: false` answers no screen. */
-  runSteps(steps: Step[], look: boolean): Promise<CallToolResult>;
+  runSteps(steps: Step[], look: boolean, route?: string): Promise<CallToolResult>;
   /** `run`'s own checks of steps (their tools, their words, an account), made before anything is touched; null when they hold. */
   checkSteps(steps: Step[]): CallToolResult | null;
 }
@@ -977,7 +977,7 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
       startFailure = result.code === "not_found" && result.message.startsWith("no known way") ? withFirstLine(result.answer, `Error off_route: ${result.message}`) : result.answer;
       return { ok: false, message: result.message };
     },
-    runSteps: (steps: Step[]) => rs.runSteps(steps, !quiet),
+    runSteps: (steps: Step[]) => rs.runSteps(steps, !quiet, route.name),
   };
   const leave = enterRoute(svc.map.folder(), route.name);
   if (leave === null) return failed(`Error bad_params: ${repeatedRoute(route.name)}`);

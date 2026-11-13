@@ -22,6 +22,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { isToolName, callTool, type ToolName } from "./dispatch.js";
 import { realRunner } from "./journeyexport.js";
 import { MapRegistry } from "./places.js";
+import { AuditLog } from "./auditlog.js";
+import { GrantBook } from "./grants.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
 import { TaplineHost, type ListenResult } from "./server.js";
 import { restoreAnimations } from "./animations.js";
@@ -184,8 +186,16 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   // One map per app for every client of this host: places, roads and links grow as agents drive (§18.9).
   const maps = new MapRegistry({ mapsDir: options.maps ?? join(configDir(options.env), "maps") });
 
+  // Grants (AGENT-TOOLS 1.14 §19) live in the policy file: no file, no grants. The audit log (§23) has no off switch.
+  let grants: GrantBook | undefined;
+  if (options.noPolicy !== true && options.policy !== undefined) {
+    const audit = new AuditLog(join(configDir(options.env), "audit"));
+    audit.open();
+    grants = new GrantBook({ policyPath: options.policy, audit });
+  }
   const toolsOptions: ToolsOptions = {
     maps,
+    ...(grants !== undefined ? { grants } : {}),
     ...(options.brief === true ? { brief: true } : {}),
     policy,
     uxRules,

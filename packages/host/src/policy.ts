@@ -24,7 +24,10 @@ export const DEFAULT_CONFIRM = [
 
 const listsSchema = z.object({ confirm: z.array(z.string()).optional(), block: z.array(z.string()).optional() });
 export const policySchema = z.object({
-  version: z.literal(1),
+  // Version 2 (AGENT-TOOLS 1.14 §19.1) adds `grants`; grants.ts validates each grant alone, so one bad grant
+  // never stops the file, and a version 1 file loads as before.
+  version: z.union([z.literal(1), z.literal(2)]),
+  grants: z.unknown().optional(),
   confirm: z.array(z.string()).optional(),
   block: z.array(z.string()).optional(),
   apps: z.record(z.string(), listsSchema).optional(),
@@ -47,7 +50,7 @@ export function loadPolicy(path: string): PolicyFile {
     throw new Error(`couldn't read the policy ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
   const parsed = policySchema.safeParse(json);
-  if (!parsed.success) throw new Error(`${path} isn't a policy (version 1, with confirm, block and apps lists)`);
+  if (!parsed.success) throw new Error(`${path} isn't a policy (version 1 or 2, with confirm, block and apps lists)`);
   // A file that names only words to block keeps the built-in words to confirm; `"confirm": []` turns them off.
   return { ...parsed.data, confirm: parsed.data.confirm ?? DEFAULT_CONFIRM };
 }
