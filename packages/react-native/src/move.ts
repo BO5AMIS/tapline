@@ -21,8 +21,11 @@ export interface MoveParams {
    */
   guard?: RecipientGuard;
   /** Wait until this target is on screen, steady (same frame twice) and touchable (the press dry-run's checks pass). */
-  next?: { target: Target; capMs: number };
+  next?: { target: Target; capMs: number; kind?: NextKind };
 }
+
+/** The next move's method, so the look dry-runs the action that move will make. */
+export type NextKind = 'press' | 'longPress' | 'toggle';
 
 export type NextState = 'ready' | 'missing' | 'covered' | 'moving';
 
@@ -68,7 +71,9 @@ function parseMove(raw: unknown): MoveParams {
     parseTarget(raw.next.target); // the same checks as every target
     const cap = raw.next.capMs;
     if (typeof cap !== 'number' || !Number.isFinite(cap) || cap < 0) throw bad('next.capMs must be a number of milliseconds');
-    parsed.next = { target: raw.next.target as Target, capMs: Math.min(MAX_CAP_MS, Math.round(cap)) };
+    const kind = raw.next.kind ?? 'press';
+    if (kind !== 'press' && kind !== 'longPress' && kind !== 'toggle') throw bad('next.kind must be press, longPress or toggle');
+    parsed.next = { target: raw.next.target as Target, capMs: Math.min(MAX_CAP_MS, Math.round(cap)), kind };
   }
   return parsed;
 }
@@ -81,16 +86,16 @@ function sameFrame(a: TaplineElement['frame'], b: TaplineElement['frame']): bool
 type Look = { kind: 'touchable'; element: TaplineElement } | { kind: 'covered' } | { kind: 'missing' };
 
 /** One look at the next target: would a press touch it now? A dry run, so nothing is touched. */
-async function look(target: Target): Promise<Look> {
+async function look(target: Target, kind: NextKind): Promise<Look> {
   let refusal: unknown;
   try {
-    const result = await press({ target, dryRun: true });
+    const result = kind === 'longPress' ? await longPress({ target, dryRun: true }) : await press({ target, dryRun: true });
     return { kind: 'touchable', element: result.element };
   } catch (error) {
     refusal = error;
   }
   // A switch takes no tap of its own: the next move may be a toggle.
-  if (refusal instanceof TaplineError && refusal.code === 'not_actionable' && refusal.message.startsWith('no_action')) {
+  if (kind !== 'longPress' && refusal instanceof TaplineError && refusal.code === 'not_actionable' && refusal.message.startsWith('no_action')) {
     try {
       const result = await toggle({ target, dryRun: true });
       return { kind: 'touchable', element: result.element };
@@ -111,7 +116,7 @@ async function waitForNext(next: NonNullable<MoveParams['next']>): Promise<NonNu
   let previous: TaplineElement | null = null;
   let last: Look = { kind: 'missing' };
   for (;;) {
-    last = await look(next.target);
+    last = await look(next.target, next.kind ?? 'press');
     if (last.kind === 'touchable') {
       if (previous !== null && sameFrame(previous.frame, last.element.frame)) {
         return { state: 'ready', element: last.element, waitedMs: Date.now() - started };

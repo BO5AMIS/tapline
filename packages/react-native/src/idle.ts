@@ -57,6 +57,8 @@ interface Patch {
 
 let patches: Patch[] = [];
 let installed = false;
+/** Counts installs: a wrapper left under another patch after uninstall passes calls through, and stays dead on a later install. */
+let epoch = 0;
 /** An API exists but couldn't be patched: animations may run unseen. */
 let unpatchable = false;
 /** The react-native exports read for this install: InteractionManager's getter throws, so it is read once. */
@@ -100,7 +102,11 @@ function patch(target: unknown, name: string, make: (original: AnyFn) => AnyFn):
   }
   if (!isFn(original)) return;
   try {
-    const patched = make(original);
+    const wrapper = make(original);
+    const mine = epoch;
+    const patched: AnyFn = function (this: unknown, ...args: unknown[]): unknown {
+      return installed && mine === epoch ? wrapper.apply(this, args) : original.apply(this, args);
+    };
     const own = Object.prototype.hasOwnProperty.call(record, name);
     record[name] = patched;
     if (record[name] !== patched) {
@@ -279,6 +285,8 @@ function reanimatedPresent(): boolean {
 export function installIdleSignals(): () => void {
   if (!installed) {
     installed = true;
+    epoch += 1;
+    restoreOwn();
     unpatchable = false;
     exportsRead = new Map();
     patchAnimated();
@@ -288,20 +296,33 @@ export function installIdleSignals(): () => void {
   return uninstallIdleSignals;
 }
 
-export function uninstallIdleSignals(): void {
-  if (!installed) return;
-  installed = false;
-  for (const { target, name, own, original, patched } of patches.reverse()) {
+/**
+ * Puts back what is still on top. A wrapper something else was stacked on (the fast-animation wrappers) stays: it is
+ * dead (it passes calls through) and its record is kept, so a later call restores it once the wrapper above is gone.
+ */
+function restoreOwn(): void {
+  const kept: Patch[] = [];
+  for (const record of patches.reverse()) {
+    const { target, name, own, original, patched } = record;
     try {
-      // The app may have replaced the function since: leave its version alone.
-      if (target[name] !== patched) continue;
+      if (target[name] !== patched) {
+        // Replaced by another patch above ours: keep the record. An app's own replacement is dropped with it later.
+        kept.push(record);
+        continue;
+      }
       if (own) target[name] = original;
       else delete target[name];
     } catch {
       // ignore
     }
   }
-  patches = [];
+  patches = kept.reverse();
+}
+
+export function uninstallIdleSignals(): void {
+  if (!installed) return;
+  installed = false;
+  restoreOwn();
   exportsRead = null;
   handles.clear();
   animations.clear();
