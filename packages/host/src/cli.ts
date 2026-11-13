@@ -18,6 +18,7 @@ import {
 import { setUpDevServe } from "./dev.js";
 import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
+import { runAuditLog, runGrants } from "./grantscmd.js";
 import { runInit } from "./init.js";
 import { runReport } from "./report.js";
 import { runMcp } from "./mcp.js";
@@ -50,6 +51,10 @@ Commands:
            (exit 0: all held, 1: one stopped, 2: one couldn't start)
   report   Where an agent's calls went and the waste in them, from the action log:
            tapline report [--since <90m | 2h | 1d | date | epoch ms>] (default: the last 24 hours)
+  grants   List the grants in the policy file, today's counts and the last uses: tapline grants --policy <file>;
+           --revoke-all revokes every grant in it at once (a running route stops at its next touch that needs one)
+  audit-log  What was done under a person's standing permission (grants used, revoked, approvals):
+           tapline audit-log [--since <date or ISO time>] lists the lines; --delete deletes the log
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
            Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills);
@@ -66,7 +71,10 @@ Options:
   --client <name>  For call: the agent's name, so its report and journey stay its own (default: the parent process id)
   --json         For call: print {"text", "image_path"} instead of the text
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
-  --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
+  --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked, and its grants).
+                 For grants and doctor: the policy file whose grants they read
+  --revoke-all   For grants: revoke every grant in the policy file (it stays in the file, marked revoked)
+  --delete       For audit-log: delete the audit log
   --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
   --no-dialog    For mcp: don't ask a person's OK in the host's dialog, only in the live view (for a host that
                  passes dialogs to the model instead of showing them to a person)
@@ -275,6 +283,8 @@ export function parseCli(argv: string[]) {
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
+      "revoke-all": { type: "boolean" },
+      delete: { type: "boolean" },
       "no-dialog": { type: "boolean" },
       brief: { type: "boolean" },
       "ux-rules": { type: "string" },
@@ -349,7 +359,10 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "doctor": {
-      const results = await runDoctor(values.accounts !== undefined ? { accountsFile: values.accounts } : {});
+      const results = await runDoctor({
+        ...(values.accounts !== undefined ? { accountsFile: values.accounts } : {}),
+        ...(values.policy !== undefined ? { policyFile: values.policy } : {}),
+      });
       process.stdout.write(`${formatDoctor(results, needsAPerson(results))}\n`);
       let failed = results.some((r) => r.status === "fail");
       if (values.app === true) {
@@ -376,6 +389,21 @@ export async function main(argv: string[]): Promise<number> {
     case "report": {
       // Reads the action log; needs no host and no app.
       const outcome = runReport({ dir: join(configDir(), "log"), ...(values.since !== undefined ? { since: values.since } : {}) });
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "grants": {
+      // For a person at a terminal (AGENT-TOOLS 1.14 §19.5, §19.7): it reads and edits the policy file; needs no host and no app.
+      const outcome = await runGrants({ policy: values.policy, auditDir: join(configDir(), "audit"), revokeAll: values["revoke-all"] === true });
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "audit-log": {
+      const outcome = runAuditLog({
+        dir: join(configDir(), "audit"),
+        ...(values.since !== undefined ? { since: values.since } : {}),
+        ...(values.delete === true ? { delete: true } : {}),
+      });
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
     }

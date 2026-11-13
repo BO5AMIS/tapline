@@ -4,7 +4,8 @@ import { createServer } from "node:net";
 import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNTS_WARNING, loadAccounts, type GitProbe } from "./accounts.js";
-import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
+import { GrantBook } from "./grants.js";
+import { DEFAULT_PORT,DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -33,6 +34,30 @@ export interface DoctorDeps {
   accountsFile?: string;
   /** The git questions the accounts file is checked with; default: the user's own git. */
   gitProbe?: GitProbe;
+  /** `--policy FILE`: its grants are checked when given (AGENT-TOOLS 1.14 §19.1, §19.4). */
+  policyFile?: string;
+  /** The clock for the grants' dates; default: now. */
+  now?: () => Date;
+}
+
+/** The grants of a policy file: refused grants and a state file that doesn't parse are warnings (§19.1, §19.4). */
+async function checkGrants(file: string, now: (() => Date) | undefined): Promise<CheckResult> {
+  const book = new GrantBook({ policyPath: file, audit: null, ...(now !== undefined ? { now } : {}) });
+  const report = await book.inspect();
+  if (!report.fileOk) {
+    return { name: "Grants", status: "warn", detail: `can't read the policy file ${file}, so no grant covers anything`, fix: "Fix the file (it must be JSON, version 1 or 2)." };
+  }
+  const problems = GrantBook.noticeLines(report).map((line) => line.replace(/^Note: /, "").replace(/\.$/, ""));
+  if (problems.length === 0) {
+    const n = report.grants.length;
+    return { name: "Grants", status: "pass", detail: n === 0 ? "none in the policy file" : `${n} ${n === 1 ? "grant" : "grants"} load` };
+  }
+  return {
+    name: "Grants",
+    status: "warn",
+    detail: problems.join("; "),
+    fix: report.stateBroken ? `Fix or delete ${file}.state.json (until then every grant counts as used up).` : "A refused grant covers nothing; fix it in the policy file, or remove it.",
+  };
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -420,6 +445,10 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
   if (deps.accountsFile !== undefined) {
     const file = deps.accountsFile;
     results.push(await guard("Test accounts", "fail", () => checkAccounts(file, deps.gitProbe)));
+  }
+  if (deps.policyFile !== undefined) {
+    const file = deps.policyFile;
+    results.push(await guard("Grants", "warn", () => checkGrants(file, deps.now)));
   }
   return results;
 }
