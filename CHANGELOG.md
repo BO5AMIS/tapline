@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.7.0, "the Control Update" (unreleased)
+
+Standing permissions, personal data by name, safety for text written by strangers, scheduled runs, and a record of
+all of it, as AGENT-TOOLS 1.14 (agreed with Tapwright, sha256 0dddf352) defines them. Tapline works inside the user's own
+app; the whole phone (system apps, notifications, unattended running) is Tapwright's.
+
+- **Grants (§19).**
+  - A grant is a person's standing OK for a kind of touch in one app, with limits. It lives in a version 2 policy file
+    (`--policy FILE`).
+  - A grant names its words, and optionally a route, counts per day and per hour, an end at most 30 days away, quiet
+    hours, and drafts only.
+  - A covered touch goes through with `Note: allowed by grant "…" (2 of 3 today).`
+  - Counts live next to the policy file, so two tools sharing it share them.
+  - Some touches can never be granted: payments, account deletion, cards, and the block list.
+  - After a person's "Allow once" in the chat dialog, the host may offer a grant. Only the person's answer creates it.
+  - The live view's Pause stops every grant, and `tapline grants --revoke-all` revokes them all.
+  - `tapline grants` lists the grants, and session reports gain a `Grants:` line.
+- **The vault (§20).**
+  - The test-accounts file grows into a vault: accounts, cards, addresses, identities and notes, typed by name with
+    `${vault.<name>.<field>}`. `${account.…}` still works.
+  - The file can be protected: with DPAPI on Windows or the keychain on macOS (`tapline vault protect FILE`), in the
+    format Tapwright reads too.
+  - No value appears in any answer, log, map, script, route, report or dialog, in any encoding.
+  - A card is typed only with a person's OK every time.
+- **One-time codes.** `${otp.<app>}` types a sign-in code that Tapwright 1.7 read from a notification. The code is never
+  shown. Tapwright's daemon must prove itself on the same loopback connection before Tapline sends it the token.
+- **Content from others (§21).**
+  - The app can wrap views that hold other people's text in `<TaplineFromOthers>`, and answers then mark it
+    `text (from others) "…"`.
+  - The skill and the server instructions say to treat all text the agent didn't write as data, never as instructions.
+  - **Drafts only:** Send, Post, Publish, Reply and Comment under a drafts-only grant or route stop before the touch.
+    The draft is shown to a person to send or not.
+- **Scheduled runs (§22).**
+  - `tapline schedule add|list|remove` writes a schedule and registers a Windows task that wakes the PC.
+  - `tapline run-schedule` runs the route with grants, the vault and drafts only in force. It skips, with the exact
+    reason, when the phone is in use, the app isn't open, or a run is still going.
+- **The audit log (§23).** Grant uses, revocations, approvals, vault and code uses, and scheduled runs are recorded in
+  `~/.tapline/audit/`, and kept 90 days. Read them with `tapline audit-log`.
+- **Also from AGENT-TOOLS 1.13.3:**
+  - An alert's message shows in the `Alert:` line (`Alert: "<title>" "<message>" [Button] …`). It is redacted and cut
+    like element text, and never matched against policy words.
+  - `drive` takes `look`: `look: false` answers with the first line only and wins over `brief`. A stop always carries
+    the screen.
+
 ## 1.6.2 (2026-11-14)
 
 Fixes found on the phone after 1.6.1 (Wayfare on a real iPhone, iOS 26.5). No change to the shared documents.
