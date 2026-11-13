@@ -20,12 +20,16 @@ import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runAuditLog, runGrants } from "./grantscmd.js";
 import { runInit } from "./init.js";
+import { scheduleAdd, scheduleList, scheduleRemove, type ScheduleDeps } from "./schedule.js";
 import { runReport } from "./report.js";
 import { runMcp } from "./mcp.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
+import { APP_WAIT_MS, runSchedule } from "./runschedule.js";
+import { AuditLog } from "./auditlog.js";
+import { connectScheduleHost, realTaskEntry, redactorFor, spawnSchedRunner } from "./schedulehost.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
 import { protectedLine, protectVaultFile } from "./vault.js";
@@ -56,6 +60,12 @@ Commands:
            --revoke-all revokes every grant in it at once (a running route stops at its next touch that needs one)
   audit-log  What was done under a person's standing permission (grants used, revoked, approvals):
            tapline audit-log [--since <date or ISO time>] lists the lines; --delete deletes the log
+  schedule Run a saved route on a time or when a file appears, with no model (Windows Task Scheduler wakes the PC):
+           tapline schedule add <route> --at "09:00 daily" [--with caption=@captions.txt] [--name NAME]
+           [--policy FILE] [--accounts FILE] [--maps DIR]  (or --on-file FOLDER in place of --at);
+           tapline schedule list; tapline schedule remove NAME
+  run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
+           (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
   vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
            (Windows DPAPI for the current user, or the macOS keychain); Tapwright reads the same file
   token    Print the token (only for connecting without pairing, e.g. a simulator)
@@ -102,7 +112,12 @@ Options:
   --metro-port <n>   For dev: Metro's port (default 8081)
   --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
   --stop             For dev: stop serving Metro
-  --wait <s>         For replay: how long to wait for the app to connect (default 60)
+  --wait <s>         For replay and run-schedule: how long to wait for the app to connect (default 60)
+  --at <when>        For schedule add: "HH:MM daily", "HH:MM weekdays" or an ISO date-time (one run)
+  --with <name=value>  For schedule add: a value for one of the route's variables; "@file" is the text of that file,
+                     read when the run starts (a relative path is relative to ~/.tapline/schedules). Repeat for more
+  --name <name>      For schedule add: the schedule's name (default: the route's)
+  --on-file <folder> For schedule add: run when a new file appears in the folder (in place of --at)
   --update-references  For replay: compare_screen steps and matches checks save the screen into the
                      script's .references folder instead of comparing (exit 0 when every step ran)
   --project <dir>    For skill install: install into that project's .claude/skills and
@@ -286,6 +301,12 @@ export function parseCli(argv: string[]) {
       since: { type: "string" },
       junit: { type: "string" },
       "update-references": { type: "boolean" },
+      at: { type: "string" },
+      with: { type: "string", multiple: true },
+      name: { type: "string" },
+      "on-file": { type: "string" },
+      "on-notification": { type: "string" },
+      "check-trigger": { type: "boolean" },
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
@@ -411,6 +432,67 @@ export async function main(argv: string[]): Promise<number> {
         ...(values.delete === true ? { delete: true } : {}),
       });
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "schedule": {
+      // For a person at a terminal (AGENT-TOOLS 1.14 §22.1); needs no host and no app.
+      const deps: ScheduleDeps = { configDir: configDir(), platform: process.platform, now: () => new Date(), cwd: process.cwd(), run: spawnSchedRunner, entry: realTaskEntry() };
+      const verb = positionals[1];
+      const outcome =
+        verb === "add"
+          ? await scheduleAdd(
+              {
+                route: positionals[2],
+                name: values.name,
+                at: values.at,
+                with: values.with,
+                onFile: values["on-file"],
+                onNotification: values["on-notification"],
+                policy: values.policy,
+                accounts: values.accounts,
+                maps: values.maps,
+              },
+              deps,
+            )
+          : verb === "list"
+            ? scheduleList(deps.configDir)
+            : verb === "remove"
+              ? await scheduleRemove(positionals[2], deps)
+              : { text: 'Usage: tapline schedule add <route> --at "09:00 daily" | --on-file FOLDER\n       tapline schedule list\n       tapline schedule remove NAME', code: 2 };
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "run-schedule": {
+      const wait = values.wait === undefined ? APP_WAIT_MS / 1000 : Number(values.wait);
+      if (!(wait > 0)) {
+        process.stderr.write("--wait is in seconds, above 0\n");
+        return 2;
+      }
+      const dir = configDir();
+      const outcome = await runSchedule(
+        positionals[1],
+        { checkTrigger: values["check-trigger"] === true },
+        {
+          configDir: dir,
+          now: () => new Date(),
+          clock: Date.now,
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          connect: (schedule, name) => connectScheduleHost(schedule, name),
+          audit: new AuditLog(join(dir, "audit")),
+          redactFor: redactorFor,
+          pid: process.pid,
+          alive: (pid) => {
+            try {
+              process.kill(pid, 0);
+              return true;
+            } catch (error) {
+              return (error as NodeJS.ErrnoException).code === "EPERM";
+            }
+          },
+          appWaitMs: wait * 1000,
+        },
+      );
+      if (outcome.text !== "") (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
     }
     case "vault": {

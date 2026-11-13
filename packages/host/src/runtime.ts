@@ -85,6 +85,8 @@ export interface Runtime {
    * server). Other ids are dropped after 30 minutes without a call.
    */
   toolsFor(clientId: string | undefined): TaplineTools;
+  /** True while a person (live view) or an agent is driving the phone, or the live view has paused agents (a scheduled run waits, §22.3). */
+  phoneInUse(): boolean;
   close(): Promise<void>;
 }
 
@@ -316,6 +318,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     viewerLinks,
     remoteViewer,
     toolsFor,
+    phoneInUse: () => control.driver() !== null || control.paused(),
     // The maps are written at most once a second while driving, and in full here.
     close: async () => {
       await maps.flushAll().catch(() => undefined);
