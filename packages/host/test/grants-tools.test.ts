@@ -62,7 +62,7 @@ interface Rig {
   tools: TaplineTools;
   app: FakeApp;
   dialog: FakeDialogClient;
-  state: { screen: "welcome" | "home"; failPress: boolean };
+  state: { screen: "welcome" | "home"; failPress: boolean; pressError: string | null; treeDown: boolean; treeDownAfterPress: boolean; handlerThrew: boolean };
   policyPath: string;
   logDir: string;
   auditDir: string;
@@ -77,18 +77,22 @@ async function setup(grants: unknown[] | null): Promise<Rig> {
   hosts.push(host);
   const root = mkdtempSync(join(tmpdir(), "tapline-grants-tools-"));
   dirs.push(root);
-  const state = { screen: "welcome" as "welcome" | "home", failPress: false };
+  const state = { screen: "welcome" as "welcome" | "home", failPress: false, pressError: null as string | null, treeDown: false, treeDownAfterPress: false, handlerThrew: false };
   const handler = (req: IncomingRequest): Reply => {
     switch (req.method) {
       case "tree":
+        if (state.treeDown) return { ok: false, error: { code: "internal", message: "the read failed" } };
         return { ok: true, result: { screen: { width: 430, height: 932 }, elements: state.screen === "welcome" ? [POST, PAY] : [HOME], route: { names: [state.screen] }, place: { route: [state.screen] } } };
       case "place":
         return { ok: true, result: { route: [state.screen], seenAt: Date.now() } };
       case "press": {
         if (state.failPress) return { ok: false, error: { code: "not_actionable", message: "disabled" } };
+        const dry = (req.params as { dryRun?: unknown }).dryRun === true;
+        if (state.pressError !== null && !dry) return { ok: false, error: { code: state.pressError, message: "the press failed" } };
         const target = (req.params as { target?: { testID?: string } }).target;
         if (target?.testID === "post") state.screen = "home";
-        return { ok: true, result: { element: target?.testID === "pay" ? PAY : POST, settledMs: 10 } };
+        if (state.treeDownAfterPress && !dry) state.treeDown = true;
+        return { ok: true, result: { element: target?.testID === "pay" ? PAY : POST, settledMs: 10, ...(state.handlerThrew ? { handler: { kind: "own", threw: "boom" } } : {}) } };
       }
       default:
         return { ok: true, result: {} };
@@ -430,5 +434,138 @@ describe("the report's Grants line and the action log (§19.7)", () => {
     const r = await setup([GRANT]);
     await r.tools.look({ screenshot: false });
     expect(textOf(r.tools.sessionReport({}))).not.toContain("Grants:");
+  });
+});
+
+// -- R1 (PR 12 review): a reserved grant is checked again right before the touch, and a delivered touch keeps its use (§19.3, §19.4)
+
+describe("a grant reserved before the wait for control is checked again before the touch", () => {
+  /** A control queue whose wait for a person to be idle runs `during` once, deterministically, with an injected clock. */
+  const waiting = (clock: { t: number }, during: () => void): ControlQueue => {
+    let done = false;
+    return new ControlQueue({
+      idleMs: 1000,
+      giveUpMs: 600_000,
+      now: () => clock.t,
+      sleep: () => {
+        if (!done) {
+          done = true;
+          during();
+        }
+        clock.t += 1500;
+        return Promise.resolve();
+      },
+    });
+  };
+  const usageToday = async (r: Rig, name: string): Promise<number> => {
+    const { usage } = await new GrantBook({ policyPath: r.policyPath, audit: null }).listing();
+    return usage.get(name)?.today ?? 0;
+  };
+  const at = (hour: number, minute: number): Date => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, minute, 0);
+  };
+
+  /** Taps Post while `during` happens in the wait for control. */
+  const tapDuring = async (r: Rig, book: GrantBook, during: () => void): Promise<CallToolResult> => {
+    const control = waiting({ t: Date.now() }, during);
+    const tools = r.makeTools(book, policyOf(), true, { control });
+    await control.runPerson(() => Promise.resolve());
+    return tools.tap({ target: { id: "post" }, look: false });
+  };
+  const bookOf = (r: Rig, now?: () => Date): GrantBook => new GrantBook({ policyPath: r.policyPath, audit: new AuditLog(r.auditDir), ...(now !== undefined ? { now } : {}) });
+
+  it("a revoke during the wait means no touch without a person, and the use is given back", async () => {
+    const r = await setup([GRANT]);
+    const answer = await tapDuring(r, bookOf(r), () => r.put([{ ...GRANT, revoked: TODAY() }]));
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/needs_confirmation/);
+    expect(presses(r.app)).toBe(0);
+    expect(await usageToday(r, "posting")).toBe(0);
+  });
+
+  it("a draftsOnly change during the wait gives the draft path, not a touch", async () => {
+    const r = await setup([GRANT]);
+    const answer = await tapDuring(r, bookOf(r), () => r.put([{ ...GRANT, draftsOnly: true }]));
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/a draft is waiting for a person/);
+    expect(presses(r.app)).toBe(0);
+    expect(await usageToday(r, "posting")).toBe(0);
+  });
+
+  it("crossing into quiet hours during the wait means no touch", async () => {
+    const start = at(10, 0);
+    const r = await setup([{ ...GRANT, quiet: { from: "10:30", to: "11:00" } }]);
+    const grantClock = { t: start.getTime() };
+    const answer = await tapDuring(r, bookOf(r, () => new Date(grantClock.t)), () => {
+      grantClock.t = start.getTime() + 45 * 60_000;
+    });
+    expect(answer.isError).toBe(true);
+    expect(presses(r.app)).toBe(0);
+    expect(await usageToday(r, "posting")).toBe(0);
+  });
+
+  it("an `until` that ends during the wait means no touch", async () => {
+    const start = at(23, 30);
+    const r = await setup([{ ...GRANT, until: TODAY() }]);
+    const grantClock = { t: start.getTime() };
+    const answer = await tapDuring(r, bookOf(r, () => new Date(grantClock.t)), () => {
+      grantClock.t = start.getTime() + 60 * 60_000;
+    });
+    expect(answer.isError).toBe(true);
+    expect(presses(r.app)).toBe(0);
+    expect(await usageToday(r, "posting")).toBe(0);
+  });
+
+  it("a grant that still covers goes through with its one use", async () => {
+    const r = await setup([{ ...GRANT, perDay: 1 }]);
+    const answer = await tapDuring(r, bookOf(r), () => undefined);
+    expect(textOf(answer)).toBe('Tapped e1 button "Post" id=post.\nNote: allowed by grant "posting" (1 of 1 today).');
+    expect(await usageToday(r, "posting")).toBe(1);
+  });
+});
+
+describe("a use is given back only when the touch surely wasn't made", () => {
+  const nextTap = async (r: Rig): Promise<string> => {
+    r.state.screen = "welcome";
+    return textOf(await r.tools.tap({ target: { id: "post" }, look: false }));
+  };
+
+  it("a delivered touch followed by a failed screen read keeps the count", async () => {
+    const r = await setup([{ ...GRANT, perDay: 1 }]);
+    r.state.treeDownAfterPress = true;
+    const first = await r.tools.tap({ target: { id: "post" } });
+    expect(presses(r.app)).toBe(1);
+    expect(first.isError).toBe(true);
+    r.state.treeDown = false;
+    r.state.treeDownAfterPress = false;
+    expect(await nextTap(r)).toContain(`grant "posting" doesn't cover this (1 of 1 today)`);
+    expect(r.dialog.shown).toBe(1);
+  });
+
+  it("a handler that sends and then throws keeps the count (a step of run fails)", async () => {
+    const r = await setup([{ ...GRANT, perDay: 1 }]);
+    r.state.handlerThrew = true;
+    const first = await r.tools.run({ steps: [{ tool: "tap", target: { id: "post" } }] });
+    expect(first.isError).toBe(true);
+    expect(presses(r.app)).toBe(1);
+    r.state.handlerThrew = false;
+    expect(await nextTap(r)).toContain(`doesn't cover this (1 of 1 today)`);
+  });
+
+  it("an app error after dispatch (internal) keeps the count", async () => {
+    const r = await setup([{ ...GRANT, perDay: 1 }]);
+    r.state.pressError = "internal";
+    expect((await r.tools.tap({ target: { id: "post" }, look: false })).isError).toBe(true);
+    r.state.pressError = null;
+    expect(await nextTap(r)).toContain(`doesn't cover this (1 of 1 today)`);
+  });
+
+  it("not_found before the touch gives the use back", async () => {
+    const r = await setup([{ ...GRANT, perDay: 1 }]);
+    r.state.pressError = "not_found";
+    expect((await r.tools.tap({ target: { id: "post" }, look: false })).isError).toBe(true);
+    r.state.pressError = null;
+    expect(await nextTap(r)).toContain('allowed by grant "posting" (1 of 1 today)');
   });
 });

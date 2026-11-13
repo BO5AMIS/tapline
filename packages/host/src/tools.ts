@@ -1021,6 +1021,18 @@ function flushNotes(answer: CallToolResult, notes: string[]): CallToolResult {
   return appendNotes(answer, notes.splice(0));
 }
 
+/**
+ * Codes that say a request was refused before anything was touched: the host never sent it (not connected, app in the background)
+ * or the app refused it before it dispatched (target missing, not touchable, ambiguous, stale, bad arguments). Anything else
+ * (a timeout, a disconnect, an app error, a handler that threw) leaves it uncertain whether the touch was made.
+ */
+const NOT_DELIVERED_CODES: ReadonlySet<string> = new Set(["not_found", "not_actionable", "ambiguous", "stale", "bad_params", "unsupported", "not_allowed", "not_connected", "in_background", "busy", "paused"]);
+
+/** True when a request's failure proves the touch was not made. */
+function notDelivered(error: unknown): boolean {
+  return error instanceof TaplineError && NOT_DELIVERED_CODES.has(error.code);
+}
+
 /** A grant that let a touch through: what its answer says, and what a failed touch gives back (§19.3, §19.4). */
 interface GrantUse {
   name: string;
@@ -1354,6 +1366,8 @@ export class TaplineTools {
    * that runs inside it (its own action) can never reset or set the outer action's state.
    */
   private readonly okScope = new AsyncLocalStorage<{ used: boolean }>();
+  /** Whether a guarded touch's request may have reached the app (AGENT-TOOLS 1.14 §19.4): a grant's use is given back only when it surely did not. */
+  private readonly deliveryScope = new AsyncLocalStorage<{ sent: boolean }>();
   /** The saved routes running in this call (a drive, a replay): a grant with a `route` covers touches made inside it only (§19.1). */
   private readonly routeScope = new AsyncLocalStorage<string[]>();
   /** True inside a route that carries `"draftsOnly": true` (§18.5, §21.3); it nests: a route inside one is drafts-only too. */
@@ -1991,6 +2005,7 @@ export class TaplineTools {
       : { method, params };
     const timeoutMs = call.pipelined ? (call.next?.capMs ?? 0) + 15_000 : undefined;
     let raw: unknown;
+    let moveSent = false;
     try {
       const run = async (): Promise<unknown> => {
         this.setOk(false);
@@ -2002,14 +2017,20 @@ export class TaplineTools {
           sentDraft = gate.draft === true;
           covered = gate.grant;
         }
-        return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        moveSent = true;
+        try {
+          return await this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        } catch (error) {
+          if (notDelivered(error)) moveSent = false;
+          throw error;
+        }
       };
       raw = this.options.control ? await this.options.control.runAgent(run) : await run();
     } catch (error) {
       await this.dropPreUse(waited);
       if (error instanceof PolicyStop) return { kind: "stop", answer: error.answer };
-      // The touch wasn't made: the grant's use is given back (§19.4).
-      if (covered !== undefined) await this.releaseGrant(covered);
+      // The touch surely wasn't made: the grant's use is given back; a sent or uncertain one stays counted (§19.4).
+      if (covered !== undefined && !moveSent) await this.releaseGrant(covered);
       this.logExtra = undefined;
       const code = error instanceof TaplineError ? error.code : "internal";
       this.showAction("agent", method, undefined, params, code, error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
@@ -3588,7 +3609,15 @@ export class TaplineTools {
           // `as` is a recording's name for the text, never the app's business.
           const kept = typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "as" && (wire === undefined || key !== "account"))) : params;
           const sent = wire === undefined ? kept : { ...(kept as Record<string, unknown>), ...wire.values };
-          return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+          // From here the request may reach the app; only a failure that proves it didn't takes that back (a grant's use stays counted).
+          const delivery = this.deliveryScope.getStore();
+          if (delivery !== undefined) delivery.sent = true;
+          try {
+            return await this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+          } catch (error) {
+            if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
+            throw error;
+          }
         };
         // With the live viewer, a person watching goes first.
         result = this.options.control ? await this.options.control.runAgent(run) : await run();
@@ -4532,11 +4561,18 @@ export class TaplineTools {
         const turn = async (): Promise<CallToolResult | null> => {
           const gate = await this.policyGate(session, "tap", "press", pressParams, tapLists, ready.waited);
           if ("stop" in gate) return gate.stop;
+          let pressSent = false;
           try {
             frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-            await this.host.request("press", pressParams, { sessionId: session.id });
+            pressSent = true;
+            try {
+              await this.host.request("press", pressParams, { sessionId: session.id });
+            } catch (error) {
+              if (notDelivered(error)) pressSent = false;
+              throw error;
+            }
           } catch (error) {
-            if (gate.grant !== undefined) await this.releaseGrant(gate.grant);
+            if (gate.grant !== undefined && !pressSent) await this.releaseGrant(gate.grant);
             throw error;
           }
           if (gate.grant !== undefined) this.grantNotes.getStore()?.push(gate.grant.line);
@@ -4994,20 +5030,24 @@ export class TaplineTools {
     let sentDraft = false;
     let covered: GrantUse | undefined;
     let answer: CallToolResult;
+    const delivery = { sent: false };
     try {
-      answer = await perform(async () => {
-        const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
-        if ("stop" in gate) return gate.stop;
-        granted = gate.via;
-        sentDraft = gate.draft === true;
-        covered = gate.grant;
-        return null;
-      });
+      answer = await this.deliveryScope.run(delivery, () =>
+        perform(async () => {
+          const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
+          if ("stop" in gate) return gate.stop;
+          granted = gate.via;
+          sentDraft = gate.draft === true;
+          covered = gate.grant;
+          return null;
+        }),
+      );
     } finally {
       await this.dropPreUse(ready.waited);
     }
-    // A use is counted when the touch is made: one that wasn't made gives its use back (§19.4).
-    if (covered !== undefined && answer.isError === true) await this.releaseGrant(covered);
+    // A use is counted when the touch is made: one that surely wasn't made gives its use back (§19.4). A touch that was sent, or
+    // may have been (a timeout, a failed read after it, a handler that threw), stays counted: a repeat must not beat the limits.
+    if (covered !== undefined && answer.isError === true && !delivery.sent) await this.releaseGrant(covered);
     const notes = this.grantNotes.getStore();
     const withNotes = notes !== undefined ? flushNotes(answer, notes) : answer;
     if (covered !== undefined && answer.isError !== true) return appendNote(withNotes, covered.line);
@@ -5213,8 +5253,10 @@ export class TaplineTools {
     // Whether a draft applies was decided where the person was asked; a grant made by their answer in this very call is for the next touch.
     const waiting = waited !== undefined && waited !== null;
     const draftFrom = waiting ? ("draft" in waited ? waited.draft : undefined) : undefined;
-    const draft =
+    let draft =
       verdict.kind !== "confirm" ? null : waiting ? (draftFrom !== undefined ? await this.draftWith(session, draftFrom, verdict.word) : null) : await this.draftOf(session, verdict.raw, verdict.word);
+    // The reserved grant stopped covering the touch while the call waited (R1): its use is back, and the touch goes the way it would have with no grant.
+    let lostGrant = false;
     if (waited !== undefined && waited !== null) {
       // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
       // A call that was cancelled while it waited never touches.
@@ -5228,17 +5270,33 @@ export class TaplineTools {
         return { stop: fail(CHANGED_WHILE_WAITING) };
       }
       if ("pre" in waited) {
-        // The grant's use was taken before the dialog stage: it is this touch's now, and given back if the touch isn't made.
+        // The grant's use was taken before the dialog stage. The wait for control may have outlasted what it was taken under (a
+        // revocation, draftsOnly, quiet hours, `until`): read the policy again right now, taking no further use.
+        const use = waited.pre.use;
+        let covers = false;
+        try {
+          covers = this.options.grants !== undefined && (await this.options.grants.stillCovers({ app: session.app, element: verdict.raw, routes: this.routeScope.getStore() ?? [] }, use));
+        } catch {
+          covers = false;
+        }
+        if (covers) {
+          // It is this touch's now, and given back if the touch isn't made.
+          waited.pre.handed = true;
+          return { granted: false, grant: use };
+        }
         waited.pre.handed = true;
-        return { granted: false, grant: waited.pre.use };
+        await this.releaseGrant(use);
+        lostGrant = true;
+        draft = verdict.kind === "confirm" ? await this.draftOf(session, verdict.raw, verdict.word) : null;
+      } else {
+        this.approved(session, verdict.word, waited.via, draft !== null);
+        return { granted: true, via: waited.via, ...(draft !== null ? { draft: true as const } : {}) };
       }
-      this.approved(session, verdict.word, waited.via, draft !== null);
-      return { granted: true, via: waited.via, ...(draft !== null ? { draft: true as const } : {}) };
     }
     if (verdict.kind === "none") return { granted: false };
     // §19.3: where the policy says a person must OK, a grant may stand in for them: it is used up here, right before the touch.
-    // Not for a draft (§21.3): a person sees it first.
-    const grant = draft === null ? await this.grantFor(session, tool, verdict.raw, verdict.word, "use") : null;
+    // Not for a draft (§21.3): a person sees it first. Not again after the one reserved for this call stopped covering.
+    const grant = draft === null && !lostGrant ? await this.grantFor(session, tool, verdict.raw, verdict.word, "use") : null;
     if (grant !== null) return { granted: false, grant };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = draft?.caption ?? captionFor(tool, label ?? undefined, params) ?? tool;
@@ -6251,7 +6309,7 @@ export class TaplineTools {
   }
 
   /** One measuring window in the app: start, (the tap,) wait out `seconds`, stop. */
-  private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>): Promise<PerfResult> {
+  private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>, delivery?: { sent: boolean }): Promise<PerfResult> {
     const id = { sessionId: session.id };
     // The window's number: the stop names it, so a call never takes another call's numbers (an older SDK has none).
     let stopParams: Record<string, unknown> = {};
@@ -6268,7 +6326,15 @@ export class TaplineTools {
     const started = Date.now();
     try {
       // The caller holds the live view's queue for the whole window when there is a tap (see performance).
-      if (press !== undefined) await this.host.request("press", press, id);
+      if (press !== undefined) {
+        if (delivery !== undefined) delivery.sent = true;
+        try {
+          await this.host.request("press", press, id);
+        } catch (error) {
+          if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
+          throw error;
+        }
+      }
       const rest = seconds * 1000 - (Date.now() - started);
       if (rest > 0) await sleep(rest);
     } catch (error) {
@@ -6318,12 +6384,13 @@ export class TaplineTools {
           if (tapped !== undefined) {
             const gate = await this.policyGate(session, "tap", "press", tapped, this.touchLists(session), ready.waited);
             if ("stop" in gate) return { stop: gate.stop };
+            const delivery = { sent: false };
             try {
-              const result = await this.measureWindow(session, seconds, tapped);
+              const result = await this.measureWindow(session, seconds, tapped, delivery);
               if (gate.grant !== undefined) this.grantNotes.getStore()?.push(gate.grant.line);
               return { result };
             } catch (error) {
-              if (gate.grant !== undefined) await this.releaseGrant(gate.grant);
+              if (gate.grant !== undefined && !delivery.sent) await this.releaseGrant(gate.grant);
               throw error;
             }
           }

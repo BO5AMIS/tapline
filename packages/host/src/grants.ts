@@ -470,6 +470,28 @@ export class GrantBook {
     return { kind: "ask", notes, asked };
   }
 
+  /**
+   * Whether the grant a use was taken under still covers this touch, right now (§19.3): the policy file is read again, so a
+   * revocation, a `draftsOnly`, quiet hours, `until`, the word and the route condition are current. Takes no use and writes nothing; the
+   * use must still be recorded in the state file. Any doubt (an unreadable file) answers false: the touch then asks a person.
+   */
+  async stillCovers(touch: GrantTouch, use: { name: string; stamp: string; date: string }): Promise<boolean> {
+    const policy = await this.readPolicy();
+    if (policy === null) return false;
+    if (matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], touch.element) !== null) return false;
+    const grant = policy.grants.find((g) => g.name === use.name);
+    if (grant === undefined) return false;
+    const at = this.now();
+    const minutes = at.getHours() * 60 + at.getMinutes();
+    if (grant.app !== touch.app.id && grant.app !== touch.app.name) return false;
+    if (matchWord(grant.words, touch.element) === null) return false;
+    if (grant.route !== undefined && !touch.routes.includes(grant.route)) return false;
+    if (grant.revoked !== undefined || grant.draftsOnly || localDate(at) > grant.until) return false;
+    if (grant.quiet !== undefined && inQuiet(grant.quiet, minutes)) return false;
+    const uses = await this.readState();
+    return uses?.[use.name]?.[use.date]?.includes(use.stamp) === true;
+  }
+
   /** A use taken back: the touch wasn't made after all (§19.4: a use is counted when the touch is made). */
   async release(use: { name: string; stamp: string; date: string }): Promise<void> {
     await this.withLock(async () => {
