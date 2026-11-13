@@ -16,7 +16,7 @@ import {
   type MoveTool,
   type PlaceKey,
 } from "./mapfile.js";
-import { elementSchema, placeStateSchema, treeResultSchema, type PlaceState, type TreeResult } from "./protocol.js";
+import { elementSchema, looksLikeValue, placeStateSchema, treeResultSchema, type PlaceState, type TreeResult } from "./protocol.js";
 
 // Places, roads and links (AGENT-TOOLS 1.13 §18.1 to §18.3, §18.11). A place key holds route patterns, never
 // params or screen text; the map file never holds what a screen showed; a link holds a pattern, never a real id.
@@ -63,12 +63,12 @@ export function placeNameFromRoute(route: string[]): string {
 
 /** The key from where the app says it is. Null when it names no route (no router, or no screen yet). */
 export function keyFromState(state: PlaceState | undefined): PlaceKey | null {
-  if (state === undefined || state.route.length === 0) return null;
-  return {
-    route: [...state.route],
-    ...(typeof state.tab === "string" && state.tab !== "" ? { tab: state.tab } : {}),
-    ...(typeof state.layer === "string" && state.layer !== "" ? { layer: state.layer } : {}),
-  };
+  // A route piece that looks like a value can't be a pattern: the place falls back to the signature.
+  if (state === undefined || state.route.length === 0 || state.route.some(looksLikeValue)) return null;
+  const tab = typeof state.tab === "string" && state.tab !== "" && !looksLikeValue(state.tab) ? state.tab : undefined;
+  // A layer or tab that looks like a value is dropped, not the place.
+  const layer = typeof state.layer === "string" && state.layer !== "" && !looksLikeValue(state.layer) ? state.layer : undefined;
+  return { route: [...state.route], ...(tab !== undefined ? { tab } : {}), ...(layer !== undefined ? { layer } : {}) };
 }
 
 /** The key from the tree's `place`. Params are never read. Null when the app has no router. */
@@ -82,7 +82,8 @@ export function routeKey(tree: Pick<TreeResult, "place">): PlaceKey | null {
  */
 export function signatureKey(tree: TreeResult): PlaceKey {
   const fixed = tree.elements.filter((element) => element.row !== true);
-  const ids = [...new Set(fixed.map((element) => element.testID ?? "").filter((id) => id !== ""))].sort();
+  // An id that looks like a value (a record's id in a testID) is content, not structure.
+  const ids = [...new Set(fixed.map((element) => element.testID ?? "").filter((id) => id !== "" && !looksLikeValue(id)))].sort();
   const containers: string[] = [];
   const add = (kind: string): void => {
     if (!containers.includes(kind)) containers.push(kind);
@@ -97,7 +98,8 @@ export function signatureKey(tree: TreeResult): PlaceKey {
   const tabs = fixed.filter((element) => roleOf(element) === "tab");
   const selected = tabs.findIndex((element) => element.selected === true);
   const chosen = selected >= 0 ? tabs[selected] : undefined;
-  const tab = chosen === undefined ? null : chosen.testID !== undefined && chosen.testID !== null && chosen.testID !== "" ? chosen.testID : selected;
+  const tab =
+    chosen === undefined ? null : chosen.testID !== undefined && chosen.testID !== null && chosen.testID !== "" && !looksLikeValue(chosen.testID) ? chosen.testID : selected;
   const layer = tree.place?.layer ? tree.place.layer.split(":")[0] : (tree.alerts ?? []).length > 0 ? "alert" : null;
   const parts = { ids, containers, tab, layer };
   return { signature: createHash("sha256").update(stable(parts)).digest("hex").slice(0, 16), parts };
@@ -240,11 +242,14 @@ export function classifyMove(call: MoveCall): { move: Move; names: NonNullable<M
     const [x0, y0, x1, y1] = ["x0", "y0", "x1", "y1"].map((key) => params[key]);
     if (![x0, y0, x1, y1].every((n) => typeof n === "number" && Number.isFinite(n))) return { skip: "unnamed" };
     const seconds = params["seconds"];
+    // A step exactly as `run` takes it (1.13.1 item 14).
     return {
       move: {
         tool,
-        target: { x: x0 as number, y: y0 as number },
-        to: { x: x1 as number, y: y1 as number },
+        x0: x0 as number,
+        y0: y0 as number,
+        x1: x1 as number,
+        y1: y1 as number,
         ...(typeof seconds === "number" && Number.isFinite(seconds) ? { seconds } : {}),
       },
       names: {},
@@ -322,7 +327,9 @@ export class AppMap {
   private readonly readOnly: boolean;
   private readonly gapMs: number;
   private here: Place | null = null;
-  private typedAt: string | null = null;
+  // Places where text was typed stay marked until the app reconnects: a move from one may depend on that text (§18.2).
+  private readonly typedPlaces = new Set<string>();
+  private session: string | undefined;
   private known: KnownPlaces | undefined;
   private knownFor: string | undefined;
   private dirty = false;
@@ -415,7 +422,6 @@ export class AppMap {
     }
     const saved = this.map.places[name] as MapPlace;
     const place: Place = { name, key: saved.key, link: saved.link };
-    if (this.here?.name !== name) this.typedAt = null;
     this.here = place;
     return { place, isNew, line: hadPlaces ? (isNew ? NEW_LINE : `Place: ${name}.`) : null };
   }
@@ -434,12 +440,19 @@ export class AppMap {
 
   /** Text was typed at the current place: the moves that leave it may depend on it, so none is saved (§18.2). */
   noteTyped(): void {
-    this.typedAt = this.here?.name ?? null;
+    if (this.here !== null) this.typedPlaces.add(this.here.name);
   }
 
-  /** Whether text was typed at the current place since the app arrived here. Asked before a move: arriving clears it. */
+  /** The app connected (again): what was typed before is no longer known, so the marks go. */
+  useSession(sessionId: string): void {
+    if (this.session === sessionId) return;
+    this.session = sessionId;
+    this.typedPlaces.clear();
+  }
+
+  /** Whether text was typed at the current place in this connection. */
   typedHere(): boolean {
-    return this.typedAt !== null && this.typedAt === this.here?.name;
+    return this.here !== null && this.typedPlaces.has(this.here.name);
   }
 
   // -- places the app lists before a visit
@@ -497,7 +510,7 @@ export class AppMap {
     if (skip !== undefined) return { saved: false, reason: skip };
     if (from === null) return { saved: false, reason: "unknown_start" };
     if (from.name === to.name) return { saved: false, reason: "same_place" };
-    if (this.typedAt === from.name) return { saved: false, reason: "typed" };
+    if (this.typedPlaces.has(from.name)) return { saved: false, reason: "typed" };
     const id = roadId(from.name, move, to.name);
     const existing = this.map.roads.find((road) => roadId(road.from, road.move, road.to) === id);
     const now = this.iso();

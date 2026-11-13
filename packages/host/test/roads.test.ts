@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAP_FORMAT, MAP_VERSION, loadMap, type MapFile, type Move } from "../src/mapfile.js";
+import { z } from "zod";
 import { AppMap, classifyMove, type MoveCall, type Place } from "../src/places.js";
+import { stepSchema, type RunTool } from "../src/run.js";
+import { toolShapes } from "../src/tools.js";
 
 // AGENT-TOOLS 1.13 §18.2 and §18.3: roads and links. Every test works in a temp folder, never in ~/.tapline.
 
@@ -77,8 +80,12 @@ describe("which moves are saved as roads", () => {
       move: { tool: "open_url" },
     });
     expect(classifyMove({ method: "swipe", params: { x0: 10, y0: 600, x1: 10, y1: 100, seconds: 0.3 }, result: {}, by: "agent", neededOk: false, replaying: false })).toMatchObject({
-      move: { tool: "swipe", target: { x: 10, y: 600 }, to: { x: 10, y: 100 } },
+      move: { tool: "swipe", x0: 10, y0: 600, x1: 10, y1: 100, seconds: 0.3 },
     });
+  });
+
+  it("a swipe missing a coordinate is no road", () => {
+    expect(classifyMove({ method: "swipe", params: { x0: 10, y0: 600, x1: 10 }, result: {}, by: "agent", neededOk: false, replaying: false })).toEqual({ skip: "unnamed" });
   });
 
   it.each([
@@ -187,9 +194,50 @@ describe("saving a road", () => {
     map.observe({ elements: [], place: { route: ["(tabs)", "settings"] } });
     map.noteTyped();
     expect(map.recordMove(settings, TAP_LANGUAGE, NAMES, language, 100)).toEqual({ saved: false, reason: "typed" });
-    // Arriving somewhere else clears it.
+    // Another place where nothing was typed is not marked.
     map.observe({ elements: [], place: { route: ["(tabs)", "settings", "language"] } });
     expect(map.recordMove(language, { tool: "back" }, {}, settings, 100).saved).toBe(true);
+  });
+
+  it("a place where text was typed stays marked after the app leaves and comes back", () => {
+    const { map } = memoryMap();
+    const { settings, language } = seedTwo(map);
+    map.useSession("s1");
+    map.observe({ elements: [], place: { route: ["(tabs)", "settings"] } });
+    map.noteTyped();
+    map.observe({ elements: [], place: { route: ["(tabs)", "settings", "language"] } });
+    map.observe({ elements: [], place: { route: ["(tabs)", "settings"] } });
+    expect(map.typedHere()).toBe(true);
+    expect(map.recordMove(settings, TAP_LANGUAGE, NAMES, language, 100)).toEqual({ saved: false, reason: "typed" });
+    // Until the app reconnects.
+    map.useSession("s1");
+    expect(map.typedHere()).toBe(true);
+    map.useSession("s2");
+    expect(map.typedHere()).toBe(false);
+    expect(map.recordMove(settings, TAP_LANGUAGE, NAMES, language, 100).saved).toBe(true);
+  });
+
+  it("every saved road's move parses as a step of run (1.13.1 item 14)", () => {
+    const { map } = memoryMap();
+    const { settings, language } = seedTwo(map);
+    const moves: Move[] = [
+      { tool: "tap", target: { id: "a" } },
+      { tool: "long_press", target: { label: "Language" } },
+      { tool: "toggle", target: { text: "Dark mode" } },
+      { tool: "tap", target: { x: 10, y: 20 } },
+      { tool: "back" },
+      { tool: "open_url", url: "wayfare://trips/[id]" },
+      { tool: "swipe", x0: 1, y0: 2, x1: 3, y1: 4, seconds: 0.3 },
+    ];
+    for (const move of moves) map.recordMove(settings, move, {}, language, 10);
+    expect(map.data().roads).toHaveLength(moves.length);
+    for (const { move } of map.data().roads) {
+      const step = stepSchema.safeParse(move);
+      expect(step.success, JSON.stringify(move)).toBe(true);
+      const { tool, ...rest } = move;
+      expect(z.object(toolShapes[tool as RunTool]).strict().safeParse(rest).success, JSON.stringify(move)).toBe(true);
+      expect(JSON.stringify(move)).not.toContain('"ref"');
+    }
   });
 
   it("replay never writes: a read-only map saves no road and no file", async () => {

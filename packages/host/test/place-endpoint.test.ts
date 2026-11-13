@@ -139,6 +139,26 @@ describe("GET /place", () => {
     expect((await get(port, `?app=${APP_ID}`)).status).toBe(404);
   });
 
+  it("an event whose pieces look like values leaves the stored place unchanged", async () => {
+    const { port, app } = await setup();
+    place(app, { route: ["trips"], tab: "trips" });
+    await delay(50);
+    for (const bad of [
+      { route: ["orders", "10432"] },
+      { route: ["user", "123"] },
+      { route: ["invite", "3fa9c1d2-7b0e-44a8-9c01-e7a5d2b84f36"] },
+      { route: ["trips"], layer: "sheet:98765" },
+      { route: ["trips"], tab: "3fa9c1d27b0e44a8c1" },
+    ]) {
+      place(app, bad);
+    }
+    await delay(50);
+    const text = await (await get(port, `?app=${APP_ID}`)).text();
+    const body = JSON.parse(text) as { route: string[]; tab?: string; layer?: string };
+    expect(body).toMatchObject({ route: ["trips"], tab: "trips" });
+    expect(body.layer).toBeUndefined();
+  });
+
   it("the place event is not a log line", async () => {
     const { host, app } = await setup();
     place(app, { route: ["a"] });

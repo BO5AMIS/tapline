@@ -235,6 +235,16 @@ describe("roads from an agent's own calls", () => {
     expect(JSON.stringify(mapOf()?.data())).not.toContain("paris");
   });
 
+  it("type at A, go to B, back to A, tap: no A to B road is saved", async () => {
+    const { tools, mapOf } = await setup();
+    await tools.look({ screenshot: false });
+    await tools.typeText({ target: { id: "search" }, text: "paris" });
+    await tools.tap({ target: { id: "language-row" } });
+    await tools.back({});
+    await tools.tap({ target: { id: "language-row" } });
+    expect(mapOf()?.data().roads.map((road) => `${road.from}>${road.to}`)).toEqual(["language>settings"]);
+  });
+
   it("a row without an id is saved as {\"row\": true}", async () => {
     const { tools, mapOf, registry, file } = await setup();
     await tools.look({ screenshot: false });

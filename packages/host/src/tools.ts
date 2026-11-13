@@ -2763,7 +2763,9 @@ export class TaplineTools {
 
   /** The app's map, when this server keeps maps. */
   private mapOf(session: SessionInfo): AppMap | undefined {
-    return this.options.maps?.forApp(session.app);
+    const map = this.options.maps?.forApp(session.app);
+    map?.useSession(session.id);
+    return map;
   }
 
   /** Where the app is, from what this host already holds, and how to ask it. */

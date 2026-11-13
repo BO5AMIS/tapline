@@ -40,8 +40,11 @@ export type Move = {
   tool: MoveTool | (string & {});
   target?: { id?: string; label?: string; text?: string; row?: true; x?: number; y?: number };
   url?: string;
-  /** A swipe's end point and length: Tapline's own fields, kept by any tool that reads the file (§18.9). */
-  to?: { x: number; y: number };
+  /** A swipe is a step as `run` takes it: both points and, when given, its length (1.13.1 item 14). */
+  x0?: number;
+  y0?: number;
+  x1?: number;
+  y1?: number;
   seconds?: number;
 };
 

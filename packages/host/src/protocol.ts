@@ -122,11 +122,21 @@ export const elementSchema = z.object({
 });
 export type TreeElement = z.infer<typeof elementSchema>;
 
-/** Where the app is: route patterns, never params, and no screen text (AGENT-TOOLS 1.13 §18.1). */
+/**
+ * Whether a piece of a place key looks like a value (an id, a number, a UUID, long hex) and not a name. A place holds
+ * patterns, never values, so such a piece is dropped or refused (AGENT-TOOLS 1.13 §18.1, lead's decision 2026-11-13).
+ */
+export function looksLikeValue(piece: string): boolean {
+  return /^\d+$/.test(piece) || /\d{4,}/.test(piece) || /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(piece) || /[0-9a-f]{16,}/i.test(piece);
+}
+
+const pieceSchema = z.string().max(200).refine((piece) => !looksLikeValue(piece), "looks like a value, not a name");
+
+/** Where the app is: route patterns, never params, and no screen text (AGENT-TOOLS 1.13 §18.1). A piece that looks like a value refuses the whole place. */
 export const placeStateSchema = z.object({
-  route: z.array(z.string().max(200)).max(32),
-  tab: z.string().max(200).nullish(),
-  layer: z.string().max(200).nullish(),
+  route: z.array(pieceSchema).max(32),
+  tab: pieceSchema.nullish(),
+  layer: pieceSchema.nullish(),
 });
 export type PlaceState = z.infer<typeof placeStateSchema>;
 
@@ -144,7 +154,8 @@ export const treeResultSchema = z.object({
   /** Only for a request with `glass: true` (a journey in a user's eyes): whether a scroll view can really go further. */
   glass: z.object({ moreAbove: z.boolean(), moreBelow: z.boolean() }).optional(),
   /** Where the app is as a route key (capability `place`). `route` is empty without a router. */
-  place: placeStateSchema.optional(),
+  // A place with a value in it is dropped, not an error: the rest of the tree is fine and the host uses a signature.
+  place: placeStateSchema.optional().catch(undefined),
   /** The focused screen (apps using React Navigation / Expo Router). */
   route: z
     .object({

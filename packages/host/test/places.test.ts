@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ERROR_CODES, placeStateSchema, treeResultSchema, type TreeResult } from "../src/protocol.js";
+import { ERROR_CODES, looksLikeValue, placeStateSchema, treeResultSchema, type TreeResult } from "../src/protocol.js";
 import { AppMap, placeNameFromRoute, routeKey, samePlace, signatureKey } from "../src/places.js";
 import { MAP_FORMAT, MAP_VERSION, type MapFile, type PlaceKey } from "../src/mapfile.js";
 
@@ -176,6 +176,39 @@ describe("what the app sends (task 10's wire)", () => {
   it("a place with params in it keeps none of them", () => {
     const parsed = placeStateSchema.parse({ route: ["trips", "[id]"], params: { id: "42" } });
     expect(JSON.stringify(parsed)).not.toContain("42");
+  });
+});
+
+describe("values are not names", () => {
+  it.each(["12", "20260", "order-10432", "3fa9c1d2-7b0e-44a8-9c01-e7a5d2b84f36", "3fa9c1d27b0e44a8c1", "sheet:12345"])("%s looks like a value", (piece) => {
+    expect(looksLikeValue(piece)).toBe(true);
+  });
+  it.each(["[id]", "settings", "trips", "(tabs)", "sheet:Filters", "tab-2", "abc123"])("%s is a name", (piece) => {
+    expect(looksLikeValue(piece)).toBe(false);
+  });
+
+  it("a route piece that looks like a value sends the place to the signature", () => {
+    expect(routeKey(tree({ route: ["orders", "10432"] }))).toBeNull();
+    const { map } = memoryMap();
+    const seen = map.observe(tree({ route: ["orders", "10432"] }, [el({ testID: "pay", role: "button" })]));
+    expect("signature" in seen.place.key).toBe(true);
+    expect(JSON.stringify(map.data())).not.toContain("10432");
+  });
+
+  it("a layer or tab that looks like a value is dropped, the place stays", () => {
+    expect(routeKey(tree({ route: ["trips"], layer: "sheet:98765", tab: "3fa9c1d27b0e44a8c1" }))).toEqual({ route: ["trips"] });
+  });
+
+  it("a signature leaves out ids that look like values", () => {
+    const a = signatureKey(tree(undefined, [el({ testID: "search", role: "input" }), el({ testID: "trip-10432", role: "button" })]));
+    const b = signatureKey(tree(undefined, [el({ testID: "search", role: "input" }), el({ testID: "trip-99871", role: "button" })]));
+    expect(a).toEqual(b);
+    expect(JSON.stringify(a)).not.toContain("10432");
+  });
+
+  it("a tree whose place holds a value still parses, without the place", () => {
+    const parsed = treeResultSchema.parse({ elements: [], place: { route: ["orders", "10432"] } });
+    expect(parsed.place).toBeUndefined();
   });
 });
 

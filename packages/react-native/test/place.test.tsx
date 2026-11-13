@@ -7,7 +7,8 @@ import { installAlertTracking, uninstallAlertTracking } from '../src/alerts';
 import { setEventSink } from '../src/events';
 import { resetRefs, setMeasurer, tree } from '../src/inspect';
 import { currentPlace, placeData, routePattern, startPlaceEvents } from '../src/place';
-import { tabNameFromKey } from '../src/placekey';
+import { looksLikeValue, placeFrom, tabNameFromKey } from '../src/placekey';
+import type { RouteFound } from '../src/inspect';
 
 // AGENT-TOOLS 1.13 §18.1 and §18.11: where the app is, as a key. Pattern names only: no param's value, no screen text.
 
@@ -74,6 +75,37 @@ describe('routePattern', () => {
 
   test('drops empty pieces, so a leading or doubled slash makes no phantom name', () => {
     expect(routePattern(['/trips//[id]/', ''])).toEqual(['trips', '[id]']);
+  });
+});
+
+describe('values are not names (AGENT-TOOLS 1.13 §18.1)', () => {
+  const found = (chain: string[], presentation?: string): RouteFound => ({
+    key: `k-${chain.join('-')}`,
+    name: chain[chain.length - 1] ?? '',
+    params: undefined,
+    navigation: navigation({ type: 'stack' }) as unknown as RouteFound['navigation'],
+    focused: true,
+    chain,
+    ...(presentation !== undefined ? { presentation } : {}),
+  });
+  const place = (route: RouteFound) => placeFrom({ routes: [route], tabs: [], modal: null });
+
+  test.each(['1234', '12', 'order-10432', '3fa9c1d2-7b0e-44a8-9c01-e7a5d2b84f36', '3fa9c1d27b0e44a8c1'])('%s looks like a value', (piece) => {
+    expect(looksLikeValue(piece)).toBe(true);
+  });
+  test.each(['[id]', 'settings', 'sheet:Filters', 'tab-2'])('%s is a name', (piece) => {
+    expect(looksLikeValue(piece)).toBe(false);
+  });
+
+  test('a route piece that is a value leaves no route, so the host uses its signature', () => {
+    expect(place(found(['orders', '10432']))).toEqual({ route: [] });
+    expect(place(found(['orders/[id]']))).toEqual({ route: ['orders', '[id]'] });
+  });
+
+  test('a layer name that is a value keeps only its kind', () => {
+    expect(place(found(['trips', 'sheet-98765'], 'formSheet')).layer).toBe('sheet');
+    expect(place(found(['trips', 'filters'], 'formSheet')).layer).toBe('sheet:filters');
+    expect(place(found(['trips', 'detail-12345'], 'modal')).layer).toBe('modal');
   });
 });
 

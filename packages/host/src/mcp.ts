@@ -101,10 +101,10 @@ export async function runMcp(options: Omit<RuntimeOptions, "api" | "log"> = {}):
     for (const line of (error instanceof Error ? error.message : String(error)).split("\n")) log(line);
     return false;
   }
-  const { host } = runtime;
   const server = createMcpServer(runtime.toolsFor(undefined), { noDialog: options.noDialog === true });
+  // `runtime.close` writes the maps before it closes the host.
   const shutdown = (): void => {
-    void host.close().finally(() => process.exit(0));
+    void runtime.close().finally(() => process.exit(0));
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

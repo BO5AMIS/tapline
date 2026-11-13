@@ -63,10 +63,30 @@ function plain(name: string): string {
   return name.replace(/[:/]/g, '_');
 }
 
+/**
+ * Whether a piece of a place looks like a value (an id, a number, a UUID, long hex) and not a name. A place holds
+ * patterns, never values (AGENT-TOOLS 1.13 §18.1). The host applies the same rule.
+ */
+export function looksLikeValue(piece: string): boolean {
+  return (
+    /^\d+$/.test(piece) ||
+    /\d{4,}/.test(piece) ||
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(piece) ||
+    /[0-9a-f]{16,}/i.test(piece)
+  );
+}
+
+/** A layer: its kind and, when the name isn't a value, its name. */
+function layerOf(kind: 'sheet' | 'modal', name: string | undefined): string {
+  return name === undefined || looksLikeValue(name) ? kind : `${kind}:${plain(name)}`;
+}
+
 export function placeFrom(parts: PlaceParts): PlaceState {
   const current = focusedRoute(parts.routes);
   const chain = current ? current.chain : [];
-  const place: PlaceState = { route: routePattern(chain) };
+  const route = routePattern(chain);
+  // A route piece that looks like a value can't be a pattern: no route, and the host falls back to its signature.
+  const place: PlaceState = { route: route.some(looksLikeValue) ? [] : route };
   const onPath = parts.routes.filter((route) => route.focused && startsWith(chain, route.chain));
 
   // The selected tab: a tab navigator's selected route, else a native tab bar's selected tab (by its key, never its title).
@@ -94,12 +114,12 @@ export function placeFrom(parts: PlaceParts): PlaceState {
   } else {
     const presented = [...onPath].reverse().find((route) => route.presentation !== undefined);
     if (presented?.presentation !== undefined) {
-      place.layer = `${SHEET_PRESENTATIONS.has(presented.presentation) ? 'sheet' : 'modal'}:${plain(presented.name)}`;
+      place.layer = layerOf(SHEET_PRESENTATIONS.has(presented.presentation) ? 'sheet' : 'modal', presented.name);
     } else if (parts.modal) {
-      const name = modalName(parts.modal);
-      place.layer = name === undefined ? 'modal' : `modal:${plain(name)}`;
+      place.layer = layerOf('modal', modalName(parts.modal));
     }
   }
+  if (place.tab !== undefined && looksLikeValue(place.tab)) delete place.tab;
   return place;
 }
 
