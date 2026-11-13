@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.1 (unreleased)
+
+Shared documents brought up to date with Tapwright, and small CI hardening. No change to how Tapline drives an app.
+
+- QUALITY-BAR 2.5 (shared with Tapwright): R3's off-screen case is now one no scroll can reach (`lab-behind-bar`, a
+  button the lab's fixed header covers), and `lab-bottom` moves to R1, where the tool scrolls to it and taps. The
+  bench follows it.
+- The macOS job that compiles the native module keeps no git credential and stops after 30 minutes.
+
 ## 1.6.0, "the Speed Update" (2026-11-13)
 
 The same checks in fewer calls and fewer seconds, on ground the agent has been over before. The interface
