@@ -219,7 +219,7 @@ interface Rule {
  * One pass over the text with every value's every form, longest first, so a value that holds another is scrubbed whole and a
  * placeholder is never scrubbed again.
  */
-function scrubber(entries: Record<string, VaultEntry>): (text: string) => string {
+function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, field: string) => string = placeholderOf): (text: string) => string {
   const rules = new Map<string, Rule>();
   const add = (source: string, weight: number, token: string): void => {
     if (!rules.has(source)) rules.set(source, { source, weight, token });
@@ -227,7 +227,7 @@ function scrubber(entries: Record<string, VaultEntry>): (text: string) => string
   for (const [name, entry] of Object.entries(entries)) {
     for (const [field, value] of Object.entries(entry.values)) {
       if (value.length < MIN_SCRUB) continue;
-      const token = placeholderOf(name, field);
+      const token = tokenOf(name, field);
       for (const form of variantsOf(value)) {
         add(escapeRegExp(form), form.length, token);
       }
@@ -249,6 +249,18 @@ function scrubber(entries: Record<string, VaultEntry>): (text: string) => string
       return String(args[0]);
     });
   };
+}
+
+/**
+ * A scrubber for loose values that are not vault entries (a one-time code, AGENT-TOOLS 1.14 §20.4): each shows as `token`.
+ * The same forms and the same minimum length as a vault value.
+ */
+export function looseScrubber(values: readonly string[], token: string): (text: string) => string {
+  const entries: Record<string, VaultEntry> = {};
+  values.forEach((value, i) => {
+    entries[`v${i}`] = { kind: "note", values: { text: value } };
+  });
+  return scrubber(entries, () => token);
 }
 
 function normalizedEntries(file: AccountsFile | VaultFile): Record<string, VaultEntry> {
@@ -428,9 +440,9 @@ const WHOLE_ACCOUNT = /^\$\{account\.(\w+)\}$/;
 const WHOLE_VAULT = /^\$\{vault\.(\w+)\.(\w+)\}$/;
 const VAULT_ANY = /^\$\{vault\.[^}]*\}$/;
 
-/** Whether a text refers to the vault (`${account.…}` or `${vault.…}`). */
+/** Whether a text refers to the vault (`${account.…}`, `${vault.…}`) or to a one-time code (`${otp.<app>}`, §20.4). */
 export function mentionsVault(text: string): boolean {
-  return text.includes("${account.") || text.includes("${vault.");
+  return text.includes("${account.") || text.includes("${vault.") || text.includes("${otp.");
 }
 
 /** What a reference named: which entry and field, and its kind. */
@@ -450,6 +462,11 @@ export type AccountText =
  * (field null).
  */
 export function substituteAccount(text: string, store: AccountStore, name: string | undefined, appId: string): AccountText {
+  // A one-time code is fetched and typed by the tool itself (otpclient.ts); text that reaches here isn't one it can type.
+  if (text.includes("${otp.")) {
+    const alone = /^\$\{otp\.[^}]+\}$/.test(text);
+    return { ok: false, code: "bad_params", message: alone ? "a one-time code takes no account; write ${otp.<app>} alone." : "a one-time code is the whole text of a step, not part of one." };
+  }
   const vault = WHOLE_VAULT.exec(text);
   if (vault !== null) {
     const entry = vault[1] ?? "";
