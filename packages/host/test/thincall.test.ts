@@ -21,10 +21,7 @@ afterEach(async () => {
 
 /** What a real host sends back: an HMAC of the caller's challenge, keyed by the token. */
 const proofFor = (req: IncomingMessage, token = FAKE_TOKEN): string =>
-  createHmac("sha256", token).update(`tapline-proof-v1
-${String(req.headers["x-tapline-challenge"])}
-${req.socket.localPort}
-loopback`).digest("hex");
+  createHmac("sha256", token).update(`tapline-proof-v1\n${String(req.headers["x-tapline-challenge"])}\n${req.socket.localAddress}\n${req.socket.localPort}`).digest("hex");
 
 interface Seen {
   path: string;

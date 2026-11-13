@@ -41,10 +41,10 @@ async function realHost(): Promise<{ runtime: Runtime; home: string }> {
   return { runtime, home };
 }
 
-function ioFor(home: string, ports: number[]): { io: ThinCallIO; out: string[]; err: string[] } {
+function ioFor(home: string, ports: number[], address = "127.0.0.1"): { io: ThinCallIO; out: string[]; err: string[] } {
   const out: string[] = [];
   const err: string[] = [];
-  return { io: { out: (t) => void out.push(t), err: (t) => void err.push(t), env: { TAPLINE_HOME: home }, ppid: 1, ports, address: "127.0.0.1" }, out, err };
+  return { io: { out: (t) => void out.push(t), err: (t) => void err.push(t), env: { TAPLINE_HOME: home }, ppid: 1, ports, address }, out, err };
 }
 
 async function listen(server: Server): Promise<number> {
@@ -56,9 +56,11 @@ async function listen(server: Server): Promise<number> {
 
 describe("the host's proof is bound to the port it was asked on", () => {
   it("a proof made for one port never verifies for another", () => {
-    expect(hostProof("t", "aa", 7210)).toMatch(/^[0-9a-f]{64}$/);
-    expect(hostProof("t", "aa", 7210)).not.toBe(hostProof("t", "aa", 7211));
-    expect(hostProof("t", "aa", 7210)).not.toBe(hostProof("u", "aa", 7210));
+    expect(hostProof("t", "aa", "127.0.0.1", 7210)).toMatch(/^[0-9a-f]{64}$/);
+    expect(hostProof("t", "aa", "127.0.0.1", 7210)).not.toBe(hostProof("t", "aa", "127.0.0.1", 7211));
+    expect(hostProof("t", "aa", "127.0.0.1", 7210)).not.toBe(hostProof("u", "aa", "127.0.0.1", 7210));
+    expect(hostProof("t", "aa", "127.0.0.1", 7210)).not.toBe(hostProof("t", "aa", "::1", 7210));
+    expect(hostProof("t", "aa", "127.0.0.1", 7210)).toBe(hostProof("t", "aa", "::ffff:127.0.0.1", 7210));
   });
 
   it("an impostor that relays the probe to the real host on another port never gets the token", async () => {
@@ -98,6 +100,49 @@ describe("the host's proof is bound to the port it was asked on", () => {
 });
 
 // Abandoned calls -------------------------------------------------------------------------------
+
+const hasIpv6 = await new Promise<boolean>((resolve) => {
+  const probe = createServer();
+  probe.once("error", () => resolve(false));
+  probe.listen(0, "::1", () => probe.close(() => resolve(true)));
+});
+
+/** A relay on ::1 at the given port that forwards every request to 127.0.0.1 at the real host port, and records the credentials it saw. */
+async function relayOnIpv6(port: number, target: number): Promise<{ stolen: string[] }> {
+  const stolen: string[] = [];
+  const relay = createServer((req, res) => {
+    if (req.method === "POST") stolen.push(String(req.headers.authorization));
+    const forward = request({ host: "127.0.0.1", port: target, path: req.url, method: req.method, headers: req.headers, agent: false }, (answer) => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(res);
+    });
+    req.pipe(forward);
+  });
+  await new Promise<void>((resolve, reject) => {
+    relay.once("error", reject);
+    relay.listen(port, "::1", resolve);
+  });
+  servers.push(relay);
+  return { stolen };
+}
+
+describe.skipIf(!hasIpv6)("a relay on ::1 with the real host port never gets the credential", () => {
+  it("refuses it for ::1, localhost and TAPLINE_PORT", async () => {
+    const { runtime, home } = await realHost();
+    const { stolen } = await relayOnIpv6(runtime.port, runtime.port);
+    const aimed = ioFor(home, [runtime.port], "::1");
+    expect(await runThinCall(["apps"], aimed.io)).toBe(3);
+    expect(stolen).toEqual([]);
+    // localhost: 127.0.0.1 comes first and is the real host; the relay is never sent the credential.
+    const named = ioFor(home, [runtime.port], "localhost");
+    await runThinCall(["apps"], named.io);
+    expect(stolen).toEqual([]);
+    const env = ioFor(home, [], "::1");
+    env.io.env["TAPLINE_PORT"] = String(runtime.port);
+    expect(await runThinCall(["apps"], env.io)).toBe(3);
+    expect(stolen).toEqual([]);
+  });
+});
 
 describe("a queued call whose client went away never runs", () => {
   it("skips the abandoned tap when its predecessor finishes", async () => {

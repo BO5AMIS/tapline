@@ -97,16 +97,22 @@ function post(address: string, port: number, tool: string, body: string, token: 
 
 type Probe = "host" | "mcp" | "none";
 
-/** What a host must send back to prove it holds the token on this port (the same formula as hostProof in api.ts). */
-function proofOf(token: string, challenge: string, port: number): string {
-  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${port}\nloopback`).digest("hex");
+/** An address as one spelling: no brackets, lower case, an IPv4-mapped IPv6 address as plain IPv4 (the same as in api.ts). */
+function normalizeAddress(address: string): string {
+  const plain = address.toLowerCase().replace(/^\[|\]$/g, "");
+  return plain.startsWith("::ffff:") && plain.includes(".") ? plain.slice("::ffff:".length) : plain;
 }
 
-/** The proof must be made for the port this client connected to: a proof relayed from another port fails here. */
-function provesToken(header: string | string[] | undefined, token: string, challenge: string, port: number): boolean {
+/** What a host must send back to prove it holds the token at this endpoint (the same formula as hostProof in api.ts). */
+function proofOf(token: string, challenge: string, address: string, port: number): string {
+  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${normalizeAddress(address)}\n${port}`).digest("hex");
+}
+
+/** The proof must be made for the address and port of the socket this client is connected to: one relayed from another endpoint fails here. */
+function provesToken(header: string | string[] | undefined, token: string, challenge: string, address: string, port: number): boolean {
   if (typeof header !== "string") return false;
   const given = Buffer.from(header, "utf8");
-  const wanted = Buffer.from(proofOf(token, challenge, port), "utf8");
+  const wanted = Buffer.from(proofOf(token, challenge, address, port), "utf8");
   return given.length === wanted.length && timingSafeEqual(given, wanted);
 }
 
@@ -133,7 +139,7 @@ function probe(address: string, port: number, token: string): Promise<Probe> {
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf8");
-        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge, port)) finish("host");
+        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge, res.socket.remoteAddress ?? "", res.socket.remotePort ?? 0)) finish("host");
         else if (res.statusCode === 404 && text.includes("MCP server")) finish("mcp");
         else finish("none");
       });
@@ -268,9 +274,13 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     return 3;
   }
 
+  // One concrete loopback address per endpoint: a name is never sent to twice, so it can't resolve differently later.
+  const name = normalizeAddress(address);
+  const addresses = name === "localhost" ? ["127.0.0.1", "::1"] : [name];
+  const endpoints = ports.flatMap((port) => addresses.map((concrete) => ({ address: concrete, port })));
   let mcpHostSeen = false;
   let tokenRefused = false;
-  for (const port of ports) {
+  for (const { address, port } of endpoints) {
     const who = await probe(address, port, token);
     if (who === "mcp") {
       mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls

@@ -25,15 +25,21 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+/** An address as one spelling: no brackets, lower case, and an IPv4-mapped IPv6 address as plain IPv4. */
+export function normalizeAddress(address: string): string {
+  const plain = address.toLowerCase().replace(/^\[|\]$/g, "");
+  return plain.startsWith("::ffff:") && plain.includes(".") ? plain.slice("::ffff:".length) : plain;
+}
+
 /**
- * The host's proof that it holds the token: an HMAC of the caller's fresh challenge and of the port the request arrived
- * on, keyed by the token. The port is in it so that a listener on another port can't relay the probe to the real host and
- * hand its proof back: a proof made on port B never verifies for port A. The host is always this computer (the client
- * refuses any other name), so it is the fixed word "loopback". The token itself never leaves; thincall.ts computes the
- * same value and sends the token only to a host that proves it for the port it connected to.
+ * The host's proof that it holds the token: an HMAC of the caller's fresh challenge and of the address and port the request
+ * arrived on, keyed by the token. They are in it so that a listener on another port, or on another address with the same
+ * port (::1 against 127.0.0.1), can't relay the probe to the real host and hand its proof back: a proof made for one
+ * endpoint never verifies for another. The token itself never leaves; thincall.ts computes the same value from the socket
+ * it connected to and sends the token only to a host that proves it for that endpoint.
  */
-export function hostProof(token: string, challenge: string, port: number): string {
-  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${port}\nloopback`).digest("hex");
+export function hostProof(token: string, challenge: string, address: string, port: number): string {
+  return createHmac("sha256", token).update(`tapline-proof-v1\n${challenge}\n${normalizeAddress(address)}\n${port}`).digest("hex");
 }
 
 /** What goes back as JSON: the answer's text, whether it is a refusal, and the first picture when there is one. */
@@ -89,7 +95,11 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
     // A thin call asks who it is talking to before it sends the token: only a host that holds the token can answer.
     const challenge = req.headers["x-tapline-challenge"];
     const port = req.socket.localPort;
-    const proof = typeof challenge === "string" && port !== undefined && /^[0-9a-f]{16,128}$/.test(challenge) ? hostProof(context.token, challenge, port) : undefined;
+    const address = req.socket.localAddress;
+    const proof =
+      typeof challenge === "string" && port !== undefined && address !== undefined && /^[0-9a-f]{16,128}$/.test(challenge)
+        ? hostProof(context.token, challenge, address, port)
+        : undefined;
     res.writeHead(405, { "content-type": "text/plain; charset=utf-8", ...(proof !== undefined ? { "x-tapline-proof": proof } : {}) });
     res.end("POST only.\n");
     return true;
