@@ -329,6 +329,22 @@ describe("check tables", () => {
     expect(R3_CHECKS).toHaveLength(7);
     expect(R4_GRID).toHaveLength(7);
   });
+  it("put lab-bottom in R1 (scrolled to, then tapped) and lab-behind-bar in R3 (QUALITY-BAR 2.5)", () => {
+    expect(R1_STEPS.map((s) => s.name)).toContain("tap lab-bottom from the top: the tool scrolls to it and taps");
+    expect(R3_CHECKS.some((c) => "id" in c.target && c.target.id === "lab-bottom")).toBe(false);
+    const bar = R3_CHECKS.find((c) => "id" in c.target && c.target.id === "lab-behind-bar");
+    expect(bar?.reasons).toEqual(["off_screen", "covered"]);
+    expect(bar?.notPressed).toBe("behind-bar");
+  });
+  it("the fake lab scrolls to lab-bottom on a tap, and refuses lab-behind-bar as off_screen", () => {
+    const lab = new FakeLab();
+    expect(lab.call("tap", { target: { id: "lab-bottom" } }).text).toContain("Tapped lab-bottom");
+    expect(lab.pressed).toBe("bottom");
+    lab.scroll = 0;
+    const r = lab.call("tap", { target: { id: "lab-behind-bar" } });
+    expect(r.text).toMatch(/^Error not_actionable: off_screen/);
+    expect(lab.pressed).toBe("bottom");
+  });
   it("resolves viewer points from a look", () => {
     const text = [
       `Screen ${W}x${H} pt @3x · 3 elements`,

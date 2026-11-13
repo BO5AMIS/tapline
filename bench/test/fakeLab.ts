@@ -61,6 +61,8 @@ function buildElements(): El[] {
     els.push(col(`lab-row-${n}`, 1160 + (n - 1) * 40, { text: `Row ${n}`, h: 36, role: "text" }));
   }
   els.push(col("lab-bottom", 2800));
+  // Under the fixed header: no scroll brings it out.
+  els.push({ id: "lab-behind-bar", role: "button", x: 80, y: 60, w: 280, h: 30, fixed: true });
   return els;
 }
 
@@ -369,11 +371,18 @@ export class FakeLab {
     if (el.id === "lab-covered" && !this.options.bugs?.falseSuccessCovered) {
       return "Error not_actionable: covered by lab-overlay";
     }
+    if (el.id === "lab-behind-bar") return "Error not_actionable: off_screen, no scroll can bring it out (behind the fixed header)";
     const r = this.rect(el);
     const cy = r.y + r.h / 2;
     if (!el.fixed && cy < BAR && cy >= 0) return "Error not_actionable: covered by the navigation bar";
     if (cy < 0 || cy > H) return "Error not_actionable: off_screen, scroll to it";
     return null;
+  }
+
+  /** As the real tools do (AGENT-TOOLS 1.13.1 item 3): an off-screen target in the list is scrolled into view first. */
+  private scrollToIt(el: El): void {
+    if (el.fixed || el.sheet || !this.refusal(el)?.startsWith("Error not_actionable: off_screen")) return;
+    this.scroll = Math.min(this.maxScroll, Math.max(0, el.y + el.h / 2 - H / 2));
   }
 
   private tap(args: Record<string, unknown>): string {
@@ -415,6 +424,7 @@ export class FakeLab {
       this.foreground = OTHER_APP;
       return `Tapped ${first.id}.\nSettled in 0.10 s.`;
     }
+    this.scrollToIt(first);
     const refused = this.refusal(first);
     if (refused && this.options.bugs?.pressesBehindCover && (this.shareOpen || this.nativeAlert)) {
       this.pressed = first.id.replace(/^lab-/, "");
@@ -462,6 +472,7 @@ export class FakeLab {
         const found = this.find(args.target);
         const el = found[0];
         if (!el) return out("Error not_found: nothing matches");
+        this.scrollToIt(el);
         const refused = this.refusal(el);
         if (refused) return out(refused);
         this.press(el);
@@ -471,6 +482,7 @@ export class FakeLab {
       case "type_text": {
         const el = this.find(args.target)[0];
         if (!el) return out("Error not_found: nothing matches");
+        this.scrollToIt(el);
         const refused = this.refusal(el);
         if (refused) return out(refused);
         const text = typeof args.text === "string" ? args.text : "";
@@ -481,6 +493,7 @@ export class FakeLab {
       case "toggle": {
         const el = this.find(args.target)[0];
         if (!el) return out("Error not_found: nothing matches");
+        this.scrollToIt(el);
         const refused = this.refusal(el);
         if (refused) return out(refused);
         const on = args.value === true;
