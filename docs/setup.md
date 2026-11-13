@@ -114,6 +114,25 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 
 `LocalSubnet` is your Wi-Fi; `100.64.0.0/10` is Tailscale.
 
+**Options for the agent's side (1.6).** `tapline mcp` and the standalone `tapline host` take these:
+
+- `--brief`: actions answer in at most 12 element lines (a call's `brief: false` overrides it).
+- `--accounts FILE`: test accounts, so an agent can sign in by name without seeing a password:
+  `{"version": 1, "accounts": {"tester2": {"username": "...", "password": "...", "apps": ["com.example.wayfare"]}}}`.
+  The file must sit outside any git repository, or be ignored by it, or Tapline refuses it. Keep it
+  outside the folders the agent can read. A password stays out of pictures only while its field is
+  secure. `tapline doctor --accounts FILE` checks it and prints the names, never the values.
+- `--maps DIR`: keep each app's map (places, roads, links, routes, reflexes) in `DIR/<app id>/`
+  instead of `~/.tapline/maps/<app id>/`. A team can share one folder.
+- `--no-dialog` (`mcp`): don't open the host's dialog for a person's OK or a "needs a person" moment;
+  the live view still asks. Use it with a chat app that passes dialogs to the model instead of
+  showing them to a person.
+
+`tapline host` runs in the foreground with the live view and takes all the options of `mcp`. While
+it runs, `tapline call <tool> '<json>'` sends one tool call to it in about 0.1 s (`--client NAME`
+names the caller; `--json` prints `{"text", "image_path"}`; exit 0 an answer, 2 a refusal, 3 no host).
+A phone pairs with that host, not with an agent's own MCP server.
+
 ## 3. The app
 
 Your own React Native or Expo app, in a development build or a TestFlight build, or an Expo
@@ -388,7 +407,7 @@ your Wi-Fi.
 | the agent gets `not_connected` or `in_background` | the app isn't open in front: open it on the phone (on the same Wi-Fi); `apps` should list it |
 | scanning the code doesn't open the app | the scheme passed to `pair` must be the app's `scheme`; the build must have Tapline turned on |
 | the app doesn't ask to connect (pairing without a QR code) | the offer from `pair` lasts only 10 minutes and works once: call `pair` again. Check that `metro.config.js` uses `withTapline`, that the phone and the computer are on the same Wi-Fi, and that the app loads its code from Metro on this computer, not through a tunnel. TestFlight and release builds need the QR code (`pair` with the scheme) |
-| `not_allowed: needs_confirmation` | the touch is on an element with a policy word (Buy, Delete, Send …). Open the live view and choose Allow once, then repeat the same call within 120 seconds. On a test phone with test data, run the MCP server with `--no-policy` |
+| `not_allowed: needs_confirmation` | the touch is on an element with a policy word (Buy, Delete, Send …). Choose Allow once in the dialog your MCP client shows or in the live view; the agent's call waits up to 120 seconds for it. If your client shows no dialog, or passes it to the model instead of a person, run the MCP server with `--no-dialog`; then allow in the live view and the agent repeats the call. On a test phone with test data, run the MCP server with `--no-policy` |
 | the app opens a "not found" screen | Expo Router: add `app/+native-intent.ts` (step 3) |
 | "pairing code has expired or was already used" | ask for a new code; each one works once, for 10 minutes |
 | the app never connects | the phone and the computer are on the same Wi-Fi (some guest or office networks block devices from each other); the host (or the agent) is running; Windows: the firewall rule above |

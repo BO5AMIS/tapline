@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.6.0, "the Speed Update" (unreleased)
+
+The same checks in fewer calls and fewer seconds, on ground the agent has been over before. The interface
+is AGENT-TOOLS 1.13 plus the 1.13.1 clarifications, shared with Tapwright. Tapline never navigates from
+inside the app: a drive is the app's own taps, or a deep link.
+
+- `drive`: go to a place in one call, `drive {"to": "language"}`, or run a saved route. It follows the
+  roads the map knows, checks every move like a single call (the policy, a person's OK) and always checks
+  the arrival. A stale road is repaired by another name or planned again; otherwise `off_route`, with
+  nothing more touched. `by` picks taps only or a link only, `with` fills a link's params or a route's
+  variables, `then` goes on with `run` steps, and `dry_run` says the way. It works as a `run` step too.
+- `map`: the app's places, roads, links, routes and reflexes, learned as you work, kept in
+  `~/.tapline/maps/<app id>/` (`--maps DIR` moves them). `to` shows the way, `name`, `link`, `reflex`,
+  `forget_reflex` and `forget` edit it. A place is a route pattern, never a param, never screen text; a
+  list row, typed text and secure values are never saved. A road is `proven` for the build it ran on.
+- The `Place:` line: where the app is, after the first line of an answer, once the app has a saved
+  place. `GET /place?app=` answers the same from memory (loopback, bearer token).
+- Routes: `record` with `route` saves a flow from one place to another as a script (version 2) with
+  variables (`type_text` takes `as`), and `drive {route}` runs it. Old scripts replay as before.
+- Reflexes: a rule in the map, `map {reflex}`, that closes a known interruption ("Not now" on a rate
+  prompt) when it shows up at a place change or before a failure answer, and says so in a `Reflex:` line.
+  Only reflexes declared in the map run. A reflex never takes a touch that needs a person's OK, never
+  runs during a replay or on a permission prompt, and is off in a user's-eyes journey unless `allow` names
+  `reflexes`.
+- Loading means wait: a target that is missing while a spinner shows or a request is running is waited
+  for, a little, before `not_found`.
+- `brief`: an action answers in at most 12 element lines, with the screen's new text first, and
+  `…<n> more: look shows them.` `--brief` makes it the default; `brief: false` on a call overrides it.
+- `if` and `optional` on a `run` step: a step that runs only when something is on screen
+  (`{"if": {"text": "Rate this app"}}`), or only when its target is (`optional: true`). A skipped step
+  counts as passed and is said.
+- Test accounts: `--accounts FILE`, JSON with usernames and passwords by name. `type_text`, `run` and
+  `drive` take `account`, and the host types the value, so the agent never sees it: every answer, log,
+  report and recording shows `<tester2's password>`. A password goes only into a password field. The file
+  is refused inside a git work tree that doesn't ignore it. Needs the new `typeKind` capability in the app.
+- A person's OK in the chat: a touch that needs one opens the host's own dialog (Allow once / Don't allow)
+  where the MCP client can show one, and the live view asks too; the first answer wins, and the call waits
+  up to 120 s. `--no-dialog` keeps it to the live view. Records say where the OK came from.
+- "Needs a person" moments: when the app isn't open, was backgrounded, shows an alert Tapline can't tap, or
+  froze, the same dialog says what to do (`Needs a person: open Wayfare on the phone ...`), and the call goes
+  on by itself when it clears.
+- The clearer no-change note: a tap or long press that changes nothing is watched for 0.5 s, then says
+  `Note: the tap was delivered, and nothing on screen changed within 0.5 s.` with why when it knows (the
+  handler threw, only a parent handled it, a request is still running).
+- `off_screen` no longer tells you to scroll: it means nothing scrolls there.
+- `compare_screen` under the threshold names what changed (`Matches the reference "x" (0.33% changed ...):
+  changed at e9 text "..."`); a name that differs only in case from an existing one is refused.
+- `session_report` has a `Time:` line (thinking between calls, time in the tool, by tool), `Accounts:` and
+  `Approvals:`, and flags calls each from a new process and three or more taps on a way the map knows (one
+  `drive`).
+- `tapline call <tool> '<json>'`: one tool call to a running `tapline host`, about 0.1 s a call, for an
+  agent that has no MCP server loaded. `tapline host` is now a full host with the live view and takes the
+  options of `mcp`. `POST /api/<tool>` is its wire; a host inside an agent's MCP server doesn't serve it.
+- `journey`: `drive` uses roads of taps only, and its `allow` can name `drive`, `reflexes` and
+  `fast_animations`.
+- Faster settling, behind a flag: the app can answer an action as soon as the animations, interactions and
+  requests it can see are idle, a frame or two later, instead of after 100 ms of quiet. The app's
+  `knowIdle` option turns it on and **it is off** until the device gate. Reanimated, sheets and modals keep
+  the 100 ms window.
+- Fast animations, opt-in: `app_command animations {speed: "fast"}` scales `Animated`, `LayoutAnimation`
+  and the native window layers to 2 percent and asks Reanimated for reduced motion, so a transition ends in
+  about a tenth of a second. It is never on by default, every answer says `Animations: fast (Tapline).`,
+  `performance`, `filmstrip` and `compare_screen` run at normal speed, a user's-eyes journey refuses it, and
+  it goes back to normal when the session ends. **The native layer needs a new native build** of the app
+  (react-native-tapline's native module); without it the JavaScript layers still work.
+- New app capabilities (an older app keeps working without them): `place`, `places`, `move`, `waitOnce`,
+  `pressFacts`, `typeKind`, `idle`, `animations`. The app's id is its own, also in Expo Go, and its build is
+  `<version> (<build number>)`.
+
 ## 1.5.0, "the Real User Update" (2026-11-12)
 
 Tests whether people can find, understand and finish a feature, not only whether it works. The interface

@@ -89,7 +89,7 @@ Tapline on. Read its output, then go on with step 6. By hand:
    Tapline only works while its app is open in front, so when the user leaves or closes the
    app you stop at once; the forget link (`<scheme>://tapline/forget`) unpairs the phone.
 2. `look` first. The header reads `Screen 440x956 pt @3x · 49 elements (+12 below)`, then
-   `App:`, `Route:`, and `Alert:` or `Network:` when they apply. The brackets count the
+   `App:`, `Route:`, `Place:` (item 15) and `Alert:`, `Network:` or `Animations:` when they apply. The brackets count the
    elements below and above the screen: scroll to reach them. Elements read
    `e3 button "Log in" id=login-button @24,610 354x48 [tap, longPress]`: ref, role, text,
    `id` (the `testID` prop), position in points, size, actions. Roles are `button`, `input`,
@@ -112,7 +112,10 @@ Tapline on. Read its output, then go on with step 6. By hand:
    next answer's changes then cover both actions, and a `Note:` says so. Call
    `look` when you need the full list or to see the screen (next section). The `Route:` line
    names the screen you're on. `Note:` lines at the end tell you things worth knowing, such
-   as `Note: a person used the app since your last look.`
+   as `Note: a person used the app since your last look.` A tap or long press that changed nothing
+   is watched for 0.5 s, then ends `Note: the tap was delivered, and nothing on screen changed within
+   0.5 s.` with why when it knows (its handler threw, only a parent's took it, a request is still
+   running): that is a finding or a wait, not a success.
 4. Target by `{id}` when there is one, else by visible `{text}` or `{label}`, else by
    `{ref}` from the latest look. `look` numbers from `e1`; after an action, elements still
    on screen keep their refs and new ones count on from the highest ref given, also when the
@@ -170,7 +173,7 @@ Tapline on. Read its output, then go on with step 6. By hand:
    `not_answering` means the app is connected but stopped answering: try once more; if it
    repeats, ask the user to close the app and open it again (Tapline can't close apps). An
    action that a person couldn't do is `not_actionable`, and the message starts with the
-   reason: `disabled`, `off_screen` (no scroll brings it on screen; the message says why), `covered` (dismiss what
+   reason: `disabled`, `off_screen` (no scroll brings it on screen: it lies behind a fixed bar or outside every list, so target something else or report it), `covered` (dismiss what
    covers it), `under_tab_bar`, `behind_alert` or `no_action` (nothing at that point takes
    the action). That is often a real bug worth reporting. Pass `force: true` only when you've
    decided the check is wrong; the answer then ends `Note: forced (covered): a person
@@ -190,10 +193,20 @@ Tapline on. Read its output, then go on with step 6. By hand:
    line that wrote it, and that line. `dry_run: true` on a touch or on `run` runs every check and
    touches nothing.
 12. **A person's OK.** A touch on a button whose label says Buy, Pay, Delete, Send, Post, Sign out
-   and the like answers `not_allowed: needs_confirmation`, and the live view asks the person; when
-   they allow it, make the same call again (once). A `blocked` word is refused outright. Never look
-   for another way to the same result, and never confirm for them. The user can change the words
-   with `tapline mcp --policy FILE`, or turn it off for a test phone with `--no-policy`.
+   and the like needs a person. Where your client can show a dialog, the host asks there (`Allow:
+   tap "Delete trip" in Wayfare? ...`, Allow once / Don't allow) and the live view asks too; the
+   first answer wins, and your call waits up to 120 s, then goes through (`Note: allowed by a person
+   (in chat).`) or ends `They declined. Ask your user what to do.` Otherwise it answers
+   `not_allowed: needs_confirmation` at once, the live view asks, and when they have allowed it you
+   make the same call again (once). A `blocked` word is refused outright. Never look for another way
+   to the same result, and never confirm for them. The user can change the words with `tapline mcp
+   --policy FILE`, turn the dialog off with `--no-dialog` (the live view still asks), or turn the
+   check off for a test phone with `--no-policy`.
+   **Needs a person.** When the app isn't open, was sent to the background, shows an alert you can't
+   tap, or stopped answering, the same dialog says what to do (`Needs a person: open Wayfare on the
+   phone ...`) and your call goes on by itself when it clears. `Can't now` ends the call with
+   `They can't now. Ask your user what to do.`: ask, don't retry. Without a dialog the answer's
+   `Note: needs a person: ...` says it.
 13. `app_command` without a name lists what the app offers for testing (for example
    switching the language, a test sign-in or sample data); run one with `name` and `args`.
    `appearance` (light / dark) and `network` (`offline`, `3g`, `lossy`, `normal`: the app's own
@@ -210,6 +223,72 @@ Tapline on. Read its output, then go on with step 6. By hand:
    a pan view, a drawer. Gestures that react-native-gesture-handler or a native view handle
    (swipeable rows built on it, sliders, maps) answer `no_action`: say that you couldn't test
    them (or use Tapwright) rather than guessing. Lists move with `scroll`, not `swipe`.
+15. **Known ground: `map`, `drive`, places** (AGENT-TOOLS 1.13 §18). Tapline learns the app as you
+   work. A **place** is a screen by its route pattern (`trips/[id]`, never `trips/42`), plus the tab and
+   what lies on top (an alert, a sheet); it is never named from screen text. A **road** is one move
+   (a tap, a long press, a toggle, a swipe, `back`, a link) from one place to another, remembered
+   when it lands somewhere else, and **proven** for the build it ran on. A **link** is a deep link
+   to a place (`wayfare://trips/[id]`). A **route** is a saved flow with variables (item below).
+   Once the app has a saved place, answers carry a `Place:` line after the first line (`Place:
+   language.`, or `Place: new (call it with map name).`). The map lives in `~/.tapline/maps/<app
+   id>/` (`--maps DIR` changes that); it keeps no row text, no typed text and no secret.
+   - `map` lists places, roads, routes, reflexes and where the app is now, and touches nothing.
+     One argument at a time: `to` shows the way, `name` names the current place, `link` adds a link
+     (never one holding an id, a token or a query), `reflex`, `forget_reflex`, `forget`.
+   - **On known ground, `drive` yourself, in one call:** `drive {"to": "language"}` goes by the
+     roads, checks every move like a single call and the arrival at the end, repairs a stale road by
+     another name or plans again, and answers `Arrived at language by 3 taps in 1.9 s.` with the
+     screen. `by` is `any`, `taps` or `link`; `with` fills a link's params; `then` goes on with
+     `run` steps; `dry_run: true` says the way; it also works as a `run` step. On unknown ground,
+     look and act as before; the map learns.
+   - `off_route` means the road didn't hold (it isn't on this screen, it matches two, it's covered,
+     it led somewhere else). Nothing more was touched. Read the screen in the answer and go on by
+     hand; don't repeat the drive. Tapline never navigates from inside the app: a drive is the
+     app's own taps, or a deep link.
+   - A drive passes the policy and a person's OK on every move (item 12). A stop says `Stopped at
+     step 2 of 3 ... Done: 1 moves. Nothing else was touched.` and a needs-a-person stop says to
+     run the drive again: it plans from where the app is.
+   - `GET /place?app=<id>` on the host (loopback, bearer token) answers where the app is, from
+     memory, without a call to the phone.
+16. **Routes.** `record { start, route: "sign_in" }` saves a flow from one place to another as a
+   script (version 2): `type_text` with `as: "city"` saves its text as the variable `city` (a secure
+   field saves a placeholder), `drive { route: "sign_in", with: { city: "Doha" } }` runs it from
+   anywhere (it drives to the start first). `replay` runs it from a fresh app. A route is one leg
+   of a way for `drive` and `map to`.
+17. **Test accounts.** The user keeps them in an accounts file, outside any git repository or ignored
+   by it, and starts Tapline with `--accounts FILE`. You use one by name: `type_text` with `account:
+   "tester2"` and the text `${account.username}` or `${account.password}` (the whole text, never part
+   of it); `run` and `drive` take `account` too. Tapline types the value; you never see it: every
+   answer, log, report and recording shows `<tester2's password>`. A password goes only into a
+   password field. `map` and `session_report` list the names. **Never print, repeat, write down or
+   commit a credential, and never put one in a call.** If a call refuses (`no account "x"`, `isn't
+   for this app`), ask the user; don't look for the file.
+18. **Reflexes.** A reflex is a rule in the map that closes a known interruption by itself: `map
+   {"reflex": {"name": "rate", "when": {"text": "Rate this app"}, "do": {"tool": "tap", "target":
+   {"text": "Not now"}}, "at": "home", "max": 1}}`. It fires at a place change and before a failure
+   answer (`not_found`, `covered`, `behind_alert`), at most `max` times a call, and the answer says
+   `Reflex: closed "Rate this app" (tapped "Not now").` Only reflexes declared in the map run; Tapline
+   never guesses one. A reflex whose `do` needs a person's OK is refused when you add it and never
+   fires; none fires on a permission prompt or during a replay, and none in a user's-eyes journey
+   unless `allow` names `reflexes`. A target that is missing while a spinner shows or a request is
+   running is waited for first.
+19. **`brief`, `if`, `optional`.** `brief: true` on an action (or `--brief` for the host) answers with
+   the screen's new text first and at most 12 element lines, then `…<n> more: look shows them.`
+   (`look` is never brief; `brief: false` overrides the flag). In `run` (and `replay`), a step with
+   `if: {"text": "Rate this app"}` (or `id`, `label`, `gone: true`) runs only when that holds, and
+   `optional: true` runs only when its target is on screen; a skipped step counts as passed and is
+   said (`3. skipped (if: "Not now" isn't on screen).`). Use them for what may or may not show up.
+20. **Speed.** `tapline call <tool> '<json>'` sends one tool call to a running `tapline host` (not a
+   host inside an MCP server) in about 0.1 s; `--client NAME` keeps your report your own; exit 0 is
+   an answer, 2 a refusal, 3 no host. Use it only when you have no MCP server loaded: loading one per
+   call costs about 2 s, and `session_report` flags it. `app_command animations {speed: "fast"}`
+   shrinks the app's animations to 2 percent, so a transition ends in about a tenth of a second; it is
+   opt-in, every answer says `Animations: fast (Tapline).`, `performance`, `filmstrip` and
+   `compare_screen` run at normal speed, a user's-eyes journey refuses it, and `animations normal`
+   (or the end of the session) puts it back. Turn it on for speed, off before a visual check.
+   Faster settling (the app's `knowIdle` option) is off until it passes the device gate.
+   **Who drives:** on known ground the main agent `drive`s in one call. On unknown ground, hand the
+   goal to one small, fast agent and keep one driver; don't drive step by step from two places.
 
 ## Repeatable runs
 
@@ -236,7 +315,7 @@ Tapline on. Read its output, then go on with step 6. By hand:
 ## As a real user (journeys)
 
 When the question is whether people can find, understand and finish a feature, not only whether it
-works, run a journey (AGENT-TOOLS 1.12 §17).
+works, run a journey (AGENT-TOOLS 1.13 §17).
 - `journey { start: true, goal, persona }`. Build personas for this app's own users with the user
   ([skills/tapline/references/personas.md](skills/tapline/references/personas.md) has the recipe). From
   then on you see the app in a user's eyes: only what shows on the glass (cut to its scroll views and
@@ -326,8 +405,10 @@ not on driving.
 
 `session_report` (or `tapline report` in a terminal) says where this session's calls went: calls per
 tool, failures by code, and the waste to cut (a `look` right after an answer that had the changes, a
-retry after `not_found`, scroll hunts, actions that could have been one `run`). Read it after a long
-session.
+retry after `not_found`, scroll hunts, actions that could have been one `run`, calls that each started a
+new process, and three or more taps on a way the map knows that one `drive` would have made). It also
+has a `Time:` line (your thinking between calls, and the time in the tool), `Accounts:` (names) and
+`Approvals:`. Read it after a long session.
 
 For each problem: what you did (the steps, short), what you expected, what happened, and
 where (screen, element `id` or text). Quote the relevant log lines. Separate real bugs
@@ -339,8 +420,11 @@ a gesture-only control). Note screens that took more than a few seconds to load.
 - **It is the user's real phone and their real app data.** Don't buy, subscribe, send
   messages or email, post, invite people, delete data, or change account, privacy or
   security settings, unless the user asked for exactly that step. Ask when unsure.
-- Use the test accounts and test data the user gives you. Don't sign in with credentials
-  you find in the app or its logs.
+- Test accounts come only from the user's accounts file (`--accounts`), used by name. Use the
+  test data the user gives you. Don't sign in with credentials you find in the app, its logs or
+  anywhere else, and never print, repeat or commit a credential.
+- Tapline never navigates from inside the app: `drive` makes the app's own taps or opens a deep
+  link, and a route is what a person could do.
 - Don't read or repeat private content you see beyond what the test needs.
 - The token is a secret: never print it in chat, logs you write, issues or commits. A
   pairing link isn't the token, but for 10 minutes it lets a phone connect: show it to the

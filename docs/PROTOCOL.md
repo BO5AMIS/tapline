@@ -469,3 +469,39 @@ result:
 - `next.state`: `ready`; `missing` (not there at the cap, or refused for another reason); `covered` (covered by something,
   under the tab bar or behind an alert); `moving` (there but its frame still changing at the cap, with `element`).
   `element` is present for `ready` and `moving`. `waitedMs` is how long the wait took.
+
+## Host endpoints for tools on this computer
+
+Plain HTTP on the host's port, only from this computer (a peer that isn't loopback gets 403), with the host's token as
+`Authorization: Bearer <token>` (401 without it). The token is never in an answer. These are not part of the
+app's wire; they are how a script or another tool talks to the host (AGENT-TOOLS 1.13 §18.10, §18.11).
+
+### `POST /api/<tool>`
+
+The thin call (`tapline call <tool> '<json>'`). Served only by a standalone `tapline host`; a host inside an agent's MCP
+server answers 404 (`The thin call is served by "tapline host" only ...`), so one agent's session can't be driven by
+another's calls. The body is a JSON object of at most 1 MB (an empty body is `{}`): the tool's own arguments. An
+argument the tool doesn't have, or one of the wrong kind, is an `Error bad_params` answer, as over MCP.
+
+- `X-Agent-Client: <name>` (optional): the caller's name, so its session report, journey and person's OK stay its own.
+  A call with none shares one anonymous caller, which never uses a dialog or another caller's OK.
+- 200 with `{ "text": "...", "isError": false, "image": { "mimeType", "dataBase64" } }` (`image` only when the answer
+  has a picture). A tool's refusal is also 200 with `isError: true`; the text is what MCP would have returned.
+- 400 a bad body, 401 no token, 403 not this computer, 404 an unknown tool (or an MCP host), 405 not POST.
+- A call that needs a person's OK has no host dialog here: it answers `needs_confirmation` at once and the live view asks.
+- `tapline call` prints `text` and exits 0 for an answer, 2 for a refusal, 3 when no host answers; `--json` prints
+  `{"text", "image_path"}`, and a picture is saved to a file whose path `image_path` gives.
+
+### `GET /place?app=<app id>`
+
+Where the app is, from the host's memory of its latest `place` event: no call goes to the phone.
+
+```json
+{ "app": "com.example.wayfare", "route": ["(tabs)", "settings"], "tab": "settings", "layer": "sheet:Filters", "seenAt": 1731500000000, "inFront": true }
+```
+
+`route` is a route pattern (names split on `/`), never params or text; `tab` and `layer` are present only when there is
+one. `seenAt` is the host's clock when the event arrived. `inFront` is false when the app reported that it is in the
+background. 400 without `app`, 404 `{"error":"no app"}` when no session has that app id, and 404 `{"error":"no place"}`
+when the app (an older SDK, without the `place` capability) has sent none. When several sessions have the app, the one
+with the newest place answers.
