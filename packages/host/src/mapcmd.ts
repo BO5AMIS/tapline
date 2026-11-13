@@ -221,7 +221,15 @@ export function cheapestWay(roads: MapRoad[], from: string, to: string, isProven
     const { best } = found;
     if (budget-- <= 0 || (best !== null && cost > best.cost)) return;
     if (at === to) {
-      if (best === null || cost < best.cost || (cost === best.cost && used > best.used)) found.best = { cost, used, chain: [...chain] };
+      // At equal cost a way with more saved routes wins (a person recorded it on purpose), and only then the most
+      // recently used: the time alone made the choice depend on which millisecond a road and a route were saved in.
+      const routeLegs = chain.filter(isRouteLeg).length;
+      const bestRouteLegs = best === null ? 0 : best.chain.filter(isRouteLeg).length;
+      const better =
+        best === null ||
+        cost < best.cost ||
+        (cost === best.cost && (routeLegs > bestRouteLegs || (routeLegs === bestRouteLegs && used > best.used)));
+      if (better) found.best = { cost, used, chain: [...chain] };
       return;
     }
     for (const next of legs) {
