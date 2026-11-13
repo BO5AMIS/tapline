@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readAuditLines, type AuditLog } from "./auditlog.js";
 import { newFilesSince, readScheduleFile, readSeen, resolveWith, schedulePath, schedulesDir, writeSeen, type Schedule } from "./schedule.js";
@@ -51,6 +52,8 @@ export interface RunDeps {
   alive: (pid: number) => boolean;
   appWaitMs?: number;
   busyWaitMs?: number;
+  /** For tests: runs after a run found a leftover lock and before it takes the lock over (another run may get in between). */
+  beforeReclaim?: () => void;
 }
 
 export interface RunOptions {
@@ -108,32 +111,83 @@ function lockPath(configDir: string, name: string): string {
   return join(schedulesDir(configDir), `${name}.lock`);
 }
 
-/** One run of a schedule at a time: the lock is a file created exclusively, holding the run's process id and time. */
-function takeLock(deps: RunDeps, name: string): boolean {
-  const path = lockPath(deps.configDir, name);
-  mkdirSync(schedulesDir(deps.configDir), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(path, JSON.stringify({ pid: deps.pid, t: deps.now().getTime() }), { flag: "wx" });
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-    }
-    let holder: { pid?: unknown; t?: unknown } = {};
-    try {
-      holder = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; t?: unknown };
-    } catch {
-      // an unreadable lock is a leftover
-    }
-    const fresh = typeof holder.t === "number" && deps.now().getTime() - holder.t < LOCK_STALE_MS;
-    if (typeof holder.pid === "number" && fresh && deps.alive(holder.pid)) return false;
-    rmSync(path, { force: true });
+type LockHolder = { pid?: unknown; t?: unknown; owner?: unknown };
+
+function parseHolder(text: string): LockHolder {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null ? (parsed as LockHolder) : {};
+  } catch {
+    return {}; // an unreadable lock is a leftover
   }
-  return false;
 }
 
-function dropLock(deps: RunDeps, name: string): void {
-  rmSync(lockPath(deps.configDir, name), { force: true });
+/** A unique name for a lock file moved aside: only the one who moved it ever touches it. */
+function tombstone(path: string): string {
+  return `${path}.${randomBytes(6).toString("hex")}.tomb`;
+}
+
+/**
+ * One run of a schedule at a time: the lock is a file created exclusively, holding the run's process id, time and an owner token.
+ * A lock that is a leftover is taken over by renaming it to a tombstone of its own and checking that the tombstone holds what was
+ * read; a lock that changed hands meanwhile is put back, never deleted. Returns the owner token, or null when the lock is held.
+ */
+export function takeLock(deps: RunDeps, name: string): string | null {
+  const path = lockPath(deps.configDir, name);
+  mkdirSync(schedulesDir(deps.configDir), { recursive: true });
+  const token = `${randomBytes(8).toString("hex")}-${deps.pid}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      writeFileSync(path, JSON.stringify({ pid: deps.pid, t: deps.now().getTime(), owner: token }), { flag: "wx" });
+      return token;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+    }
+    let seen: string;
+    try {
+      seen = readFileSync(path, "utf8");
+    } catch {
+      continue; // released between our create and our read: try to create again
+    }
+    const holder = parseHolder(seen);
+    const fresh = typeof holder.t === "number" && deps.now().getTime() - holder.t < LOCK_STALE_MS;
+    if (typeof holder.pid === "number" && fresh && deps.alive(holder.pid)) return null;
+    deps.beforeReclaim?.();
+    const tomb = tombstone(path);
+    try {
+      renameSync(path, tomb);
+    } catch {
+      continue; // another run took it over first, or its holder released it
+    }
+    try {
+      const moved = readFileSync(tomb, "utf8");
+      if (moved !== seen) writeFileSync(path, moved, { flag: "wx" }); // it changed hands after we looked: give it back
+    } catch {
+      // put back by someone else already, or unreadable: the next round decides
+    } finally {
+      rmSync(tomb, { force: true });
+    }
+  }
+  return null;
+}
+
+/** Releases the lock only while it still holds this run's token; another run's lock is never removed. */
+export function dropLock(deps: RunDeps, name: string, token: string): void {
+  const path = lockPath(deps.configDir, name);
+  const tomb = tombstone(path);
+  try {
+    renameSync(path, tomb);
+  } catch {
+    return; // already gone
+  }
+  try {
+    const moved = readFileSync(tomb, "utf8");
+    if (parseHolder(moved).owner !== token) writeFileSync(path, moved, { flag: "wx" });
+  } catch {
+    // put back by someone else already: leave it
+  } finally {
+    rmSync(tomb, { force: true });
+  }
 }
 
 function writeReport(deps: RunDeps, redact: (text: string) => string, name: string, startedAt: Date, report: RunReport): string | null {
@@ -233,7 +287,8 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
   const values = resolveWith(schedule.with, schedulesDir(deps.configDir));
   if (!values.ok) return finishWith("failed", `couldn't start: ${values.message}`, `failed at step 0 (start)`, 2);
 
-  if (!takeLock(deps, name)) return skip(SKIP_PREVIOUS);
+  const lockToken = takeLock(deps, name);
+  if (lockToken === null) return skip(SKIP_PREVIOUS);
   if (newest !== null) writeSeen(deps.configDir, name, newest);
   let host: ScheduleHost | undefined;
   try {
@@ -279,7 +334,7 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
     const couldntStart = /^Error (not_found|bad_params|not_connected|internal):/.test(answer.text) && !/Ran \d+ of/.test(answer.text);
     return finishWith("failed", detail, detail, couldntStart ? 2 : 1, extra);
   } finally {
-    dropLock(deps, name);
+    dropLock(deps, name, lockToken);
     await host?.close().catch(() => undefined);
   }
 }

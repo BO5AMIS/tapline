@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditLog, readAuditLines } from "../src/auditlog.js";
-import { BUSY_WAIT_MS, runSchedule, type CallAnswer, type RunDeps, type ScheduleHost } from "../src/runschedule.js";
+import { BUSY_WAIT_MS, dropLock, runSchedule, takeLock, type CallAnswer, type RunDeps, type ScheduleHost } from "../src/runschedule.js";
 import { schedulePath, schedulesDir, type Schedule } from "../src/schedule.js";
 
 // AGENT-TOOLS 1.14 §22.2, §22.3, §23: `tapline run-schedule`, with a fake host, an injected clock and no phone.
@@ -344,5 +344,62 @@ describe("a file trigger's check", () => {
   it("refuses --check-trigger on a schedule that starts on a time", async () => {
     const r = rig();
     expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(2);
+  });
+});
+
+describe("the run lock is owned (PR 12 review)", () => {
+  const lockFile = (r: Rig): string => join(schedulesDir(r.dir), "daily.lock");
+  const staleLock = (r: Rig): string => {
+    writeFileSync(lockFile(r), JSON.stringify({ pid: 999, t: r.deps.now().getTime() - 7 * 3600 * 1000 }));
+    return lockFile(r);
+  };
+
+  it("two runs that find the same leftover lock: one takes it, the other never deletes the new lock, so no run is duplicated", () => {
+    const r = rig();
+    staleLock(r);
+    const alive = (): boolean => true;
+    const first: RunDeps = { ...r.deps, pid: 1111, alive };
+    let firstToken: string | null = null;
+    // the second run has read the leftover; before it takes it over, the first run gets in
+    const second: RunDeps = {
+      ...r.deps,
+      pid: 2222,
+      alive,
+      beforeReclaim: () => {
+        firstToken = takeLock(first, "daily");
+      },
+    };
+    const secondToken = takeLock(second, "daily");
+    expect(firstToken).not.toBeNull();
+    expect(secondToken).toBeNull();
+    const held = JSON.parse(readFileSync(lockFile(r), "utf8")) as { pid: number; owner: string };
+    expect(held.pid).toBe(1111);
+    expect(held.owner).toBe(firstToken);
+  });
+
+  it("a run that stalled past the takeover can't release its successor's lock", () => {
+    const r = rig();
+    const alive = (): boolean => true;
+    const old: RunDeps = { ...r.deps, pid: 1111, alive };
+    const oldToken = takeLock(old, "daily");
+    expect(oldToken).not.toBeNull();
+    // the old run stalls for hours; its lock is taken over by a new run
+    r.time.ms += 7 * 3600 * 1000;
+    const successor: RunDeps = { ...r.deps, pid: 2222, alive };
+    const newToken = takeLock(successor, "daily");
+    expect(newToken).not.toBeNull();
+    expect(newToken).not.toBe(oldToken);
+    // the old run wakes and finishes: its release leaves the new lock in place, and nobody else can take it
+    dropLock(old, "daily", oldToken as string);
+    expect((JSON.parse(readFileSync(lockFile(r), "utf8")) as { owner: string }).owner).toBe(newToken);
+    expect(takeLock({ ...r.deps, pid: 3333, alive }, "daily")).toBeNull();
+    dropLock(successor, "daily", newToken as string);
+    expect(existsSync(lockFile(r))).toBe(false);
+  });
+
+  it("a run's own release removes its lock and leaves no tombstone", async () => {
+    const r = rig();
+    expect((await runSchedule("daily", {}, r.deps)).code).toBe(0);
+    expect(readdirSync(schedulesDir(r.dir)).filter((f) => f.includes("daily.lock"))).toEqual([]);
   });
 });
