@@ -226,7 +226,7 @@ describe('under the bars iOS draws', () => {
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^covered: /);
     expect(error.message).toContain('is under the navigation bar iOS draws, at (200, 77): a real tap would hit the bar instead.');
-    expect(error.message).toContain('Scroll it clear of the bar (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
+    expect(error.message).toContain("It isn't inside a scroll view, so it can't be scrolled clear of the bar; target something else or report it, or pass force: true to call its handler anyway.");
     expectUntouched(onChangeText, calls);
     await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }));
     expect(onChangeText).toHaveBeenCalledWith('x');
@@ -256,7 +256,7 @@ describe('under the bars iOS draws', () => {
     expect(error.code).toBe('not_actionable');
     expect(error.message).toMatch(/^under_tab_bar: /);
     expect(error.message).toContain('is under the tab bar iOS draws, at (200, 749): a real tap would switch tabs instead.');
-    expect(error.message).toContain('Scroll it clear of the bar (scroll with this target and to: "target"), or pass force: true to call its handler anyway.');
+    expect(error.message).toContain("It isn't inside a scroll view, so it can't be scrolled clear of the bar; target something else or report it, or pass force: true to call its handler anyway.");
     expectUntouched(onChangeText, calls);
     await run(() => typeText({ target: { testID: 'field' }, text: 'x', force: true }));
     expect(onChangeText).toHaveBeenCalledWith('x');
