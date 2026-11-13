@@ -58,7 +58,16 @@ jobs:
         working-directory: ${{ runner.temp }}/nativecheck
         run: |
           npx expo prebuild --platform ios --clean
-          grep -q "TaplineNative" ios/Podfile.lock || { echo "TaplineNative was not autolinked"; exit 1; }
+          if ! grep -q "TaplineNative" ios/Podfile.lock; then
+            echo "TaplineNative was not autolinked. What autolinking sees:"
+            ls node_modules/react-native-tapline
+            cat node_modules/react-native-tapline/expo-module.config.json
+            npx expo-modules-autolinking search --platform apple --json 2>&1 | head -c 4000 || true
+            echo
+            npx expo-modules-autolinking resolve --platform apple --json 2>&1 | grep -i -A5 tapline || echo "(not in resolve)"
+            npx expo-modules-autolinking search --platform ios --json 2>&1 | grep -i -A5 tapline || echo "(not in search for ios)"
+            exit 1
+          fi
 
       - name: Build for the simulator (compiles TaplineNative)
         working-directory: ${{ runner.temp }}/nativecheck/ios
