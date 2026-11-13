@@ -6,6 +6,9 @@ The same checks in fewer calls and fewer seconds, on ground the agent has been o
 is AGENT-TOOLS 1.13 plus the 1.13.1 clarifications, shared with Tapwright. Tapline never navigates from
 inside the app: a drive is the app's own taps, or a deep link.
 
+- Fix: apps on Expo SDK 55 (iOS 15.1) now get the native module. Its podspec asked for iOS 16.4, and CocoaPods
+  silently skips a pod that needs a newer iOS than the app. A new macOS CI job builds a blank Expo app with the SDK
+  (the newest Expo and SDK 55), so the native code is compiled on every change.
 - `drive`: go to a place in one call, `drive {"to": "language"}`, or run a saved route. It follows the
   roads the map knows, checks every move like a single call (the policy, a person's OK) and always checks
   the arrival. A stale road is repaired by another name or planned again; otherwise `off_route`, with
