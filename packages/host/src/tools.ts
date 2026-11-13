@@ -11,14 +11,14 @@ import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
-import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
+import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
-import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
+import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
@@ -1132,7 +1132,7 @@ interface StressWaiting {
 const DOUBLE_TAP_GAP_MS = 80;
 /** What the app says of a double tap's second tap. */
 const pressSecondSchema = z.union([
-  z.object({ done: z.literal(true), afterMs: z.number() }),
+  z.object({ done: z.literal(true), afterMs: z.number(), threw: z.string().optional() }),
   z.object({ done: z.literal(false), reason: z.string().regex(/^[a-z_]{1,40}$/), afterMs: z.number() }),
 ]);
 /** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
@@ -1208,6 +1208,17 @@ export class TaplineTools {
   /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
   private readonly callScope = new AsyncLocalStorage<CallState>();
   private readonly thinScope = new AsyncLocalStorage<boolean>();
+  /** Takes this object's listeners off the host, so a dropped client is not kept alive by it. */
+  private readonly disposers: Array<() => void> = [];
+
+  dispose(): void {
+    for (const off of this.disposers.splice(0)) off();
+  }
+
+  /** A person used the app through another tools object (the live viewer): `{ref}` targets here are stale too. */
+  noteViewerInput(): void {
+    this.markPersonUsedApp();
+  }
 
   /** Runs a call that came through the thin call, so its log entries say `via: "call"` (§16.1, §18.10). */
   asThinCall<T>(run: () => T): T {
@@ -1368,30 +1379,42 @@ export class TaplineTools {
     this.stillCapMs = options.stillCapMs ?? 2000;
     // A finger on the phone itself: the app saw a real touch. It can't be queued like viewer input
     // (it has already happened), so it only leaves the note and makes `{ref}` targets stale.
-    host.on("touch", (session) => {
+    const onTouch = (session: SessionInfo): void => {
       if (this.host.current()?.id === session.id) this.markPersonUsedApp();
-    });
+    };
     // What a stress moment a person does leaves behind, for `done` to check (AGENT-TOOLS 1.12 §17.4).
     // Kept per app, so another connected app's events never count for the journey's app.
-    host.on("appState", (session, state) => {
+    const onAppState = (session: SessionInfo, state: string): void => {
       if (state !== "active") this.appLeftAt.set(identityOf(session), Date.now());
-    });
-    host.on("disconnect", (session) => {
+    };
+    const onDisconnect = (session: SessionInfo): void => {
       // The app puts its animations back by itself when it loses the host; the host forgets it was fast.
       forgetAnimations(this.host, session.id);
       this.appLeftAt.set(identityOf(session), Date.now());
-    });
-    host.on("connect", (session) => {
+    };
+    const onConnect = (session: SessionInfo): void => {
       this.appConnectedAt.set(identityOf(session), Date.now());
-    });
+    };
     // The app's picker used the armed test pictures: that is when a pick was "skipped" (1.5 review, finding 5).
-    host.on("pickerSkipped", (session, count) => {
+    const onPickerSkipped = (session: SessionInfo, count: number): void => {
       this.pickerFrom = identityOf(session);
       try {
         this.mediaState.recordPickerSkipped(session.app.id, count);
       } finally {
         this.pickerFrom = undefined;
       }
+    };
+    host.on("touch", onTouch);
+    host.on("appState", onAppState);
+    host.on("disconnect", onDisconnect);
+    host.on("connect", onConnect);
+    host.on("pickerSkipped", onPickerSkipped);
+    this.disposers.push(() => {
+      host.off("touch", onTouch);
+      host.off("appState", onAppState);
+      host.off("disconnect", onDisconnect);
+      host.off("connect", onConnect);
+      host.off("pickerSkipped", onPickerSkipped);
     });
     // The measuring tools run with fast animations paused (PLAN-1.6 F4, E8): innermost, so the note is part of the answer.
     for (const name of PAUSED_TOOLS) {
@@ -5452,6 +5475,8 @@ export class TaplineTools {
     const blocked = name === "network" ? this.networkRefusal((args.args as { mode?: unknown } | undefined)?.mode) : null;
     if (blocked !== null) return blocked;
     const sessionId = this.host.current()?.id;
+    // A measurement holds animations at normal: an explicit switch to fast waits for it to end.
+    if (name === "animations" && sessionId !== undefined && (args.args as { speed?: unknown } | undefined)?.speed === "fast") await afterPause(this.host, sessionId);
     const answer = await this.act(
       "command",
       { name, args: args.args ?? {} },
@@ -6316,9 +6341,7 @@ export class TaplineTools {
     const checked = await this.survivalOf(running, survives);
     const done = this.stressDone(running, "double_tap", ` on ${targetWords(target)}`, checked);
     const s = second.data;
-    const how = s.done
-      ? `Both taps went through, ${s.afterMs} ms apart.`
-      : `The first tap went through; the second, ${s.afterMs} ms later, didn't land (${s.reason}).`;
+    const how = secondTapSentence(s);
     return text(`${line(done)}\n${how}`);
   }
 

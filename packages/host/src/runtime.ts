@@ -220,13 +220,22 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined): Promise<CallToolResult> {
     // A thin call never uses the MCP server's tools: those hold its dialog and the OKs given for its calls.
     const tools = toolsFor(clientId ?? ANONYMOUS_CLIENT);
-    return tools.asThinCall(() => callTool(tools, tool, args));
+    // Calls that share a tools object run one after another: they share its per-call state (a run's account).
+    const before = lanes.get(tools) ?? Promise.resolve();
+    const answer = before.then(() => tools.asThinCall(() => callTool(tools, tool, args)));
+    lanes.set(tools, answer.then(() => undefined, () => undefined));
+    return answer;
   }
+  const lanes = new WeakMap<TaplineTools, Promise<void>>();
 
   function toolsFor(clientId: string | undefined): TaplineTools {
     if (clientId === undefined) return primary;
     const now = clock();
-    for (const [id, entry] of clients) if (now - entry.lastUsed > CLIENT_IDLE_MS) clients.delete(id);
+    for (const [id, entry] of clients) {
+      if (now - entry.lastUsed <= CLIENT_IDLE_MS) continue;
+      entry.tools.dispose();
+      clients.delete(id);
+    }
     const known = clients.get(clientId);
     if (known !== undefined) {
       known.lastUsed = now;
@@ -255,7 +264,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
         });
       },
       readOverlay: () => primary.readOverlay(),
-      runInput: (input) => primary.personInput(input),
+      runInput: async (input) => {
+        const outcome = await primary.personInput(input);
+        // The request reached the app: every client's refs from before it are stale.
+        if (outcome.action !== undefined) for (const entry of clients.values()) entry.tools.noteViewerInput();
+        return outcome;
+      },
       confirmations,
     });
     hub = live;
@@ -291,6 +305,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
       await maps.flushAll().catch(() => undefined);
       // The phone is never left fast-forwarded with nobody watching (PLAN-1.6 F4, E8).
       await restoreAnimations(host).catch(() => undefined);
+      for (const entry of clients.values()) entry.tools.dispose();
+      clients.clear();
+      primary.dispose();
       await host.close();
     },
   };

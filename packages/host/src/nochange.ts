@@ -79,3 +79,15 @@ export function saysNoVisibleChange(answer: string): boolean {
 export function saysRequestsRunning(answer: string): boolean {
   return /^Network: \d+ requests? in flight$/m.test(answer);
 }
+
+/** What the app says of a double tap's second tap (`threw`: the handler threw on it, so the tap did land). */
+export type SecondTap = { done: true; afterMs: number; threw?: string | undefined } | { done: false; reason: string; afterMs: number };
+
+/** The sentence for a double tap's second tap: it went through, it reached the handler and threw, or it didn't land. */
+export function secondTapSentence(second: SecondTap): string {
+  if (!second.done) return `The first tap went through; the second, ${second.afterMs} ms later, didn't land (${second.reason}).`;
+  if (second.threw !== undefined) {
+    return `The first tap went through; the second, ${second.afterMs} ms later, reached the handler, but the handler threw: ${cleanMessage(second.threw)}`;
+  }
+  return `Both taps went through, ${second.afterMs} ms apart.`;
+}

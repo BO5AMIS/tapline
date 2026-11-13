@@ -156,7 +156,8 @@ function strokeRect(canvas: Decoded, x: number, y: number, w: number, h: number,
 // diffImages
 // ---------------------------------------------------------------------------------------------
 
-function regionsFromMask(mask: Uint8Array, width: number, height: number): DiffBox[] {
+/** Changed regions of a mask, largest first; `pixels` counts only the cells that belong to that region. */
+export function regionsFromMask(mask: Uint8Array, width: number, height: number): DiffBox[] {
   const cols = Math.ceil(width / CELL);
   const rows = Math.ceil(height / CELL);
   const marked = new Uint8Array(cols * rows);
@@ -176,10 +177,12 @@ function regionsFromMask(mask: Uint8Array, width: number, height: number): DiffB
     let minR = rows;
     let maxR = -1;
     const stack = [start];
+    const members: number[] = [];
     seen[start] = 1;
     while (stack.length > 0) {
       const cell = stack.pop();
       if (cell === undefined) break;
+      members.push(cell);
       const cx = cell % cols;
       const cy = Math.floor(cell / cols);
       minC = Math.min(minC, cx);
@@ -207,9 +210,14 @@ function regionsFromMask(mask: Uint8Array, width: number, height: number): DiffB
       width: Math.min(width, (maxC + 1) * CELL) - x,
       height: Math.min(height, (maxR + 1) * CELL) - y,
     };
+    // Only the cells of this region: another region may sit inside its box.
     let pixels = 0;
-    for (let py = box.y; py < box.y + box.height; py++) {
-      for (let px = box.x; px < box.x + box.width; px++) if (mask[py * width + px]) pixels++;
+    for (const cell of members) {
+      const x0 = (cell % cols) * CELL;
+      const y0 = Math.floor(cell / cols) * CELL;
+      for (let py = y0; py < Math.min(height, y0 + CELL); py++) {
+        for (let px = x0; px < Math.min(width, x0 + CELL); px++) if (mask[py * width + px]) pixels++;
+      }
     }
     boxes.push({ ...box, pixels });
   }
