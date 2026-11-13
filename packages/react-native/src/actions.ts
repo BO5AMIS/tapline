@@ -47,6 +47,7 @@ import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
 import { onCommit } from './register';
+import { isKnowIdle, waitUntilIdle } from './idle';
 import { waitUntilSteady, waitUntilStill } from './settle';
 import {
   TaplineError,
@@ -164,14 +165,31 @@ async function sheetProbe(): Promise<Fiber | null> {
   return null;
 }
 
+/** When the last settle ended: a request begun since then is one the next action started (F1). */
+let lastSettledAt = Date.now();
+
 async function settleNow(): Promise<SettleOutcome> {
   const started = Date.now();
   let capped = false;
   const onCap = (): void => {
     capped = true;
   };
+  // Know-don't-watch (off unless `knowIdle`): answer when every signal the SDK can see is idle.
+  let knowSpentMs = 0;
+  if (isKnowIdle() && settings.capMs > 0) {
+    const known = await waitUntilIdle({ frames: 2, capMs: settings.capMs, since: lastSettledAt });
+    knowSpentMs = Math.max(0, Date.now() - started);
+    // A sheet or modal moves out of the SDK's sight: it keeps today's window and position poll.
+    if (!known.usedFallback && openModalHosts().length === 0 && closingModalHosts().length === 0) {
+      lastSettledAt = Date.now();
+      const settledMs = Math.max(0, Math.min(settings.capMs, known.settledMs));
+      return known.capped ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
+    }
+    if (known.capped) onCap();
+  }
   await waitUntilStill({
     ...settings,
+    capMs: settings.capMs - knowSpentMs,
     onCommit: (listener) => onCommit(() => listener()),
     now: Date.now,
     onCap,
@@ -205,6 +223,7 @@ async function settleNow(): Promise<SettleOutcome> {
     }
   }
   const settledMs = Math.max(0, Math.min(settings.capMs, Date.now() - started));
+  lastSettledAt = Date.now();
   return capped && settings.capMs > 0 ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
 }
 

@@ -1,5 +1,6 @@
 import { Alert, Linking } from 'react-native';
 import { startTapline, stopTapline, type TaplineOptions } from '../src/index';
+import { isKnowIdle } from '../src/idle';
 import { getLogEntries } from '../src/logs';
 import { memoryStorage } from '../src/storage';
 
@@ -45,6 +46,15 @@ afterEach(() => {
 });
 
 describe('startTapline / stopTapline', () => {
+  test('knowIdle is off by default, on when asked, and off again after stop', () => {
+    startTapline(direct('ws://100.64.0.7:7210'));
+    expect(isKnowIdle()).toBe(false);
+    startTapline({ ...direct('ws://100.64.0.7:7210'), knowIdle: true });
+    expect(isKnowIdle()).toBe(true);
+    stopTapline();
+    expect(isKnowIdle()).toBe(false);
+  });
+
   test('stays completely off unless enabled is true (a store build)', async () => {
     const before = console.log;
     startTapline({ enabled: false, url: 'ws://100.64.0.7:7210', token: 'abc' });

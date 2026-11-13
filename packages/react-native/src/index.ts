@@ -3,6 +3,7 @@ import { TaplineAgent, type DevOffer, type OfferSource } from './agent';
 import { installAlertTracking, nativeAlert, uninstallAlertTracking } from './alerts';
 import { configureCrash } from './crash';
 import { addLog, installLogs, originalLog, uninstallLogs } from './logs';
+import { setKnowIdle } from './idle';
 import { inFlight, installNetworkTracking, onNetworkFailure, uninstallNetworkTracking } from './network';
 import { setNetworkIdleProvider } from './wait';
 import { memoryStorage, secureStoreStorage, type TaplineStorage } from './storage';
@@ -31,6 +32,12 @@ export interface TaplineOptions {
    * agent can press. Tapline's own prompts always stay native.
    */
   alerts?: 'record' | 'stand-in';
+  /**
+   * Know, don't watch (1.6, off by default): an action answers as soon as the animations, interactions and
+   * requests Tapline can see are idle, a frame or two later, instead of after 100 ms without a commit.
+   * What it can't see (Reanimated, a sheet, native work) keeps the 100 ms window.
+   */
+  knowIdle?: boolean;
 }
 
 let agent: TaplineAgent | null = null;
@@ -140,6 +147,7 @@ export function startTapline(options: TaplineOptions): void {
     installLogs();
     installAlertTracking({ standIn: options.alerts === 'stand-in' });
     watchNetwork();
+    if (options.knowIdle === true) setKnowIdle(true);
     const next = new TaplineAgent(
       { app: options.app, ...(url !== '' && token !== '' ? { direct: { url, token } } : {}) },
       { storage, linking: Linking, confirm: confirmWithAlert, notify: notifyWithAlert, offers: devOffers() },
@@ -161,6 +169,7 @@ export function stopTapline(): void {
       configureCrash(null);
       uninstallAlertTracking();
       unwatchNetwork();
+      setKnowIdle(false);
     }
   } catch {
     // ignore

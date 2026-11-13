@@ -1,5 +1,6 @@
 import { Appearance, I18nManager } from 'react-native';
 import { reload } from './actions';
+import { setKnowIdle } from './idle';
 import { originalWarn } from './logs';
 import {
   RESERVED_COMMANDS,
@@ -70,7 +71,20 @@ const textSize: TaplineCommand = {
   run: runTextSize,
 };
 
+/** Built in: how an action decides the app is still (F1). Lets a gate compare both paths in one session. */
+const settleMode: TaplineCommand = {
+  description:
+    'Choose how an action decides the screen is still (args: { mode: "quiet" | "know" }); "quiet" waits 100 ms without a React commit, "know" answers as soon as the animations, interactions and requests the SDK can see are idle',
+  run: (args) => {
+    const mode = args.mode;
+    if (mode !== 'quiet' && mode !== 'know') throw new Error('mode must be "quiet" or "know"');
+    setKnowIdle(mode === 'know');
+    return { mode };
+  },
+};
+
 function installBuiltIns(): void {
+  registry.set('settle', settleMode);
   registry.set('appearance', appearance);
   registry.set('network', network);
   registry.set('text_size', textSize);
