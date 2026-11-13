@@ -523,3 +523,88 @@ describe("run with an account", () => {
     expect(typed).toHaveLength(0);
   });
 });
+
+// ---- the policy sees the raw words; everything shown stays scrubbed (PR 9 fix B) ------------------------
+
+describe("policy words an account value hides", () => {
+  const DELETE_BUTTON = { ref: "e7", type: "Pressable", role: "button", testID: "go", label: "Delete", text: "Delete", frame: { x: 24, y: 700, width: 354, height: 48 }, actions: ["press"] };
+  const word = accountStore({ version: 1, accounts: { tester2: { username: USER, password: "Delete", apps: [APP] } } });
+
+  async function rig(policy: { version: 1; confirm: string[]; block: string[] }) {
+    const logDir = tmp();
+    const { host, port } = await startHost({ redact: word.redact });
+    hosts.push(host);
+    const pressed: Array<Record<string, unknown>> = [];
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "press", "logs", "dryRun"] }, (req) => {
+      const params = req.params as Record<string, unknown>;
+      if (req.method === "tree") return { ok: true, result: { screen: SCREEN, elements: [DELETE_BUTTON] } };
+      if (req.method === "press" && params["dryRun"] === true) return { ok: true, result: { dryRun: true, element: DELETE_BUTTON, point: { x: 200, y: 724 } } };
+      if (req.method === "press") {
+        pressed.push(params);
+        return { ok: true, result: { element: DELETE_BUTTON, settledMs: 10 } };
+      }
+      return { ok: true, result: {} };
+    });
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, accounts: { store: word }, policy, logDir });
+    return { tools, pressed, logDir };
+  }
+
+  const everything = (logDir: string, answer: string, tools: TaplineTools): string =>
+    [answer, textOf(tools.sessionReport({})), ...readdirSync(logDir).map((name) => readFileSync(join(logDir, name), "utf8"))].join("\n");
+
+  it("a Delete label hidden by the password Delete still asks for the OK, and is never pressed silently", async () => {
+    const { tools, pressed, logDir } = await rig({ version: 1, confirm: ["delete"], block: [] });
+    const answer = await tools.tap({ target: { id: "go" }, look: false });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("needs_confirmation");
+    expect(pressed).toHaveLength(0);
+    expect(everything(logDir, textOf(answer), tools)).not.toContain("Delete");
+  });
+
+  it("a block word that equals an account value still blocks, and the word is not shown", async () => {
+    const { tools, pressed, logDir } = await rig({ version: 1, confirm: [], block: ["Delete"] });
+    const answer = await tools.tap({ target: { id: "go" }, look: false });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("blocked");
+    expect(pressed).toHaveLength(0);
+    expect(everything(logDir, textOf(answer), tools)).not.toContain("Delete");
+  });
+
+  it("a dry run says it needs an OK and shows no password", async () => {
+    const { tools, pressed } = await rig({ version: 1, confirm: ["delete"], block: [] });
+    const answer = textOf(await tools.tap({ target: { id: "go" }, dry_run: true }));
+    expect(answer).toContain("needs a person");
+    expect(answer).not.toContain("Delete");
+    expect(pressed).toHaveLength(0);
+  });
+});
+
+describe("property names are scrubbed too", () => {
+  it("redactValue scrubs keys, nested and in arrays, and keeps colliding keys apart", () => {
+    const out = redactValue({ [USER]: 1, list: [{ [PASS]: { [USER]: "x" } }], plain: true }, store.redact);
+    expect(JSON.stringify(out)).not.toContain(USER);
+    expect(JSON.stringify(out)).not.toContain(PASS);
+    expect(out).toEqual({ "<tester2's username>": 1, list: [{ "<tester2's password>": { "<tester2's username>": "x" } }], plain: true });
+    const both = redactValue({ [USER]: 1, "<tester2's username>": 2 }, store.redact) as Record<string, number>;
+    expect(Object.keys(both).sort()).toEqual(["<tester2's username>", "<tester2's username> #2"]);
+    expect(Object.values(both).sort()).toEqual([1, 2]);
+  });
+
+  it("an app_command result keyed by the username never shows it", async () => {
+    const { host, port } = await startHost({ redact: store.redact });
+    hosts.push(host);
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "command"] }, (req) =>
+      req.method === "command"
+        ? { ok: true, result: { result: { [USER]: { signedIn: true }, sessions: [{ [PASS]: 1 }] } } }
+        : { ok: true, result: { screen: SCREEN, elements: [] } },
+    );
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, accounts: { store } });
+    const said = textOf(await tools.appCommand({ name: "whoami", look: false }));
+    expect(said).toContain("signedIn");
+    expect(said).not.toContain(USER);
+    expect(said).not.toContain(PASS);
+    expect(said).toContain("<tester2's username>");
+  });
+});

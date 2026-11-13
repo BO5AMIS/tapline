@@ -253,6 +253,11 @@ export interface DevOffer {
 export interface RequestOptions {
   sessionId?: string;
   timeoutMs?: number;
+  /**
+   * The answer comes back with account values still in it, for the host's own safety checks (the policy, the guard).
+   * It never goes outward: show it only through `redactOut`.
+   */
+  internal?: boolean;
 }
 
 export interface ListenResult {
@@ -302,6 +307,8 @@ interface HostEvents {
 
 interface Pending {
   method: string;
+  /** The caller asked for the unredacted answer (`RequestOptions.internal`). */
+  internal: boolean;
   resolve: (value: unknown) => void;
   reject: (error: TaplineError) => void;
   timer: NodeJS.Timeout;
@@ -822,6 +829,16 @@ export class TaplineHost extends EventEmitter<HostEvents> {
 
   // ---- requests -------------------------------------------------------------
 
+  /** Whether account values are scrubbed from what the apps send (a test accounts file is loaded). */
+  get redacting(): boolean {
+    return this.redact !== undefined;
+  }
+
+  /** Scrubs a value (text and property names) the way every answer from an app is; for what an `internal` request gave. */
+  redactOut<T>(value: T): T {
+    return this.redact === undefined ? value : (redactValue(value, this.redact) as T);
+  }
+
   /** Sends a request to an app and resolves with its `result` (or rejects with a TaplineError). */
   request(method: string, params: unknown = {}, options: RequestOptions = {}): Promise<unknown> {
     const session =
@@ -872,7 +889,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
           ),
         );
       }, timeoutMs);
-      session.pending.set(id, { method, resolve, reject, timer });
+      session.pending.set(id, { method, internal: options.internal === true, resolve, reject, timer });
       const frame = JSON.stringify({ type: "request", id, method, params });
       session.socket.send(frame, (error) => {
         if (error !== undefined && error !== null) {
@@ -1027,7 +1044,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
         session.pending.delete(parsed.data.id);
         const redact = this.redact;
         if (parsed.data.ok) {
-          pending.resolve(redact === undefined ? (parsed.data.result ?? {}) : redactValue(parsed.data.result ?? {}, redact));
+          pending.resolve(redact === undefined || pending.internal ? (parsed.data.result ?? {}) : redactValue(parsed.data.result ?? {}, redact));
         } else {
           const error = redact === undefined || parsed.data.error === undefined ? parsed.data.error : (redactValue(parsed.data.error, redact) as typeof parsed.data.error);
           pending.reject(

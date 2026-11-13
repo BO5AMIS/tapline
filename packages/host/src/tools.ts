@@ -1042,6 +1042,12 @@ function momentCode(answer: CallToolResult): "not_connected" | "in_background" |
 }
 
 /** An app's dry-run answer (AGENT-TOOLS 1.8 §11.4). */
+/** Elements already read: as they may be shown, and raw (account values in) for the policy only. */
+interface KnownElements {
+  elements: TreeElement[];
+  raw: TreeElement[];
+}
+
 const dryRunResultSchema = z.object({
   element: elementSchema.nullish(),
   dryRun: z.literal(true),
@@ -1820,25 +1826,30 @@ export class TaplineTools {
     const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" || tool === "open_url" ? tool : short ? "swipe" : null;
     const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
     let guard = call.guard;
+    // What the drive read may hide account values; the policy and the guard get the raw element (see resolveForPolicy).
+    let knownRaw: TreeElement[] | undefined;
     // The policy and the guard are about the element that receives the touch, which may be an ancestor of the one named (§18.4).
     if (call.known !== undefined && (tool === "tap" || tool === "long_press" || tool === "toggle") && (checked || guard !== undefined)) {
       const named = call.known[0];
       const needs = tool === "tap" ? "press" : tool === "long_press" ? "longPress" : "toggle";
-      if (named !== undefined && !(named.actions ?? []).includes(needs)) {
-        // Not an actor itself: the app's own tap resolution (a dry run) says which element takes the touch.
+      // With account values hidden in what the drive read, the policy and the guard need the raw element: ask the app (a dry run).
+      if (named !== undefined && (this.host.redacting || !(named.actions ?? []).includes(needs))) {
+        // Not an actor itself (or hidden): the app's own tap resolution (a dry run) says which element takes the touch.
         const resolved = await this.resolveForPolicy(session, method, params);
         if (resolved.kind === "error") {
           this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
           return { kind: "stop", answer: fail(resolved.text) };
         }
-        if (resolved.elements.length !== 1 || resolved.elements[0] === undefined) return { kind: "stop", answer: fail("Error not_found: the touch's target could not be resolved for the policy check.") };
+        if (resolved.elements.length !== 1 || resolved.elements[0] === undefined || resolved.raw[0] === undefined) return { kind: "stop", answer: fail("Error not_found: the touch's target could not be resolved for the policy check.") };
         known = resolved.elements;
-        if (guard !== undefined) guard = guardOf(resolved.elements[0]);
+        knownRaw = resolved.raw;
+        if (guard !== undefined) guard = guardOf(resolved.raw[0]);
       }
     }
     let waited: Waited | null = null;
     if (guardedTool !== null && checked) {
-      const ready = await this.awaitOk(session, guardedTool, method, params, lists, known);
+      const pair = known === undefined ? undefined : { elements: known, raw: knownRaw ?? known };
+      const ready = await this.awaitOk(session, guardedTool, method, params, lists, pair);
       if ("stop" in ready) return { kind: "stop", answer: ready.stop };
       waited = ready.waited;
     }
@@ -1853,7 +1864,7 @@ export class TaplineTools {
         this.setOk(false);
         if (guardedTool !== null && checked) {
           // After a wait for a person, the element is read again: a change during the wait must be caught (§11.3).
-          const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known);
+          const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known === undefined ? undefined : { elements: known, raw: knownRaw ?? known });
           if ("stop" in gate) throw new PolicyStop(gate.stop);
           granted = gate.via;
         }
@@ -1994,15 +2005,15 @@ export class TaplineTools {
   private async reflexVerdict(session: SessionInfo, step: ReflexDo, lists: { confirm: string[]; block: string[] }): Promise<ReflexVerdict> {
     const words = reflexWords(step);
     const blockedWord = matchWord(lists.block, words);
-    if (blockedWord !== null) return { kind: "blocked", word: blockedWord };
+    if (blockedWord !== null) return { kind: "blocked", word: this.host.redactOut(blockedWord) };
     const flaggedWord = matchWord(lists.confirm, words);
-    if (flaggedWord !== null) return { kind: "flagged", word: flaggedWord };
+    if (flaggedWord !== null) return { kind: "flagged", word: this.host.redactOut(flaggedWord) };
     if (lists.confirm.length === 0 && lists.block.length === 0) return { kind: "none" };
     if (step.tool !== "tap" && step.tool !== "long_press" && step.tool !== "toggle") return { kind: "none" };
     const method = step.tool === "tap" ? "press" : step.tool === "long_press" ? "longPress" : "toggle";
     const resolved = await this.resolveForPolicy(session, method, { target: toWireTarget(step.target) });
     if (resolved.kind === "error") return { kind: "unresolved", why: `it can't be checked now (${resolved.text.replace(/^Error \w+: /, "").split("\n")[0]?.slice(0, 120) ?? ""})` };
-    const verdict = this.policyWords(lists, resolved.elements);
+    const verdict = this.policyWords(lists, resolved);
     return verdict.kind === "none" ? { kind: "none" } : { kind: verdict.kind === "blocked" ? "blocked" : "flagged", word: verdict.word };
   }
 
@@ -4789,7 +4800,7 @@ export class TaplineTools {
         this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
         return fail(resolved.text);
       }
-      const verdict = this.policyWords(lists, resolved.elements);
+      const verdict = this.policyWords(lists, resolved);
       const shown = resolved.elements[0];
       if (verdict.kind === "blocked") {
         this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
@@ -4826,7 +4837,7 @@ export class TaplineTools {
     params: Record<string, unknown>,
     lists: { confirm: string[]; block: string[] },
     waited: Waited | null,
-    known?: TreeElement[],
+    known?: KnownElements,
   ): Promise<{ stop: CallToolResult } | { via?: OkVia }> {
     const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
     if ("stop" in gate) return gate;
@@ -4854,21 +4865,21 @@ export class TaplineTools {
     params: Record<string, unknown>,
     lists: { confirm: string[]; block: string[] },
     /** Elements a drive already read: the policy is checked against them instead of a dry run (§18.4). */
-    known?: TreeElement[],
+    known?: KnownElements,
   ): Promise<{ stop: CallToolResult } | { waited: Waited | null }> {
     const dialogs = this.dialogs;
     if (dialogs === undefined || !dialogs.available() || lists.confirm.length === 0) return { waited: null };
-    const resolved = known !== undefined ? ({ kind: "ok", elements: known } as const) : await this.resolveForPolicy(session, method, params);
+    const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     // A target that can't be checked is answered by the check right before the touch.
     if (resolved.kind === "error") return { waited: null };
-    const verdict = this.policyWords(lists, resolved.elements);
+    const verdict = this.policyWords(lists, resolved);
     if (verdict.kind !== "confirm") return { waited: null };
     if (this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    const key = this.confirmKey(session, tool, verdict.element);
+    const key = this.confirmKey(session, tool, verdict.raw);
     const ask = { kind: tool, caption, word: verdict.word };
-    const fp = this.fingerprint(verdict.element);
+    const fp = this.fingerprint(verdict.raw);
     const name = this.shortName(verdict.element, false);
     const refuse = (tail: string): { stop: CallToolResult } => {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
@@ -4961,16 +4972,16 @@ export class TaplineTools {
     /** An OK the person gave while the call waited (`awaitOk`): used up, and checked against the screen as it is now. */
     waited?: Waited | null,
     /** Elements a drive already read: checked instead of a dry run; the app's guard holds the touch to them (§18.4). */
-    known?: TreeElement[],
+    known?: KnownElements,
   ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
-    const resolved = known !== undefined ? ({ kind: "ok", elements: known } as const) : await this.resolveForPolicy(session, method, params);
+    const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
       // Fail closed: what can't be checked isn't touched. The answer is the one the touch would give.
       this.showAction("agent", method, undefined, params, resolved.code, resolved.reason);
       return { stop: fail(resolved.text) };
     }
-    const verdict = this.policyWords(lists, resolved.elements);
+    const verdict = this.policyWords(lists, resolved);
     if (verdict.kind === "blocked") {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
       return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
@@ -4982,7 +4993,7 @@ export class TaplineTools {
       // A call that was cancelled while it waited never touches.
       const same =
         verdict.kind === "confirm" &&
-        this.fingerprint(verdict.element) === waited.fp &&
+        this.fingerprint(verdict.raw) === waited.fp &&
         this.host.current()?.id === session.id &&
         this.holdScope.getStore()?.signal?.aborted !== true;
       if (!same) {
@@ -4995,7 +5006,7 @@ export class TaplineTools {
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
     const caption = captionFor(tool, label ?? undefined, params) ?? tool;
     // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
-    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.element), { kind: tool, caption, word: verdict.word });
+    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.raw), { kind: tool, caption, word: verdict.word });
     if (check.granted) return { granted: true, via: check.via };
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
@@ -5017,15 +5028,19 @@ export class TaplineTools {
   /** Which policy word, if any, the elements the target could mean carry: a block word first, then a confirm word. */
   private policyWords(
     lists: { confirm: string[]; block: string[] },
-    elements: TreeElement[],
-  ): { kind: "blocked" | "confirm"; element: TreeElement; word: string } | { kind: "none" } {
-    for (const element of elements) {
-      const word = matchWord(lists.block, element);
-      if (word !== null) return { kind: "blocked", element, word };
+    resolved: { elements: TreeElement[]; raw: TreeElement[] },
+  ): { kind: "blocked" | "confirm"; element: TreeElement; raw: TreeElement; word: string } | { kind: "none" } {
+    // The words are matched on the raw elements, so a label an account value hides is still the word it is. What the
+    // verdict carries for showing (`element`, `word`) is scrubbed; `raw` stays inside, for the key and the fingerprint.
+    for (const [i, raw] of resolved.raw.entries()) {
+      const word = matchWord(lists.block, raw);
+      const element = resolved.elements[i];
+      if (word !== null && element !== undefined) return { kind: "blocked", element, raw, word: this.host.redactOut(word) };
     }
-    for (const element of elements) {
-      const word = matchWord(lists.confirm, element);
-      if (word !== null) return { kind: "confirm", element, word };
+    for (const [i, raw] of resolved.raw.entries()) {
+      const word = matchWord(lists.confirm, raw);
+      const element = resolved.elements[i];
+      if (word !== null && element !== undefined) return { kind: "confirm", element, raw, word: this.host.redactOut(word) };
     }
     return { kind: "none" };
   }
@@ -5085,13 +5100,14 @@ export class TaplineTools {
     method: string,
     params: Record<string, unknown>,
   ): Promise<
-    | { kind: "ok"; elements: TreeElement[]; point?: { x: number; y: number }; value?: unknown; scrolls?: true }
+    | { kind: "ok"; elements: TreeElement[]; raw: TreeElement[]; point?: { x: number; y: number }; value?: unknown; scrolls?: true }
     | { kind: "error"; text: string; code: string; reason?: string }
   > {
+    // `raw` still holds the account values, for the policy and the guard only; `elements` is what may be shown or kept.
     if (session.capabilities.includes("dryRun")) {
       let raw: unknown;
       try {
-        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id });
+        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id, internal: true });
       } catch (error) {
         const reason = error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined;
         return {
@@ -5103,9 +5119,11 @@ export class TaplineTools {
       }
       const parsed = dryRunResultSchema.safeParse(raw);
       if (!parsed.success) return { kind: "error", text: "Error internal: the app didn't answer the dry run.", code: "internal" };
+      const found = parsed.data.element ? [parsed.data.element] : [];
       return {
         kind: "ok",
-        elements: parsed.data.element ? [parsed.data.element] : [],
+        elements: this.host.redactOut(found),
+        raw: found,
         ...(parsed.data.point !== undefined ? { point: parsed.data.point } : {}),
         ...(parsed.data.value !== undefined ? { value: parsed.data.value } : {}),
         ...(parsed.data.scrolls === true ? { scrolls: true } : {}),
@@ -5118,7 +5136,7 @@ export class TaplineTools {
     }
     let raw: unknown;
     try {
-      raw = await this.host.request("tree", {}, { sessionId: session.id });
+      raw = await this.host.request("tree", {}, { sessionId: session.id, internal: true });
     } catch (error) {
       return { kind: "error", text: describeError(error), code: error instanceof TaplineError ? error.code : "internal" };
     }
@@ -5132,7 +5150,8 @@ export class TaplineTools {
     const frame = elements.length === 1 && first !== undefined ? first.frame : null;
     return {
       kind: "ok",
-      elements,
+      elements: this.host.redactOut(elements),
+      raw: elements,
       ...(frame ? { point: { x: Math.round(frame.x + frame.width / 2), y: Math.round(frame.y + frame.height / 2) } } : {}),
     };
   }
@@ -6264,7 +6283,7 @@ export class TaplineTools {
       const resolved = await this.resolveForPolicy(session, "press", { target: toWireTarget(target) });
       if (resolved.kind === "error") refusal.answer = fail(resolved.text);
       else {
-        const verdict = this.policyWords(lists, resolved.elements);
+        const verdict = this.policyWords(lists, resolved);
         if (verdict.kind === "blocked") refusal.answer = fail(this.blockedLine(verdict.element, verdict.word));
         else if (verdict.kind === "confirm") {
           refusal.answer = fail(

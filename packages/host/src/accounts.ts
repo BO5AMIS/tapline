@@ -182,12 +182,23 @@ export async function loadAccounts(file: string, probe: GitProbe = realGitProbe)
   return { store: accountStore(parsed.data) };
 }
 
-/** Scrubs every string in a JSON value (an app's answer), keeping its shape. */
+/**
+ * Scrubs every string in a JSON value (an app's answer), keeping its shape. Property names are scrubbed too; two names
+ * that come out the same stay apart with a numbered suffix.
+ */
 export function redactValue(value: unknown, redact: (text: string) => string): unknown {
   if (typeof value === "string") return redact(value);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, redact));
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, redact)]));
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const base = redact(key);
+      let name = base;
+      for (let n = 2; Object.prototype.hasOwnProperty.call(out, name); n++) name = `${base} #${n}`;
+      // defineProperty keeps a name like "__proto__" an ordinary key.
+      Object.defineProperty(out, name, { value: redactValue(item, redact), enumerable: true, writable: true, configurable: true });
+    }
+    return out;
   }
   return value;
 }
