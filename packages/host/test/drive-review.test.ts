@@ -68,7 +68,7 @@ describe("a jump's link words go through the policy", () => {
   });
 
   it("a flagged word needs a person's OK: no dialog stops it, a dialog asks and then goes", async () => {
-    const policy = { version: 1, confirm: ["cancel"], block: [] };
+    const policy = { version: 1 as const, confirm: ["cancel"], block: [] as string[] };
     const none = await setup({ map: orders(), policy, world: (w) => (w.links["wayfare://orders/42/cancel"] = "trips") });
     const stopped = await drive(none, jump);
     expect(textOf(stopped)).toMatch(/^Error not_allowed: needs_confirmation: /);
