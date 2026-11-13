@@ -124,13 +124,13 @@ function readPairing(raw: string | null): Pairing | null {
   return null;
 }
 
+/** How long an accepted offer may go without a welcome before the agent gives up on it and resumes the saved home. */
+export const OFFER_PAIR_TIMEOUT_MS = 15_000;
+
 /**
  * The in-app side of pairing: connects to the remembered computer, and handles pairing and
  * forget links (asking the user before connecting anywhere new). Work runs one step at a time.
  */
-/** How long an accepted offer may go without a welcome before the agent gives up on it and resumes the saved home. */
-export const OFFER_PAIR_TIMEOUT_MS = 15_000;
-
 export class TaplineAgent {
   private client: TaplineClient | null = null;
   private subscription: { remove(): void } | null = null;
