@@ -24,6 +24,7 @@ export interface El {
   role: string;
   testID?: string;
   label?: string;
+  row?: boolean;
   text?: string;
   frame: typeof frame;
   actions: string[];
@@ -74,6 +75,12 @@ export interface World {
   landOnce?: Screen;
   /** Called after each press, with the testID. */
   onPress?: (testID: string) => void;
+  /** The phone resolves a touch to this testID instead of the target the host checked (a guard must catch it). */
+  swapTo?: string;
+  /** What the app says of the next target, instead of looking for it. */
+  nextState?: "covered" | "moving";
+  /** Open alerts the tree reports. */
+  alerts?: unknown[];
   /** Answer `move` with this error code once, as the app's guard would. */
   moveError?: { code: string; message: string };
 }
@@ -150,6 +157,12 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
       }
       case "back":
         return { ok: true, result: { settledMs: 20 } };
+      case "type": {
+        const target = params["target"] as Wire | undefined;
+        const secure = target?.testID === "password";
+        const text = String(params["text"] ?? "");
+        return { ok: true, result: { element: { ref: "e90", type: "TextInput", role: "input", testID: target?.testID }, value: secure ? "•".repeat(text.length) : text, ...(secure ? { secure: true } : {}), settledMs: 10 } };
+      }
       case "openURL": {
         const landed = world.landOnce ?? world.links[String(params["url"])];
         delete world.landOnce;
@@ -165,7 +178,7 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
     const params = (req.params ?? {}) as Record<string, unknown>;
     switch (req.method) {
       case "tree":
-        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: world.elements[world.screen], route: { names: ROUTES[world.screen] }, place: { route: ROUTES[world.screen] } } };
+        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: world.elements[world.screen], ...(world.alerts !== undefined ? { alerts: world.alerts } : {}), route: { names: ROUTES[world.screen] }, place: { route: ROUTES[world.screen] } } };
       case "place":
         return { ok: true, result: { route: ROUTES[world.screen], seenAt: Date.now() } };
       case "places":
@@ -180,8 +193,8 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
         }
         const method = String(params["method"]);
         if (guard !== undefined) {
-          const element = findOn(world, inner["target"] as Wire | undefined);
-          if (element !== undefined && ((guard.id !== undefined && guard.id !== element.testID) || (guard.text !== undefined && guard.text !== element.text))) {
+          const element = world.swapTo !== undefined ? world.elements[world.screen].find((e) => e.testID === world.swapTo) : findOn(world, inner["target"] as Wire | undefined);
+          if (element !== undefined && ((guard.id !== undefined && guard.id !== element.testID) || (guard.label !== undefined && guard.label !== element.label) || (guard.text !== undefined && guard.text !== element.text))) {
             return { ok: false, error: { code: "stale", message: "stale: the target is another element now" } };
           }
         }
@@ -194,7 +207,8 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
           result: {
             done: done.result,
             place: { route: ROUTES[world.screen] },
-            ...(next !== undefined ? { next: found !== undefined ? { state: "ready", element: found, waitedMs: 5 } : { state: "missing", waitedMs: 5 } } : {}),
+            ...(next !== undefined && world.nextState === "covered" ? { next: { state: "covered", waitedMs: 5 } } : {}),
+            ...(next !== undefined && world.nextState === undefined ? { next: found !== undefined ? { state: "ready", element: found, waitedMs: 5 } : { state: "missing", waitedMs: 5 } } : {}),
           },
         };
       }

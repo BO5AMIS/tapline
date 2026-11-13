@@ -77,6 +77,14 @@ export function matchWord(words: string[], element: { label?: string | null; tex
   return null;
 }
 
+/** An id or a path as words: `deleteAccountButton` and `delete-account` both read "delete account". */
+export const asWords = (piece: string): string => piece.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[-_./]+/g, " ");
+
+/** The words a policy could match in a link: its path only (no scheme, query or fragment), as words. */
+export function linkWords(url: string): string {
+  return asWords(url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/[?#].*$/, ""));
+}
+
 /** What a person's OK is tied to: the same tool on the same element (its id, else its role, label and text). */
 export function elementKey(element: { testID?: string | null; role?: string | null; label?: string | null; text?: string | null }): string {
   return element.testID ? `id:${element.testID}` : `el:${element.role ?? ""}|${element.label ?? ""}|${element.text ?? ""}`;

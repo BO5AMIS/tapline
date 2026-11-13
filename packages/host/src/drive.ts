@@ -97,6 +97,8 @@ export interface DriveServices {
   map: AppMap;
   source: PlaceSource;
   capabilities: readonly string[];
+  /** The call was cancelled: stop between moves. */
+  aborted(): boolean;
   /** A user's-eyes journey never jumps (§18.4). */
   tapsOnly: boolean;
   clock(): number;
@@ -277,6 +279,11 @@ const guardOf = (element: TreeElement): Guard | undefined => {
 /** How a road names an element now: by id, else label, else text (§18.2). */
 function moveTargetOf(element: TreeElement): { target: NonNullable<Move["target"]>; names: NonNullable<MapRoad["names"]> } | null {
   const names: NonNullable<MapRoad["names"]> = {};
+  // A list row keeps only its id: its label and text are content, never saved (§18.2).
+  if (element.row === true) {
+    if (typeof element.testID !== "string" || element.testID === "") return null;
+    return { target: { id: element.testID }, names: { id: element.testID } };
+  }
   if (typeof element.testID === "string" && element.testID !== "") names.id = element.testID;
   if (typeof element.label === "string" && element.label !== "") names.label = element.label;
   if (typeof element.text === "string" && element.text !== "") names.text = element.text;
@@ -324,13 +331,15 @@ export function repairTarget(
   if (names.id !== undefined) wires.push({ testID: names.id });
   if (names.label !== undefined) wires.push({ label: names.label });
   if (names.text !== undefined) wires.push({ text: names.text });
+  const usable = (element: TreeElement): boolean => element.row !== true || (typeof element.testID === "string" && element.testID !== "");
   for (const wire of wires) {
-    const found = find(wire, elements);
+    const found = find(wire, elements).filter(usable);
     if (found.length === 1 && found[0] !== undefined) return found[0];
   }
   const wanted = [names.label, names.text].filter((s): s is string => s !== undefined).map(normal);
   const near = elements.filter(
     (element) =>
+      usable(element) &&
       (element.actions?.length ?? 0) > 0 &&
       [element.label, element.text].some((s) => typeof s === "string" && wanted.some((w) => close(normal(s), w))),
   );
@@ -338,6 +347,7 @@ export function repairTarget(
 }
 
 const shownName = (element: TreeElement): string => {
+  if (element.row === true) return `id=${element.testID ?? "?"}`;
   const words = element.text ?? element.label;
   return typeof words === "string" && words !== "" ? JSON.stringify(words) : `id=${element.testID ?? "?"}`;
 };
@@ -348,6 +358,31 @@ type Core = { ok: true; answer: CallToolResult } | { ok: false; code: string; me
 
 const OFF_ROUTE_CODES: ReadonlySet<string> = new Set(["not_found", "ambiguous", "not_actionable", "stale"]);
 const MAX_REPLANS = 2;
+/** Moments only a person can clear (§11.5): a drive is a batch, so they are answered in a batch's form and never re-run. */
+const MOMENT_CODES: ReadonlySet<string> = new Set(["not_connected", "in_background", "not_answering"]);
+
+function batchFailure(code: string, message: string, step: { i: number; n: number; road: MapRoad }, done: number): Core {
+  const text = `Ran ${done} of ${step.n} steps; stopped at step ${step.i + 1} (${stepWords(step.road)}): ${message} Nothing else was touched.`;
+  return { ok: false, code, message: text, answer: failed(`Error ${code}: ${text}`) };
+}
+
+/** The next target is covered: an alert goes to the person's moment, anything else is off_route (and blames no road). */
+async function covered(
+  svc: DriveServices,
+  step: { i: number; n: number; road: MapRoad },
+  done: number,
+  now: Place | null,
+  finish: (code: string, why: string, step: { i: number; n: number; road: MapRoad } | null, now: Place | null, isNew: boolean) => Promise<Core>,
+): Promise<Core> {
+  let alert = false;
+  try {
+    alert = ((await svc.tree()).alerts?.length ?? 0) > 0;
+  } catch {
+    alert = false;
+  }
+  if (alert) return batchFailure("not_actionable", "behind_alert: An alert is open; a person has to answer it.", step, done);
+  return finish("off_route", "it's covered by something on the screen", step, now, false);
+}
 
 function offRouteWhy(code: string, message: string): string {
   if (code === "not_found") return "it isn't on this screen";
@@ -440,6 +475,10 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
       const planned = moves[i];
       if (planned === undefined) break;
       const { road, viaLink } = planned;
+      if (svc.aborted()) {
+        const message = `the call was cancelled. Done: ${plural(run.done, "move", "moves")}. Nothing else was touched.`;
+        return { ok: false, code: "cancelled", message, answer: failed(`Error cancelled: ${message}`) };
+      }
       const step = { i, n: moves.length, road };
       const built = build(road.move, values);
       if (!built.ok) return finish("off_route", built.why, step, here, false);
@@ -450,10 +489,7 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
       if (built.wire !== undefined && !("x" in built.wire)) {
         const state = waiting?.state;
         if (state === "ready" || state === "moving") element = waiting?.element;
-        else if (state === "covered") {
-          markFailed(road, viaLink, map, run.dropped);
-          return finish("off_route", "it's covered by something on the screen", step, here, false);
-        }
+        else if (state === "covered") return covered(svc, step, run.done, here, finish);
         if (element === undefined) {
           const elements = fresh ?? (tree = await svc.tree()).elements;
           const found = svc.candidates(built.wire, elements);
@@ -501,10 +537,13 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
         return { ok: false, code: found?.[1] ?? "not_allowed", message: `${found?.[2] ?? body} ${lines[0] ?? ""}`.trim(), answer: appendLines(outcome.answer, lines) };
       }
       if (outcome.kind === "error") {
+        // Only a target that isn't there, or an arrival elsewhere, blames a road (§18.2).
+        if (outcome.code === "not_actionable" && /^behind_alert/.test(outcome.message)) return batchFailure(outcome.code, outcome.message, step, run.done);
         if (OFF_ROUTE_CODES.has(outcome.code)) {
-          if (outcome.code !== "stale") markFailed(road, viaLink, map, run.dropped);
+          if (outcome.code === "not_found") markFailed(road, viaLink, map, run.dropped);
           return finish("off_route", offRouteWhy(outcome.code, outcome.message), step, here, false);
         }
+        if (MOMENT_CODES.has(outcome.code)) return batchFailure(outcome.code, outcome.message, step, run.done);
         const message = `${outcome.message} Done: ${plural(run.done, "move", "moves")}.`;
         return { ok: false, code: outcome.code, message, answer: failed(`Error ${outcome.code}: ${message}`) };
       }
@@ -521,7 +560,9 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
       here = arrival.obs.place;
       if (here.name !== road.to) {
         markFailed(road, viaLink, map, run.dropped);
-        if (arrival.obs.isNew || run.replans >= MAX_REPLANS) return finish("off_route", "it didn't lead where the road says", step, here, arrival.obs.isNew);
+        // Nothing moved, or a jump that missed on its own say: the same road or link would only miss again.
+        if (!viaLink && here.name === road.from) return finish("off_route", "the screen didn't change", step, here, false);
+        if (arrival.obs.isNew || run.replans >= MAX_REPLANS || (viaLink && by === "link")) return finish("off_route", "it didn't lead where the road says", step, here, arrival.obs.isNew);
         // Planned again from where it is, by roads: a link that missed would only miss again.
         const again = planWay(map, here, target, { by: by === "link" ? "link" : "taps", tapsOnly: svc.tapsOnly });
         if ("error" in again) return finish("off_route", "it didn't lead where the road says", step, here, false);
@@ -535,7 +576,7 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
       // Clean: the road is updated only now, after the arrival check passed (§18.4).
       let proven = road;
       if (!viaLink && repaired !== undefined && touched !== null) {
-        proven = map.repairRoad(road, { ...road.move, target: touched.target }, touched.names) ?? road;
+        proven = map.repairRoad(road, { ...road.move, target: touched.target }, touched.names, repaired.element.row !== true) ?? road;
         run.repairs.push(`Road repaired: ${shownName(repaired.element)} (was ${repaired.was}).`);
       }
       if (!viaLink) {

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readRouteSync, type MapReflex, type MapRoad } from "./mapfile.js";
 import { placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
-import { matchWord } from "./policy.js";
+import { asWords, linkWords, matchWord } from "./policy.js";
 import { looksLikeValue } from "./protocol.js";
 import { routeEdges, type RouteEdge } from "./routes.js";
 import { describeRunStep } from "./run.js";
@@ -333,12 +333,10 @@ async function addLink(link: string, placeName: string | undefined, ctx: MapCont
 
 // -- reflexes (§18.7); the machinery that fires them is not here
 
-/** An id or a path as words: `deleteAccountButton` and `delete-account` both read "delete account". */
-const asWords = (piece: string): string => piece.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[-_./]+/g, " ");
 
 /** The words a policy could match in a reflex's `do`: its text and label, an id's words, and a link's path words. */
 function wordsOf(step: ReflexInput["do"]): { label?: string; text?: string } {
-  if (step.tool === "open_url") return { text: asWords(step.url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")) };
+  if (step.tool === "open_url") return { text: linkWords(step.url) };
   if (step.tool !== "tap" && step.tool !== "long_press" && step.tool !== "toggle") return {};
   const target = step.target;
   if ("id" in target) return { text: asWords(target.id) };

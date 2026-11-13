@@ -44,7 +44,7 @@ import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
 import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
-import { DEFAULT_POLICY, elementKey, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { DEFAULT_POLICY, elementKey, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
@@ -1661,6 +1661,7 @@ export class TaplineTools {
       source,
       capabilities: session.capabilities,
       tapsOnly: this.userEyes(),
+      aborted: () => this.holdScope.getStore()?.signal?.aborted === true,
       clock: this.clock,
       sleep: this.sleep,
       describe: describeError,
@@ -1698,11 +1699,14 @@ export class TaplineTools {
     const lists = listsFor(this.policy, session.app);
     const { tool, method, params } = call;
     const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
-    const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" ? tool : short ? "swipe" : null;
+    // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
+    const url = typeof params["url"] === "string" ? params["url"] : "";
+    const known = tool === "open_url" ? [{ ref: "", role: "link", text: linkWords(url) } satisfies TreeElement] : call.known;
+    const guardedTool = tool === "tap" || tool === "long_press" || tool === "toggle" || tool === "open_url" ? tool : short ? "swipe" : null;
     const checked = guardedTool !== null && (lists.confirm.length > 0 || lists.block.length > 0);
     let waited: Waited | null = null;
     if (guardedTool !== null && checked) {
-      const ready = await this.awaitOk(session, guardedTool, method, params, lists, call.known);
+      const ready = await this.awaitOk(session, guardedTool, method, params, lists, known);
       if ("stop" in ready) return { kind: "stop", answer: ready.stop };
       waited = ready.waited;
     }
@@ -1716,13 +1720,10 @@ export class TaplineTools {
       const run = async (): Promise<unknown> => {
         this.okUsed = false;
         if (guardedTool !== null && checked) {
-          const gate = await this.policyGate(session, guardedTool, method, params, lists, waited, call.known);
+          // After a wait for a person, the element is read again: a change during the wait must be caught (§11.3).
+          const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known);
           if ("stop" in gate) throw new PolicyStop(gate.stop);
           granted = gate.via;
-          if (granted !== undefined) {
-            this.logExtra = { confirmed: true, confirmed_by: granted };
-            this.okUsed = true;
-          }
         }
         return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
       };
@@ -2358,6 +2359,10 @@ export class TaplineTools {
       // Time spent waiting for a person's OK isn't counted (§9.3).
       if (Date.now() - started - (hold.ms - heldAtStart) > RUN_TIMEOUT_MS) {
         stop = { index: i, code: "timeout", message: `the batch ran longer than ${RUN_TIMEOUT_MS / 1000} s`, rest: [] };
+        break;
+      }
+      if (this.holdScope.getStore()?.signal?.aborted === true) {
+        stop = { index: i, code: "cancelled", message: "the call was cancelled", rest: [] };
         break;
       }
       const at = Date.now();
@@ -4430,19 +4435,35 @@ export class TaplineTools {
     if ("stop" in ready) return ready.stop;
     let granted: OkVia | undefined;
     const answer = await perform(async () => {
-      const gate = await this.policyGate(session, tool, method, params, lists, ready.waited);
+      const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
       if ("stop" in gate) return gate.stop;
       granted = gate.via;
-      if (granted !== undefined) {
-        this.logExtra = { confirmed: true, confirmed_by: granted };
-        // §18.2: a move that needed a person's OK is never saved as a road.
-        this.okUsed = true;
-      }
       return null;
     });
     if (granted === undefined || answer.isError === true) return answer;
     this.journeyRun?.noteOk(granted);
     return appendNote(answer, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
+  }
+
+  /**
+   * The check right before a touch, shared by a single call and a drive's move: the policy's verdict, the person's OK used up,
+   * and what the log and the road rules need to know about it (§18.2: a move that needed an OK is never saved as a road).
+   */
+  private async gatePreflight(
+    session: SessionInfo,
+    tool: string,
+    method: string,
+    params: Record<string, unknown>,
+    lists: { confirm: string[]; block: string[] },
+    waited: Waited | null,
+    known?: TreeElement[],
+  ): Promise<{ stop: CallToolResult } | { via?: OkVia }> {
+    const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
+    if ("stop" in gate) return gate;
+    if (gate.via === undefined) return {};
+    this.logExtra = { confirmed: true, confirmed_by: gate.via };
+    this.okUsed = true;
+    return { via: gate.via };
   }
 
   /** What the person was asked for and what the screen showed then; the touch is checked against it right before it happens. */
