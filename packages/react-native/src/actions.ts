@@ -1304,8 +1304,9 @@ async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs
     const { frame } = await elementFor(found);
     if (params.force !== true) await assertReachable(again.snapshot, found, frame);
     const at = Date.now() - started;
-    callHandler('onPress', handler, [pressEvent(found.node.fiber, frame)]);
-    return { done: true, afterMs: at };
+    // A handler that throws on the second tap was reached: that is the app's failure, not a tap that didn't land.
+    const threw = callHandlerCaught('onPress', handler, [pressEvent(found.node.fiber, frame)]);
+    return threw === undefined ? { done: true, afterMs: at } : { done: true, afterMs: at, threw };
   } catch (error) {
     const reason =
       error instanceof TaplineError
@@ -1318,7 +1319,7 @@ async function pressAgain(first: Entry, params: Record<string, unknown>, afterMs
 }
 
 /** What happened to a double tap's second tap, and how long after the first it came. */
-export type PressSecond = { done: true; afterMs: number } | { done: false; reason: string; afterMs: number };
+export type PressSecond = { done: true; afterMs: number; threw?: string } | { done: false; reason: string; afterMs: number };
 
 /**
  * What `press` and `longPress` answer: the element, `closedKeyboard: true` when the keyboard was
