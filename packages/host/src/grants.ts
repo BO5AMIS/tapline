@@ -185,8 +185,21 @@ export function parseGrants(raw: unknown, today: string, block: (app: string) =>
 
 // -- the state file (§19.4)
 
-const stateSchema = z.object({ version: z.literal(1), uses: z.record(z.string(), z.record(z.string(), z.array(z.string()))) });
+/**
+ * `generation` is the fence (PR 12 review): it goes up by one at every write, and a writer that finds it changed since it read
+ * the file, or that no longer owns the lock, writes nothing. A file without it (the other tool's) reads as generation 0.
+ */
+const stateSchema = z.object({ version: z.literal(1), generation: z.number().int().min(0).optional(), uses: z.record(z.string(), z.record(z.string(), z.array(z.string()))) });
 type Uses = Record<string, Record<string, string[]>>;
+interface State {
+  uses: Uses;
+  generation: number;
+}
+
+/** What a holder of the lock can ask: does the lock file still carry my token? */
+interface LockHold {
+  owns(): Promise<boolean>;
+}
 
 /** What the touch is, for a grant to match: the app, the element's own label and text, and the saved routes running now. */
 export interface GrantTouch {
@@ -225,11 +238,23 @@ export interface GrantBookOptions {
   lockClock?: () => number;
   sleep?: (ms: number) => Promise<void>;
   staleMs?: number;
+  /** For tests: runs while the lock is held, after the counts were read and before the use is committed (a stalled holder). */
+  beforeCommit?: () => Promise<void>;
 }
 
 const LOCK_TRIES = 300;
 const LOCK_WAIT_MS = 20;
 const RENAME_TRIES = 5;
+
+/** The owner token a lock's content names; undefined for a lock that is not in this format (an older or other tool's). */
+function lockOwner(text: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && typeof (parsed as { owner?: unknown }).owner === "string" ? (parsed as { owner: string }).owner : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error && typeof (error as { code: unknown }).code === "string" ? (error as { code: string }).code : undefined;
@@ -271,17 +296,17 @@ export class GrantBook {
     return parseGrants(file.data.grants, localDate(this.now()), (app) => listsFor(file.data, { id: app, name: app }).block);
   }
 
-  /** The state file's uses; null when it doesn't parse (it is left alone, §19.4). A missing file is no uses. */
-  private async readState(): Promise<Uses | null> {
+  /** The state file's uses and generation; null when it doesn't parse (it is left alone, §19.4). A missing file is no uses. */
+  private async readState(): Promise<State | null> {
     let text: string;
     try {
       text = await readFile(this.statePath, "utf8");
     } catch (error) {
-      return errorCode(error) === "ENOENT" ? {} : null;
+      return errorCode(error) === "ENOENT" ? { uses: {}, generation: 0 } : null;
     }
     try {
       const parsed = stateSchema.safeParse(JSON.parse(text));
-      return parsed.success ? parsed.data.uses : null;
+      return parsed.success ? { uses: parsed.data.uses, generation: parsed.data.generation ?? 0 } : null;
     } catch {
       return null;
     }
@@ -306,7 +331,7 @@ export class GrantBook {
     const uses = await this.readState();
     const at = this.now();
     const usage = new Map<string, { today: number; hour: number } | null>();
-    for (const grant of report.grants) usage.set(grant.name, uses === null ? null : this.counts(uses, grant, at));
+    for (const grant of report.grants) usage.set(grant.name, uses === null ? null : this.counts(uses.uses, grant, at));
     return { report, usage };
   }
 
@@ -393,7 +418,7 @@ export class GrantBook {
   /** Reads the policy file as it is, lets `change` edit it, and writes it back when it says it did. A string is why it couldn't. */
   private async editPolicy(change: (file: Record<string, unknown>) => boolean): Promise<true | string> {
     const path = this.options.policyPath;
-    const outcome = await this.withLock(async (): Promise<true | string> => {
+    const outcome = await this.withLock(async (hold): Promise<true | string> => {
       let file: unknown;
       try {
         file = JSON.parse(await readFile(path, "utf8"));
@@ -402,6 +427,7 @@ export class GrantBook {
       }
       if (typeof file !== "object" || file === null || Array.isArray(file)) return "the policy file isn't a policy.";
       if (!change(file as Record<string, unknown>)) return true;
+      if (!(await hold.owns())) return "the grants' lock was taken over while the file was being changed; try again.";
       try {
         await this.writeAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
       } catch (error) {
@@ -488,21 +514,23 @@ export class GrantBook {
     if (grant.route !== undefined && !touch.routes.includes(grant.route)) return false;
     if (grant.revoked !== undefined || grant.draftsOnly || localDate(at) > grant.until) return false;
     if (grant.quiet !== undefined && inQuiet(grant.quiet, minutes)) return false;
-    const uses = await this.readState();
-    return uses?.[use.name]?.[use.date]?.includes(use.stamp) === true;
+    const state = await this.readState();
+    return state?.uses[use.name]?.[use.date]?.includes(use.stamp) === true;
   }
 
   /** A use taken back: the touch wasn't made after all (§19.4: a use is counted when the touch is made). */
   async release(use: { name: string; stamp: string; date: string }): Promise<void> {
-    await this.withLock(async () => {
-      const uses = await this.readState();
-      if (uses === null) return;
+    await this.withLock(async (hold) => {
+      const state = await this.readState();
+      if (state === null) return;
+      const uses = state.uses;
       const list = uses[use.name]?.[use.date];
       const at = list?.indexOf(use.stamp) ?? -1;
       if (list === undefined || at < 0) return;
       list.splice(at, 1);
       if (list.length === 0 && uses[use.name] !== undefined) delete uses[use.name]?.[use.date];
-      await this.writeState(uses);
+      // A holder that lost the lock gives nothing back: the use stays counted, the safe side.
+      await this.writeState(uses, state.generation, hold).catch(() => undefined);
     });
   }
 
@@ -528,9 +556,9 @@ export class GrantBook {
 
   /** A string: the limit that stopped it. null: it can't be counted (a broken state file), nothing to say. */
   private async peek(grant: Grant, at: Date): Promise<{ today: number; stamp: string; date: string } | string | null> {
-    const uses = await this.readState();
-    if (uses === null) return null;
-    const counts = this.counts(uses, grant, at);
+    const state = await this.readState();
+    if (state === null) return null;
+    const counts = this.counts(state.uses, grant, at);
     return this.limit(grant, counts) ?? { today: counts.today + 1, stamp: "", date: localDate(at) };
   }
 
@@ -538,23 +566,27 @@ export class GrantBook {
   private async use(grant: Grant, at: Date, detail: string, app: { id?: string; name: string }, all: Grant[]): Promise<{ today: number; stamp: string; date: string } | string | null> {
     const audit = this.options.audit;
     if (audit === null) return null;
-    const done = await this.withLock(async () => {
-      const uses = await this.readState();
+    const done = await this.withLock(async (hold) => {
+      const state = await this.readState();
       // A state file that doesn't parse is left alone; every grant is used up (§19.4).
-      if (uses === null) return null;
+      if (state === null) return null;
+      const uses = state.uses;
       const counts = this.counts(uses, grant, at);
       const stopped = this.limit(grant, counts);
       if (stopped !== null) return stopped;
       const stamp = localIso(at);
       const date = localDate(at);
       const count = counts.today + 1;
+      await this.options.beforeCommit?.();
+      // A holder that stalled past the takeover no longer owns the lock: its counts are old, so it records nothing and its touch asks a person.
+      if (!(await hold.owns())) return null;
       // A grant needs its line: when it can't be written, the grant doesn't cover the touch (§23).
       if (!audit.write({ kind: "grant", app: app.id ?? app.name, name: grant.name, detail: `${detail} (${count} of ${grant.perDay} today)` })) return null;
       const mine = (uses[grant.name] ??= {});
       (mine[date] ??= []).push(stamp);
       this.prune(uses, date, all);
       try {
-        await this.writeState(uses);
+        await this.writeState(uses, state.generation, hold);
       } catch {
         return null;
       }
@@ -570,16 +602,42 @@ export class GrantBook {
     }
   }
 
-  private async withLock<T>(run: () => Promise<T>): Promise<T | null> {
-    if (!(await this.acquire())) return null;
+  /**
+   * Runs `run` while holding the lock, which is owned by a token (a random id and the process id) only this call knows. The hold
+   * lets `run` ask whether the lock is still its own before it writes; the lock is released only while it still carries the token.
+   */
+  private async withLock<T>(run: (hold: LockHold) => Promise<T>): Promise<T | null> {
+    const token = await this.acquire();
+    if (token === null) return null;
     try {
-      return await run();
+      return await run({ owns: () => this.owns(token) });
     } finally {
-      await rm(this.lockPath, { force: true }).catch(() => undefined);
+      await this.unlock(token);
     }
   }
 
-  private async acquire(): Promise<boolean> {
+  /** The lock's content: the owner's token and when it was taken. */
+  private lockText(token: string): string {
+    return `${JSON.stringify({ owner: token, pid: process.pid, t: this.now().toISOString() })}\n`;
+  }
+
+  private async readLock(): Promise<string | null> {
+    try {
+      return await readFile(this.lockPath, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether the lock file still carries this token. */
+  private async owns(token: string): Promise<boolean> {
+    const text = await this.readLock();
+    return text !== null && lockOwner(text) === token;
+  }
+
+  /** Creates the lock exclusively and returns its owner token, taking over a stale one safely; null when it stays held. */
+  private async acquire(): Promise<string | null> {
+    const token = `${randomBytes(8).toString("hex")}-${process.pid}`;
     for (let attempt = 0; attempt < LOCK_TRIES; attempt++) {
       let handle;
       try {
@@ -587,52 +645,78 @@ export class GrantBook {
       } catch (error) {
         const code = errorCode(error);
         // Windows says EPERM or EBUSY while a rival's delete of the lock is under way: it is held.
-        if (code !== "EEXIST" && code !== "EPERM" && code !== "EBUSY") return false;
-        if (await this.stale()) await this.reclaim();
+        if (code !== "EEXIST" && code !== "EPERM" && code !== "EBUSY") return null;
+        const seen = await this.staleLock();
+        if (seen !== null) await this.takeOver(seen);
         else await this.sleep(LOCK_WAIT_MS);
         continue;
       }
       try {
-        await handle.writeFile(`${process.pid} ${this.now().toISOString()}\n`, "utf8");
+        await handle.writeFile(this.lockText(token), "utf8");
       } finally {
         await handle.close();
       }
-      return true;
+      return token;
     }
-    return false;
+    return null;
   }
 
-  private async stale(): Promise<boolean> {
+  /** The content of the lock when it is older than the takeover time, else null. */
+  private async staleLock(): Promise<string | null> {
     try {
-      return this.lockClock() - (await stat(this.lockPath)).mtimeMs > this.staleMs;
+      const info = await stat(this.lockPath);
+      if (this.lockClock() - info.mtimeMs <= this.staleMs) return null;
+      return await readFile(this.lockPath, "utf8");
     } catch {
-      return false;
+      return null;
     }
   }
 
-  /** Takes a lock that looked stale by renaming it away, so only one reclaimer wins. */
-  private async reclaim(): Promise<void> {
-    const grabbed = `${this.lockPath}.${randomBytes(4).toString("hex")}.stale`;
+  /**
+   * Takes over a stale lock: renames it to a tombstone of its own, and only if the tombstone holds the stale content that was read
+   * does the lock count as removed. A lock that changed hands between the look and the rename is put back, never deleted. The
+   * caller then creates its own lock exclusively.
+   */
+  private async takeOver(seen: string): Promise<void> {
+    const tomb = `${this.lockPath}.${randomBytes(6).toString("hex")}.stale`;
     try {
-      await rename(this.lockPath, grabbed);
+      await rename(this.lockPath, tomb);
     } catch {
-      return; // someone else reclaimed it first, or its holder released it
+      return; // someone else took it over first, or its holder released it
     }
     try {
-      const madeAt = (await stat(grabbed)).mtimeMs;
-      if (this.lockClock() - madeAt <= this.staleMs) {
-        // It was fresh after all (it changed hands between our look and our rename): give it back.
-        const text = await readFile(grabbed, "utf8").catch(() => "");
-        await writeFile(this.lockPath, text, { flag: "wx" }).catch(() => undefined);
-      }
+      const held = await readFile(tomb, "utf8").catch(() => null);
+      if (held !== null && held !== seen) await writeFile(this.lockPath, held, { flag: "wx" }).catch(() => undefined);
     } finally {
-      await rm(grabbed, { force: true }).catch(() => undefined);
+      await rm(tomb, { force: true }).catch(() => undefined);
     }
   }
 
-  /** A temporary file and a rename, with retries on Windows (§19.4). */
-  private async writeState(uses: Uses): Promise<void> {
-    await this.writeAtomic(this.statePath, `${JSON.stringify({ version: 1, uses }, null, 2)}\n`);
+  /** Removes the lock only while it still holds this token: through a tombstone, so another holder's lock is never unlinked. */
+  private async unlock(token: string): Promise<void> {
+    const tomb = `${this.lockPath}.${randomBytes(6).toString("hex")}.released`;
+    try {
+      await rename(this.lockPath, tomb);
+    } catch {
+      return; // already gone
+    }
+    try {
+      const held = await readFile(tomb, "utf8").catch(() => null);
+      if (held !== null && lockOwner(held) !== token) await writeFile(this.lockPath, held, { flag: "wx" }).catch(() => undefined);
+    } finally {
+      await rm(tomb, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * A temporary file and a rename, with retries on Windows (§19.4). Fenced: the writer must still own the lock, and the file's
+   * generation must still be the one it read; the new file carries that generation plus one. Otherwise nothing is written.
+   */
+  private async writeState(uses: Uses, generation: number, hold: LockHold): Promise<void> {
+    if (!(await hold.owns())) throw new Error("the lock was taken over");
+    const now = await this.readState();
+    if (now === null || now.generation !== generation) throw new Error("the state file changed");
+    await this.writeAtomic(this.statePath, `${JSON.stringify({ version: 1, generation: generation + 1, uses }, null, 2)}\n`);
   }
 
   private async writeAtomic(path: string, content: string): Promise<void> {
