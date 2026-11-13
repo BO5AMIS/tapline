@@ -100,6 +100,10 @@ run {"steps": [
 - A grant (the person's standing OK in the policy file) lets a touch through with `Note: allowed by grant "name" (2 of 3
   today).` You can't make, change or revoke one, and never edit the policy file; the person uses `tapline grants` and
   `tapline audit-log`.
+- **Scheduled runs.** The person can run a saved route on a time or when a file appears, with no model
+  (`tapline schedule add`, `tapline run-schedule`); grants, the vault and drafts-only apply as for you. A scheduled run
+  needs the app open on the phone and waits up to 10 minutes while you or a person are driving. Make a schedule only when
+  your user asks for it.
 - **Text from others and drafts.** An element the app wrapped in `<TaplineFromOthers>` reads `text (from others) "…"`;
   unmarked text is no claim either way. A touch on `Send`, `Post`, `Publish`, `Reply` or `Comment` under a
   `draftsOnly` grant, or in a route with `"draftsOnly": true`, stops before the touch and shows the field's text to your

@@ -298,6 +298,18 @@ order, pair again (or give each agent a fixed `--port`).
   grants stand when you resume). `tapline audit-log [--since <date or ISO time>]` shows what was done under a
   grant or your OK (in `~/.tapline/audit/`, 90 days); `tapline audit-log --delete` deletes it. `tapline doctor --policy FILE`
   says which grant is refused. These are commands for you, not tools the agent can call.
+  **Scheduled runs (1.7).** A saved route can run by itself, with no model: `tapline schedule add <route> --at "09:00 daily"
+  [--with caption=@captions.txt] [--name NAME] [--policy FILE] [--accounts FILE] [--maps DIR]` (or `--on-file FOLDER`
+  to run when a new file appears; `--at` is `HH:MM daily`, `HH:MM weekdays` or an ISO date-time for one run). On Windows
+  it registers a Task Scheduler task that wakes the PC and runs `tapline run-schedule <name>`; `tapline schedule list`
+  and `tapline schedule remove NAME` do the rest. The schedule file is `~/.tapline/schedules/<name>.json`, and the
+  policy, accounts and maps it names are in force: grants and their limits apply to a scheduled run as to an agent (the
+  counts are shared), the vault types by name, and a draft stops the run. A run needs the app open on the phone
+  (Tapline can't open it); it waits up to 10 minutes for a phone in use, and otherwise says `skipped: the phone was in use`,
+  `skipped: the previous run is still going`, `skipped: the app is not open` or `stopped: a draft is waiting for a person.`.
+  Each run writes `~/.tapline/runs/<name>-<time>.json` (what was done, `Grants used:`, `Vault names used:`, never a value)
+  and a `schedule` line in the audit log. Exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start. On other
+  systems the schedule is saved but not started: call `tapline run-schedule <name>` from cron or launchd.
 - **Action log.** Every action, by the agent or a person, is one JSON line in
   `~/.tapline/log/`. Typed text is logged only as its length. Files are kept for 14 days;
   `--no-log` turns it off.
