@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ActionLogEntry } from "../src/actionlog.js";
 import { AuditLog } from "../src/auditlog.js";
 import { Confirmations } from "../src/confirm.js";
-import { Dialogs, OK_ALLOW, OK_FIELD, type ElicitAnswer, type ElicitClient } from "../src/elicit.js";
+import { ControlQueue } from "../src/control.js";
+import { Dialogs, OK_ALLOW, OK_FIELD, type ElicitAnswer, type ElicitClient, type ElicitSchema } from "../src/elicit.js";
 import { GrantBook } from "../src/grants.js";
 import { saveMap, type MapFile } from "../src/mapfile.js";
 import { MapRegistry } from "../src/places.js";
@@ -55,6 +56,8 @@ class FakeDialogClient implements ElicitClient {
   }
 }
 
+type ToolsExtra = Partial<ConstructorParameters<typeof TaplineTools>[1]>;
+
 interface Rig {
   tools: TaplineTools;
   app: FakeApp;
@@ -64,7 +67,7 @@ interface Rig {
   logDir: string;
   auditDir: string;
   put(grants: unknown[]): void;
-  makeTools(grants: GrantBook | undefined, policy: PolicyFile, dialog?: boolean): TaplineTools;
+  makeTools(grants: GrantBook | undefined, policy: PolicyFile, dialog?: boolean, extra?: ToolsExtra): TaplineTools;
   registry: MapRegistry;
   scriptsDir: string;
 }
@@ -104,8 +107,8 @@ async function setup(grants: unknown[] | null): Promise<Rig> {
   registries.push(registry);
   const scriptsDir = join(root, "scripts");
   const dialog = new FakeDialogClient();
-  const makeTools = (book: GrantBook | undefined, policy: PolicyFile, withDialog = true): TaplineTools =>
-    new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, confirmations: new Confirmations(), logDir, maps: registry, scriptsDir, reloadWaitMs: 50, ...(withDialog ? { dialogs: new Dialogs(dialog, {}) } : {}), policy, ...(book !== undefined ? { grants: book } : {}) });
+  const makeTools = (book: GrantBook | undefined, policy: PolicyFile, withDialog = true, extra: ToolsExtra = {}): TaplineTools =>
+    new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, confirmations: new Confirmations(), logDir, maps: registry, scriptsDir, reloadWaitMs: 50, ...(withDialog ? { dialogs: new Dialogs(dialog, {}) } : {}), policy, ...(book !== undefined ? { grants: book } : {}), ...extra });
   const book = grants === null ? undefined : new GrantBook({ policyPath, audit });
   const tools = makeTools(book, { version: 2, confirm: ["Post", "Pay"], block: [] });
   return { tools, app, dialog, state, policyPath, logDir, auditDir, put, makeTools, registry, scriptsDir };
@@ -253,5 +256,179 @@ describe("a grant stands in for a person's OK (§19.3)", () => {
     const replayed = await tools.replay({ name: "post_update" });
     expect(textOf(replayed)).toContain('allowed by grant "posting" (2 of 5 today)');
     expect(r.dialog.shown).toBe(shownBefore);
+  });
+});
+
+// -- A2: pause, revoke-all, the dialog that creates a grant, the report line (AGENT-TOOLS 1.14 §19.5 to §19.7, §23)
+
+/** A host dialog that answers each question as a script says, and keeps what it was asked. */
+class ScriptedClient implements ElicitClient {
+  asked: Array<{ message: string; schema: ElicitSchema }> = [];
+  constructor(private readonly answer: (message: string, schema: ElicitSchema) => ElicitAnswer) {}
+  canShowForm(): boolean {
+    return true;
+  }
+  elicit(message: string, schema: ElicitSchema): Promise<ElicitAnswer> {
+    this.asked.push({ message, schema });
+    return Promise.resolve(this.answer(message, schema));
+  }
+}
+
+const accept = (answer: string): ElicitAnswer => ({ action: "accept", content: { answer } });
+const policyOf = (): PolicyFile => ({ version: 2, confirm: ["Post", "Pay"], block: [] });
+const policyGrants = (path: string): Array<Record<string, unknown>> => (JSON.parse(readFileSync(path, "utf8")) as { grants: Array<Record<string, unknown>> }).grants;
+const isGrantQuestion = (schema: ElicitSchema): boolean => schema.properties["answer"]?.enum.includes("Allow") === true;
+
+describe("pause is not the kill switch (§19.5)", () => {
+  it("a paused agent touches nothing and counts nothing; resuming restores the grant's cover", async () => {
+    const r = await setup([GRANT]);
+    const control = new ControlQueue();
+    const tools = r.makeTools(new GrantBook({ policyPath: r.policyPath, audit: new AuditLog(r.auditDir) }), policyOf(), false, { control });
+    control.setPaused(true);
+    const paused = await tools.tap({ target: { id: "post" }, look: false });
+    expect(paused.isError).toBe(true);
+    expect(textOf(paused)).toMatch(/^Error paused:/);
+    expect(presses(r.app)).toBe(0);
+    expect(readdirSync(r.auditDir)).toEqual([]);
+    control.setPaused(false);
+    const resumed = await tools.tap({ target: { id: "post" }, look: false });
+    expect(textOf(resumed)).toBe('Tapped e1 button "Post" id=post.\nNote: allowed by grant "posting" (1 of 2 today).');
+    expect(auditLines(r.auditDir)).toHaveLength(1);
+  });
+
+  it("with a dialog, a pause before the touch gives the use back", async () => {
+    const r = await setup([GRANT]);
+    const control = new ControlQueue();
+    const tools = r.makeTools(new GrantBook({ policyPath: r.policyPath, audit: new AuditLog(r.auditDir) }), policyOf(), true, { control });
+    control.setPaused(true);
+    expect(textOf(await tools.tap({ target: { id: "post" }, look: false }))).toMatch(/^Error paused:/);
+    control.setPaused(false);
+    // the use taken before the dialog stage was given back: both of the grant's two uses are still there
+    expect(textOf(await tools.tap({ target: { id: "post" }, look: false }))).toContain("(1 of 2 today)");
+    r.state.screen = "welcome";
+    expect(textOf(await tools.tap({ target: { id: "post" }, look: false }))).toContain("(2 of 2 today)");
+  });
+});
+
+describe("revoke-all stops a covered touch at the next move (§19.5)", () => {
+  it("a second host instance sharing the policy file revokes; the first stops, asking a person", async () => {
+    const r = await setup([GRANT]);
+    expect(textOf(await r.tools.tap({ target: { id: "post" }, look: false }))).toContain("allowed by grant");
+    // another host (the tool's other process, here a second GrantBook) revokes everything
+    const other = new GrantBook({ policyPath: r.policyPath, audit: new AuditLog(r.auditDir) });
+    expect(await other.revokeAll()).toEqual({ revoked: ["posting"], already: [] });
+    r.state.screen = "welcome";
+    const next = await r.tools.tap({ target: { id: "post" }, look: false });
+    expect(textOf(next)).toContain(`Note: grant "posting" doesn't cover this (it was revoked on ${TODAY()}); asking a person.`);
+    expect(r.dialog.shown).toBe(1);
+    expect(policyGrants(r.policyPath)[0]?.["revoked"]).toBe(TODAY());
+    expect(auditLines(r.auditDir).filter((l) => l["kind"] === "revoke")).toEqual([expect.objectContaining({ name: "posting", detail: "grants --revoke-all" })]);
+  });
+
+  it("with no dialog the touch after a revoke-all answers needs_confirmation", async () => {
+    const r = await setup([GRANT]);
+    const tools = r.makeTools(new GrantBook({ policyPath: r.policyPath, audit: new AuditLog(r.auditDir) }), policyOf(), false);
+    expect(textOf(await tools.tap({ target: { id: "post" }, look: false }))).toContain("allowed by grant");
+    await new GrantBook({ policyPath: r.policyPath, audit: null }).revokeAll();
+    r.state.screen = "welcome";
+    const next = await tools.tap({ target: { id: "post" }, look: false });
+    expect(next.isError).toBe(true);
+    expect(textOf(next)).toMatch(/needs_confirmation/);
+  });
+});
+
+describe("a grant is made only by the person's answer (§19.6)", () => {
+  const setupOffer = async (answer: (message: string, schema: ElicitSchema) => ElicitAnswer): Promise<{ r: Rig; client: ScriptedClient; tools: TaplineTools }> => {
+    const r = await setup([]);
+    const client = new ScriptedClient(answer);
+    const audit = new AuditLog(r.auditDir);
+    const tools = r.makeTools(new GrantBook({ policyPath: r.policyPath, audit }), policyOf(), true, { dialogs: new Dialogs(client, {}), audit });
+    return { r, client, tools };
+  };
+  const person = (grant: string, drafts: string) => (message: string, schema: ElicitSchema): ElicitAnswer => {
+    if (message.startsWith("Allow: ")) return accept(OK_ALLOW);
+    if (isGrantQuestion(schema)) return accept(grant);
+    return accept(drafts);
+  };
+
+  it("after Allow once, asks the grant with the exact text; Allow and the default No write the grant with drafts on", async () => {
+    const { r, client, tools } = await setupOffer(person("Allow", "No"));
+    const answer = await tools.tap({ target: { id: "post" }, look: false });
+    expect(textOf(answer)).toContain("Note: allowed by a person (in chat).");
+    const questions = client.asked.map((a) => a.message);
+    expect(questions[0]).toBe('Allow: tap "Post" in Demo? (policy word "Post")');
+    expect(questions[1]).toMatch(/^Allow tapping "Post" in Demo up to 3 times a day, until \d{1,2} [A-Z][a-z]{2} \(drafts shown to you first\)\?$/);
+    expect(questions[2]).toBe("Send these without showing you each one first?");
+    expect(client.asked[2]?.schema.properties["answer"]?.default).toBe("No");
+    expect(client.asked[1]?.schema.properties["answer"]?.default).toBeUndefined();
+    const grants = policyGrants(r.policyPath);
+    expect(grants).toEqual([{ name: "demo_post", app: APP_ID, words: ["Post"], perDay: 3, until: inDays(7) }]);
+    expect(grants[0]).not.toHaveProperty("draftsOnly");
+    expect(auditLines(r.auditDir).map((l) => [l["kind"], l["name"], l["detail"]])).toEqual([
+      ["approval", "Post", "grant created"],
+      ["approval", "Post", "allowed by a person (in chat)"],
+    ]);
+  });
+
+  it("Yes to the separate second question writes draftsOnly false, and that grant then covers", async () => {
+    const { r, tools } = await setupOffer(person("Allow", "Yes"));
+    await tools.tap({ target: { id: "post" }, look: false });
+    expect(policyGrants(r.policyPath)[0]?.["draftsOnly"]).toBe(false);
+    r.state.screen = "welcome";
+    const next = await tools.tap({ target: { id: "post" }, look: false });
+    expect(textOf(next)).toBe('Tapped e1 button "Post" id=post.\nNote: allowed by grant "demo_post" (1 of 3 today).');
+  });
+
+  it("Don't allow, a decline or a cancel writes nothing; the person isn't asked again in the session", async () => {
+    const refusals: ElicitAnswer[] = [accept("Don't allow"), { action: "decline" }, { action: "cancel" }];
+    for (const refuse of refusals) {
+      const { r, client, tools } = await setupOffer((message) => (message.startsWith("Allow: ") ? accept(OK_ALLOW) : refuse));
+      await tools.tap({ target: { id: "post" }, look: false });
+      expect(policyGrants(r.policyPath)).toEqual([]);
+      r.state.screen = "welcome";
+      await tools.tap({ target: { id: "post" }, look: false });
+      expect(client.asked.filter((a) => isGrantQuestion(a.schema))).toHaveLength(1);
+    }
+  });
+
+  it("a person who declines the touch is not offered a grant, and the refusal is in the audit log", async () => {
+    const { r, client, tools } = await setupOffer(() => accept("Don't allow"));
+    const answer = await tools.tap({ target: { id: "post" }, look: false });
+    expect(answer.isError).toBe(true);
+    expect(client.asked).toHaveLength(1);
+    expect(policyGrants(r.policyPath)).toEqual([]);
+    expect(auditLines(r.auditDir)).toEqual([expect.objectContaining({ kind: "approval", name: "Post", detail: "declined" })]);
+  });
+
+  it("never offers a grant for a payment", async () => {
+    const { r, client, tools } = await setupOffer(person("Allow", "No"));
+    await tools.tap({ target: { id: "pay" }, look: false });
+    expect(client.asked.map((a) => a.message)).toEqual(['Allow: tap "Pay now" in Demo? (policy word "Pay")']);
+    expect(policyGrants(r.policyPath)).toEqual([]);
+  });
+
+  it("a grant is not made from an answer that isn't an accepted Allow", async () => {
+    const { r, tools } = await setupOffer((message, schema) => (message.startsWith("Allow: ") ? accept(OK_ALLOW) : isGrantQuestion(schema) ? accept("Allow once") : accept("Yes")));
+    await tools.tap({ target: { id: "post" }, look: false });
+    expect(policyGrants(r.policyPath)).toEqual([]);
+  });
+});
+
+describe("the report's Grants line and the action log (§19.7)", () => {
+  it("session_report names the uses and the times a person was asked", async () => {
+    const r = await setup([{ ...GRANT, perDay: 2 }]);
+    for (let i = 0; i < 3; i++) {
+      r.state.screen = "welcome";
+      await r.tools.tap({ target: { id: "post" }, look: false });
+    }
+    const report = textOf(r.tools.sessionReport({}));
+    expect(report).toContain("Grants: posting 2 uses (2 of 2 today); asked a person 1 time (limit reached).");
+    expect(report.split("\n").findIndex((l) => l.startsWith("Grants:"))).toBeGreaterThan(0);
+  });
+
+  it("is left out when no grant was involved", async () => {
+    const r = await setup([GRANT]);
+    await r.tools.look({ screenshot: false });
+    expect(textOf(r.tools.sessionReport({}))).not.toContain("Grants:");
   });
 });
