@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import type { AccountStore } from "./accounts.js";
+import { mentionsVault, type AccountStore } from "./accounts.js";
 import { insideDir, loadMap, readRouteSync, saveMap, saveRouteFile } from "./mapfile.js";
 import type { AppMap } from "./places.js";
 import type { Step } from "./run.js";
@@ -29,9 +29,9 @@ export function routeSlug(raw: string): string | null {
 // -- variables
 
 /** `${name}` or `${account.field}`; `$${` is a literal `${`. ASCII names only. */
-const TOKEN = /\$\$\{|\$\{([A-Za-z_]\w*(?:\.\w+)?)\}/g;
-const WHOLE_ACCOUNT = /^\$\{account\.\w+\}$/;
-const ACCOUNT_BRIEF = "an account value is the whole text of a step, not part of one.";
+const TOKEN = /\$\$\{|\$\{([A-Za-z_]\w*(?:\.\w+){0,2})\}/g;
+const WHOLE_ACCOUNT = /^\$\{(?:account\.\w+|vault\.\w+\.\w+)\}$/;
+const ACCOUNT_BRIEF = "an account or vault value is the whole text of a step, not part of one.";
 
 /** Typed text written so a replay reads it back as it was: a literal `${` becomes `$${`. */
 export function escapeLiteral(text: string): string {
@@ -58,11 +58,11 @@ function fillText(text: string, { values, variables }: Fill): string {
   return text.replace(TOKEN, (match: string, name: string | undefined) => {
     if (name === undefined) return "${";
     // An account's value is typed by the tool when the step runs; it stays a placeholder here.
-    if (name.startsWith("account.")) return match;
+    if (name.startsWith("account.") || name.startsWith("vault.")) return match;
     if (variables !== undefined && !variables.includes(name)) throw new Refusal(`the step uses ${name} but the route's variables don't list it.`);
     if (!Object.hasOwn(values, name)) throw new Refusal(`no value given for the variable "${name}".`);
     const value = values[name] as string;
-    if (value.includes("${account.")) throw new Refusal(`the value of "${name}" can't hold an account placeholder; name the account instead.`);
+    if (mentionsVault(value)) throw new Refusal(`the value of "${name}" can't hold an account placeholder; name the account instead.`);
     return value;
   });
 }
@@ -78,9 +78,10 @@ function fillValue(value: unknown, fill: Fill): unknown {
 
 /** An account placeholder in a typed step's text must be the whole text, and a field an account has. */
 function checkAccountText(text: string, accounts: AccountStore | undefined): void {
-  const found = [...text.matchAll(TOKEN)].filter((m) => m[1]?.startsWith("account.") === true);
+  const found = [...text.matchAll(TOKEN)].filter((m) => m[1]?.startsWith("account.") === true || m[1]?.startsWith("vault.") === true);
   if (found.length === 0) return;
-  if (!WHOLE_ACCOUNT.test(text)) throw new Refusal(ACCOUNT_BRIEF);
+  if (!WHOLE_ACCOUNT.test(text)) throw new Refusal(text.includes("${vault.") ? ACCOUNT_BRIEF : "an account value is the whole text of a step, not part of one.");
+  if (found[0]?.[1]?.startsWith("vault.") === true) return;
   const field = (found[0]?.[1] ?? "").slice("account.".length);
   if (accounts !== undefined && field !== "username" && field !== "password") {
     throw new Refusal(`\${account.${field}} isn't a value an account has; use \${account.username} or \${account.password}.`);
@@ -101,7 +102,7 @@ export function substituteVariables(step: Step, values: Record<string, string>, 
     const filled = Object.fromEntries(Object.entries(step).map(([key, value]) => [key, key === "tool" ? value : fillValue(value, fill)]));
     // Checked again on the filled text: a literal or a value must never turn into an account placeholder.
     const after = (filled as Record<string, unknown>)["text"];
-    if (step.tool === "type_text" && typeof after === "string" && after.includes("${account.") && after !== text) {
+    if (step.tool === "type_text" && typeof after === "string" && mentionsVault(after) && after !== text) {
       throw new Refusal("a literal ${account. can't become an account placeholder; an account value is the whole text of a step, written as its own placeholder.");
     }
     return { ok: true, step: filled as Step };
@@ -136,7 +137,7 @@ export function routeTyped(params: Record<string, unknown>): { params: Record<st
   const { as, ...rest } = params;
   if (typeof as === "string") return { params: { ...rest, text: variablePlaceholder(as) }, placeholder: true, variable: as, account: false };
   const account = typeof rest["text"] === "string" && rest["text"].includes("${account.");
-  return { params: rest, placeholder: account, account };
+  return { params: rest, placeholder: typeof rest["text"] === "string" && mentionsVault(rest["text"]), account };
 }
 
 function escapeValue(value: unknown): unknown {

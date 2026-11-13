@@ -408,10 +408,25 @@ async function checkAccounts(file: string, probe: GitProbe | undefined): Promise
   try {
     const loaded = await loadAccounts(file, probe);
     if (loaded.store === null) {
-      return { name, status: "fail", detail: loaded.blocked, fix: "Move the file outside the repository, or add it to .gitignore." };
+      const opened = loaded.blocked.startsWith("the vault file can't be opened");
+      return {
+        name,
+        status: "fail",
+        detail: loaded.blocked,
+        fix: opened ? "Open it as the user who protected it, on the same computer, from where it was protected; or protect the plain file again with tapline vault protect." : "Move the file outside the repository, or add it to .gitignore.",
+      };
     }
     const names = loaded.store.names();
-    return { name, status: "pass", detail: `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}. ${ACCOUNTS_WARNING}` };
+    const onlyAccounts = names.every((entry) => loaded.store?.kindOf(entry) === "account");
+    const listed = onlyAccounts
+      ? `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}`
+      : `${names.length} ${names.length === 1 ? "entry" : "entries"}: ${names.map((entry) => `${entry} (${loaded.store?.kindOf(entry) ?? "account"})`).join(", ")}`;
+    return {
+      name,
+      status: "pass",
+      detail: `${listed}. ${ACCOUNTS_WARNING}${loaded.note !== undefined ? ` ${loaded.note}` : ""}`,
+      ...(loaded.note !== undefined ? { fix: "Run tapline vault protect FILE to keep it protected for this user." } : {}),
+    };
   } catch (error) {
     return { name, status: "fail", detail: errorText(error), fix: "Fix the file, or leave out --accounts." };
   }

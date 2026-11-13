@@ -130,7 +130,10 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
   // The test accounts (AGENT-TOOLS 1.13 §18.6). A refused file still starts the server, with no accounts and the reason.
   const accounts = options.accounts !== undefined ? await loadAccounts(options.accounts, options.gitProbe) : undefined;
-  if (accounts !== undefined && accounts.store === null) log(accounts.blocked);
+  if (accounts !== undefined) {
+    const said = accounts.store === null ? accounts.blocked : accounts.note;
+    if (said !== undefined) log(said);
+  }
 
   const config = await resolveConfig(options);
   const clients = new Map<string, { tools: TaplineTools; lastUsed: number }>();

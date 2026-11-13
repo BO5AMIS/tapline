@@ -898,6 +898,18 @@ export interface RouteServices {
 }
 
 const ACCOUNT_FIELD = /\$\{account\.([a-z]+)\}/g;
+const VAULT_REF = /\$\{vault\.\w+\.\w+\}/g;
+
+/** The vault references a route's steps type, whole, once each. */
+function vaultRefsUsed(steps: Step[]): string[] {
+  const refs = new Set<string>();
+  for (const step of steps) {
+    const typed = (step as { text?: unknown }).text;
+    if (typeof typed !== "string") continue;
+    for (const found of typed.matchAll(VAULT_REF)) refs.add(found[0]);
+  }
+  return [...refs];
+}
 
 /** The account fields a route's steps type, in order, once each. */
 export function accountFieldsUsed(steps: Step[]): string[] {
@@ -923,10 +935,11 @@ function prepareRoute(svc: DriveServices, rs: RouteServices, name: string, value
   const route = loadRoute(svc.map.folder(), name);
   if (route === null) return { ok: false, code: "not_found", message: `no route named "${name}"; map lists the routes.` };
   const used = accountFieldsUsed(route.steps);
-  if (strictAccount && used.length === 0 && account !== undefined) {
+  if (strictAccount && used.length === 0 && account !== undefined && vaultRefsUsed(route.steps).length === 0) {
     return { ok: false, code: "bad_params", message: `account "${account}" is named but the route ${route.name} types no \${account.username} or \${account.password}.` };
   }
-  for (const field of used) {
+  // A vault value is probed whole (`${vault.home.street}`); an account's by its field.
+  for (const field of [...used, ...vaultRefsUsed(route.steps)]) {
     const refused = rs.probeAccount(field, account);
     if (refused !== null) return { ok: false, code: "bad_params", message: refused };
   }

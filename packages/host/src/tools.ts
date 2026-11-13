@@ -22,7 +22,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
+import { mentionsVault, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -736,7 +736,7 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
 
 /** A step that types an account's value: its text is a placeholder, kept in the script (the value never is). */
 function isAccountStep(step: ScriptStep): boolean {
-  return step.method === "type" && typeof step.params["text"] === "string" && step.params["text"].includes("${account.");
+  return step.method === "type" && typeof step.params["text"] === "string" && mentionsVault(step.params["text"]);
 }
 
 /**
@@ -1862,7 +1862,7 @@ export class TaplineTools {
     return {
       accounts: this.options.accounts?.store ?? undefined,
       probeAccount: (field, named) => {
-        const used = this.accountText("$" + "{account." + field + "}", named, session);
+        const used = this.accountText(field.startsWith("${") ? field : "$" + "{account." + field + "}", named, session);
         return used !== null && !used.ok ? used.message : null;
       },
       runSteps: (steps, look, route) => this.inRoute(route, () => this.run({ steps, account, brief, ...(look ? {} : { look: false }) })),
@@ -2329,12 +2329,15 @@ export class TaplineTools {
   /** The first answer of the session says an accounts file was refused (it sits in a git repo), once (AGENT-TOOLS 1.13 §18.6). */
   private withAccountsNote(answer: CallToolResult): CallToolResult {
     const loaded = this.options.accounts;
-    if (this.accountsNoteDone || loaded === undefined || loaded.store !== null) return answer;
+    if (this.accountsNoteDone || loaded === undefined) return answer;
+    // A plain vault file carries its warning (§20.2); a refused one says why.
+    const line = loaded.store !== null ? loaded.note : `Note: ${loaded.blocked}`;
+    if (line === undefined) return answer;
     if (answer.content[0]?.type !== "text") return answer;
     this.accountsNoteDone = true;
     // An answer that is the refusal itself already says it.
-    if (answer.content[0].text.includes(loaded.blocked)) return answer;
-    return appendNote(answer, `Note: ${loaded.blocked}`);
+    if (loaded.store === null && answer.content[0].text.includes(loaded.blocked)) return answer;
+    return appendNote(answer, line);
   }
 
   /** The first call has been answered, so the "needs a person" note has had its turn. */
@@ -3493,7 +3496,7 @@ export class TaplineTools {
     if (wire !== undefined && wire.sessionId !== session.id) {
       return fail("Error not_connected: the app changed while the account's value was being prepared; try again.");
     }
-    if (wire === undefined && method === "type" && typeof params === "object" && params !== null && String((params as { text?: unknown }).text ?? "").includes("${account.")) {
+    if (wire === undefined && method === "type" && typeof params === "object" && params !== null && mentionsVault(String((params as { text?: unknown }).text ?? ""))) {
       return fail("Error bad_params: an account value can't be typed as plain text; it needs a loaded account and a connected app.");
     }
     const shortAnswer = this.briefOn(brief);
@@ -5487,7 +5490,7 @@ export class TaplineTools {
       text: args.text,
       replace: args.replace ?? true,
       submit: args.submit ?? false,
-      ...(account !== null ? { account: args.account ?? this.runAccount } : {}),
+      ...(account !== null && args.text.includes("${account.") ? { account: args.account ?? this.runAccount } : {}),
       ...(this.userEyes() ? { noScroll: true } : {}),
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
@@ -5500,13 +5503,16 @@ export class TaplineTools {
     if (args.dry_run === true) {
       if (wire === undefined) {
         // A placeholder with no checked account is never sent, not even to be resolved.
-        if (args.text.includes("${account.")) return Promise.resolve(this.notConnected());
+        if (mentionsVault(args.text)) return Promise.resolve(this.notConnected());
         return this.dryRun("type_text", "type", params);
       }
       const { account: _account, ...plain } = params;
-      return this.dryRun("type_text", "type", { ...plain, text: "", kind: wire.values.kind });
+      return this.dryRun("type_text", "type", { ...plain, text: "", ...(wire.values["kind"] !== undefined ? { kind: wire.values["kind"] } : {}) });
     }
-    return this.act(
+    const use = account !== null && account.ok ? account.use : undefined;
+    // What the audit line says about the field the value went into (§23): the app's own answer says whether it was secure.
+    let secureField: boolean | undefined;
+    const typed = this.act(
       "type",
       // `as` is for the recording only: `act` keeps it out of what goes to the app.
       args.as !== undefined ? { ...params, as: args.as } : params,
@@ -5516,6 +5522,7 @@ export class TaplineTools {
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
         // Journey or not, iOS shows the last character of a password for about a second: remember when (finding 4).
         if (secure) this.secureTypedAt = this.clock();
+        secureField = secure;
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
         return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
@@ -5523,11 +5530,24 @@ export class TaplineTools {
       args.screenshot,
       undefined,
       undefined,
-      undefined,
+      use?.kind === "card" && session !== undefined ? () => this.cardOk(session, use, params) : undefined,
       args.brief,
       undefined,
       wire,
     );
+    if (use === undefined || session === undefined) return typed;
+    // Every use of a vault value is one `vault` line: the entry and the field, never the value (§20.1, §23).
+    return typed.then((answer) => {
+      if (answer.isError !== true) {
+        this.options.audit?.write({
+          kind: "vault",
+          app: session.app.id ?? session.app.name,
+          name: use.name,
+          detail: `${use.field} into ${secureField === true ? "secure field" : "text field"}`,
+        });
+      }
+      return answer;
+    });
   }
 
   /** Why `as` can't be used on this typed text (AGENT-TOOLS 1.13 §18.5), or null: it goes only while a route records. */
@@ -5536,7 +5556,62 @@ export class TaplineTools {
     if (this.recording?.route === undefined) return "Error bad_params: as goes only while recording a route (record with route).";
     const problem = variableProblem(as);
     if (problem !== null) return `Error bad_params: ${problem}`;
-    if (account !== undefined || text.includes("${account.")) return "Error bad_params: as can't go with an account's value; the route keeps its placeholder already.";
+    if (account !== undefined || mentionsVault(text)) return "Error bad_params: as can't go with an account's value; the route keeps its placeholder already.";
+    return null;
+  }
+
+  /**
+   * A card's field is typed only with a person's OK, every time, and no grant covers it (AGENT-TOOLS 1.14 §19.2, §20.1). The
+   * dialog's words name the entry and the field, never the value. Returns an answer that stops the call, or null to go on.
+   */
+  private async cardOk(session: SessionInfo, use: VaultUse, params: Record<string, unknown>): Promise<CallToolResult | null> {
+    const { account: _account, ...plain } = params;
+    const resolved = await this.resolveForPolicy(session, "type", { ...plain, text: "" });
+    if (resolved.kind === "error") return fail(resolved.text);
+    const label = resolved.elements[0]?.label ?? resolved.elements[0]?.text ?? undefined;
+    const role = resolved.elements[0]?.role ?? "field";
+    const app = plainText(session.app.name) || "the app";
+    const what = label !== undefined && plainText(label) !== "" ? `"${plainText(label)}"` : `the ${plainText(role, 30) || "field"}`;
+    const caption = `Allow: type card "${use.name}" ${use.field} into ${what} in ${app}?`;
+    const words = `typing card "${use.name}" ${use.field}`;
+    const refuse = (tail: string): CallToolResult => fail(`Error not_allowed: needs_confirmation: ${words} needs a person's OK, every time (no grant covers a card). ${tail}`);
+    if (this.inReflexStep()) return refuse("A reflex never asks.");
+    const key = this.confirmKey(session, `card:${use.name}.${use.field}`, resolved.raw[0] ?? { ref: "", role: "input" });
+    const ask = { kind: "type_text", caption, word: "card" };
+    const check = this.confirmations.check(key, ask);
+    if (check.granted) {
+      this.approved(session, "card", check.via);
+      return null;
+    }
+    if ("held" in check) return refuse("They declined it just now. Don't ask again by repeating the call: ask your user what they want.");
+    const dialogs = this.dialogs;
+    if (dialogs === undefined || !dialogs.available()) return refuse(`${this.liveViewLine()}${check.suffix}`);
+    const hold = this.holdScope.getStore();
+    const cancelled = hold?.signal;
+    const abort = new AbortController();
+    const waitStarted = Date.now();
+    const noDialog = new Promise<"no_dialog">((done) => {
+      void dialogs.askOk(caption, abort.signal).then((answer) => {
+        if (answer === "unavailable") done("no_dialog");
+        else if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
+      });
+    });
+    const onCancel = (): void => this.confirmations.withdraw(check.request.id);
+    cancelled?.addEventListener("abort", onCancel, { once: true });
+    const settled = await Promise.race([this.confirmations.wait(check.request.id), noDialog]);
+    cancelled?.removeEventListener("abort", onCancel);
+    abort.abort();
+    if (hold !== undefined) hold.ms += Date.now() - waitStarted;
+    if (settled === "no_dialog") return refuse(this.liveViewLine());
+    if (cancelled?.aborted === true) return refuse("The call was cancelled before anyone answered.");
+    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
+    if (!settled.allow) {
+      this.options.audit?.write({ kind: "approval", app: session.app.id ?? session.app.name, name: "card", detail: "declined" });
+      return refuse("They declined. Ask your user what to do.");
+    }
+    const used = this.confirmations.check(key, ask);
+    if (!used.granted) return fail(CHANGED_WHILE_WAITING);
+    this.approved(session, "card", used.via);
     return null;
   }
 
@@ -5554,8 +5629,8 @@ export class TaplineTools {
     text: string,
     named: string | undefined,
     session: SessionInfo | undefined,
-  ): { ok: true; value: string; kind: "secure" | "plain" } | { ok: false; code: string; message: string } | null {
-    const mentions = text.includes("${account.");
+  ): { ok: true; value: string; kind: "secure" | "plain" | undefined; use: VaultUse | undefined } | { ok: false; code: string; message: string } | null {
+    const mentions = mentionsVault(text);
     if (!mentions && named === undefined) return null;
     const loaded = this.options.accounts;
     if (loaded === undefined) return { ok: false, code: "bad_params", message: "no accounts are loaded; start Tapline with --accounts FILE." };
@@ -5569,11 +5644,12 @@ export class TaplineTools {
     if (!substituted.ok) return substituted;
     if (substituted.field === null) return null;
     // An older app ignores the kind and would type a password into any field.
-    if (!session.capabilities.includes("typeKind")) {
+    if ((substituted.field === "password" || substituted.field === "username") && !session.capabilities.includes("typeKind")) {
       return { ok: false, code: "unsupported", message: "this app's Tapline is too old to type an account's value safely; update react-native-tapline." };
     }
-    const field: AccountField = substituted.field;
-    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : "plain" };
+    // Only a password and a username are held to a kind of field (§18.6); the rest of the vault goes where the app lets it.
+    const field = substituted.field;
+    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : field === "username" ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {
