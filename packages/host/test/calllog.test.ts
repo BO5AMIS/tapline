@@ -19,7 +19,7 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const SAVE = { ref: "e3", type: "Pressable", role: "button", testID: "save", text: "Save", frame: { x: 24, y: 610, width: 354, height: 48 }, actions: ["press"] };

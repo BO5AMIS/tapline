@@ -14,7 +14,7 @@ const APP = { id: "com.example.wayfare", name: "Wayfare", version: "1.4.0", buil
 const dirs: string[] = [];
 afterEach(() => {
   vi.useRealTimers();
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function temp(): string {

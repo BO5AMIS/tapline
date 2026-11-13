@@ -19,7 +19,7 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const textOf = (result: CallToolResult): string => result.content.map((b) => (b.type === "text" ? b.text : `<${b.type}>`)).join("\n");

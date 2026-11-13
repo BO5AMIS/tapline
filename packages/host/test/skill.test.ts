@@ -17,7 +17,7 @@ function temp(): string {
 }
 
 afterEach(() => {
-  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe("the skill in the repository (Agent Skills format)", () => {

@@ -131,6 +131,16 @@ export interface SetupOptions {
 
 export const ALL_CAPS = ["tree", "press", "logs", "dryRun", "place", "places", "move"];
 
+/** Every map registry a test made: their background saves must end before the test deletes its folders. */
+const openRegistries = new Set<MapRegistry>();
+
+/** Waits for every drive test's map saves, then forgets the registries (call it in afterEach, before deleting folders). */
+export async function flushDriveMaps(): Promise<void> {
+  const all = [...openRegistries];
+  openRegistries.clear();
+  await Promise.all(all.map((registry) => registry.flushAll().catch(() => undefined)));
+}
+
 export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: string[], options: SetupOptions = {}): Promise<Setup> {
   const { host, port } = await startHost();
   hosts.push(host);
@@ -224,6 +234,7 @@ export async function setupDrive(hosts: TaplineHost[], apps: FakeApp[], dirs: st
   const { app } = await FakeApp.connect(port, { app: APP, capabilities: options.capabilities ?? ALL_CAPS, ...options.hello }, handler);
   apps.push(app);
   const registry = new MapRegistry({ mapsDir });
+  openRegistries.add(registry);
   const tools = new TaplineTools(host, {
     connect: { url: "", name: "Dev PC" },
     maps: registry,

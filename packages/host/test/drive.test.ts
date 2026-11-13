@@ -7,7 +7,7 @@ import { toolDescription } from "../src/tool-text.js";
 import { ControlQueue } from "../src/control.js";
 import type { MapFile } from "../src/mapfile.js";
 import type { TaplineHost } from "../src/server.js";
-import { BUILD, OLD_BUILD, baseMap, button, note, place, road, setupDrive, textOf, type Setup, type SetupOptions } from "./drive-helpers.js";
+import { BUILD, OLD_BUILD, baseMap, button, note, place, road, setupDrive, textOf, type Setup, type SetupOptions, flushDriveMaps } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // AGENT-TOOLS 1.13 §18.4: `drive`, one call across the map.
@@ -18,7 +18,8 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  await flushDriveMaps();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const setup = (options: SetupOptions = {}): Promise<Setup> => setupDrive(hosts, apps, dirs, options);

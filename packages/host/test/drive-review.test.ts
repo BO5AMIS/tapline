@@ -7,7 +7,7 @@ import { callTool } from "../src/dispatch.js";
 import { CANT_NOW, DONE_FIELD, Dialogs, OK_ALLOW, OK_FIELD, type ElicitAnswer, type ElicitClient } from "../src/elicit.js";
 import type { MapFile, MapRoad } from "../src/mapfile.js";
 import type { TaplineHost } from "../src/server.js";
-import { baseMap, button, note, place, road, setupDrive, textOf, type El, type Setup, type SetupOptions } from "./drive-helpers.js";
+import { baseMap, button, note, place, road, setupDrive, textOf, type El, type Setup, type SetupOptions, flushDriveMaps } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // The safety review of the first drive commit (1.6 task 15): rows, link words, blame, nothing moved, moments, cancel, the guard.
@@ -18,7 +18,8 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  await flushDriveMaps();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const setup = (options: SetupOptions = {}): Promise<Setup> => setupDrive(hosts, apps, dirs, options);

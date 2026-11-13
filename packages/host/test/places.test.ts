@@ -11,7 +11,7 @@ import { MAP_FORMAT, MAP_VERSION, type MapFile, type PlaceKey } from "../src/map
 const APP = { id: "com.example.wayfare", name: "Wayfare", version: "1.4.0", build: "1.4.0 (212)" };
 const dirs: string[] = [];
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function temp(): string {

@@ -86,7 +86,7 @@ describe("the policy's words", () => {
       writeFileSync(bad, JSON.stringify({ confirm: "Pay" }));
       expect(() => loadPolicy(bad)).toThrow(/isn't a policy/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 

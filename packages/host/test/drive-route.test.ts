@@ -5,7 +5,7 @@ import { accountStore } from "../src/accounts.js";
 import { callTool } from "../src/dispatch.js";
 import type { MapFile } from "../src/mapfile.js";
 import type { TaplineHost } from "../src/server.js";
-import { baseMap, button, place, setupDrive, textOf, type El, type Setup, type SetupOptions } from "./drive-helpers.js";
+import { baseMap, button, place, setupDrive, textOf, type El, type Setup, type SetupOptions, flushDriveMaps } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // AGENT-TOOLS 1.13 §18.4 and §18.5: `drive` with a route, with `then`, as a `run` step, and a route as one leg of a way.
@@ -16,7 +16,8 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  await flushDriveMaps();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const frame = { x: 20, y: 100, width: 300, height: 44 };

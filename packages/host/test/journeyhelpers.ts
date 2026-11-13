@@ -146,7 +146,7 @@ export async function rig(options: RigOptions = {}): Promise<Rig> {
     cleanup: async () => {
       for (const a of apps.splice(0)) a.ws.terminate();
       await host.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     },
   };
 }

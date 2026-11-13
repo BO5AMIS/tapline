@@ -11,7 +11,7 @@ import { APP, BUILD, OLD_BUILD, road } from "./drive-helpers.js";
 
 const dirs: string[] = [];
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function mapWith(roads: MapRoad[], links: Record<string, string> = {}): AppMap {

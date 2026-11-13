@@ -61,6 +61,6 @@ describe("swipe in a recording", () => {
     const replayed = textOf(await tools.replay({ name: "swipe-close" }));
     expect(replayed).toMatch(/^Ran 1 of 1 steps/);
     expect(app.requests.filter((r) => r.method === "swipe")).toHaveLength(2);
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 });

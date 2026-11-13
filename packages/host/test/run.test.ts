@@ -186,7 +186,7 @@ describe("record keeps the index of a shared label or text (AGENT-TOOLS 1.8 §9.
       const script = JSON.parse(readFileSync(join(dir, "second.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
       expect(script.steps[0]).toMatchObject({ tool: "tap", target: { text: "Edit", index: 1 } });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

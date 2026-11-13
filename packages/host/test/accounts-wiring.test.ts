@@ -14,7 +14,7 @@ const dirs: string[] = [];
 const runtimes: Runtime[] = [];
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((r) => r.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function tmp(): string {

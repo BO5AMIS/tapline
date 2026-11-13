@@ -5,7 +5,7 @@ import { callTool } from "../src/dispatch.js";
 import { Dialogs, OK_ALLOW, OK_FIELD, type ElicitAnswer, type ElicitClient } from "../src/elicit.js";
 import type { MapFile } from "../src/mapfile.js";
 import type { TaplineHost } from "../src/server.js";
-import { baseMap, road, setupDrive, textOf, ALL_CAPS, type Setup, type SetupOptions } from "./drive-helpers.js";
+import { baseMap, road, setupDrive, textOf, ALL_CAPS, type Setup, type SetupOptions, flushDriveMaps } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // AGENT-TOOLS 1.13 §18.4 and F7: moves pipelined on the phone, the policy checked in the host before each one.
@@ -16,7 +16,8 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  await flushDriveMaps();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const setup = (options: SetupOptions = {}): Promise<Setup> => setupDrive(hosts, apps, dirs, options);

@@ -16,7 +16,7 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(runtimes.splice(0).map((r) => r.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const DELETE = { ref: "e12", type: "Pressable", role: "button", testID: "delete-trip", text: "Delete", frame: { x: 115, y: 620, width: 200, height: 40 }, actions: ["press"] };

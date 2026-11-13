@@ -15,10 +15,13 @@ import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
 const dirs: string[] = [];
+/** Registries whose background map saves must end before a test deletes its folders. */
+const registries: MapRegistry[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  await Promise.all(registries.splice(0).map((r) => r.flushAll().catch(() => undefined)));
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const textOf = (result: CallToolResult): string => result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
@@ -73,13 +76,14 @@ async function setup(options: { start?: Screen } = {}) {
   const { app } = await FakeApp.connect(port, { capabilities: ["tree", "press", "type", "typeKind", "logs", "dryRun", "place"] }, handler);
   apps.push(app);
   const saves: string[] = [];
-  const registry = new MapRegistry({
+  const registry: MapRegistry = new MapRegistry({
     mapsDir,
     save: (dir: string, map: MapFile, opts) => {
       saves.push(dir);
       return saveMap(dir, map, opts);
     },
   });
+  registries.push(registry);
   const tools = new TaplineTools(host, {
     connect: { url: "", name: "Dev PC" },
     maps: registry,

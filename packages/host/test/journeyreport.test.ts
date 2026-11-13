@@ -91,7 +91,7 @@ describe("frames during a journey", () => {
       expect(rec.frames.map((f) => f.step)).toEqual([0, 2]);
       expect(rec.frames[1]?.tap).toEqual({ x: 10 / 360, y: 20 / 780 });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 

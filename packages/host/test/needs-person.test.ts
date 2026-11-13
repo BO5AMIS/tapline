@@ -50,7 +50,7 @@ afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
   for (const r of journeyRigs.splice(0)) await r.cleanup();
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 /** The smallest thing `media` accepts as a JPEG: a start, a header with a size, an end. */

@@ -88,7 +88,7 @@ describe("the offer file for the Metro helper", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(existsSync(join(dir, `${port}.json`))).toBe(false);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

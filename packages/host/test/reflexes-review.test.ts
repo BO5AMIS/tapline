@@ -7,7 +7,7 @@ import { callTool } from "../src/dispatch.js";
 import type { MapFile, MapReflex } from "../src/mapfile.js";
 import type { PolicyFile } from "../src/policy.js";
 import type { TaplineHost } from "../src/server.js";
-import { ALL_CAPS, baseMap, button, note, setupDrive, textOf, type El, type Setup, type SetupOptions, type World } from "./drive-helpers.js";
+import { ALL_CAPS, baseMap, button, note, setupDrive, textOf, type El, type Setup, type SetupOptions, type World, flushDriveMaps } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // Review of 1.6 task 17: a reflex step never asks a person, its checks are re-made, a retry needs the same element, and its
@@ -19,7 +19,8 @@ const dirs: string[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  await flushDriveMaps();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 const COVERED = { code: "not_actionable", message: 'covered: e1 button "General" is behind e20 text "Rate Wayfare"; close that first.' };

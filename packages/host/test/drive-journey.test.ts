@@ -6,7 +6,7 @@ import { callTool } from "../src/dispatch.js";
 import type { MapFile } from "../src/mapfile.js";
 import type { MapRegistry } from "../src/places.js";
 import type { TaplineHost } from "../src/server.js";
-import { ALL_CAPS, baseMap, button, place, road, setupDrive, textOf, type Setup, type SetupOptions } from "./drive-helpers.js";
+import { ALL_CAPS, baseMap, button, place, road, setupDrive, textOf, type Setup, type SetupOptions, flushDriveMaps } from "./drive-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // AGENT-TOOLS 1.13 §18.12: `drive` in a user's-eyes journey takes roads made of taps a person could make, aimed by visible text.
@@ -18,6 +18,7 @@ const registries: MapRegistry[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
+  await flushDriveMaps();
   // A drive marks its roads as driven and the registry saves that map in the background. Wait for the save to end before the folder
   // goes, or the delete races the map's temp file and lock (ENOTEMPTY on Windows).
   await Promise.all(registries.splice(0).map((r) => r.flushAll()));
