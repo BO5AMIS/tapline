@@ -1,4 +1,4 @@
-import { audit, uxCheck, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
+import { audit, beginAction, uxCheck, back, getLogs, inspect, longPress, onActed, openURL, press, reload, screenshot, scroll, settleOutcome, swipe, toggle, typeText } from './actions';
 import { checkLayout } from './checks';
 import { crashAck } from './crash';
 import { listCommands, runCommand } from './commands';
@@ -21,6 +21,7 @@ onActed(frameAfterAction);
 /** An action changes the screen: let anyone watching see the result soon. */
 function action(fn: MethodFn): MethodFn {
   return async (params) => {
+    beginAction();
     try {
       return await fn(params);
     } finally {

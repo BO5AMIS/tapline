@@ -12,6 +12,7 @@ import { originalLog, setLogSink } from './logs';
 import { methods as defaultMethods, type MethodFn } from './methods';
 import { refreshCover } from './native';
 import { resetTaplineTextSize } from './locale';
+import { resetKnowIdle } from './idle';
 import { resetNetworkCondition } from './network';
 import { stopPerf } from './perf';
 import { startPlaceEvents } from './place';
@@ -184,6 +185,7 @@ export class TaplineClient {
     const socket = this.socket;
     this.socket = null;
     resetNetworkCondition();
+    resetKnowIdle();
     resetTaplineTextSize();
     resetMedia();
     if (this.ready) this.status('disconnected');
@@ -422,6 +424,7 @@ export class TaplineClient {
     setEventSink(null);
     // The phone is never left offline or slow with nobody watching.
     resetNetworkCondition();
+    resetKnowIdle();
     resetTaplineTextSize();
     resetMedia();
     // Nobody can watch while disconnected; the host asks again after it reconnects.

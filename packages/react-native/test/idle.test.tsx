@@ -5,9 +5,10 @@ import { act } from 'react-test-renderer';
 import { configureActions, press } from '../src/actions';
 import { runCommand } from '../src/commands';
 import { defaultCapabilities } from '../src/client';
-import { collectNodes, resetRefs } from '../src/inspect';
-import { installIdleSignals, isKnowIdle, setKnowIdle, waitUntilIdle } from '../src/idle';
-import { installNetworkTracking, uninstallNetworkTracking } from '../src/network';
+import { collectNodes, resetRefs, setMeasurer } from '../src/inspect';
+import * as idleModule from '../src/idle';
+import { configureKnowIdle, installIdleSignals, isKnowIdle, resetKnowIdle, setKnowIdle, waitUntilIdle } from '../src/idle';
+import { installNetworkTracking, startedRequests, uninstallNetworkTracking } from '../src/network';
 
 // AGENT-TOOLS 1.13 (F1, know-don't-watch): answer once every signal the SDK can see says idle, then wait
 // one or two frames. A signal it can't see (Reanimated, a sheet, timers) keeps today's 100 ms quiet window.
@@ -46,6 +47,8 @@ afterEach(async () => {
   setKnowIdle(false);
   delete holder.__reanimatedModuleProxy;
   uninstallNetworkTracking();
+  // Pending Animated frames and polls must not outlive the test ("Jest environment torn down").
+  jest.clearAllTimers();
   jest.useRealTimers();
   configureActions({ quietMs: 0, capMs: 0 });
   await unmountAll();
@@ -60,9 +63,9 @@ describe('waitUntilIdle', () => {
   afterEach(() => setKnowIdle(false));
 
   /** Resolves once `waitUntilIdle` has answered, or reports it has not after `ms`. */
-  async function answersWithin(ms: number, since = Date.now()): Promise<{ settledMs: number; usedFallback: boolean; capped: boolean } | null> {
+  async function answersWithin(ms: number, requestMark = startedRequests()): Promise<{ settledMs: number; usedFallback: boolean; capped: boolean } | null> {
     let result: { settledMs: number; usedFallback: boolean; capped: boolean } | null = null;
-    void waitUntilIdle({ frames: 2, capMs: 2000, since }).then((r) => {
+    void waitUntilIdle({ frames: 2, capMs: 2000, requestMark }).then((r) => {
       result = r;
     });
     await jest.advanceTimersByTimeAsync(ms);
@@ -76,7 +79,7 @@ describe('waitUntilIdle', () => {
 
   test('one frame answers in about 16 ms', async () => {
     let result: { settledMs: number } | null = null;
-    void waitUntilIdle({ frames: 1, capMs: 2000, since: Date.now() }).then((r) => {
+    void waitUntilIdle({ frames: 1, capMs: 2000, requestMark: startedRequests() }).then((r) => {
       result = r;
     });
     await jest.advanceTimersByTimeAsync(20);
@@ -87,7 +90,7 @@ describe('waitUntilIdle', () => {
     // handle
     const handle = InteractionManager.createInteractionHandle();
     let done = false;
-    void waitUntilIdle({ frames: 2, capMs: 5000, since: Date.now() }).then(() => {
+    void waitUntilIdle({ frames: 2, capMs: 5000, requestMark: startedRequests() }).then(() => {
       done = true;
     });
     await jest.advanceTimersByTimeAsync(300);
@@ -100,7 +103,7 @@ describe('waitUntilIdle', () => {
     done = false;
     const value = new Animated.Value(0);
     Animated.timing(value, { toValue: 1, duration: 300, useNativeDriver: false }).start();
-    void waitUntilIdle({ frames: 2, capMs: 5000, since: Date.now() }).then(() => {
+    void waitUntilIdle({ frames: 2, capMs: 5000, requestMark: startedRequests() }).then(() => {
       done = true;
     });
     await jest.advanceTimersByTimeAsync(200);
@@ -112,7 +115,7 @@ describe('waitUntilIdle', () => {
     done = false;
     const jsOnly = jest.fn();
     LayoutAnimation.configureNext({ duration: 250, update: { type: 'linear' } }, jsOnly);
-    void waitUntilIdle({ frames: 2, capMs: 5000, since: Date.now() }).then(() => {
+    void waitUntilIdle({ frames: 2, capMs: 5000, requestMark: startedRequests() }).then(() => {
       done = true;
     });
     await jest.advanceTimersByTimeAsync(200);
@@ -135,9 +138,9 @@ describe('waitUntilIdle', () => {
     const old = target.fetch('https://api.example.com/poll');
     void old;
     await jest.advanceTimersByTimeAsync(50);
-    const since = Date.now();
+    const mark = startedRequests();
     // the poll began before the action: it never holds
-    expect(await answersWithin(40, since)).toEqual({ settledMs: 32, usedFallback: false, capped: false });
+    expect(await answersWithin(40, mark)).toEqual({ settledMs: 32, usedFallback: false, capped: false });
     release({ status: 200, headers: { get: () => null } });
     await jest.advanceTimersByTimeAsync(0);
 
@@ -146,11 +149,11 @@ describe('waitUntilIdle', () => {
     installNetworkTracking({ target });
     uninstallNetworkTracking();
     installNetworkTracking({ target });
-    const started = Date.now();
+    const started = startedRequests();
     const started1 = target.fetch('https://api.example.com/trips');
     void started1;
     let done = false;
-    void waitUntilIdle({ frames: 2, capMs: 5000, since: started }).then(() => {
+    void waitUntilIdle({ frames: 2, capMs: 5000, requestMark: started }).then(() => {
       done = true;
     });
     await jest.advanceTimersByTimeAsync(400);
@@ -179,7 +182,7 @@ describe('waitUntilIdle', () => {
   test('the cap still ends the wait', async () => {
     InteractionManager.createInteractionHandle();
     let result: { settledMs: number; usedFallback: boolean; capped: boolean } | null = null;
-    void waitUntilIdle({ frames: 2, capMs: 500, since: Date.now() }).then((r) => {
+    void waitUntilIdle({ frames: 2, capMs: 500, requestMark: startedRequests() }).then((r) => {
       result = r;
     });
     await jest.advanceTimersByTimeAsync(600);
@@ -271,16 +274,27 @@ describe('the patches', () => {
 });
 
 describe('the settle command and the capability', () => {
-  test('settle {mode} switches the path in one session', async () => {
-    expect(isKnowIdle()).toBe(false);
-    expect((await runCommand({ name: 'settle', args: { mode: 'know' } })).result).toEqual({ mode: 'know' });
+  test('settle {mode: "quiet"} switches the path off for the session', async () => {
+    configureKnowIdle(true);
     expect(isKnowIdle()).toBe(true);
     expect((await runCommand({ name: 'settle', args: { mode: 'quiet' } })).result).toEqual({ mode: 'quiet' });
     expect(isKnowIdle()).toBe(false);
   });
 
-  test('settle refuses another mode', async () => {
+  test('settle never switches know on: that comes only from knowIdle in startTapline', async () => {
+    await expect(runCommand({ name: 'settle', args: { mode: 'know' } })).rejects.toMatchObject({ code: 'internal' });
+    expect(isKnowIdle()).toBe(false);
     await expect(runCommand({ name: 'settle', args: { mode: 'fast' } })).rejects.toMatchObject({ code: 'internal' });
+  });
+
+  test("the next session starts from the app's own setting", async () => {
+    configureKnowIdle(true);
+    await runCommand({ name: 'settle', args: { mode: 'quiet' } });
+    resetKnowIdle();
+    expect(isKnowIdle()).toBe(true);
+    configureKnowIdle(false);
+    resetKnowIdle();
+    expect(isKnowIdle()).toBe(false);
   });
 
   test('the app announces the idle capability', () => {
@@ -389,12 +403,12 @@ describe('the same final tree as the 100 ms path', () => {
     ['a sheet animation', 'open-sheet', 'Sheet is open'],
     ['a list load', 'load-list', 'Oslo'],
     ['a request', 'send', 'Sent'],
-  ])('%s: both paths end on the same tree, the know path at least 60 ms sooner', async (_name, testID, shown) => {
+  ])('%s: both paths end on the same tree, the know path at least 40 ms sooner', async (_name, testID, shown) => {
     const quiet = await scenario(testID, false);
     const know = await scenario(testID, true);
     expect(quiet.texts).toContain(shown);
     expect(know.texts).toEqual(quiet.texts);
-    expect(know.settledMs).toBeLessThanOrEqual(quiet.settledMs - 60);
+    expect(know.settledMs).toBeLessThanOrEqual(quiet.settledMs - 40);
   });
 
   test('with Reanimated present the know path takes the 100 ms window too', async () => {
@@ -447,5 +461,208 @@ describe('the same final tree as the 100 ms path', () => {
       result = await press({ target: { testID: 'open-sheet' } });
     });
     expect(result?.settledMs).toBe(0);
+  });
+});
+
+describe('stuck entries do not hold every later settle (review 1)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    installIdleSignals();
+  });
+
+  test('a handle that is never cleared holds one settle to the cap, then is ignored', async () => {
+    InteractionManager.createInteractionHandle();
+    let first: { capped: boolean } | null = null;
+    void waitUntilIdle({ frames: 2, capMs: 500, requestMark: startedRequests() }).then((r) => {
+      first = r;
+    });
+    await jest.advanceTimersByTimeAsync(600);
+    expect(first).toMatchObject({ capped: true });
+    let second: { settledMs: number; capped: boolean } | null = null;
+    void waitUntilIdle({ frames: 2, capMs: 500, requestMark: startedRequests() }).then((r) => {
+      second = r;
+    });
+    await jest.advanceTimersByTimeAsync(40);
+    expect(second).toEqual({ settledMs: 32, usedFallback: false, capped: false });
+  });
+
+  test('an animation with no end callback is counted for its duration plus a short grace, then released', async () => {
+    const value = new Animated.Value(0);
+    Animated.timing(value, { toValue: 1, duration: 200, useNativeDriver: false }).start();
+    let done = false;
+    void waitUntilIdle({ frames: 2, capMs: 5000, requestMark: startedRequests() }).then(() => {
+      done = true;
+    });
+    await jest.advanceTimersByTimeAsync(150);
+    expect(done).toBe(false);
+    await jest.advanceTimersByTimeAsync(200);
+    expect(done).toBe(true);
+  });
+
+  test("the app's start() gets no callback unless it passed one, and keeps its own callback", () => {
+    setKnowIdle(false);
+    const innerStart = jest.fn();
+    const animated = Animated as unknown as { timing: unknown };
+    const real = animated.timing;
+    animated.timing = () => ({ start: innerStart, stop: jest.fn() });
+    try {
+      installIdleSignals();
+      const bare = Animated.timing(new Animated.Value(0), { toValue: 1, duration: 50, useNativeDriver: false });
+      bare.start();
+      expect(innerStart).toHaveBeenLastCalledWith();
+      const mine = jest.fn();
+      Animated.timing(new Animated.Value(0), { toValue: 1, duration: 50, useNativeDriver: false }).start(mine);
+      const passed = innerStart.mock.calls[innerStart.mock.calls.length - 1]?.[0] as (r: unknown) => void;
+      passed({ finished: true });
+      expect(mine).toHaveBeenCalledWith({ finished: true });
+    } finally {
+      setKnowIdle(false);
+      animated.timing = real;
+    }
+  });
+
+  test('InteractionManager is read once per install: its getter is not hit again for each patch', () => {
+    setKnowIdle(false);
+    let reads = 0;
+    Object.defineProperty(rn, 'InteractionManager', {
+      configurable: true,
+      get() {
+        reads += 1;
+        return InteractionManager;
+      },
+    });
+    try {
+      installIdleSignals();
+      expect(reads).toBe(1);
+    } finally {
+      setKnowIdle(false);
+      Object.defineProperty(rn, 'InteractionManager', { configurable: true, value: InteractionManager });
+    }
+  });
+
+  test('uninstalling ends a wait that is still polling, at once', async () => {
+    InteractionManager.createInteractionHandle();
+    let result: { usedFallback: boolean } | null = null;
+    void waitUntilIdle({ frames: 2, capMs: 5000, requestMark: startedRequests() }).then((r) => {
+      result = r;
+    });
+    await jest.advanceTimersByTimeAsync(50);
+    expect(result).toBeNull();
+    setKnowIdle(false);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(result).toMatchObject({ usedFallback: true });
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});
+
+describe('the settle never answers mid-change (review 1)', () => {
+  function Screen({ delayedCommit }: { delayedCommit: boolean }): React.ReactElement {
+    const [late, setLate] = useState(false);
+    return (
+      <View>
+        <Pressable
+          testID="go"
+          onPress={() => {
+            // A timer before the change: Tapline never patches timers, so the know path can't see it (documented limit).
+            if (delayedCommit) setTimeout(() => setLate(true), 50);
+          }}
+        >
+          <Text>Go</Text>
+        </Pressable>
+        {late ? <Text>Arrived late</Text> : null}
+      </View>
+    );
+  }
+
+  let clockStart = Date.now();
+
+  async function runPress(know: boolean, movement: (elapsed: number) => number, delayedCommit = false): Promise<{ settledMs: number; texts: string[] }> {
+    resetRefs();
+    await mount(<Screen delayedCommit={delayedCommit} />);
+    clockStart += 1_000_000;
+    jest.useFakeTimers({ now: clockStart });
+    const t0 = Date.now();
+    setMeasurer(async () => frame(movement(Date.now() - t0), 0, 100, 40));
+    setKnowIdle(know);
+    configureActions({ quietMs: 100, capMs: 2000 });
+    let settledMs = -1;
+    try {
+      let pending: Promise<void> = Promise.resolve();
+      await act(async () => {
+        pending = press({ target: { testID: 'go' } }).then((r) => {
+          settledMs = r.settledMs;
+        });
+        await jest.advanceTimersByTimeAsync(1);
+      });
+      for (let i = 0; i < 1500 && settledMs < 0; i++) {
+        await act(async () => {
+          await jest.advanceTimersByTimeAsync(1);
+        });
+      }
+      await pending;
+    } finally {
+      jest.useRealTimers();
+    }
+    const texts = collectNodes()
+      .map((node) => node.text)
+      .filter((text) => text !== '');
+    await unmountAll();
+    setKnowIdle(false);
+    return { settledMs, texts };
+  }
+
+  test('a slide that starts after every counter is zero (a native push) is waited for', async () => {
+    // Still for 20 ms, then slides one point per millisecond until 220 ms.
+    const slide = (elapsed: number): number => Math.max(0, Math.min(200, elapsed - 20));
+    const result = await runPress(true, slide);
+    expect(result.settledMs).toBeGreaterThanOrEqual(220);
+  });
+
+  test('a screen that stays still answers in a few frames', async () => {
+    const result = await runPress(true, () => 0);
+    expect(result.settledMs).toBeLessThan(80);
+  });
+
+  test('the documented limit: a handler that waits on a timer before changing the screen is not seen', async () => {
+    // A 50 ms timer is invisible to the SDK and fires after its 2-frame hold; the 100 ms window would see it.
+    // The device gate must show whether the 2-frame hold is enough for real apps.
+    const quiet = await runPress(false, () => 0, true);
+    const know = await runPress(true, () => 0, true);
+    expect(quiet.texts).toContain('Arrived late');
+    expect(know.texts).not.toContain('Arrived late');
+  });
+});
+
+describe('a sheet already open skips the know path (review 5)', () => {
+  test('waitUntilIdle is not called when a modal is open', async () => {
+    resetRefs();
+    useFrames({}, frame(0, 0, 100, 40));
+    await mount(
+      <View>
+        {React.createElement(
+          'RCTModalHostView',
+          null,
+          <Pressable testID="close" onPress={() => {}}>
+            <Text>Close</Text>
+          </Pressable>,
+        )}
+      </View>,
+    );
+    setKnowIdle(true);
+    const spy = jest.spyOn(idleModule, 'waitUntilIdle');
+    configureActions({ quietMs: 100, capMs: 2000 });
+    jest.useFakeTimers();
+    let settledMs = -1;
+    try {
+      const pending = press({ target: { testID: 'close' } }).then((r) => {
+        settledMs = r.settledMs;
+      });
+      for (let i = 0; i < 400 && settledMs < 0; i++) await jest.advanceTimersByTimeAsync(1);
+      await pending;
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

@@ -1,13 +1,19 @@
-import { openRequestsSince } from './network';
+import { openRequestsAfter } from './network';
 import { onCommit } from './register';
 import { isRecord } from './types';
 
 /**
  * Know, don't watch (AGENT-TOOLS 1.13, F1). Instead of waiting 100 ms without a React commit, the
  * SDK counts what it can see running (Animated, LayoutAnimation, InteractionManager handles and the
- * requests an action started) and answers when all of that is idle, one or two frames later.
- * What it can't see (Reanimated, native work, timers) keeps today's quiet window. Timers are never
- * patched. The patches exist only while this is switched on, and uninstall puts everything back.
+ * requests an action started) and answers when all of that is idle, two frames later.
+ * What it can't see (Reanimated, native work, timers) keeps today's quiet window, and the caller
+ * checks that positions are still before it answers. Timers are never patched, so a handler that
+ * waits on a timer before changing the screen is not seen. The patches exist only while this is
+ * switched on, and uninstall puts everything back.
+ *
+ * Not counted: passive effects. React calls `onPostCommitFiberRoot` when they have flushed, but an
+ * existing DevTools hook may not forward it, and a lost signal would hold every settle to the cap.
+ * The hold after each commit covers effects that flush in the same frame.
  */
 
 type AnyFn = (...args: unknown[]) => unknown;
@@ -15,19 +21,30 @@ type AnyFn = (...args: unknown[]) => unknown;
 const FRAME_MS = 16;
 /** How often the signals are read while waiting; finer than a frame, so the answer isn't rounded up to one. */
 const POLL_MS = 8;
-/** A LayoutAnimation's end callback may never come (nothing moved), so a timer releases it. */
+/** An animation nobody told us the end of is counted for its duration plus this. */
+const SHORT_GRACE_MS = 50;
+/** An animation whose end callback never comes is dropped this long after its expected end. */
+const STUCK_GRACE_MS = 1000;
+const TIMING_DEFAULT_MS = 500;
+/** Spring and decay have no duration, and a composite (stagger) hides its children's timers. */
+const ASSUMED_MS = 600;
 const LAYOUT_GRACE_MS = 100;
-const LAYOUT_DEFAULT_MS = 500;
 
 export interface IdleReading {
   interactionHandles: number;
   /** Animated animations running now (loops excluded). */
   animations: number;
   layoutAnimating: boolean;
-  /** Requests the action started (begun at or after `since`) that are still open. */
+  /** Requests begun after the action's mark that are still open. */
   startedRequestsOpen: number;
   /** True when something the SDK can't see may be running: the caller must use the quiet window. */
   blind: boolean;
+}
+
+/** One thing being counted: it ends when released, expires at `expiresAt`, or is `stuck` after a capped wait. */
+interface Counted {
+  expiresAt: number | null;
+  stuck: boolean;
 }
 
 interface Patch {
@@ -42,20 +59,28 @@ let patches: Patch[] = [];
 let installed = false;
 /** An API exists but couldn't be patched: animations may run unseen. */
 let unpatchable = false;
-const handles = new Set<unknown>();
-let animations = 0;
-let loops = 0;
-let layoutAnimations = 0;
-const layoutTimers = new Set<ReturnType<typeof setTimeout>>();
+/** The react-native exports read for this install: InteractionManager's getter throws, so it is read once. */
+let exportsRead: Map<string, unknown> | null = null;
+const handles = new Map<unknown, Counted>();
+const animations = new Map<number, Counted>();
+const loops = new Map<number, Counted>();
+const layouts = new Map<number, Counted>();
+let nextId = 1;
+/** Waits still polling; uninstall ends them. */
+const activeWaits = new Set<() => void>();
 
 /** A react-native export, or undefined: InteractionManager is gone from newer versions and its getter throws. */
 function rnExport(name: string): unknown {
+  if (exportsRead?.has(name)) return exportsRead.get(name);
+  let found: unknown;
   try {
     const rn: unknown = require('react-native');
-    return isRecord(rn) ? rn[name] : undefined;
+    found = isRecord(rn) ? rn[name] : undefined;
   } catch {
-    return undefined;
+    found = undefined;
   }
+  exportsRead?.set(name, found);
+  return found;
 }
 
 function isFn(value: unknown): value is AnyFn {
@@ -88,6 +113,13 @@ function patch(target: unknown, name: string, make: (original: AnyFn) => AnyFn):
   }
 }
 
+function add<K>(map: Map<K, Counted>, key: K, expiresAt: number | null): () => void {
+  map.set(key, { expiresAt, stuck: false });
+  return () => {
+    map.delete(key);
+  };
+}
+
 function once(fn: () => void): () => void {
   let done = false;
   return () => {
@@ -97,22 +129,54 @@ function once(fn: () => void): () => void {
   };
 }
 
-/** Counts an animation from `start` to its end callback (also when it is stopped). */
-function track(animation: unknown, kind: 'run' | 'loop'): unknown {
+/** How many entries still count: not released, not stuck, not past their expiry. Expired ones are dropped. */
+function live(map: Map<unknown, Counted>): number {
+  const now = Date.now();
+  let count = 0;
+  for (const [key, entry] of map) {
+    if (entry.expiresAt !== null && now >= entry.expiresAt) map.delete(key);
+    else if (!entry.stuck) count += 1;
+  }
+  return count;
+}
+
+/** A wait ended at its cap with these still held: they are stuck, and don't hold the next settle. */
+function markStuck(): void {
+  for (const map of [handles, animations, layouts, loops] as Array<Map<unknown, Counted>>) {
+    for (const entry of map.values()) entry.stuck = true;
+  }
+}
+
+/** The milliseconds an Animated runner is expected to take, from its arguments. */
+function expectedMs(name: string, args: unknown[]): number {
+  const config = args[1];
+  if (name === 'timing') {
+    const duration = isRecord(config) && typeof config.duration === 'number' ? config.duration : TIMING_DEFAULT_MS;
+    const delay = isRecord(config) && typeof config.delay === 'number' ? config.delay : 0;
+    return duration + delay;
+  }
+  if (name === 'delay') return typeof args[0] === 'number' ? args[0] : 0;
+  return ASSUMED_MS;
+}
+
+/**
+ * Counts an animation from `start`. With an end callback it is released when that runs (also on stop);
+ * the callback is wrapped only when the app passed one. Without one it is counted for its expected time.
+ */
+function track(animation: unknown, kind: 'run' | 'loop', expected: number): unknown {
   if (!isRecord(animation) || !isFn(animation.start)) return animation;
   const start = animation.start;
   try {
     animation.start = function (this: unknown, ...args: unknown[]): unknown {
-      if (kind === 'loop') loops += 1;
-      else animations += 1;
-      const release = once(() => {
-        if (kind === 'loop') loops = Math.max(0, loops - 1);
-        else animations = Math.max(0, animations - 1);
-      });
       const callback = args[0];
+      const map = kind === 'loop' ? loops : animations;
+      const withCallback = isFn(callback);
+      const expiresAt = kind === 'loop' ? null : Date.now() + expected + (withCallback ? STUCK_GRACE_MS : SHORT_GRACE_MS);
+      const release = once(add(map, nextId++, expiresAt));
+      if (!withCallback) return start.apply(this, args);
       const wrapped: AnyFn = (...result) => {
         release();
-        return isFn(callback) ? callback(...result) : undefined;
+        return callback(...result);
       };
       try {
         return start.apply(this, [wrapped, ...args.slice(1)]);
@@ -133,31 +197,20 @@ function patchAnimated(): void {
   for (const name of ANIMATED_RUNNERS) {
     patch(rnExport('Animated'), name, (original) =>
       function (this: unknown, ...args: unknown[]): unknown {
-        return track(original.apply(this, args), 'run');
+        return track(original.apply(this, args), 'run', expectedMs(name, args));
       },
     );
   }
   patch(rnExport('Animated'), 'loop', (original) =>
     function (this: unknown, ...args: unknown[]): unknown {
-      return track(original.apply(this, args), 'loop');
+      return track(original.apply(this, args), 'loop', 0);
     },
   );
 }
 
-/** Counts a LayoutAnimation from the call to its end or fail callback, or to its duration plus a short grace. */
-function layoutTracked(original: AnyFn, args: unknown[], callbackAt: number[], durationOf: (args: unknown[]) => unknown, self: unknown): unknown {
-  layoutAnimations += 1;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const release = once(() => {
-    layoutAnimations = Math.max(0, layoutAnimations - 1);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      layoutTimers.delete(timer);
-    }
-  });
-  const duration = durationOf(args);
-  timer = setTimeout(release, (typeof duration === 'number' ? duration : LAYOUT_DEFAULT_MS) + LAYOUT_GRACE_MS);
-  layoutTimers.add(timer);
+/** Counts a LayoutAnimation to its end or fail callback (wrapped only when the app passed one), else to its duration plus a grace. */
+function layoutTracked(original: AnyFn, args: unknown[], callbackAt: number[], duration: unknown, self: unknown): unknown {
+  const release = once(add(layouts, nextId++, Date.now() + (typeof duration === 'number' ? duration : TIMING_DEFAULT_MS) + LAYOUT_GRACE_MS));
   const next = [...args];
   for (const at of callbackAt) {
     const callback = next[at];
@@ -180,7 +233,7 @@ function patchLayoutAnimation(): void {
   patch(rnExport('LayoutAnimation'), 'configureNext', (original) =>
     function (this: unknown, ...args: unknown[]): unknown {
       const config = args[0];
-      return layoutTracked(original, args, [1, 2], () => (isRecord(config) ? config.duration : undefined), this);
+      return layoutTracked(original, args, [1, 2], isRecord(config) ? config.duration : undefined, this);
     },
   );
   // The preset helpers call the module's own `configureNext`, not the property, so they are counted here.
@@ -190,21 +243,22 @@ function patchLayoutAnimation(): void {
         const layout = rnExport('LayoutAnimation');
         const presets = isRecord(layout) ? layout.Presets : undefined;
         const preset = isRecord(presets) ? presets[name] : undefined;
-        return layoutTracked(original, args, [0], () => (isRecord(preset) ? preset.duration : undefined), this);
+        return layoutTracked(original, args, [0], isRecord(preset) ? preset.duration : undefined, this);
       },
     );
   }
 }
 
 function patchInteractions(): void {
-  patch(rnExport('InteractionManager'), 'createInteractionHandle', (original) =>
+  const manager = rnExport('InteractionManager');
+  patch(manager, 'createInteractionHandle', (original) =>
     function (this: unknown, ...args: unknown[]): unknown {
       const handle = original.apply(this, args);
-      handles.add(handle);
+      add(handles, handle, null);
       return handle;
     },
   );
-  patch(rnExport('InteractionManager'), 'clearInteractionHandle', (original) =>
+  patch(manager, 'clearInteractionHandle', (original) =>
     function (this: unknown, ...args: unknown[]): unknown {
       handles.delete(args[0]);
       return original.apply(this, args);
@@ -226,6 +280,7 @@ export function installIdleSignals(): () => void {
   if (!installed) {
     installed = true;
     unpatchable = false;
+    exportsRead = new Map();
     patchAnimated();
     patchLayoutAnimation();
     patchInteractions();
@@ -247,13 +302,14 @@ export function uninstallIdleSignals(): void {
     }
   }
   patches = [];
-  for (const timer of layoutTimers) clearTimeout(timer);
-  layoutTimers.clear();
+  exportsRead = null;
   handles.clear();
-  animations = 0;
-  loops = 0;
-  layoutAnimations = 0;
+  animations.clear();
+  loops.clear();
+  layouts.clear();
   unpatchable = false;
+  // A wait still polling ends now, as blind: its caller runs the quiet window.
+  for (const stop of [...activeWaits]) stop();
 }
 
 /** Whether know-don't-watch is on: the signals are patched. Off by default in 1.6.0 (`knowIdle`). */
@@ -266,14 +322,28 @@ export function setKnowIdle(on: boolean): void {
   else uninstallIdleSignals();
 }
 
+/** The app's own setting (`knowIdle` in `startTapline`); an agent can only switch to quiet for a session. */
+let appSetting = false;
+
+/** Sets the app's own choice and applies it. */
+export function configureKnowIdle(on: boolean): void {
+  appSetting = on;
+  setKnowIdle(on);
+}
+
+/** A session ended: back to the app's own setting. */
+export function resetKnowIdle(): void {
+  setKnowIdle(appSetting);
+}
+
 /** What the SDK sees running right now. */
-export function readIdle(since: number): IdleReading {
+export function readIdle(requestMark: number): IdleReading {
   return {
-    interactionHandles: handles.size,
-    animations,
-    layoutAnimating: layoutAnimations > 0,
-    startedRequestsOpen: openRequestsSince(since),
-    blind: !installed || unpatchable || loops > 0 || reanimatedPresent(),
+    interactionHandles: live(handles),
+    animations: live(animations),
+    layoutAnimating: live(layouts) > 0,
+    startedRequestsOpen: openRequestsAfter(requestMark),
+    blind: !installed || unpatchable || live(loops) > 0 || reanimatedPresent(),
   };
 }
 
@@ -292,11 +362,12 @@ export interface IdleOutcome {
 /**
  * Resolves once every visible signal has been idle, with no React commit, for `frames` frames of 16 ms,
  * or at `capMs`. Resolves at once with `usedFallback` when the SDK is blind (or `capMs` is 0), and
- * mid-wait if it becomes blind (a loop starts). `since` is when the action began.
+ * mid-wait if it becomes blind (a loop starts) or is switched off. `requestMark` is `startedRequests()`
+ * from when the action began: only requests begun after it count.
  */
-export function waitUntilIdle(options: { frames: 1 | 2; capMs: number; since: number }): Promise<IdleOutcome> {
+export function waitUntilIdle(options: { frames: 1 | 2; capMs: number; requestMark: number }): Promise<IdleOutcome> {
   const started = Date.now();
-  if (options.capMs <= 0 || readIdle(options.since).blind) return Promise.resolve({ settledMs: 0, usedFallback: true, capped: false });
+  if (options.capMs <= 0 || readIdle(options.requestMark).blind) return Promise.resolve({ settledMs: 0, usedFallback: true, capped: false });
   const holdMs = options.frames * FRAME_MS;
   return new Promise((resolve) => {
     let done = false;
@@ -312,12 +383,16 @@ export function waitUntilIdle(options: { frames: 1 | 2; capMs: number; since: nu
       if (timer !== undefined) clearTimeout(timer);
       clearTimeout(cap);
       stopCommits();
+      activeWaits.delete(abort);
+      if (capped) markStuck();
       resolve({ settledMs: Math.max(0, Math.min(options.capMs, Date.now() - started)), usedFallback, capped });
     };
+    const abort = (): void => finish(true, false);
+    activeWaits.add(abort);
     const cap = setTimeout(() => finish(false, true), options.capMs);
     const tick = (): void => {
       if (done) return;
-      const reading = readIdle(options.since);
+      const reading = readIdle(options.requestMark);
       if (reading.blind) return finish(true, false);
       const now = Date.now();
       if (!idle(reading)) lastChange = now;

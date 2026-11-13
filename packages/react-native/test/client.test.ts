@@ -12,6 +12,7 @@ import {
   type ClientDeps,
   type WebSocketLike,
 } from '../src/client';
+import { configureKnowIdle, isKnowIdle, setKnowIdle } from '../src/idle';
 import { media, setMediaModules } from '../src/media';
 import { installNetworkTracking, networkCondition, setNetworkCondition, uninstallNetworkTracking } from '../src/network';
 import { addLog, clearLogs, getLogEntries, uninstallLogs } from '../src/logs';
@@ -349,6 +350,23 @@ describe('keepalive', () => {
       setNetworkCondition('3g');
       harness.client.stop();
       expect(networkCondition()).toBe('normal');
+    });
+
+    test("the settle mode goes back to the app's own setting when the connection ends", () => {
+      configureKnowIdle(true);
+      try {
+        const socket = connect(makeClient());
+        setKnowIdle(false); // the agent chose quiet for this session
+        socket.drop(1006);
+        expect(isKnowIdle()).toBe(true);
+        const harness = makeClient();
+        connect(harness);
+        setKnowIdle(false);
+        harness.client.stop();
+        expect(isKnowIdle()).toBe(true);
+      } finally {
+        configureKnowIdle(false);
+      }
     });
 
     test('the host going silent puts the network back to normal', () => {

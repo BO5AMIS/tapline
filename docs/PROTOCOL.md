@@ -74,7 +74,7 @@ Optional capabilities added in 1.6 (a host checks for them and does without when
 says a tap that changed nothing without a clause about the handler (AGENT-TOOLS 1.13 §3).
 `typeKind` (the `kind` param of `type`, below): a host without it never sends a test account's value, since an older app would type it into any field (AGENT-TOOLS 1.13 §18.6).
 
-`idle` (know-don't-watch, F1): the app can answer an action's settle as soon as the animations, interactions and requests it can see are idle, a frame or two later, instead of after 100 ms without a commit. It is off unless the app starts with `knowIdle: true` or the built-in app command `settle {mode: "know"}` is run (`"quiet"` goes back). The settle result keeps its shape (`settledMs`, `settleCapMs`); a host needs to do nothing. What the app can't see (Reanimated, a sheet or modal, native work) keeps the 100 ms window.
+`idle` (know-don't-watch, F1): the app can answer an action's settle as soon as the animations, interactions and requests it can see are idle, a frame or two later, instead of after 100 ms without a commit. It is off unless the app starts with `knowIdle: true`. The built-in app command `settle {mode: "quiet"}` switches it off for the session (it can never switch it on), and the app's own setting comes back when the session ends. After the idle hold the app reads the visible positions twice, a frame apart, and keeps today's poll when they differ. The settle result keeps its shape (`settledMs`, `settleCapMs`); a host needs to do nothing. What the app can't see (Reanimated, a sheet or modal, native work) keeps the 100 ms window.
 
 ### Host → app: `welcome`
 

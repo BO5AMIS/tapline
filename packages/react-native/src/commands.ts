@@ -71,15 +71,14 @@ const textSize: TaplineCommand = {
   run: runTextSize,
 };
 
-/** Built in: how an action decides the app is still (F1). Lets a gate compare both paths in one session. */
+/** Built in: back to the 100 ms quiet window for this session. "know" comes only from `knowIdle` in `startTapline`. */
 const settleMode: TaplineCommand = {
   description:
-    'Choose how an action decides the screen is still (args: { mode: "quiet" | "know" }); "quiet" waits 100 ms without a React commit, "know" answers as soon as the animations, interactions and requests the SDK can see are idle',
+    "Make actions wait the 100 ms quiet window for this session (args: { mode: \"quiet\" }); the app's own setting (knowIdle) comes back when the session ends",
   run: (args) => {
-    const mode = args.mode;
-    if (mode !== 'quiet' && mode !== 'know') throw new Error('mode must be "quiet" or "know"');
-    setKnowIdle(mode === 'know');
-    return { mode };
+    if (args.mode !== 'quiet') throw new Error('mode must be "quiet": know-don\'t-watch is switched on only by the app (knowIdle)');
+    setKnowIdle(false);
+    return { mode: 'quiet' };
   },
 };
 

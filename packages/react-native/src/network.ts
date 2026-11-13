@@ -67,7 +67,7 @@ let customIgnore: ((url: string) => boolean) | null = null;
 let pending = 0;
 /** Requests begun so far; the difference across an action is what the action started. */
 let began = 0;
-/** The start time of each request still open, by its place in the order begun: idle detection asks what an action started. */
+/** Each request still open, by its place in the order begun (the `began` count) with its start time: idle detection asks what an action started. */
 const openStarts = new Map<number, number>();
 let generation = 0;
 let condition: NetworkMode = 'normal';
@@ -975,11 +975,11 @@ export function inFlight(): number {
   return pending;
 }
 
-/** How many requests that began at or after `since` (ms since the epoch) are still open. */
-export function openRequestsSince(since: number): number {
+/** How many requests begun after `mark` (a `startedRequests()` reading) are still open. */
+export function openRequestsAfter(mark: number): number {
   ensureFetchWrapped();
   let count = 0;
-  for (const startedAt of openStarts.values()) if (startedAt >= since) count += 1;
+  for (const id of openStarts.keys()) if (id > mark) count += 1;
   return count;
 }
 

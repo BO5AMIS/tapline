@@ -46,7 +46,7 @@ import { uxScreen, type UxAction, type UxCheckName, type UxKind } from './uxchec
 import { isOwnAlert, openAlerts } from './alerts';
 import { firstHostChild, hostChildren, isCompositeTag, sameFiber, type Fiber } from './fiber';
 import { getLogEntries } from './logs';
-import { onCommit } from './register';
+import { commitRevision, onCommit } from './register';
 import { isKnowIdle, waitUntilIdle } from './idle';
 import { waitUntilSteady, waitUntilStill } from './settle';
 import {
@@ -165,8 +165,58 @@ async function sheetProbe(): Promise<Fiber | null> {
   return null;
 }
 
-/** When the last settle ended: a request begun since then is one the next action started (F1). */
-let lastSettledAt = Date.now();
+/**
+ * Where `startedRequests()` stood when the action began (or when the last settle ended): a request begun after
+ * it is one the action started (F1).
+ */
+let requestMark = 0;
+
+/** An action is starting: only requests begun from now on count as its own. */
+export function beginAction(): void {
+  requestMark = startedRequests();
+}
+
+const FRAME_MS = 16;
+
+/** Whether an open or closing sheet hides the app's motion from the SDK. */
+function sheetPresent(): boolean {
+  return openModalHosts().length > 0 || closingModalHosts().length > 0;
+}
+
+/** The elements whose positions say the screen has stopped: the acting ones and the outermost. */
+function watchedFibers(): Fiber[] {
+  try {
+    const entries = takeSnapshot().entries;
+    const picked = new Map<number, Fiber>();
+    for (const entry of [...entries.filter((e) => e.info.actions.length > 0).slice(0, 6), ...entries.slice(0, 6)]) {
+      picked.set(entry.node.index, entry.node.fiber);
+    }
+    return [...picked.values()];
+  } catch {
+    return [];
+  }
+}
+
+function sameFrame(a: Frame | null, b: Frame | null): boolean {
+  if (a === null || b === null) return a === b;
+  return Math.abs(a.x - b.x) <= 1 && Math.abs(a.y - b.y) <= 1 && Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1;
+}
+
+/**
+ * A native push, a Lottie or a gesture-handler sheet moves without a commit or an Animated call, so after the
+ * idle hold the visible positions are read twice, a frame apart. Says which element moved, and whether React
+ * committed in between.
+ */
+async function positionsMoved(): Promise<{ moving: Fiber | null; committed: boolean }> {
+  const before = commitRevision();
+  const fibers = watchedFibers();
+  const read = (): Promise<Array<Frame | null>> => Promise.all(fibers.map((fiber) => measureFiber(fiber).catch(() => null)));
+  const first = await read();
+  await new Promise<void>((resolve) => setTimeout(resolve, FRAME_MS));
+  const second = await read();
+  const at = first.findIndex((frame, i) => !sameFrame(frame, second[i] ?? null));
+  return { moving: at >= 0 ? (fibers[at] ?? null) : null, committed: commitRevision() !== before };
+}
 
 async function settleNow(): Promise<SettleOutcome> {
   const started = Date.now();
@@ -174,18 +224,31 @@ async function settleNow(): Promise<SettleOutcome> {
   const onCap = (): void => {
     capped = true;
   };
-  // Know-don't-watch (off unless `knowIdle`): answer when every signal the SDK can see is idle.
+  // Know-don't-watch (off unless `knowIdle`): answer when every signal the SDK can see is idle and still.
+  // An open sheet is out of its sight, so that keeps today's window and position poll.
   let knowSpentMs = 0;
-  if (isKnowIdle() && settings.capMs > 0) {
-    const known = await waitUntilIdle({ frames: 2, capMs: settings.capMs, since: lastSettledAt });
-    knowSpentMs = Math.max(0, Date.now() - started);
-    // A sheet or modal moves out of the SDK's sight: it keeps today's window and position poll.
-    if (!known.usedFallback && openModalHosts().length === 0 && closingModalHosts().length === 0) {
-      lastSettledAt = Date.now();
-      const settledMs = Math.max(0, Math.min(settings.capMs, known.settledMs));
+  if (isKnowIdle() && settings.capMs > 0 && !sheetPresent()) {
+    const known = await waitUntilIdle({ frames: 2, capMs: settings.capMs, requestMark });
+    let moving: Fiber | null = null;
+    let steady = !known.usedFallback && !known.capped;
+    if (steady && !sheetPresent()) {
+      const check = await positionsMoved();
+      moving = check.moving;
+      steady = moving === null && !check.committed;
+    }
+    if (!known.usedFallback && !sheetPresent() && (steady || known.capped)) {
+      requestMark = startedRequests();
+      const settledMs = Math.max(0, Math.min(settings.capMs, Date.now() - started));
       return known.capped ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
     }
     if (known.capped) onCap();
+    knowSpentMs = Math.max(0, Date.now() - started);
+    // Something moved without a commit: today's poll waits for it to stop.
+    const left = settings.capMs - knowSpentMs;
+    if (moving && left > 0) {
+      await waitUntilSteady(() => measureFiber(moving), { pollMs: SHEET_POLL_MS, capMs: left, now: Date.now, onCap });
+      knowSpentMs = Math.max(0, Date.now() - started);
+    }
   }
   await waitUntilStill({
     ...settings,
@@ -223,7 +286,7 @@ async function settleNow(): Promise<SettleOutcome> {
     }
   }
   const settledMs = Math.max(0, Math.min(settings.capMs, Date.now() - started));
-  lastSettledAt = Date.now();
+  requestMark = startedRequests();
   return capped && settings.capMs > 0 ? { settledMs, settleCapMs: settings.capMs } : { settledMs };
 }
 

@@ -3,7 +3,7 @@ import { TaplineAgent, type DevOffer, type OfferSource } from './agent';
 import { installAlertTracking, nativeAlert, uninstallAlertTracking } from './alerts';
 import { configureCrash } from './crash';
 import { addLog, installLogs, originalLog, uninstallLogs } from './logs';
-import { setKnowIdle } from './idle';
+import { configureKnowIdle } from './idle';
 import { inFlight, installNetworkTracking, onNetworkFailure, uninstallNetworkTracking } from './network';
 import { setNetworkIdleProvider } from './wait';
 import { memoryStorage, secureStoreStorage, type TaplineStorage } from './storage';
@@ -147,7 +147,7 @@ export function startTapline(options: TaplineOptions): void {
     installLogs();
     installAlertTracking({ standIn: options.alerts === 'stand-in' });
     watchNetwork();
-    if (options.knowIdle === true) setKnowIdle(true);
+    configureKnowIdle(options.knowIdle === true);
     const next = new TaplineAgent(
       { app: options.app, ...(url !== '' && token !== '' ? { direct: { url, token } } : {}) },
       { storage, linking: Linking, confirm: confirmWithAlert, notify: notifyWithAlert, offers: devOffers() },
@@ -169,7 +169,7 @@ export function stopTapline(): void {
       configureCrash(null);
       uninstallAlertTracking();
       unwatchNetwork();
-      setKnowIdle(false);
+      configureKnowIdle(false);
     }
   } catch {
     // ignore
