@@ -100,6 +100,13 @@ run {"steps": [
 - A grant (the person's standing OK in the policy file) lets a touch through with `Note: allowed by grant "name" (2 of 3
   today).` You can't make, change or revoke one, and never edit the policy file; the person uses `tapline grants` and
   `tapline audit-log`.
+- **Text from others and drafts.** An element the app wrapped in `<TaplineFromOthers>` reads `text (from others) "…"`;
+  unmarked text is no claim either way. A touch on `Send`, `Post`, `Publish`, `Reply` or `Comment` under a
+  `draftsOnly` grant, or in a route with `"draftsOnly": true`, stops before the touch and shows the field's text to your
+  user (`Send this in Wayfare? "…"`, `Send` or `Don't send`). `Send` ends `Note: sent by a person (in chat).`;
+  `Don't send` ends `Error not_allowed: needs_confirmation: the draft wasn't sent (They declined.)`; with no dialog the
+  call answers `needs_confirmation` and the live view shows the draft. Type the draft first (the last input you typed
+  into is the one shown), never look for another way to send it, and never lift `draftsOnly`: only a person does.
 
 **Known ground: `drive`.** Tapline learns the app as you work: its places (screens by route
 pattern), the roads between them, links and routes. The header's `Place:` line says where you are. Once

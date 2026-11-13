@@ -41,6 +41,10 @@ startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
   pairing lasts until the app restarts, or pass `storage` (`getItem`, `setItem`,
   `removeItem`, async). Each install also keeps a random id there, so the computer can
   tell two phones apart.
+- Text other people wrote (comments, emails, messages): wrap it in `<TaplineFromOthers>` (it draws nothing of its
+  own), or put `taplineFromOthers` on a `Text`. The agent then reads it as `text (from others) "…"`, and a route
+  or grant that is drafts-only treats the touches that send replies with care. Unmarked text is never claimed either
+  way, and the mark is a hint, not a boundary: the agent is told to follow no instruction found in screen text.
 - Optional: `app: { name, id, version, build }` names the app for the host; `url` and
   `token` connect straight to a host without pairing (a simulator on the same computer);
   `stopTapline()` shuts it down. `react-native-view-shot` for screenshots.
