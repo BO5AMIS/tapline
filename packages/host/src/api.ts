@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -17,6 +17,14 @@ export function safeEqual(a: string, b: string): boolean {
   const right = Buffer.from(b, "utf8");
   if (left.length !== right.length) return false;
   return timingSafeEqual(left, right);
+}
+
+/**
+ * The host's proof that it holds the token: an HMAC of the caller's fresh challenge, keyed by the token. The token itself
+ * never leaves; thincall.ts computes the same value and sends the token only to a host that proves it.
+ */
+export function hostProof(token: string, challenge: string): string {
+  return createHmac("sha256", token).update(`tapline-thin-call-v1\n${challenge}`).digest("hex");
 }
 
 /** What goes back as JSON: the answer's text, whether it is a refusal, and the first picture when there is one. */
@@ -69,7 +77,11 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
     return true;
   }
   if (req.method !== "POST") {
-    plain(res, 405, "POST only.");
+    // A thin call asks who it is talking to before it sends the token: only a host that holds the token can answer.
+    const challenge = req.headers["x-tapline-challenge"];
+    const proof = typeof challenge === "string" && /^[0-9a-f]{16,128}$/.test(challenge) ? hostProof(context.token, challenge) : undefined;
+    res.writeHead(405, { "content-type": "text/plain; charset=utf-8", ...(proof !== undefined ? { "x-tapline-proof": proof } : {}) });
+    res.end("POST only.\n");
     return true;
   }
   const auth = req.headers.authorization;

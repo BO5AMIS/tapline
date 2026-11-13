@@ -80,9 +80,27 @@ export function matchWord(words: string[], element: { label?: string | null; tex
 /** An id or a path as words: `deleteAccountButton` and `delete-account` both read "delete account". */
 export const asWords = (piece: string): string => piece.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[-_./]+/g, " ");
 
-/** The words a policy could match in a link: its path only (no scheme, query or fragment), as words. */
+/** Percent escapes undone, as the router does before it matches a segment; a bad escape stays as written. Twice-encoded text too. */
+export function decodePath(text: string): string {
+  let now = text;
+  for (let round = 0; round < 3; round++) {
+    const next = now.replace(/(?:%[0-9a-f]{2})+/gi, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    });
+    if (next === now) break;
+    now = next;
+  }
+  return now;
+}
+
+/** The words a policy could match in a link: its path only (no scheme, query or fragment), decoded, as words. */
 export function linkWords(url: string): string {
-  return asWords(url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/[?#].*$/, ""));
+  // The query is cut first: decoding first would turn %3F into a `?` and cut the path short.
+  return asWords(decodePath(url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/[?#].*$/, "")));
 }
 
 /** What a person's OK is tied to: the same tool on the same element (its id, else its role, label and text). */
