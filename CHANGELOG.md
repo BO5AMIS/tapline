@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0, "the Speed Update" (unreleased)
+## 1.6.0, "the Speed Update" (2026-11-13)
 
 The same checks in fewer calls and fewer seconds, on ground the agent has been over before. The interface
 is AGENT-TOOLS 1.13 plus the 1.13.1 clarifications, shared with Tapwright. Tapline never navigates from
