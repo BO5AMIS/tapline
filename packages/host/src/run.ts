@@ -75,7 +75,7 @@ export function describeProbe(probe: { text: string } | { testID: string } | { l
 
 /** The line that says a step didn't run (AGENT-TOOLS 1.13 §9.1): `  3. skipped (if: "Not now" isn't on screen).` */
 export function skippedLine(index: number, kind: "if" | "optional", what: string, gone?: boolean): string {
-  return `  ${index}. skipped (${kind}: ${what} ${gone === true ? "is still on screen" : "isn't on screen"}).`;
+  return `  ${index}. skipped (${kind}: ${what} ${gone === true ? "is on screen" : "isn't on screen"}).`;
 }
 
 export const MAX_STEPS = 50;

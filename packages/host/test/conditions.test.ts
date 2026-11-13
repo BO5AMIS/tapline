@@ -99,7 +99,7 @@ describe("skippedLine", () => {
   it("says which condition kept the step out", () => {
     expect(skippedLine(3, "if", '"Not now"')).toBe('  3. skipped (if: "Not now" isn\'t on screen).');
     expect(skippedLine(3, "optional", '"Not now"')).toBe('  3. skipped (optional: "Not now" isn\'t on screen).');
-    expect(skippedLine(3, "if", '"Spinner"', true)).toBe('  3. skipped (if: "Spinner" is still on screen).');
+    expect(skippedLine(3, "if", '"Spinner"', true)).toBe('  3. skipped (if: "Spinner" is on screen).');
   });
 });
 
@@ -138,7 +138,7 @@ describe("if and optional in run", () => {
     const { app: app2, tools: tools2 } = await setup({ list: [SAVE], found: () => false });
     const answer = await tools2.run({ steps: [{ tool: "tap", target: { id: "save" }, if: { text: "Loading", gone: true } }] });
     expect(pressed(app2)).toBe(0);
-    expect(textOf(answer)).toContain('  1. skipped (if: "Loading" is still on screen).');
+    expect(textOf(answer)).toContain('  1. skipped (if: "Loading" is on screen).');
   });
 
   it("optional checks the step's own target: id, label and text", async () => {
