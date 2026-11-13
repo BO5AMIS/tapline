@@ -7,7 +7,7 @@ import { z } from "zod";
  * the whole batch.
  */
 
-export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "app_command", "compare_screen", "performance"] as const;
+export const RUN_TOOLS = ["tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "app_command", "compare_screen", "performance", "drive"] as const;
 export type RunTool = (typeof RUN_TOOLS)[number];
 
 /** Tools a step may not be (they read or manage, rather than act): `bad_params`. */
@@ -112,6 +112,11 @@ export function describeRunStep(step: Step): string {
       return p["launch"] === true ? "performance launch" : `performance ${Number(p["seconds"] ?? 3)} s`;
     case "back":
       return "back";
+    case "drive": {
+      // A drive step reads as the place or route it goes to (AGENT-TOOLS 1.13 9.1: it counts as one step).
+      const where = typeof p["to"] === "string" ? p["to"] : typeof p["route"] === "string" ? `route ${p["route"]}` : "";
+      return `drive${where !== "" ? ` ${where}` : ""}`;
+    }
     case "compare_screen":
       return `compare_screen ${JSON.stringify(p["name"] ?? "")}`;
     default:

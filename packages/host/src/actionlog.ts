@@ -57,6 +57,11 @@ export interface ActionLogEntry {
   call_failed?: string;
   /** A `compare_screen` that matched under its threshold but named changed clusters (AGENT-TOOLS 1.13.1 item 2). */
   matched_with_changes?: boolean;
+  /**
+   * A touch that took the app from one place to another: their names (the map's own, never screen text), and whether the map
+   * already held a proven road between them. The report uses it to say a way was known (AGENT-TOOLS 1.13 16.1).
+   */
+  way?: { from: string; to: string; known: boolean };
 }
 
 export const LOG_KEEP_DAYS = 14;

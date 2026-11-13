@@ -575,7 +575,7 @@ function pathScreens(ctx: Ctx): Array<{ n: number; title: string; picture?: stri
 
 /** One step as a line; `esc` makes the app's words safe for the format (Markdown escaping, none for HTML that escapes later). */
 function stepLine(step: JourneyStep, esc: (value: string) => string = (v) => v): string {
-  return `${step.n}. ${esc(stepWords(step))}${step.ok ? "" : ` (failed${step.code !== undefined ? `: ${esc(step.code)}` : ""})`} — ${esc(step.said)}`;
+  return `${step.n}. ${esc(stepWords(step))}${step.ok ? "" : ` (failed${step.code !== undefined ? `: ${esc(step.code)}` : ""})`} — ${esc(step.said)}${step.travel !== undefined ? ` ${esc(step.travel.join(" "))}` : ""}`;
 }
 
 function rulesLines(ctx: Ctx): string[] {

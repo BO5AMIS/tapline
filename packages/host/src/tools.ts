@@ -19,12 +19,13 @@ import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.j
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
 import { mapArgsError, reflexSchema, runMap } from "./mapcmd.js";
-import { driveArgsError, driveRoute, driveTo, parseMoveResult, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { driveArgsError, driveQuietly, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
   Journey,
+  DRIVE_ALLOWED,
   OPEN_URL,
   conditionsSchema,
   exportSchema,
@@ -378,7 +379,7 @@ export const toolShapes = {
       .array(z.string().min(1).max(60))
       .max(30)
       .optional()
-      .describe('Shortcuts the journey may use: "open_url", and the names of app commands'),
+      .describe('Shortcuts the journey may use: "open_url", the names of app commands, and "drive" (a drive may jump by link), "reflexes" and "fast_animations"'),
     eyes: z.enum(EYES).optional().describe('"user" (default): see the screen as a user does; "agent" turns that off for the rest of the journey'),
     stop: z.boolean().optional().describe("End the journey (needs reached)"),
     reached: z.boolean().optional().describe("With stop: whether the goal was reached"),
@@ -1106,7 +1107,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
   "look", "run", "inspect", "audit", "ux_check", "check_layout", "compare_screen", "filmstrip", "tap", "long_press", "type_text", "scroll",
-  "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait",
+  "toggle", "app_command", "wait_for", "swipe", "back", "open_url", "logs", "crash", "wait", "drive",
 ]);
 /** A stress moment a person was asked to do: what must survive, when it was asked, and (rotate) the screen's size then. */
 interface StressWaiting {
@@ -1123,7 +1124,7 @@ const pressSecondSchema = z.union([
 ]);
 /** The calls after which a journey keeps a small picture of the screen (§17.5); the rest only read text. */
 const FRAME_TOOLS: ReadonlySet<string> = new Set([
-  "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait",
+  "look", "tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "wait_for", "wait", "drive",
 ]);
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
@@ -1143,6 +1144,8 @@ function pictureArgs(input: Record<string, unknown>): { screenshot?: boolean; wi
 const LISTING_TOOLS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "scroll", "toggle", "swipe", "back", "open_url", "app_command", "run"]);
 /** Tools that act on one element: after a run of scrolls they log whether the element was already in the list. */
 const ELEMENT_ACTIONS: ReadonlySet<string> = new Set(["tap", "long_press", "type_text", "toggle"]);
+/** The logged touches that can take the app to another place (the known-way flag reads them). */
+const AGENT_TOUCHES: ReadonlySet<string> = new Set(["tap", "long_press", "toggle", "back", "open_url", "swipe"]);
 
 /** What a call in flight collects for the call log. */
 interface CallState {
@@ -1637,20 +1640,33 @@ export class TaplineTools {
   }
 
   /** `drive` (AGENT-TOOLS 1.13 §18.4): takes the app to a place along the map's roads. The work is in drive.ts. */
-  async drive(args: Shape<"drive">): Promise<CallToolResult> {
+  async drive(args: Shape<"drive">, options: { asStep?: boolean } = {}): Promise<CallToolResult> {
     const refused = driveArgsError(args);
     if (refused !== null) return fail(`Error bad_params: ${refused}`);
-    if (args.then !== undefined) return fail("Error unsupported: drive's then isn't available yet; run the steps after the drive.");
     if (this.options.maps === undefined) return fail("Error unsupported: this server keeps no maps.");
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const map = this.mapOf(session);
     if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
-    if (this.userEyes()) return fail("Error unsupported: drive isn't available in a user's-eyes journey yet.");
+    // As a `run` step a drive builds no screen of its own: the batch answers once (9.1).
+    const given: Shape<"drive"> & { quiet?: boolean } = options.asStep === true ? { ...args, quiet: true } : args;
     const services = this.driveServices(session, map);
-    const go = (): Promise<CallToolResult> => (args.route !== undefined ? driveRoute(services, this.routeServices(session, args.account, args.brief), args) : driveTo(services, args));
+    const routes = this.routeServices(session, args.account, args.brief);
+    const drove = (): Promise<CallToolResult> => (given.route !== undefined ? driveRoute(services, routes, given) : driveTo(services, given, routes));
+    // A batch keeps only `Note:` lines of a step's answer, so a repair is said as one there.
+    const go = async (): Promise<CallToolResult> => {
+      const answer = await drove();
+      if (options.asStep !== true) return answer;
+      return { ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: block.text.replace(/^Road repaired/gm, "Note: Road repaired") } : block)) };
+    };
     // A wait for a person's OK is this call's own, as for `run`.
     return this.holdScope.getStore() !== undefined ? go() : this.holdScope.run({ ms: 0 }, go);
+  }
+
+  /** Whether a journey's user's eyes keep a drive to roads: unless its `allow` names `drive` (AGENT-TOOLS 1.13 18.12). */
+  private driveRoadsOnly(): boolean {
+    const journey = this.journeyRun;
+    return journey !== undefined && journey.userEyes && !journey.allows(DRIVE_ALLOWED);
   }
 
   /** What drive needs from this host: reads, and one move that passes the policy and a person's OK like a single call. */
@@ -1660,14 +1676,17 @@ export class TaplineTools {
       map,
       source,
       capabilities: session.capabilities,
-      tapsOnly: this.userEyes(),
+      tapsOnly: this.driveRoadsOnly(),
+      eyes: this.userEyes(),
+      moved: (tool) => this.journeyRun?.noteMove(tool),
       aborted: () => this.holdScope.getStore()?.signal?.aborted === true,
       clock: this.clock,
       sleep: this.sleep,
       describe: describeError,
       known: async () => (session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] })),
       tree: async () => {
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", {}, { sessionId: session.id }));
+        // In a user's eyes a drive reads only what is on the glass (17.1).
+        const tree = treeResultSchema.safeParse(await this.host.request("tree", this.userEyes() ? { glass: true } : {}, { sessionId: session.id }));
         if (!tree.success) throw new TaplineError("internal", "the app returned an element list the host could not read.");
         return tree.data;
       },
@@ -1684,7 +1703,17 @@ export class TaplineTools {
         const used = this.accountText("$" + "{account." + field + "}", named, session);
         return used !== null && !used.ok ? used.message : null;
       },
-      runSteps: (steps) => this.run({ steps, account, brief }),
+      runSteps: (steps, look) => this.run({ steps, account, brief, ...(look ? {} : { look: false }) }),
+      checkSteps: (steps) => {
+        // The call's account is the steps' default account here too, as when `run` runs them.
+        const before = this.runAccount;
+        this.runAccount = account;
+        try {
+          return this.checkSteps(steps);
+        } finally {
+          this.runAccount = before;
+        }
+      },
     };
   }
 
@@ -1739,6 +1768,8 @@ export class TaplineTools {
     this.noteTouch(method, params, done);
     this.showAction("agent", method, done, params);
     if (granted !== undefined) this.journeyRun?.noteOk(granted);
+    // A jump is a shortcut a user doesn't have; a journey whose `allow` names drive says so in its report (AGENT-TOOLS 1.13 18.12).
+    if (tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
     return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}) };
   }
@@ -2247,6 +2278,15 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
     const steps = args.steps as Step[];
+    const problem = this.checkSteps(steps);
+    if (problem !== null) return problem;
+    return this.runChecked(args, steps, session);
+  }
+
+  /** `run`'s checks of its steps, made before any runs (a bad step is `bad_params`, naming its number); null when they all hold. */
+  private checkSteps(steps: Step[]): CallToolResult | null {
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
     for (const [i, step] of steps.entries()) {
       if (!(RUN_TOOLS as readonly string[]).includes(step.tool)) {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
@@ -2315,6 +2355,14 @@ export class TaplineTools {
       if (!parsed.success) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ")}`);
       }
+      // A drive step needs a place or a route, and carries no `then` of its own: the steps after it are the batch's (18.4, 9.1).
+      if (step.tool === "drive") {
+        const wanted = parsed.data as unknown as DriveArgs;
+        const words = `step ${i + 1} (${describeRunStep(step)})`;
+        const wrong = driveArgsError(wanted);
+        if (wrong !== null) return fail(`Error bad_params: ${words}: ${wrong}`);
+        if (wanted.then !== undefined) return fail(`Error bad_params: ${words}: then goes on a drive call of its own; in run, put the steps after the drive step.`);
+      }
       // A test account's value is checked before any step runs too (§18.6): whole text, a known account for this app.
       if (step.tool === "type_text") {
         const typed = (params as { text?: unknown }).text;
@@ -2342,6 +2390,10 @@ export class TaplineTools {
       const refused = this.journeyStepRefusal(step, i);
       if (refused !== null) return fail(refused);
     }
+    return null;
+  }
+
+  private async runChecked(args: Shape<"run">, steps: Step[], session: SessionInfo): Promise<CallToolResult> {
     this.diffSaved = null;
     if (args.dry_run === true) return this.dryRunBatch(steps);
     const before = this.unlistedActions.get(session.id) ?? 0;
@@ -2349,6 +2401,8 @@ export class TaplineTools {
     const hold = this.holdScope.getStore() ?? { ms: 0 };
     const heldAtStart = hold.ms;
     const batchId = `b${started.toString(36)}`;
+    // A drive step inside a batch may run a batch of its own (a route): the outer one is put back after it.
+    const outerBatch = this.batch;
     const notes: string[] = [];
     const trace: string[] = [];
     let ran = 0;
@@ -2380,7 +2434,7 @@ export class TaplineTools {
       stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
       const answer = await this.runStep(step).finally(() => {
-        this.batch = undefined;
+        this.batch = outerBatch;
       });
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       if (answer.isError === true) {
@@ -2533,7 +2587,7 @@ export class TaplineTools {
     // A performance step with a tap: the tap resolves like any touch; nothing is measured (AGENT-TOOLS §15.3).
     const perfTap = first.tool === "performance" ? (first as Record<string, unknown>)["tap"] : undefined;
     const probe = perfTap !== undefined ? ({ tool: "tap", target: perfTap } as Step) : first;
-    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe"].includes(probe.tool)) {
+    if (["tap", "long_press", "toggle", "type_text", "scroll", "back", "swipe", "drive"].includes(probe.tool)) {
       const answer = await this.runStep({ ...probe, dry_run: true } as Step);
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
       const [line, ...rest] = said.split("\n");
@@ -2586,6 +2640,8 @@ export class TaplineTools {
         return this.compareStep(rest as Shape<"compare_screen">);
       case "performance":
         return this.performance(rest as Shape<"performance">);
+      case "drive":
+        return this.drive(rest as Shape<"drive">, { asStep: true });
     }
   }
 
@@ -2997,6 +3053,12 @@ export class TaplineTools {
       if (arrived === undefined) return [];
       const moved = from === null || from.name !== arrived.name;
       if ("skip" in classified) return from !== null && moved ? ["Note: not saved as a road (it needed a person's OK)."] : [];
+      // The log keeps where this touch led and whether the map already knew the way, for the report's known-way flag (16.1).
+      if (from !== null && moved) {
+        const known = map.data().roads.some((road) => road.from === from.name && road.to === arrived.name && (road.by === "tapline" || road.by === "both") && map.isProven(road));
+        const logged = this.callScope.getStore()?.entries.at(-1);
+        if (logged !== undefined && AGENT_TOUCHES.has(logged.entry.tool)) logged.entry.way = { from: from.name, to: arrived.name, known };
+      }
       let move = classified.move;
       if (move.tool === "open_url") {
         // Only a place the link reached keeps it, and only as a pattern, never the real url (§18.3).
@@ -4283,9 +4345,6 @@ export class TaplineTools {
     if (script.version === 2) {
       const filled = substituteSteps(script.steps, {}, accountStore, script.variables ?? []);
       if (!filled.ok) return fail(`Error ${filled.code}: ${filled.message}`);
-      // A route that can't run from where the app is stops here, before the fresh start restarts the app.
-      const early = this.host.current() === undefined ? null : await reachStart(script, this.routeContext(() => Promise.resolve(null)));
-      if (early !== null) return fail(`Error ${early.code}: ${early.message}`);
     }
     const ref = refStep(script.steps);
     if (ref !== null) return fail(`Error bad_params: step ${ref + 1} targets a ref; a script needs an id, label, text or point.`);
@@ -4327,8 +4386,8 @@ export class TaplineTools {
       }
     };
     if (script.version !== 2) return execute(script.steps);
-    // A route starts at a place: it runs from there, after the fresh start (§18.5).
-    const outcome = await routeRunner.run(script, {}, this.routeContext(execute), accountStore);
+    // A route starts at a place: after the fresh start the app is driven there (an `off_route` fails the replay), then it runs (18.5).
+    const outcome = await routeRunner.run(script, {}, this.routeContext(execute, (place) => this.replayDriveTo(place)), accountStore);
     return outcome.kind === "ran" ? outcome.answer : fail(`Error ${outcome.code}: ${outcome.message}`);
   }
 
@@ -4341,18 +4400,40 @@ export class TaplineTools {
 
   /**
    * What a route needs from this host (§18.5). `here` reads the app's place and writes nothing, so a replay never changes
-   * the map. Hook for `drive` (task 15): give the context a `driveTo` that takes the app to a place by link or roads;
-   * until then a route runs only from its own start.
+   * the map. `driveTo` takes the app to a place by link or roads; without one a route runs only from its own start.
    */
-  private routeContext<R>(runSteps: (steps: Step[]) => Promise<R>): RouteContext<R> {
+  private routeContext<R>(runSteps: (steps: Step[]) => Promise<R>, driveTo?: RouteContext<R>["driveTo"]): RouteContext<R> {
     return {
       here: async () => {
         const session = this.host.current();
         const map = session === undefined ? undefined : this.mapOf(session);
         return session === undefined || map === undefined ? null : placeSeen(this.placeSource(session), map);
       },
+      ...(driveTo !== undefined ? { driveTo } : {}),
       runSteps,
     };
+  }
+
+  /**
+   * A replay's way to a route's start: a drive over a copy of the map that is never written, so a replay still changes nothing
+   * (18.9). Every move keeps its policy check and a person's OK.
+   */
+  private async replayDriveTo(place: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const session = this.host.current();
+    const map = session === undefined ? undefined : this.mapOf(session);
+    if (session === undefined || map === undefined) return { ok: false, message: "the app has no map to drive with." };
+    const frozen = await map.readOnlyCopy();
+    const go = async (): Promise<{ ok: true } | { ok: false; message: string }> => {
+      // The screen a stopped drive shows must not add to the map either.
+      const before = this.replaying;
+      this.replaying = true;
+      try {
+        return await driveQuietly(this.driveServices(session, frozen), { to: place, by: "any" });
+      } finally {
+        this.replaying = before;
+      }
+    };
+    return this.holdScope.getStore() !== undefined ? go() : this.holdScope.run({ ms: 0 }, go);
   }
 
   /** Whether an answer is brief: the call's own `brief`, else the server's `--brief` (AGENT-TOOLS 1.13 §13.4). */

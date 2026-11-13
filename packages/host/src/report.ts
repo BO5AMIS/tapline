@@ -39,6 +39,8 @@ export interface CallRecord {
   approvals?: Array<"chat" | "live view">;
   /** For a look: it asked for a screenshot, a width or labels, which the answer of the action before it could not give. */
   askedPicture?: boolean;
+  /** For a single touch: where it led, and whether the map already held a proven road there (AGENT-TOOLS 1.13 16.1). */
+  way?: { from: string; to: string; known: boolean };
   /** The agent's client id, so thinking time is measured within one client. */
   client?: string;
   /** Epoch ms when the call's last entry ended; absent when the log line has no `ms` (older logs). */
@@ -114,6 +116,7 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
       ...(single && first.element !== undefined ? { element: first.element } : {}),
       ...(single && first.target !== undefined ? { target: first.target } : {}),
       ...(single && first.in_list !== undefined ? { inList: first.in_list } : {}),
+      ...(single && first.way !== undefined ? { way: first.way } : {}),
       ...(single && askedPicture(first) ? { askedPicture: true } : {}),
       ...(first.matched_with_changes === true ? { matchedWithChanges: true } : {}),
       ...(approvals.length > 0 ? { approvals } : {}),
@@ -198,6 +201,8 @@ export function analyze(calls: readonly CallRecord[]): Report {
   const idRetries: number[] = [];
   const hunts: Array<{ from: number; to: number; exact: boolean }> = [];
   const chains: Array<{ from: number; to: number }> = [];
+  /** Touches made one by one along a way the map already knew (§16.1): where they began, ended and the place they reached. */
+  const ways: Array<{ from: number; to: number; place: string; calls: number }> = [];
   for (const seq of splitBySession(calls)) {
     for (let i = 0; i < seq.length; i++) {
       const c = seq[i] as CallRecord;
@@ -248,6 +253,33 @@ export function analyze(calls: readonly CallRecord[]): Report {
       if (end - i >= 3) chains.push({ from: c.n, to: (seq[end - 1] as CallRecord).n });
       i = end;
     }
+    // 5. 3 or more touches in a row, each starting where the one before ended, every road one the map had proven: one drive
+    // (1.13.1 item 11). Looks between them don't break it; the count is every call from the first touch to the last.
+    for (let i = 0; i < seq.length; ) {
+      const first = seq[i] as CallRecord;
+      if (!(first.ok && first.way?.known === true)) {
+        i++;
+        continue;
+      }
+      let last = first;
+      let lastAt = i;
+      let touches = 1;
+      let next = i + 1;
+      while (next < seq.length) {
+        const e = seq[next] as CallRecord;
+        if (e.tool === "look") {
+          next++;
+          continue;
+        }
+        if (!(e.ok && e.way?.known === true && e.way.from === last.way?.to)) break;
+        last = e;
+        lastAt = next;
+        touches++;
+        next++;
+      }
+      if (touches >= KNOWN_WAY_TOUCHES) ways.push({ from: first.n, to: last.n, place: last.way?.to ?? "", calls: lastAt - i + 1 });
+      i = lastAt + 1;
+    }
   }
 
   const withChanges = calls.filter((c) => c.matchedWithChanges === true).map((c) => String(c.n));
@@ -284,6 +316,9 @@ export function analyze(calls: readonly CallRecord[]): Report {
       text: `${chains.length} ${chains.length === 1 ? "run" : "runs"} of 3 or more actions with no answer read in between (calls ${numbers(chains.map(range))}): one run each`,
     });
   }
+  for (const w of ways.slice(0, REPORT_MAX_NUMBERS)) {
+    flags.push({ text: `${w.calls} calls in a row on a way the map knows (calls ${range(w)}): drive {"to": ${JSON.stringify(w.place)}} is one call` });
+  }
   // Thin calls: each started a new process. Consecutive call numbers read as a range.
   const thin = calls.filter((c) => c.via === "call");
   if (thin.length >= THIN_CALLS_FLAGGED) {
@@ -309,6 +344,8 @@ export function analyze(calls: readonly CallRecord[]): Report {
   };
 }
 
+/** Three touches in a row on a way the map knows are enough to say "drive is one call" (1.13.1 item 11). */
+const KNOWN_WAY_TOUCHES = 3;
 /** Five thin calls are enough to say "load the MCP server once" (1.13.1 item 11). */
 const THIN_CALLS_FLAGGED = 5;
 /** A gap longer than this is the agent away, not thinking (§16.1). */

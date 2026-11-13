@@ -63,6 +63,13 @@ export type Eyes = (typeof EYES)[number];
 
 /** Shortcuts a journey may name in `allow` besides app commands. */
 export const OPEN_URL = "open_url";
+/**
+ * What `allow` can lift in a user's-eyes journey besides shortcuts (AGENT-TOOLS 1.13 18.12, 1.13.1 item 9): `drive` lets a
+ * drive use jumps (it is roads only otherwise), `reflexes` lifts the reflex ban, `fast_animations` the animation ban.
+ */
+export const DRIVE_ALLOWED = "drive";
+export const REFLEXES_ALLOWED = "reflexes";
+export const FAST_ANIMATIONS_ALLOWED = "fast_animations";
 
 // ---- state ------------------------------------------------------------------
 
@@ -95,6 +102,8 @@ export interface JourneyStep {
   code?: string;
   /** The first line of the answer. */
   said: string;
+  /** How a drive travelled beyond its first line: `Road repaired: "Language".` (AGENT-TOOLS 1.13 18.12). */
+  travel?: string[];
   /** Clock time the call began, ms, and how long it took. */
   at: number;
   ms: number;
@@ -261,6 +270,13 @@ export class Journey {
     this.state.shortcuts.push({ ...shortcut, what: withoutUrlSecrets(shortcut.what) });
   }
 
+  /** A drive made a move for the person: the measures count it as the touch it was. */
+  noteMove(tool: string): void {
+    const m = this.state.measures;
+    if (TAP_TOOLS.has(tool)) m.taps++;
+    if (SCROLL_TOOLS.has(tool)) m.scrolls++;
+  }
+
   pre(): Pre {
     return { screen: this.state.currentScreen, actionsOnScreen: this.actionsOnScreen, entered: this.state.measures.screensEntered > 1 };
   }
@@ -334,6 +350,8 @@ export class Journey {
     // The same for what a field holds: a tap or toggle on a filled input prints its value and placeholder too (finding 8).
     // A link may carry a sign-in token (`myapp://login?token=…`): only its scheme, host and path stay.
     const first = withoutUrlSecrets(withoutFieldText((outcome.text.split("\n")[0] ?? "").replace(tool === "type_text" ? / Value is now .*$/ : /(?!)/, "")));
+    // A drive's first line says how it went (`by 3 taps`); a repair is the other thing the report keeps (18.12).
+    const travel = tool === "drive" ? outcome.text.split("\n").filter((line) => line.startsWith("Road repaired")).map((line) => withoutUrlSecrets(withoutIds(line))) : [];
     const step: JourneyStep = {
       n: this.state.steps.length + 1,
       tool,
@@ -341,6 +359,7 @@ export class Journey {
       ok,
       ...(code !== undefined ? { code } : {}),
       said: first.length > 200 ? `${first.slice(0, 200)}…` : first,
+      ...(travel.length > 0 ? { travel } : {}),
       ...(flags.length > 0 ? { flags } : {}),
       at: outcome.at,
       ms: outcome.ms,

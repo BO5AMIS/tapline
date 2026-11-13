@@ -72,11 +72,10 @@ describe("drive: the answer", () => {
     expect((sent?.params as { params: unknown }).params).toEqual({ url: "wayfare://trips/42" });
   });
 
-  it("answers exactly one of to or route, and then is not available yet", async () => {
+  it("answers exactly one of to or route", async () => {
     const s = await setup();
     expect(textOf(await callTool(s.tools, "drive", {}))).toMatch(/^Error bad_params: give exactly one of to/);
     expect(textOf(await callTool(s.tools, "drive", { to: "a", route: "b" }))).toMatch(/^Error bad_params: give exactly one of to/);
-    expect(textOf(await callTool(s.tools, "drive", { to: "language", then: [{ tool: "wait", seconds: 0 }] }))).toMatch(/^Error unsupported: drive's then/);
     expect(s.count("press")).toBe(0);
   });
 
@@ -248,13 +247,6 @@ describe("drive: people and the policy", () => {
     expect(s.count("move") + s.count("press")).toBe(0);
   });
 
-  it("a user's-eyes journey is refused for now, before anything is touched", async () => {
-    const s = await setup();
-    await s.tools.journey({ start: true, goal: "see the language" });
-    const answer = await callTool(s.tools, "drive", { to: "language" });
-    expect(textOf(answer)).toMatch(/^Error unsupported: drive isn't available in a user's-eyes journey yet/);
-    expect(s.count("move") + s.count("press")).toBe(0);
-  });
 });
 
 describe("drive: the tool", () => {
@@ -281,7 +273,7 @@ describe("drive {route}", () => {
     const s = await withRoute(route([{ tool: "tap", target: { id: "language-row" } }], { end: "language" }));
     const answer = await callTool(s.tools, "drive", { route: "go" });
     expect(answer.isError).not.toBe(true);
-    expect(textOf(answer)).toContain("Ran 1 of 1 steps");
+    expect(textOf(answer).split("\n")[0]).toBe("Arrived at language by route go in 0.0 s.");
     expect(s.world.screen).toBe("language");
     expect(s.count("move")).toBe(1);
   });

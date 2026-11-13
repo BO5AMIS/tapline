@@ -5,7 +5,8 @@ import { cheapestWay, isRouteLeg } from "./mapcmd.js";
 import type { MapRoad, Move } from "./mapfile.js";
 import { keyFromState, placeNameFromRoute, placeNow, type AppMap, type KnownPlaces, type Observation, type Place, type PlaceSource } from "./places.js";
 import { elementSchema, placeStateSchema, type PlaceState, type TreeElement, type TreeResult } from "./protocol.js";
-import { loadRoute, routeRunner, substituteSteps } from "./routes.js";
+import { loadRoute, routeEdges, routeRunner, substituteSteps, type RouteEdge } from "./routes.js";
+import type { SharedScriptV2 } from "./script.js";
 import type { Step } from "./run.js";
 
 // `drive` (AGENT-TOOLS 1.13 §18.4; F7): takes the app to a place along the roads the map knows, with no model in the loop.
@@ -16,6 +17,8 @@ import type { Step } from "./run.js";
 export interface PlannedMove {
   road: MapRoad;
   viaLink: boolean;
+  /** Set when this leg is a saved route (§18.5): `road` then only carries its two places. */
+  route?: RouteEdge;
 }
 
 export interface DrivePlan {
@@ -25,7 +28,12 @@ export interface DrivePlan {
   proven: boolean;
 }
 
-export type PlanOptions = { by: "any" | "taps" | "link"; tapsOnly: boolean };
+export type PlanOptions = { by: "any" | "taps" | "link"; tapsOnly: boolean; routes?: RouteEdge[] };
+
+/** A saved route as one leg: a road in shape, so one loop plans and counts both. */
+function routeRoad(edge: RouteEdge): MapRoad {
+  return { from: edge.from, to: edge.to, move: { tool: "route" }, names: { text: edge.route }, by: "tapline", seen: 0, failed: 0, ms: 0, last: edge.last, build: "" };
+}
 
 /** A jump is an `open_url` of the place's link, written as a road so one loop drives both. */
 function jumpRoad(from: Place | null, to: { name: string }, link: string): MapRoad {
@@ -45,14 +53,16 @@ export function planWay(map: AppMap, from: Place | null, to: { name: string; lin
   if (options.by === "link") return { error: "no_way" };
   if (from === null) return { error: "unknown_start" };
   if (from.name === to.name) return { by: "taps", moves: [], cost: 0, proven: true };
-  const chain = cheapestWay(map.data().roads, from.name, to.name, (road) => map.isProven(road));
+  // A person has no link to follow, so a journey's roads leave the link roads, and its routes, out.
+  const roads = options.tapsOnly ? map.data().roads.filter((road) => road.move.tool !== "open_url") : map.data().roads;
+  const chain = cheapestWay(roads, from.name, to.name, (road) => map.isProven(road), options.tapsOnly ? [] : (options.routes ?? []));
   if (chain === null) return { error: "no_way" };
-  const roads = chain.filter((leg): leg is MapRoad => !isRouteLeg(leg));
+  const moves: PlannedMove[] = chain.map((leg) => (isRouteLeg(leg) ? { road: routeRoad(leg), viaLink: false, route: leg } : { road: leg, viaLink: false }));
   return {
     by: "taps",
-    moves: roads.map((road) => ({ road, viaLink: false })),
-    cost: roads.reduce((sum, road) => sum + (map.isProven(road) ? 1 : 2), 0),
-    proven: roads.every((road) => map.isProven(road)),
+    moves,
+    cost: chain.reduce((sum, leg) => sum + (isRouteLeg(leg) ? leg.moves : map.isProven(leg) ? 1 : 2), 0),
+    proven: chain.every((leg) => isRouteLeg(leg) || map.isProven(leg)),
   };
 }
 
@@ -99,8 +109,12 @@ export interface DriveServices {
   capabilities: readonly string[];
   /** The call was cancelled: stop between moves. */
   aborted(): boolean;
-  /** A user's-eyes journey never jumps (§18.4). */
+  /** A user's-eyes journey never jumps (§18.4), unless its `allow` names `drive`. */
   tapsOnly: boolean;
+  /** In a user's eyes each move is aimed by the visible text it had, and no id or place name is said (§18.12). */
+  eyes: boolean;
+  /** Told of each move that went through, so a journey can count its taps. */
+  moved?(tool: string, viaLink: boolean): void;
   clock(): number;
   sleep(ms: number): Promise<void>;
   describe(error: unknown): string;
@@ -125,6 +139,8 @@ export interface DriveArgs {
   by?: "any" | "taps" | "link" | undefined;
   brief?: boolean | undefined;
   dry_run?: boolean | undefined;
+  /** Set by the host for a drive that is a `run` step or a route's way to its start: no screen is built on success. */
+  quiet?: boolean | undefined;
 }
 
 /** A refusal of the arguments, before anything is read; null when they are fine. */
@@ -158,7 +174,9 @@ export function parseMoveResult(raw: unknown): { place: PlaceState | null; next?
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 const seconds = (ms: number): string => (Math.max(0, ms) / 1000).toFixed(1);
 
-function targetWords(target: Move["target"], names?: MapRoad["names"]): string {
+function targetWords(target: Move["target"], names?: MapRoad["names"], eyes = false): string {
+  // In a user's eyes only the visible text is said, never an id or a label (AGENT-TOOLS 1.13 18.12).
+  if (eyes) return names?.text !== undefined ? ` ${JSON.stringify(names.text)}` : "";
   // What a person would read comes first: the road's text or label, else its id (§18.4's example names "Language").
   const text = names?.text ?? names?.label ?? target?.text ?? target?.label;
   if (text !== undefined) return ` ${JSON.stringify(text)}`;
@@ -167,37 +185,40 @@ function targetWords(target: Move["target"], names?: MapRoad["names"]): string {
 }
 
 /** `tap "Language"`, for the step an answer names. */
-function stepWords(road: MapRoad): string {
+function stepWords(road: MapRoad, eyes = false): string {
   const { move } = road;
   switch (move.tool) {
     case "tap":
-      return `tap${targetWords(move.target, road.names)}`;
+      return `tap${targetWords(move.target, road.names, eyes)}`;
     case "long_press":
-      return `long press${targetWords(move.target, road.names)}`;
+      return `long press${targetWords(move.target, road.names, eyes)}`;
     case "toggle":
-      return `toggle${targetWords(move.target, road.names)}`;
+      return `toggle${targetWords(move.target, road.names, eyes)}`;
     case "back":
       return "back";
     case "swipe":
       return "swipe";
+    case "route":
+      return `route ${road.names?.text ?? ""}`.trim();
     default:
       return "open the link";
   }
 }
 
 /** `by link`, `by 3 taps`, `by link then 1 tap` (§18.4: how it travelled is always said). */
-function howText(links: number, taps: number, others: number): string {
+function howText(links: number, taps: number, others: number, routes: readonly string[] = []): string {
   const rest = taps + others;
   const noun = others === 0 ? (rest === 1 ? "tap" : "taps") : rest === 1 ? "move" : "moves";
   const link = links === 1 ? "link" : `${links} links`;
-  if (links > 0 && rest > 0) return `by ${link} then ${rest} ${noun}`;
-  return links > 0 ? `by ${link}` : `by ${rest} ${noun}`;
+  const parts = [...(links > 0 ? [link] : []), ...(routes.length > 0 ? [`route ${routes.join(", ")}`] : []), ...(rest > 0 ? [`${rest} ${noun}`] : [])];
+  return `by ${parts.length > 0 ? parts.join(" then ") : "0 taps"}`;
 }
 
-const countsOf = (moves: PlannedMove[]): { links: number; taps: number; others: number } => ({
+const countsOf = (moves: PlannedMove[]): { links: number; taps: number; others: number; routes: string[] } => ({
   links: moves.filter((move) => move.viaLink).length,
-  taps: moves.filter((move) => !move.viaLink && move.road.move.tool === "tap").length,
-  others: moves.filter((move) => !move.viaLink && move.road.move.tool !== "tap").length,
+  taps: moves.filter((move) => !move.viaLink && move.route === undefined && move.road.move.tool === "tap").length,
+  others: moves.filter((move) => !move.viaLink && move.route === undefined && move.road.move.tool !== "tap").length,
+  routes: moves.flatMap((move) => (move.route !== undefined ? [move.route.route] : [])),
 });
 
 const said = (message: string): CallToolResult => ({ content: [{ type: "text", text: message }] });
@@ -212,7 +233,9 @@ function appendLines(answer: CallToolResult, lines: string[]): CallToolResult {
 
 // -- one road as a request
 
-type Built = { ok: true; tool: TouchTool; method: TouchMethod; params: Record<string, unknown>; wire?: Record<string, unknown> } | { ok: false; why: string };
+const NO_TEXT = "it has no text a person could read";
+
+type Built ={ ok: true; tool: TouchTool; method: TouchMethod; params: Record<string, unknown>; wire?: Record<string, unknown> } | { ok: false; why: string };
 
 function wireOf(target: NonNullable<Move["target"]>): Record<string, unknown> | null {
   if (target.id !== undefined) return { testID: target.id };
@@ -237,7 +260,7 @@ export function fillLink(link: string, values: Record<string, string>): { ok: tr
 }
 
 /** The request a road's move makes. A row with no id can't be replayed: the driver chooses the row (§18.2). */
-function build(move: Move, values: Record<string, string>): Built {
+function build(move: Move, values: Record<string, string>, names?: MapRoad["names"], eyes = false): Built {
   switch (move.tool) {
     case "tap":
     case "long_press":
@@ -245,10 +268,16 @@ function build(move: Move, values: Record<string, string>): Built {
       const target = move.target;
       if (target === undefined) return { ok: false, why: "the road has no target" };
       if (target.row === true) return { ok: false, why: "it is a list row with no id of its own, so the driver chooses the row" };
-      const wire = wireOf(target);
+      // A person can't see ids: in their eyes the move is aimed by the text the road saw, and the app doesn't scroll for them (§18.12).
+      let wire: Record<string, unknown> | null;
+      if (eyes) {
+        const text = names?.text;
+        if (text === undefined || text === "") return { ok: false, why: NO_TEXT };
+        wire = { text };
+      } else wire = wireOf(target);
       if (wire === null) return { ok: false, why: "the road has no target" };
       const method = move.tool === "tap" ? "press" : move.tool === "long_press" ? "longPress" : "toggle";
-      return { ok: true, tool: move.tool === "tap" ? "tap" : move.tool === "long_press" ? "long_press" : "toggle", method, params: { target: wire }, wire };
+      return { ok: true, tool: move.tool === "tap" ? "tap" : move.tool === "long_press" ? "long_press" : "toggle", method, params: { target: wire, ...(eyes ? { noScroll: true } : {}) }, wire };
     }
     case "back":
       return { ok: true, tool: "back", method: "back", params: {} };
@@ -326,17 +355,20 @@ export function repairTarget(
   names: NonNullable<MapRoad["names"]>,
   elements: TreeElement[],
   find: (target: Record<string, unknown>, elements: TreeElement[]) => TreeElement[],
+  eyes = false,
 ): TreeElement | null {
   const wires: Array<Record<string, unknown>> = [];
-  if (names.id !== undefined) wires.push({ testID: names.id });
-  if (names.label !== undefined) wires.push({ label: names.label });
+  // A person sees text only: in their eyes no id or label names the element, and a list row's content is never a name (§18.12).
+  if (names.id !== undefined && !eyes) wires.push({ testID: names.id });
+  if (names.label !== undefined && !eyes) wires.push({ label: names.label });
   if (names.text !== undefined) wires.push({ text: names.text });
-  const usable = (element: TreeElement): boolean => element.row !== true || (typeof element.testID === "string" && element.testID !== "");
+  const usable = (element: TreeElement): boolean =>
+    eyes ? element.row !== true && typeof element.text === "string" && element.text !== "" : element.row !== true || (typeof element.testID === "string" && element.testID !== "");
   for (const wire of wires) {
     const found = find(wire, elements).filter(usable);
     if (found.length === 1 && found[0] !== undefined) return found[0];
   }
-  const wanted = [names.label, names.text].filter((s): s is string => s !== undefined).map(normal);
+  const wanted = [eyes ? undefined : names.label, names.text].filter((s): s is string => s !== undefined).map(normal);
   const near = elements.filter(
     (element) =>
       usable(element) &&
@@ -354,34 +386,39 @@ const shownName = (element: TreeElement): string => {
 
 // -- the drive
 
-type Core = { ok: true; answer: CallToolResult } | { ok: false; code: string; message: string; answer: CallToolResult };
+interface Leg {
+  i: number;
+  n: number;
+  road: MapRoad;
+  eyes: boolean;
+}
+
+type Core =
+  | { ok: true; answer: CallToolResult; line: string; notes: string[]; arrived: string }
+  | { ok: false; code: string; message: string; answer: CallToolResult };
 
 const OFF_ROUTE_CODES: ReadonlySet<string> = new Set(["not_found", "ambiguous", "not_actionable", "stale"]);
 const MAX_REPLANS = 2;
-/** Moments only a person can clear (§11.5): a drive is a batch, so they are answered in a batch's form and never re-run. */
+/** Moments only a person can clear (AGENT-TOOLS 1.13 11.5): a drive is a batch, so they are answered in a batch's form and never re-run. */
 const MOMENT_CODES: ReadonlySet<string> = new Set(["not_connected", "in_background", "not_answering"]);
 
-function batchFailure(code: string, message: string, step: { i: number; n: number; road: MapRoad }, done: number): Core {
-  const text = `Ran ${done} of ${step.n} steps; stopped at step ${step.i + 1} (${stepWords(step.road)}): ${message} Nothing else was touched.`;
+function batchFailure(code: string, message: string, leg: Leg, done: number): Core {
+  const text = `Ran ${done} of ${leg.n} steps; stopped at step ${leg.i + 1} (${stepWords(leg.road, leg.eyes)}): ${message} Nothing else was touched.`;
   return { ok: false, code, message: text, answer: failed(`Error ${code}: ${text}`) };
 }
 
+type Finish = (code: string, why: string, leg: Leg | null, now: Place | null, isNew: boolean) => Promise<Core>;
+
 /** The next target is covered: an alert goes to the person's moment, anything else is off_route (and blames no road). */
-async function covered(
-  svc: DriveServices,
-  step: { i: number; n: number; road: MapRoad },
-  done: number,
-  now: Place | null,
-  finish: (code: string, why: string, step: { i: number; n: number; road: MapRoad } | null, now: Place | null, isNew: boolean) => Promise<Core>,
-): Promise<Core> {
+async function covered(svc: DriveServices, leg: Leg, done: number, now: Place | null, finish: Finish): Promise<Core> {
   let alert = false;
   try {
     alert = ((await svc.tree()).alerts?.length ?? 0) > 0;
   } catch {
     alert = false;
   }
-  if (alert) return batchFailure("not_actionable", "behind_alert: An alert is open; a person has to answer it.", step, done);
-  return finish("off_route", "it's covered by something on the screen", step, now, false);
+  if (alert) return batchFailure("not_actionable", "behind_alert: An alert is open; a person has to answer it.", leg, done);
+  return finish("off_route", "it's covered by something on the screen", leg, now, false);
 }
 
 function offRouteWhy(code: string, message: string): string {
@@ -392,14 +429,53 @@ function offRouteWhy(code: string, message: string): string {
   return /^[a-z_]{3,30}$/.test(reason) ? `it can't be touched now (${reason.replace(/_/g, " ")})` : "it can't be touched now";
 }
 
-/** Takes the app to a place (§18.4). */
-export async function driveTo(svc: DriveServices, args: DriveArgs): Promise<CallToolResult> {
-  return (await driveCore(svc, args)).answer;
+/** The first line of an answer, replaced; the rest (the screen, the notes) stays. */
+function withFirstLine(answer: CallToolResult, line: string): CallToolResult {
+  const [top, ...rest] = answer.content;
+  if (top === undefined || top.type !== "text") return answer;
+  const [, ...lines] = top.text.split("\n");
+  return { ...answer, content: [{ type: "text", text: [line, ...lines].join("\n") }, ...rest] };
 }
 
-async function driveCore(svc: DriveServices, args: DriveArgs): Promise<Core> {
+/** Lines put in front of an answer's text. */
+function withLinesBefore(answer: CallToolResult, lines: string[]): CallToolResult {
+  const [top, ...rest] = answer.content;
+  if (top === undefined || top.type !== "text") return answer;
+  return { ...answer, content: [{ type: "text", text: [...lines, top.text].join("\n") }, ...rest] };
+}
+
+/**
+ * Takes the app to a place (AGENT-TOOLS 1.13 18.4), then runs `then` (ordinary `run` steps) when given. `rs` lets the way go
+ * through a saved route and run the `then` steps; without it a way is roads and links only.
+ */
+export async function driveTo(svc: DriveServices, args: DriveArgs, rs: RouteServices): Promise<CallToolResult> {
+  const steps = args.then as Step[] | undefined;
+  // The steps are checked like `run` checks its own, before anything is touched.
+  if (steps !== undefined) {
+    const refused = rs.checkSteps(steps);
+    if (refused !== null) return refused;
+  }
+  return afterThen(await driveCore(svc, args, rs, steps !== undefined || args.quiet === true), args, rs);
+}
+
+/** A drive for a caller that wants no screen on success (a replay going to a route's start). */
+export async function driveQuietly(svc: DriveServices, args: DriveArgs, rs?: RouteServices): Promise<{ ok: true } | { ok: false; message: string }> {
+  const core = await driveCore(svc, args, rs, true);
+  return core.ok ? { ok: true } : { ok: false, message: core.message };
+}
+
+/** `then`: the steps go on after the arrival, in the same call; the answer follows `run`'s (18.4, 9.3). */
+async function afterThen(core: Core, args: DriveArgs, rs: RouteServices | undefined): Promise<CallToolResult> {
+  // A dry run touches nothing, so the steps after it don't run either.
+  if (!core.ok || args.then === undefined || rs === undefined || args.dry_run === true) return core.answer;
+  const ran = await rs.runSteps(args.then as Step[], true);
+  if (ran.isError === true) return appendLines(ran, [...core.notes, `Note: arrived at ${core.arrived} before the steps ran.`]);
+  return withLinesBefore(ran, [core.line, ...core.notes]);
+}
+
+async function driveCore(svc: DriveServices, args: DriveArgs, rs: RouteServices | undefined, quiet: boolean): Promise<Core> {
   try {
-    return await travel(svc, args);
+    return await travel(svc, args, rs, quiet);
   } catch (error) {
     const text = svc.describe(error);
     const found = /^Error (\w+): ([\s\S]*)$/.exec(text);
@@ -407,13 +483,20 @@ async function driveCore(svc: DriveServices, args: DriveArgs): Promise<Core> {
   }
 }
 
-async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
+async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | undefined, quiet: boolean): Promise<Core> {
   const { map } = svc;
   const started = svc.clock();
   const to = args.to ?? "";
   const by = args.by ?? "any";
   const values = args.with ?? {};
+  const eyes = svc.eyes;
   const bad = (code: string, message: string): Core => ({ ok: false, code, message, answer: failed(`Error ${code}: ${message}`) });
+  // A success carries no screen when the caller adds its own (`then`, a `run` step, a replay).
+  const screenOf = (line: string): Promise<CallToolResult> => (quiet ? Promise.resolve(said(line)) : svc.screen(line, args.brief));
+
+  if (by === "link" && svc.tapsOnly) {
+    return bad("not_allowed", "in a journey, a jump is a shortcut a user doesn't have, and this journey's allow doesn't name drive; reach the place by its roads (by: \"taps\").");
+  }
 
   // The place: one the map holds, or one the app lists up front (it may have a link and no roads yet).
   const saved = map.data().places[to];
@@ -427,11 +510,12 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
   let here: Place | null = first.place;
   if (here.name === to) {
     const line = `Already at ${to}.`;
-    return { ok: true, answer: args.dry_run === true ? said(line) : await svc.screen(line, args.brief) };
+    if (args.dry_run === true) return { ok: true, answer: said(line), line, notes: [], arrived: to };
+    return { ok: true, answer: await screenOf(line), line, notes: [], arrived: to };
   }
 
   // 2. The way.
-  const options: PlanOptions = { by, tapsOnly: svc.tapsOnly };
+  const options: PlanOptions = { by, tapsOnly: svc.tapsOnly, ...(rs !== undefined ? { routes: routeEdges(map) } : {}) };
   // A screen the map doesn't hold yet is not a start a road can leave from.
   const startKnown = !first.isNew;
   let plan = planWay(map, startKnown ? here : null, target, options);
@@ -441,7 +525,18 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
     const filled = fillLink(link, values);
     if (!filled.ok) return bad("bad_params", `${to} needs ${filled.missing.join(", ")} (give it in with).`);
   }
-  if (args.dry_run === true) return { ok: true, answer: said(describePlan(plan, map, here, target)) };
+  // A saved route on the way is checked (its steps, its account) before anything is touched.
+  const prepared = new Map<string, Step[]>();
+  for (const planned of plan.moves) {
+    if (planned.route === undefined || rs === undefined) continue;
+    const ready = prepareRoute(svc, rs, planned.route.route, {}, args.account, false);
+    if (!ready.ok) return { ok: false, code: ready.code, message: ready.message, answer: refusal(ready) };
+    prepared.set(planned.route.route, ready.steps);
+  }
+  if (args.dry_run === true) {
+    const line = describePlan(plan, map, here, target);
+    return { ok: true, answer: said(line), line, notes: [], arrived: to };
+  }
 
   // 3. Go.
   const run = {
@@ -449,6 +544,7 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
     links: 0,
     taps: 0,
     others: 0,
+    routes: [] as string[],
     path: [here.name],
     repairs: [] as string[],
     provenAgain: 0,
@@ -458,12 +554,14 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
   const allowed = new Set<string>();
   let fresh: TreeElement[] | null = tree.elements;
   let waiting: NextWait | undefined;
+  const droppedNote = (road: string): string => (eyes ? "Note: dropped a road (it failed twice in a row)." : `Note: dropped the road ${road} (it failed twice in a row).`);
 
-  const finish = async (code: string, why: string, step: { i: number; n: number; road: MapRoad } | null, now: Place | null, isNew: boolean): Promise<Core> => {
-    const where = now === null ? "Now at: unknown." : `Now at: ${now.name} (${isNew ? "new" : "known"}).`;
-    const at = step === null ? "" : ` stopped at step ${step.i + 1} of ${step.n} (${stepWords(step.road)}):`;
-    const message = `${at} ${why}. ${where} Done: ${plural(run.done, "move", "moves")}. Nothing else was touched.`.trim();
-    const notes = [...run.dropped.map((road) => `Note: dropped the road ${road} (it failed twice in a row).`)];
+  const finish: Finish = async (code, why, leg, now, isNew) => {
+    // A person can't see the app's place names (18.12).
+    const where = eyes ? "" : now === null ? "Now at: unknown." : `Now at: ${now.name} (${isNew ? "new" : "known"}).`;
+    const at = leg === null ? "" : `stopped at step ${leg.i + 1} of ${leg.n} (${stepWords(leg.road, eyes)}):`;
+    const message = [at, `${why}.`, where, `Done: ${plural(run.done, "move", "moves")}.`, "Nothing else was touched."].filter((part) => part !== "").join(" ");
+    const notes = run.dropped.map(droppedNote);
     const screen = await svc.screen(`Error ${code}: ${message}`, args.brief);
     return { ok: false, code, message, answer: appendLines({ ...screen, isError: true }, notes) };
   };
@@ -479,9 +577,33 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
         const message = `the call was cancelled. Done: ${plural(run.done, "move", "moves")}. Nothing else was touched.`;
         return { ok: false, code: "cancelled", message, answer: failed(`Error cancelled: ${message}`) };
       }
-      const step = { i, n: moves.length, road };
-      const built = build(road.move, values);
-      if (!built.ok) return finish("off_route", built.why, step, here, false);
+      const leg: Leg = { i, n: moves.length, road, eyes };
+
+      // A saved route is one leg: its steps run as `run` runs them, and the arrival is checked as for a road (18.5).
+      if (planned.route !== undefined) {
+        const steps = prepared.get(planned.route.route);
+        if (rs === undefined || steps === undefined) return finish("off_route", "the route can't be run here", leg, here, false);
+        waiting = undefined;
+        fresh = null;
+        const ran = await rs.runSteps(steps, false);
+        if (ran.isError === true) {
+          const body = ran.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
+          const found = /^Error (\w+): ([\s\S]*)$/.exec(body);
+          const stop = `Stopped at step ${i + 1} of ${moves.length} (${stepWords(road, eyes)}). Done: ${plural(run.done, "move", "moves")}. Nothing else was touched.`;
+          return { ok: false, code: found?.[1] ?? "internal", message: `${found?.[2] ?? body} ${stop}`, answer: appendLines(ran, [stop]) };
+        }
+        run.done += planned.route.moves;
+        run.routes.push(planned.route.route);
+        const arrival = await arrivedAt(svc, null);
+        if (arrival === null) return finish("off_route", "the app's place can't be read, so the arrival isn't checked", leg, null, false);
+        here = arrival.obs.place;
+        if (here.name !== road.to) return finish("off_route", "it didn't lead where the road says", leg, here, arrival.obs.isNew);
+        run.path.push(here.name);
+        continue;
+      }
+
+      const built = build(road.move, values, road.names, eyes);
+      if (!built.ok) return finish("off_route", built.why, leg, here, false);
 
       // The element this move touches, as the policy sees it.
       let element: TreeElement | undefined;
@@ -489,17 +611,17 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
       if (built.wire !== undefined && !("x" in built.wire)) {
         const state = waiting?.state;
         if (state === "ready" || state === "moving") element = waiting?.element;
-        else if (state === "covered") return covered(svc, step, run.done, here, finish);
+        else if (state === "covered") return covered(svc, leg, run.done, here, finish);
         if (element === undefined) {
           const elements = fresh ?? (tree = await svc.tree()).elements;
           const found = svc.candidates(built.wire, elements);
           if (found.length === 1 && found[0] !== undefined) element = found[0];
-          else if (found.length > 1) return finish("off_route", offRouteWhy("ambiguous", ""), step, here, false);
+          else if (found.length > 1) return finish("off_route", offRouteWhy("ambiguous", ""), leg, here, false);
           else {
-            const meant = repairTarget({ ...road.names, ...(road.move.target?.id !== undefined ? { id: road.move.target.id } : {}) }, elements, svc.candidates);
+            const meant = repairTarget({ ...road.names, ...(road.move.target?.id !== undefined ? { id: road.move.target.id } : {}) }, elements, svc.candidates, eyes);
             if (meant === null) {
               markFailed(road, viaLink, map, run.dropped);
-              return finish("off_route", offRouteWhy("not_found", ""), step, here, false);
+              return finish("off_route", offRouteWhy("not_found", ""), leg, here, false);
             }
             element = meant;
             repaired = { element: meant, was: targetWords(road.move.target).trim() };
@@ -511,13 +633,20 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
 
       // The next target, so the app waits for it as part of this move (F7).
       const pipelined = svc.capabilities.includes("move");
-      const nextRoad = moves[i + 1]?.road;
-      const nextBuilt = nextRoad === undefined || moves[i + 1]?.viaLink === true ? undefined : build(nextRoad.move, values);
+      const nextPlanned = moves[i + 1];
+      const nextRoad = nextPlanned?.road;
+      const nextBuilt = nextRoad === undefined || nextPlanned?.viaLink === true || nextPlanned?.route !== undefined ? undefined : build(nextRoad.move, values, nextRoad.names, eyes);
       const nextWire = nextBuilt?.ok === true && nextBuilt.wire !== undefined && !("x" in nextBuilt.wire) ? nextBuilt.wire : undefined;
       const capMs = nextRoad === undefined ? 0 : Math.min(10_000, Math.max(2000, nextRoad.ms * 3));
 
       const touched = element !== undefined && repaired !== undefined ? moveTargetOf(element) : null;
-      const params = touched !== null ? { target: wireOf(touched.target) ?? {} } : built.params;
+      // A repaired target in a user's eyes is aimed by its text too, and the app doesn't scroll for the person.
+      const params =
+        touched !== null
+          ? eyes && typeof element?.text === "string"
+            ? { target: { text: element.text }, noScroll: true }
+            : { target: wireOf(touched.target) ?? {} }
+          : built.params;
       const guard = pipelined && element !== undefined ? guardOf(element) : undefined;
       const call: TouchCall = {
         tool: built.tool,
@@ -531,23 +660,24 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
       const movedAt = svc.clock();
       const outcome = await svc.touch(call);
       if (outcome.kind === "stop") {
-        const lines = [`Stopped at step ${i + 1} of ${moves.length} (${stepWords(road)}). Done: ${plural(run.done, "move", "moves")}. Nothing else was touched.`];
+        const lines = [`Stopped at step ${i + 1} of ${moves.length} (${stepWords(road, eyes)}). Done: ${plural(run.done, "move", "moves")}. Nothing else was touched.`];
         const body = outcome.answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
         const found = /^Error (\w+): ([\s\S]*)$/.exec(body);
         return { ok: false, code: found?.[1] ?? "not_allowed", message: `${found?.[2] ?? body} ${lines[0] ?? ""}`.trim(), answer: appendLines(outcome.answer, lines) };
       }
       if (outcome.kind === "error") {
-        // Only a target that isn't there, or an arrival elsewhere, blames a road (§18.2).
-        if (outcome.code === "not_actionable" && /^behind_alert/.test(outcome.message)) return batchFailure(outcome.code, outcome.message, step, run.done);
+        // Only a target that isn't there, or an arrival elsewhere, blames a road (18.2).
+        if (outcome.code === "not_actionable" && /^behind_alert/.test(outcome.message)) return batchFailure(outcome.code, outcome.message, leg, run.done);
         if (OFF_ROUTE_CODES.has(outcome.code)) {
           if (outcome.code === "not_found") markFailed(road, viaLink, map, run.dropped);
-          return finish("off_route", offRouteWhy(outcome.code, outcome.message), step, here, false);
+          return finish("off_route", offRouteWhy(outcome.code, outcome.message), leg, here, false);
         }
-        if (MOMENT_CODES.has(outcome.code)) return batchFailure(outcome.code, outcome.message, step, run.done);
+        if (MOMENT_CODES.has(outcome.code)) return batchFailure(outcome.code, outcome.message, leg, run.done);
         const message = `${outcome.message} Done: ${plural(run.done, "move", "moves")}.`;
         return { ok: false, code: outcome.code, message, answer: failed(`Error ${outcome.code}: ${message}`) };
       }
       run.done++;
+      svc.moved?.(road.move.tool, viaLink);
       if (outcome.via !== undefined) allowed.add(outcome.via);
       if (viaLink) run.links++;
       else if (road.move.tool === "tap") run.taps++;
@@ -555,17 +685,23 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
 
       // Is it where the road leads? (A claim of arrival is never made without this.)
       const arrival = await arrivedAt(svc, outcome.place);
-      if (arrival === null) return finish("off_route", "the app's place can't be read, so the arrival isn't checked", step, null, false);
+      if (arrival === null) return finish("off_route", "the app's place can't be read, so the arrival isn't checked", leg, null, false);
       if (arrival.tree !== undefined) fresh = arrival.tree.elements;
       here = arrival.obs.place;
       if (here.name !== road.to) {
         markFailed(road, viaLink, map, run.dropped);
         // Nothing moved, or a jump that missed on its own say: the same road or link would only miss again.
-        if (!viaLink && here.name === road.from) return finish("off_route", "the screen didn't change", step, here, false);
-        if (arrival.obs.isNew || run.replans >= MAX_REPLANS || (viaLink && by === "link")) return finish("off_route", "it didn't lead where the road says", step, here, arrival.obs.isNew);
+        if (!viaLink && here.name === road.from) return finish("off_route", "the screen didn't change", leg, here, false);
+        if (arrival.obs.isNew || run.replans >= MAX_REPLANS || (viaLink && by === "link")) return finish("off_route", "it didn't lead where the road says", leg, here, arrival.obs.isNew);
         // Planned again from where it is, by roads: a link that missed would only miss again.
-        const again = planWay(map, here, target, { by: by === "link" ? "link" : "taps", tapsOnly: svc.tapsOnly });
-        if ("error" in again) return finish("off_route", "it didn't lead where the road says", step, here, false);
+        const again = planWay(map, here, target, { by: by === "link" ? "link" : "taps", tapsOnly: svc.tapsOnly, ...(rs !== undefined ? { routes: routeEdges(map) } : {}) });
+        if ("error" in again) return finish("off_route", "it didn't lead where the road says", leg, here, false);
+        for (const planned2 of again.moves) {
+          if (planned2.route === undefined || rs === undefined || prepared.has(planned2.route.route)) continue;
+          const ready = prepareRoute(svc, rs, planned2.route.route, {}, args.account, false);
+          if (!ready.ok) return finish("off_route", "it didn't lead where the road says", leg, here, false);
+          prepared.set(planned2.route.route, ready.steps);
+        }
         run.replans++;
         if (viaLink) run.path = [here.name];
         else run.path.push(here.name);
@@ -573,11 +709,11 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
         replanned = true;
         break;
       }
-      // Clean: the road is updated only now, after the arrival check passed (§18.4).
+      // Clean: the road is updated only now, after the arrival check passed (18.4).
       let proven = road;
       if (!viaLink && repaired !== undefined && touched !== null) {
         proven = map.repairRoad(road, { ...road.move, target: touched.target }, touched.names, repaired.element.row !== true) ?? road;
-        run.repairs.push(`Road repaired: ${shownName(repaired.element)} (was ${repaired.was}).`);
+        run.repairs.push(eyes ? `Road repaired: ${shownName(repaired.element)}.` : `Road repaired: ${shownName(repaired.element)} (was ${repaired.was}).`);
       }
       if (!viaLink) {
         if (!map.isProven(proven)) run.provenAgain++;
@@ -593,18 +729,19 @@ async function travel(svc: DriveServices, args: DriveArgs): Promise<Core> {
   }
 
   // 4. Arrived and checked.
-  const counts = { links: run.links, taps: run.taps, others: run.others };
-  const how = howText(counts.links, counts.taps, counts.others);
-  const roadsDriven = run.taps + run.others;
-  const path = roadsDriven > 0 && run.path.length > 1 ? ` (${run.path.join(" > ")})` : "";
-  const line = `Arrived at ${to} ${how} in ${seconds(svc.clock() - started)} s${path}.`;
+  const how = howText(run.links, run.taps, run.others, run.routes);
+  const roadsDriven = run.taps + run.others + run.routes.length;
+  // A person can't see the app's place names (18.12).
+  const path = !eyes && roadsDriven > 0 && run.path.length > 1 ? ` (${run.path.join(" > ")})` : "";
+  const arrived = `${to} ${how} in ${seconds(svc.clock() - started)} s`;
+  const line = `Arrived at ${arrived}${path}.`;
   const notes = [
     ...[...allowed].map((via) => `Note: allowed by a person (in ${via === "chat" ? "chat" : "the live view"}).`),
     ...run.repairs,
     ...(run.provenAgain > 0 ? [`Note: ${plural(run.provenAgain, "road", "roads")} proven again for build ${map.currentBuild()}.`] : []),
-    ...run.dropped.map((road) => `Note: dropped the road ${road} (it failed twice in a row).`),
+    ...run.dropped.map(droppedNote),
   ];
-  return { ok: true, answer: appendLines(await svc.screen(line, args.brief), notes) };
+  return { ok: true, answer: appendLines(await screenOf(line), notes), line, notes, arrived };
 }
 
 function markFailed(road: MapRoad, viaLink: boolean, map: AppMap, dropped: string[]): void {
@@ -659,10 +796,11 @@ function describePlan(plan: DrivePlan, map: AppMap, from: Place | null, to: { na
   const first = plan.moves[0];
   if (plan.by === "link" && first !== undefined) return `Would drive to ${to.name} by link (${first.road.move.url ?? to.link ?? ""}).`;
   const counts = countsOf(plan.moves);
-  const how = howText(counts.links, counts.taps, counts.others);
+  const how = howText(counts.links, counts.taps, counts.others, counts.routes);
   const names = [from?.name ?? "?", ...plan.moves.map((move) => move.road.to)].join(" > ");
-  const unproven = plan.moves.filter((move) => !move.viaLink && !map.isProven(move.road));
-  const state = unproven.length === 0 ? "all proven" : `unproven for build ${map.currentBuild()}: ${unproven.map((move) => `${move.road.from} > ${move.road.to}`).join(", ")}`;
+  const unproven = plan.moves.filter((move) => !move.viaLink && move.route === undefined && !map.isProven(move.road));
+  const via = counts.routes.map((route) => `via route ${route}`);
+  const state = [unproven.length === 0 ? "all proven" : `unproven for build ${map.currentBuild()}: ${unproven.map((move) => `${move.road.from} > ${move.road.to}`).join(", ")}`, ...via].join("; ");
   return `Would drive to ${to.name} ${how}: ${names} (${state}).`;
 }
 
@@ -676,25 +814,31 @@ async function stopBeforeAnything(
 ): Promise<Core> {
   if (error === "unknown_start") {
     const now = here === null ? "unknown" : `${here.name} (new)`;
-    const message = `the app's current place isn't known, so no road can be followed. Now at: ${now}. Nothing was touched.`;
+    // A person can't see the app's place names (18.12).
+    const where = svc.eyes ? "" : ` Now at: ${now}.`;
+    const message = `the app's current place isn't known, so no road can be followed.${where} Nothing was touched.`;
     const screen = await svc.screen(`Error off_route: ${message}`, args.brief);
     return { ok: false, code: "off_route", message, answer: { ...screen, isError: true } };
   }
   const message =
     by === "link"
       ? `${target.name} has no link to jump to; add one with map link, or drive it once (the driver), and it is remembered.`
-      : `no known way from ${here?.name ?? "here"} to ${target.name}; drive it once (the driver), and it is remembered.`;
+      : svc.eyes
+        ? `no known way to ${target.name}; drive it once (the driver), and it is remembered.`
+        : `no known way from ${here?.name ?? "here"} to ${target.name}; drive it once (the driver), and it is remembered.`;
   return { ok: false, code: "not_found", message, answer: failed(`Error not_found: ${message}`) };
 }
 
-// -- a saved route (§18.5), driven from wherever the app is
+// -- a saved route (18.5), driven from wherever the app is
 
 export interface RouteServices {
   accounts: AccountStore | undefined;
   /** Whether the account can be typed here: the message when it can't (never a value). */
   probeAccount(field: string, account: string | undefined): string | null;
-  /** The steps, the way `run` runs them, with the call's account as their default. */
-  runSteps(steps: Step[]): Promise<CallToolResult>;
+  /** The steps, the way `run` runs them, with the call's account as their default; `look: false` answers no screen. */
+  runSteps(steps: Step[], look: boolean): Promise<CallToolResult>;
+  /** `run`'s own checks of steps (their tools, their words, an account), made before anything is touched; null when they hold. */
+  checkSteps(steps: Step[]): CallToolResult | null;
 }
 
 const ACCOUNT_FIELD = /\$\{account\.([a-z]+)\}/g;
@@ -710,40 +854,97 @@ export function accountFieldsUsed(steps: Step[]): string[] {
   return [...fields];
 }
 
+type Prepared = { ok: true; route: SharedScriptV2; steps: Step[] } | { ok: false; code: string; message: string; answer?: CallToolResult };
+
+/** A refused route as the call's answer: `run`'s own refusal when it gave one, else the error with its code. */
+const refusal = (ready: { code: string; message: string; answer?: CallToolResult | undefined }): CallToolResult => ready.answer ?? failed(`Error ${ready.code}: ${ready.message}`);
+
 /**
- * `drive {route}`: takes the app to the route's start place when it is elsewhere, then runs its steps with the variables
- * and the account filled in (§18.4, §18.5). The values and the account are checked before anything is touched.
+ * A route's steps with the variables and the account filled in, checked before anything is touched. `strictAccount` is for a
+ * route driven by name: an account it never types is a mistake. A route that is one leg of a way takes the call's account only if it types one.
  */
-export async function driveRoute(svc: DriveServices, rs: RouteServices, args: DriveArgs): Promise<CallToolResult> {
-  const name = args.route ?? "";
+function prepareRoute(svc: DriveServices, rs: RouteServices, name: string, values: Record<string, string>, account: string | undefined, strictAccount: boolean): Prepared {
   const route = loadRoute(svc.map.folder(), name);
-  if (route === null) return failed(`Error not_found: no route named "${name}"; map lists the routes.`);
+  if (route === null) return { ok: false, code: "not_found", message: `no route named "${name}"; map lists the routes.` };
   const used = accountFieldsUsed(route.steps);
-  if (used.length === 0 && args.account !== undefined) {
-    return failed(`Error bad_params: account "${args.account}" is named but the route ${route.name} types no \${account.username} or \${account.password}.`);
+  if (strictAccount && used.length === 0 && account !== undefined) {
+    return { ok: false, code: "bad_params", message: `account "${account}" is named but the route ${route.name} types no \${account.username} or \${account.password}.` };
   }
   for (const field of used) {
-    const refused = rs.probeAccount(field, args.account);
-    if (refused !== null) return failed(`Error bad_params: ${refused}`);
+    const refused = rs.probeAccount(field, account);
+    if (refused !== null) return { ok: false, code: "bad_params", message: refused };
   }
-  // Values are checked before anything is touched, in a dry run too.
-  const filled = substituteSteps(route.steps, args.with ?? {}, rs.accounts, route.variables ?? []);
-  if (!filled.ok) return failed(`Error ${filled.code}: ${filled.message}`);
+  const filled = substituteSteps(route.steps, values, rs.accounts, route.variables ?? []);
+  if (!filled.ok) return { ok: false, code: filled.code, message: filled.message };
+  // `run`'s own checks of the steps, made now: a step a journey's eyes refuse is found before the app is driven anywhere.
+  const refused = rs.checkSteps(filled.steps);
+  if (refused !== null) return { ok: false, code: "refused", message: "", answer: refused };
+  return { ok: true, route, steps: filled.steps };
+}
+
+/**
+ * `drive {route}`: takes the app to the route's start place when it is elsewhere, then runs its steps with the variables
+ * and the account filled in, then checks its end (18.4, 18.5). The values and the account are checked before anything is touched.
+ * The answer is the drive answer: `Arrived at home by route sign_in in 3.2 s.` and the screen.
+ */
+export async function driveRoute(svc: DriveServices, rs: RouteServices, args: DriveArgs): Promise<CallToolResult> {
+  const started = svc.clock();
+  const name = args.route ?? "";
+  const prepared = prepareRoute(svc, rs, name, args.with ?? {}, args.account, true);
+  if (!prepared.ok) return refusal(prepared);
+  const { route } = prepared;
+  const then = args.then as Step[] | undefined;
+  if (then !== undefined) {
+    const refused = rs.checkSteps(then);
+    if (refused !== null) return refused;
+  }
   if (args.dry_run === true) {
     const from = route.start !== undefined ? ` from ${route.start}` : "";
     return said(`Would run route ${route.name} (${plural(route.steps.length, "step", "steps")})${from}; nothing is touched.`);
   }
+  // No screen is built where another answer follows: the `then` steps, a `run` step's own line.
+  const quiet = then !== undefined || args.quiet === true;
+  let startNotes: string[] = [];
+  let startFailure: CallToolResult | undefined;
   const ctx = {
     here: async (): Promise<string | null> => {
       const obs = await placeNow(svc.source, svc.map);
       return obs === null ? null : obs.place.name;
     },
     driveTo: async (place: string): Promise<{ ok: true } | { ok: false; message: string }> => {
-      const result = await driveCore(svc, { to: place, by: "any", with: args.with, brief: true });
-      return result.ok ? { ok: true } : { ok: false, message: result.message };
+      const result = await driveCore(svc, { to: place, by: "any", with: args.with, brief: args.brief, account: args.account }, rs, true);
+      if (result.ok) {
+        startNotes = result.notes;
+        return { ok: true };
+      }
+      // No way to the start is the same stop as a road that went wrong: off_route (18.5).
+      startFailure = result.code === "not_found" && result.message.startsWith("no known way") ? withFirstLine(result.answer, `Error off_route: ${result.message}`) : result.answer;
+      return { ok: false, message: result.message };
     },
-    runSteps: (steps: Step[]) => rs.runSteps(steps),
+    runSteps: (steps: Step[]) => rs.runSteps(steps, !quiet),
   };
   const outcome = await routeRunner.run(route, args.with ?? {}, ctx, rs.accounts);
-  return outcome.kind === "ran" ? outcome.answer : failed(`Error ${outcome.code}: ${outcome.message}`);
+  if (outcome.kind === "refused") return startFailure ?? failed(`Error ${outcome.code}: ${outcome.message}`);
+  const ran = outcome.answer;
+  if (ran.isError === true) return ran;
+
+  // The end is checked, never assumed.
+  const now = await placeNow(svc.source, svc.map);
+  const wanted = route.end;
+  if (wanted !== undefined) {
+    const stop = (why: string): CallToolResult => ({ ...withFirstLine(ran, `Error off_route: ${why}`), isError: true });
+    if (now === null) return stop(`the app's place can't be read, so the end of the route ${route.name} isn't checked.`);
+    if (now.place.name !== wanted) {
+      return stop(
+        svc.eyes
+          ? `the route ${route.name} ran its steps but didn't end where it should.`
+          : `the route ${route.name} ran its steps but ended at ${now.place.name}, not at ${wanted} (its end).`,
+      );
+    }
+  }
+  const place = wanted ?? now?.place.name;
+  const arrived = `${place !== undefined && !svc.eyes ? `${place} ` : ""}by route ${route.name} in ${seconds(svc.clock() - started)} s`;
+  const line = `Arrived ${place !== undefined && !svc.eyes ? "at " : ""}${arrived}.`;
+  const core: Core = { ok: true, answer: appendLines(withFirstLine(ran, line), startNotes), line, notes: startNotes, arrived };
+  return afterThen(core, args, rs);
 }

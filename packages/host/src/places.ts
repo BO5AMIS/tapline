@@ -360,6 +360,15 @@ export class AppMap {
     this.loadStatus = loaded.status;
   }
 
+  /**
+   * The map as it is on disk now, read only: a replay drives over this copy, so it can read the map and never change it (§18.9).
+   * What this map holds in memory is written first, so the copy is current.
+   */
+  async readOnlyCopy(): Promise<AppMap> {
+    await this.flush();
+    return new AppMap(this.app, { dir: this.dir, clock: this.clock, readOnly: true });
+  }
+
   /** The app reconnected, maybe with a new build. */
   updateApp(app: MapApp): void {
     this.app = app;

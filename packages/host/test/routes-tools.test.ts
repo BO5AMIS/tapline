@@ -264,15 +264,15 @@ describe("replay a route", () => {
     expect(world.app.requests.filter((r) => r.method === "type" || r.method === "press" || r.method === "reload")).toHaveLength(0);
   });
 
-  it("with the app elsewhere, answers unsupported and touches nothing", async () => {
+  it("with the app elsewhere after the fresh start and no road back, fails with off_route and runs no step", async () => {
     const world = await saved();
     world.state.screen = "home";
     world.app.requests.length = 0;
     const answer = await world.tools.replay({ name: "plain" });
     expect(answer.isError).toBe(true);
-    expect(textOf(answer)).toMatch(/^Error unsupported: the route "plain" starts at welcome, and the app is at home\./);
-    // Refused before the fresh start: the app was not restarted.
-    expect(world.app.requests.filter((r) => r.method === "press" || r.method === "reload")).toHaveLength(0);
+    // The map holds no road from home to welcome, so the drive to the start stops there (18.5).
+    expect(textOf(answer)).toMatch(/^Error off_route: no known way from home to welcome;/);
+    expect(world.app.requests.filter((r) => r.method === "press")).toHaveLength(0);
   });
 
   it("a routes entry outside the map folder's routes/ is never read, and nothing is written beside it", async () => {
