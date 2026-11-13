@@ -117,11 +117,19 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 **Options for the agent's side (1.6).** `tapline mcp` and the standalone `tapline host` take these:
 
 - `--brief`: actions answer in at most 12 element lines (a call's `brief: false` overrides it).
-- `--accounts FILE`: test accounts, so an agent can sign in by name without seeing a password:
-  `{"version": 1, "accounts": {"tester2": {"username": "...", "password": "...", "apps": ["com.example.wayfare"]}}}`.
-  The file must sit outside any git repository, or be ignored by it, or Tapline refuses it. Keep it
-  outside the folders the agent can read. A password stays out of pictures only while its field is
-  secure. `tapline doctor --accounts FILE` checks it and prints the names, never the values.
+- `--accounts FILE`: the vault (AGENT-TOOLS 1.14 §20), so an agent can sign in and fill forms by name without
+  seeing a value:
+  `{"version": 2, "vault": {"tester2": {"kind": "account", "username": "...", "password": "...", "apps": ["com.example.wayfare"]}, "home": {"kind": "address", "street": "...", "city": "...", "postcode": "...", "country": "..."}, "visa": {"kind": "card", "number": "...", "expiry": "...", "cvc": "..."}}}`.
+  Kinds: `account`, `card`, `address`, `identity`, `note`, and `phone` (Tapwright's; Tapline never types it).
+  The agent refers to `${vault.home.street}` (the whole text of a step), or `account: "tester2"` with
+  `${account.username}`. A card's fields are typed only with a person's OK each time. A version 1 file
+  (`{"version": 1, "accounts": {...}}`) still loads.
+  A plain file is for test data only: it must sit outside any git repository, or be ignored by it, or Tapline
+  refuses it, and every start says it is not encrypted. `tapline vault protect FILE` rewrites it in this
+  system's protected form (Windows DPAPI for the current user, or the macOS keychain; a protected file has no
+  values in it, so it may sit anywhere, and Tapwright reads it too). Keep the file outside the folders the
+  agent can read. A password stays out of pictures only while its field is secure.
+  `tapline doctor --accounts FILE` checks it and prints the names and kinds, never the values.
 - `--maps DIR`: keep each app's map (places, roads, links, routes, reflexes) in `DIR/<app id>/`
   instead of `~/.tapline/maps/<app id>/`. A team can share one folder.
 - `--no-dialog` (`mcp`): don't open the host's dialog for a person's OK or a "needs a person" moment;

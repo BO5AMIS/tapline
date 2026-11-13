@@ -117,7 +117,8 @@ tapline mcp
   `--delete`, and `tapline doctor --policy FILE` (a refused grant, a broken state file).
 - `--no-dialog` keeps a person's OK to the live view (the host's own dialog is off), for a host that
   hands dialogs to the model instead of a person. `--brief` makes actions answer briefly.
-  `--accounts FILE` loads test accounts (outside any git repository, or ignored by it; never print
+  `--accounts FILE` loads the vault: test accounts, cards, addresses, identities, notes (a plain file outside any git
+  repository, or ignored by it, for test data only; `tapline vault protect FILE` encrypts it; never print
   it). `--maps DIR` keeps each app's map in `DIR/<app id>/`. `tapline host` takes the same options
   and serves `tapline call`.
 

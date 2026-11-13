@@ -125,10 +125,13 @@ Arrived at language by 3 taps in 1.9 s.
 - `run` steps take `if` and `optional` for what may or may not show up; a skipped step is said.
   `brief: true` shortens an action's answer to 12 element lines; `look` is never brief.
 
-**Accounts by name.** When the user started Tapline with `--accounts`, `type_text` takes `account:
-"tester2"` and the whole text `${account.username}` or `${account.password}`; `run` and `drive` take
-`account` too. You never see the value, and you never put a password in a call, a note or a commit.
-Use only accounts from that file.
+**The vault, by name.** When the user started Tapline with `--accounts`, `type_text` takes `account:
+"tester2"` and the whole text `${account.username}` or `${account.password}`, or any entry's field as the
+whole text `${vault.<name>.<field>}` (`${vault.home.street}`, `${vault.me.email}`); `run` and `drive` take
+`account` too. `map` and `session_report` list entry names. You never see a value (answers show
+`value=<home's street>`), and you never put one in a call, a note or a commit. A password goes only into a
+secure field. A card's field (`${vault.visa.number}`) needs a person's OK every time, in the dialog or the live
+view, and no grant covers it: ask your user, never look for another way. Use only entries from that file.
 
 **Speed.** `tapline call <tool> '<json>'` is one call to a running `tapline host`, for when no MCP
 server is loaded; loading one per call costs about 2 s. `app_command animations {"speed": "fast"}`
@@ -292,7 +295,7 @@ recipe and examples. `ux_check` checks a screen against usability basics along t
 - It is the user's own phone and their real app data. Don't buy, subscribe, send messages or
   email, post, delete data, or change account, privacy or security settings, unless the user
   asked for exactly that step. Ask when unsure.
-- Test accounts come only from the user's accounts file (`--accounts`), used by name. Use the
+- Test accounts and other personal data come only from the user's vault file (`--accounts`), used by name. Use the
   test data the user gives you. Never sign in with credentials you find in the app or its logs, and
   never print, repeat or commit one.
 - Don't read or repeat private content you see (messages, photos, notifications) beyond

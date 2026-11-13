@@ -151,10 +151,22 @@ something is on screen. Actions take `brief: true` for an answer of at most 12 e
 - **Reflexes.** A rule you or the agent declare in the map (`map {reflex}`) closes a known
   interruption, such as a rate prompt, at a place change or before a failure answer. Only declared
   reflexes run, and none that would need a person's OK.
-- **Test accounts.** `--accounts FILE` holds usernames and passwords by name. The agent says
-  `account: "tester2"` and the host types the value: it never reaches the agent as text, a log, a report or a
-  recording. Screenshots show what the screen shows: a username in a plain field, and a password only if
-  its field's "show password" toggle is on. The file must be outside a git repository, or ignored by it.
+- **The vault (test accounts, cards, addresses, identities, notes).** `--accounts FILE` holds values by name
+  (AGENT-TOOLS 1.14 §20). The agent says `account: "tester2"` with `${account.username}` or
+  `${account.password}`, or `${vault.home.street}` for any entry, as the whole text of a step, and the host
+  types the value: it never reaches the agent as text, a log, a report, a script, a dialog or a recording
+  (every form of it is scrubbed: as is, with spaces collapsed, JSON- and URL-encoded, with invisible marks).
+  Answers show `value=<home's street>`. Screenshots show what the screen shows: a username in a plain
+  field, and a password only if its field's "show password" toggle is on.
+  - Kinds: `account` (username, password), `card` (number, expiry, cvc), `address` (street, city, postcode,
+    country), `identity` (name, phone, email, birthday), `note` (text), and `phone` (Tapwright's passcode:
+    held, never typed by Tapline). A version 1 accounts file still loads. `apps` limits an entry to apps.
+  - **A card's fields are typed only with a person's OK, every time** (`Allow: type card "visa" number into
+    "Card number" in Wayfare?`), and no grant covers one.
+  - A plain file is for test data only (every start says it is not encrypted) and must be outside a git
+    repository, or ignored by it. `tapline vault protect FILE` turns it into the protected form: Windows DPAPI
+    for the current user, or the macOS keychain. Tapwright reads the same file.
+  - Every use is a `vault` line in the audit log (the entry and the field, never the value).
 - **A person's OK in the chat.** A touch that needs one opens the host's own dialog (Allow once /
   Don't allow) as well as the live view; the first answer wins. The same dialog says what to do when
   the app isn't open or an alert needs a person (`Needs a person: ...`), and the call goes on by
@@ -169,7 +181,7 @@ New flags (`tapline mcp` and `tapline host`):
 | Flag | What it does |
 |---|---|
 | `--brief` | actions answer briefly; a call's `brief: false` overrides it; `look` is never brief |
-| `--accounts FILE` | the test accounts file (see above) |
+| `--accounts FILE` | the vault file: test accounts, cards, addresses, identities, notes (see above; version 1 accounts files still load) |
 | `--maps DIR` | keep each app's map in `DIR/<app id>/` instead of `~/.tapline/maps/<app id>/`, so a team and both tools can share a folder |
 | `--no-dialog` | don't open the host's dialog for a person's OK or a "needs a person" moment; the live view still asks (`mcp`; for a host that hands dialogs to the model) |
 

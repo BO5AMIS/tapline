@@ -260,12 +260,14 @@ Tapline on. Read its output, then go on with step 6. By hand:
    field saves a placeholder), `drive { route: "sign_in", with: { city: "Doha" } }` runs it from
    anywhere (it drives to the start first). `replay` runs it from a fresh app. A route is one leg
    of a way for `drive` and `map to`.
-17. **Test accounts.** The user keeps them in an accounts file, outside any git repository or ignored
-   by it, and starts Tapline with `--accounts FILE`. You use one by name: `type_text` with `account:
-   "tester2"` and the text `${account.username}` or `${account.password}` (the whole text, never part
-   of it); `run` and `drive` take `account` too. Tapline types the value, and no text it gives you holds it: every
-   answer, log, report and recording shows `<tester2's password>`. A password goes only into a
-   password field. A picture is another matter: a screenshot shows a username that sits in a plain
+17. **Test accounts and the vault.** The user keeps them in a vault file (accounts, cards, addresses, identities, notes;
+   a plain file outside any git repository or ignored by it, or one protected with `tapline vault protect`), and starts
+   Tapline with `--accounts FILE`. You use an entry by name: `type_text` with `account:
+   "tester2"` and the text `${account.username}` or `${account.password}`, or `${vault.home.street}` for any entry
+   (the whole text, never part of it); `run` and `drive` take `account` too. Tapline types the value, and no text it
+   gives you holds it: every answer, log, report, script and recording shows `<tester2's password>` or `<home's street>`.
+   A password goes only into a password field. A card's fields (`${vault.visa.number}`) are typed only with a person's
+   OK every time, and no grant covers them: ask your user. The `phone` kind is Tapwright's and is never typed. A picture is another matter: a screenshot shows a username that sits in a plain
    field, and a password whose field has its "show password" toggle on. `map` and `session_report` list the names. **Never print, repeat, write down or
    commit a credential, and never put one in a call.** If a call refuses (`no account "x"`, `isn't
    for this app`), ask the user; don't look for the file.
@@ -426,7 +428,7 @@ a gesture-only control). Note screens that took more than a few seconds to load.
 - **It is the user's real phone and their real app data.** Don't buy, subscribe, send
   messages or email, post, invite people, delete data, or change account, privacy or
   security settings, unless the user asked for exactly that step. Ask when unsure.
-- Test accounts come only from the user's accounts file (`--accounts`), used by name. Use the
+- Test accounts and other personal data come only from the user's vault file (`--accounts`), used by name. Use the
   test data the user gives you. Don't sign in with credentials you find in the app, its logs or
   anywhere else, and never print, repeat or commit a credential.
 - Tapline never navigates from inside the app: `drive` makes the app's own taps or opens a deep
