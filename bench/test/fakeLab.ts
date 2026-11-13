@@ -88,6 +88,11 @@ export interface Bugs {
    * it was), and answers as if it tapped.
    */
   pressesWithoutScrolling?: boolean;
+  /**
+   * A tap on an off-screen element scrolls it only as far as the fixed header (its centre lands at y 75,
+   * behind lab-behind-bar) and fires its handler there.
+   */
+  scrollsUnderHeader?: boolean;
 }
 
 export const LAB_APP = "Lab (com.example.lab)";
@@ -438,6 +443,15 @@ export class FakeLab {
       this.options.bugs?.pressesWithoutScrolling &&
       this.refusal(first)?.startsWith("Error not_actionable: off_screen, scroll to it")
     ) {
+      this.press(first);
+      return `Tapped ${first.id}.\nSettled in 0.10 s.`;
+    }
+    if (
+      this.options.bugs?.scrollsUnderHeader &&
+      !first.fixed &&
+      this.refusal(first)?.startsWith("Error not_actionable: off_screen, scroll to it")
+    ) {
+      this.scroll = Math.min(this.maxScroll, Math.max(0, first.y + first.h / 2 - 75));
       this.press(first);
       return `Tapped ${first.id}.\nSettled in 0.10 s.`;
     }

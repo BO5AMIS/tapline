@@ -22,6 +22,7 @@ import {
   parseError,
   parseStateFields,
   readStateFields,
+  screenOf,
   shareSheetListed,
   showState,
   startsWithReason,
@@ -70,8 +71,34 @@ export interface CallOutcome {
   unproven?: string[];
 }
 
-async function onScreenNow(env: Env, id: string): Promise<boolean> {
-  return isOnScreen((await env.tool.call("look", { screenshot: false })).text, id);
+/**
+ * What marks the lab's fixed header band: the bar itself (`lab-bar`) when the tool lists it, and
+ * `lab-behind-bar`, the button the bar covers (QUALITY-BAR 2.5 R3). The band ends at the lowest edge listed.
+ */
+const HEADER_MARKS = ["lab-bar", "lab-behind-bar"];
+
+/**
+ * Where `id` is now, from a fresh look: `clear` (on screen, below the header band when the look lists
+ * a mark of it), `under-header` (on screen, but its top is inside that band), `off` (not listed, or
+ * its centre is outside the screen), or `unknown` (the look failed or has no Screen line). Only a
+ * successful, readable look counts as evidence either way.
+ */
+export async function whereNow(
+  env: Env,
+  id: string,
+): Promise<{ at: "clear" | "under-header" | "off" | "unknown"; why?: string }> {
+  const r = await env.tool.call("look", { screenshot: false });
+  if (failed(r)) return { at: "unknown", why: `the look failed: ${line(env, r)}` };
+  if (!screenOf(r.text)) return { at: "unknown", why: "the look has no Screen line" };
+  if (!isOnScreen(r.text, id)) return { at: "off" };
+  const rect = elementRect(r.text, id);
+  let headerBottom = -Infinity;
+  for (const mark of HEADER_MARKS) {
+    const m = elementRect(r.text, mark);
+    if (m) headerBottom = Math.max(headerBottom, m.y + m.h);
+  }
+  if (rect && rect.y < headerBottom) return { at: "under-header" };
+  return { at: "clear" };
 }
 
 /** Brings the target into view, makes the call, then waits for each expected state part. */
@@ -87,13 +114,25 @@ export async function runStateCall(
   }
   const bring = c.bring === undefined ? idOf(c.target) : c.bring;
   if (bring && !opts.immediate) await bringIntoView(env.tool, bring);
-  if (c.scrollsInto && (await onScreenNow(env, c.scrollsInto))) {
-    unproven.push(`${c.scrollsInto} was already on screen before the call, so nothing shows the tool scrolled to it`);
+  if (c.scrollsInto) {
+    const before = await whereNow(env, c.scrollsInto);
+    if (before.at === "unknown") {
+      unproven.push(`couldn't see whether ${c.scrollsInto} was off screen before the call (${before.why ?? "no look"})`);
+    } else if (before.at !== "off") {
+      unproven.push(`${c.scrollsInto} was already on screen before the call, so nothing shows the tool scrolled to it`);
+    }
   }
   const result = await env.tool.call(c.tool, argsOf(c, opts.look ?? false));
   // Read the screen at once: missingStates may scroll back to the top to read lab-state.
-  if (c.scrollsInto && !failed(result) && !(await onScreenNow(env, c.scrollsInto))) {
-    unproven.push(`${c.scrollsInto} wasn't on screen right after the call: the tool acted without scrolling to it`);
+  if (c.scrollsInto && !failed(result)) {
+    const after = await whereNow(env, c.scrollsInto);
+    if (after.at === "unknown") {
+      unproven.push(`couldn't see ${c.scrollsInto} right after the call (${after.why ?? "no look"})`);
+    } else if (after.at === "off") {
+      unproven.push(`${c.scrollsInto} wasn't on screen right after the call: the tool acted without scrolling to it`);
+    } else if (after.at === "under-header") {
+      unproven.push(`${c.scrollsInto} was under the fixed header right after the call: the tool acted where a person couldn't`);
+    }
   }
   return {
     result,

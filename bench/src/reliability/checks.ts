@@ -23,9 +23,10 @@ export interface StateCall {
   /** Parts of lab-state that must show afterwards. */
   expect?: string[];
   /**
-   * The tool must scroll this id into view itself: the `before` calls succeed, the id is off screen
-   * right before the call, and on screen in a look right after it (before anything scrolls back).
-   * A handler fired without a scroll fails the step.
+   * The tool must scroll this id into view itself: the `before` calls succeed, a successful look
+   * right before the call shows the id off screen, and one right after it (before anything scrolls
+   * back) shows it on screen, below the fixed header. A handler fired without a scroll, a target left
+   * under the header, or a look that fails or can't be read fails the step.
    */
   scrollsInto?: string;
 }

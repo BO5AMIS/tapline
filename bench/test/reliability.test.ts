@@ -3,9 +3,9 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkUnchanged, expectNoState, expectState, isTimeoutAnswer, PRESENT_WAIT_S } from "../src/lab.js";
-import type { CallResult } from "../src/mcp.js";
+import type { CallResult, ToolSession } from "../src/mcp.js";
 import { R1_STEPS, R3_CHECKS, R4_GRID } from "../src/reliability/checks.js";
-import { dismissShare, popoverDismissPoint, runR1, runStateCall, type Env } from "../src/reliability/driver.js";
+import { dismissShare, popoverDismissPoint, runR1, runStateCall, whereNow, type Env } from "../src/reliability/driver.js";
 
 describe("closing a popover share sheet (iOS 26)", () => {
   const region = 'e1 other "dismiss popup" id=PopoverDismissRegion @0,0 430x932 [tap]';
@@ -406,6 +406,66 @@ describe("R1 and R2 on the fake lab", () => {
     expect(unproven).toEqual([
       "lab-bottom was already on screen before the call, so nothing shows the tool scrolled to it",
     ]);
+  });
+
+  it("a look that fails before the call is no evidence the target was off screen", async () => {
+    const lab = new FakeLab({ alertTool: false });
+    lab.call("scroll", { target: { id: "lab-scroll" }, to: "end" }); // lab-bottom is in view
+    const base = lab.tool();
+    let looks = 0;
+    const tool: ToolSession = {
+      call: (name, args) =>
+        name === "look" && looks++ === 0
+          ? Promise.resolve({ text: "Error not_answering: the app is not answering", images: 0, isError: true, ms: 1 })
+          : base.call(name, args),
+    };
+    const env: Env = { tool, hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const step = R1_STEPS.find((s) => s.scrollsInto === "lab-bottom");
+    // A scroll that answers but doesn't move: the before call can't show the precondition either.
+    const { unproven } = await runStateCall(env, {
+      ...step,
+      tool: "tap",
+      before: [{ tool: "scroll", args: { target: { id: "lab-scroll" }, direction: "down", amount: 0.1, look: false } }],
+    });
+    expect(unproven).toEqual([
+      "couldn't see whether lab-bottom was off screen before the call (the look failed: Error not_answering: the app is not answering)",
+    ]);
+  });
+
+  it("a target the tool leaves under the fixed header isn't proven on screen", async () => {
+    const lab = new FakeLab({ alertTool: false, bugs: { scrollsUnderHeader: true } });
+    lab.scroll = 600; // lab-save (y 200) is off the top
+    const env: Env = { tool: lab.tool(), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() };
+    const { result, unproven } = await runStateCall(env, {
+      tool: "tap",
+      target: { id: "lab-save" },
+      bring: null,
+      scrollsInto: "lab-save",
+      expect: ["pressed=save"],
+    });
+    expect(result.isError).toBe(false);
+    expect(lab.pressed).toBe("save");
+    expect(unproven).toEqual([
+      "lab-save was under the fixed header right after the call: the tool acted where a person couldn't",
+    ]);
+  });
+
+  it("takes the header band from lab-bar when the tool lists it, down to its lowest edge", async () => {
+    const lines = [
+      `Screen ${W}x${H} pt @3x · 3 elements`,
+      `App: ${LAB_APP}`,
+      "e1 button id=lab-behind-bar @135,63 160x30 [tap]",
+      'e2 other "Lab" id=lab-bar @0,0 440x110',
+      "e3 button id=lab-bottom @80,100 280x40 [tap]",
+    ];
+    const look = (text: string): ToolSession => ({
+      call: () => Promise.resolve({ text, images: 0, isError: false, ms: 1 }),
+    });
+    const env = (text: string): Env => ({ tool: look(text), hasAlert: false, sleep: () => Promise.resolve(), skipNotes: new Set() });
+    expect((await whereNow(env(lines.join("\n")), "lab-bottom")).at).toBe("under-header");
+    // Without lab-bar, lab-behind-bar's edge (y 93) is the band: lab-bottom at y 100 is clear of it.
+    expect((await whereNow(env(lines.filter((l) => !l.includes("lab-bar ")).join("\n")), "lab-bottom")).at).toBe("clear");
+    expect((await whereNow(env(`App: ${LAB_APP}\ne3 button id=lab-bottom @80,300 280x40`), "lab-bottom")).at).toBe("unknown");
   });
 
   it("the lab-bottom step, run as written, proves the scroll", async () => {
