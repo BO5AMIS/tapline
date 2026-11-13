@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { AccountStore } from "./accounts.js";
-import { loadMap, readRouteSync, saveMap, saveRouteFile } from "./mapfile.js";
+import { insideDir, loadMap, readRouteSync, saveMap, saveRouteFile } from "./mapfile.js";
 import type { AppMap } from "./places.js";
 import type { Step } from "./run.js";
 import { sharedScriptV2Schema, type SharedScriptV2 } from "./script.js";
@@ -19,8 +19,11 @@ export function routeSlug(raw: string): string | null {
     .replace(/[^A-Za-z0-9._-]+/g, "_")
     .replace(/^[^A-Za-z0-9]+/, "")
     .slice(0, ROUTE_NAME_MAX)
-    .replace(/_+$/, "");
-  return reduced === "" ? null : reduced;
+    // Windows drops trailing dots and spaces from a file name.
+    .replace(/[._]+$/, "");
+  if (reduced === "") return null;
+  // Device names such as CON or NUL can't be files on Windows (the rule mapDir uses).
+  return /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i.test(reduced) ? `_${reduced}`.slice(0, ROUTE_NAME_MAX) : reduced;
 }
 
 // -- variables
@@ -45,11 +48,18 @@ export type Substituted = { ok: true; step: Step } | { ok: false; code: "bad_par
 
 class Refusal extends Error {}
 
-function fillText(text: string, values: Record<string, string>): string {
+interface Fill {
+  values: Record<string, string>;
+  /** The route's declared variables; when given, a token outside them is refused. */
+  variables?: readonly string[] | undefined;
+}
+
+function fillText(text: string, { values, variables }: Fill): string {
   return text.replace(TOKEN, (match: string, name: string | undefined) => {
     if (name === undefined) return "${";
     // An account's value is typed by the tool when the step runs; it stays a placeholder here.
     if (name.startsWith("account.")) return match;
+    if (variables !== undefined && !variables.includes(name)) throw new Refusal(`the step uses ${name} but the route's variables don't list it.`);
     if (!Object.hasOwn(values, name)) throw new Refusal(`no value given for the variable "${name}".`);
     const value = values[name] as string;
     if (value.includes("${account.")) throw new Refusal(`the value of "${name}" can't hold an account placeholder; name the account instead.`);
@@ -57,11 +67,11 @@ function fillText(text: string, values: Record<string, string>): string {
   });
 }
 
-function fillValue(value: unknown, values: Record<string, string>): unknown {
-  if (typeof value === "string") return fillText(value, values);
-  if (Array.isArray(value)) return value.map((item) => fillValue(item, values));
+function fillValue(value: unknown, fill: Fill): unknown {
+  if (typeof value === "string") return fillText(value, fill);
+  if (Array.isArray(value)) return value.map((item) => fillValue(item, fill));
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, fillValue(item, values)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, fillValue(item, fill)]));
   }
   return value;
 }
@@ -81,11 +91,19 @@ function checkAccountText(text: string, accounts: AccountStore | undefined): voi
  * The step with its variables filled and its `$${` made `${`. A variable with no value is refused, naming it. An account
  * placeholder stays as it is (the tool types the value later), and only as the whole text of a `type_text`.
  */
-export function substituteVariables(step: Step, values: Record<string, string>, accounts?: AccountStore): Substituted {
+export function substituteVariables(step: Step, values: Record<string, string>, accounts?: AccountStore, variables?: readonly string[]): Substituted {
   try {
+    const unlisted = variables === undefined ? undefined : Object.keys(values).find((key) => !variables.includes(key));
+    if (unlisted !== undefined) throw new Refusal(`a value was given for "${unlisted}", which the route's variables don't list.`);
     const text = (step as Record<string, unknown>)["text"];
     if (step.tool === "type_text" && typeof text === "string") checkAccountText(text, accounts);
-    const filled = Object.fromEntries(Object.entries(step).map(([key, value]) => [key, key === "tool" ? value : fillValue(value, values)]));
+    const fill: Fill = { values, variables };
+    const filled = Object.fromEntries(Object.entries(step).map(([key, value]) => [key, key === "tool" ? value : fillValue(value, fill)]));
+    // Checked again on the filled text: a literal or a value must never turn into an account placeholder.
+    const after = (filled as Record<string, unknown>)["text"];
+    if (step.tool === "type_text" && typeof after === "string" && after.includes("${account.") && after !== text) {
+      throw new Refusal("a literal ${account. can't become an account placeholder; an account value is the whole text of a step, written as its own placeholder.");
+    }
     return { ok: true, step: filled as Step };
   } catch (error) {
     if (error instanceof Refusal) return { ok: false, code: "bad_params", message: error.message };
@@ -94,10 +112,10 @@ export function substituteVariables(step: Step, values: Record<string, string>, 
 }
 
 /** Every step filled, or the first refusal with its step number. */
-export function substituteSteps(steps: Step[], values: Record<string, string>, accounts?: AccountStore): { ok: true; steps: Step[] } | { ok: false; code: "bad_params"; message: string } {
+export function substituteSteps(steps: Step[], values: Record<string, string>, accounts?: AccountStore, variables?: readonly string[]): { ok: true; steps: Step[] } | { ok: false; code: "bad_params"; message: string } {
   const done: Step[] = [];
   for (const [i, step] of steps.entries()) {
-    const filled = substituteVariables(step, values, accounts);
+    const filled = substituteVariables(step, values, accounts, variables);
     if (!filled.ok) return { ok: false, code: "bad_params", message: `step ${i + 1}: ${filled.message}` };
     done.push(filled.step);
   }
@@ -187,12 +205,22 @@ function registeredRoutes(dir: string): Record<string, string> {
   }
 }
 
+/**
+ * The full path of a registered route file, only when it is a .json file inside the map folder's `routes/`. A map can be
+ * shared and edited by another tool, so an entry like "../../x.json" is never read, and nothing is written beside it.
+ */
+export function routeFileIn(dir: string, relative: string): string | null {
+  const full = insideDir(dir, relative);
+  if (full === null || !full.startsWith(resolve(dir, "routes") + sep) || !full.endsWith(".json")) return null;
+  return full;
+}
+
 /** Where a route of that name is kept in the app's map folder (its full path), or null when the map has none. */
 export function routePathOf(map: AppMap, name: string): string | null {
   const routes = map.data().routes;
   const key = Object.hasOwn(routes, name) ? name : routeSlug(name);
   const relative = key === null || !Object.hasOwn(routes, key) ? undefined : routes[key];
-  return relative === undefined ? null : join(map.folder(), relative);
+  return relative === undefined ? null : routeFileIn(map.folder(), relative);
 }
 
 /** The route of that name from the map folder, or null (unknown, or a file that isn't a version 2 script). */
@@ -200,7 +228,7 @@ export function loadRoute(dir: string, name: string): SharedScriptV2 | null {
   const routes = registeredRoutes(dir);
   const key = Object.hasOwn(routes, name) ? name : routeSlug(name);
   const relative = key === null || !Object.hasOwn(routes, key) ? undefined : routes[key];
-  if (relative === undefined) return null;
+  if (relative === undefined || routeFileIn(dir, relative) === null) return null;
   const file = readRouteSync(dir, relative);
   const parsed = file === null ? null : sharedScriptV2Schema.safeParse(file);
   return parsed?.success === true ? parsed.data : null;
@@ -223,7 +251,7 @@ export interface RouteEdge {
 export function routeEdges(map: AppMap): RouteEdge[] {
   const edges: RouteEdge[] = [];
   for (const [route, relative] of Object.entries(map.data().routes)) {
-    const file = readRouteSync(map.folder(), relative);
+    const file = routeFileIn(map.folder(), relative) === null ? null : readRouteSync(map.folder(), relative);
     const parsed = file === null ? null : sharedScriptV2Schema.safeParse(file);
     if (parsed?.success !== true) continue;
     const { start, end, variables = [], steps } = parsed.data;
@@ -258,23 +286,30 @@ export interface RouteRunner {
 }
 
 /**
+ * Takes the app to the route's start when it is elsewhere. Null when it is there; else why it can't be. Without a driver
+ * (task 15) a route that isn't at its start is refused; a caller can ask before it restarts the app.
+ */
+export async function reachStart<R>(route: SharedScriptV2, ctx: RouteContext<R>): Promise<Extract<RouteOutcome<R>, { kind: "refused" }> | null> {
+  if (route.start === undefined) return null;
+  const here = await ctx.here();
+  if (here === route.start) return null;
+  if (ctx.driveTo === undefined) {
+    const where = here === null ? "the app's place isn't known" : `the app is at ${here}`;
+    return { kind: "refused", code: "unsupported", message: `the route "${route.name}" starts at ${route.start}, and ${where}. Go to ${route.start} first, then run it again.` };
+  }
+  const driven = await ctx.driveTo(route.start);
+  return driven.ok ? null : { kind: "refused", code: "off_route", message: driven.message };
+}
+
+/**
  * Runs a route (§18.5): fills its variables, takes the app to `start` when it is elsewhere, then runs the steps. Nothing is
  * touched when a variable has no value or the app can't be taken to the start.
  */
 export async function runRoute<R>(route: SharedScriptV2, values: Record<string, string>, ctx: RouteContext<R>, accounts?: AccountStore): Promise<RouteOutcome<R>> {
-  const filled = substituteSteps(route.steps, values, accounts);
+  const filled = substituteSteps(route.steps, values, accounts, route.variables ?? []);
   if (!filled.ok) return { kind: "refused", code: filled.code, message: filled.message };
-  if (route.start !== undefined) {
-    const here = await ctx.here();
-    if (here !== route.start) {
-      if (ctx.driveTo === undefined) {
-        const where = here === null ? "the app's place isn't known" : `the app is at ${here}`;
-        return { kind: "refused", code: "unsupported", message: `the route "${route.name}" starts at ${route.start}, and ${where}. Go to ${route.start} first, then run it again.` };
-      }
-      const driven = await ctx.driveTo(route.start);
-      if (!driven.ok) return { kind: "refused", code: "off_route", message: driven.message };
-    }
-  }
+  const start = await reachStart(route, ctx);
+  if (start !== null) return start;
   return { kind: "ran", answer: await ctx.runSteps(filled.steps) };
 }
 

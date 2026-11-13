@@ -271,7 +271,27 @@ describe("replay a route", () => {
     const answer = await world.tools.replay({ name: "plain" });
     expect(answer.isError).toBe(true);
     expect(textOf(answer)).toMatch(/^Error unsupported: the route "plain" starts at welcome, and the app is at home\./);
-    expect(world.app.requests.filter((r) => r.method === "press")).toHaveLength(0);
+    // Refused before the fresh start: the app was not restarted.
+    expect(world.app.requests.filter((r) => r.method === "press" || r.method === "reload")).toHaveLength(0);
+  });
+
+  it("a routes entry outside the map folder's routes/ is never read, and nothing is written beside it", async () => {
+    const world = await saved();
+    const outside = join(world.mapFolder, "..", "outside.json");
+    writeFileSync(outside, JSON.stringify({ format: "agent-tools-script", version: 2, name: "evil", app: APP_ID, steps: [{ tool: "tap", target: { id: "continue" } }] }));
+    const mapFile = join(world.mapFolder, "map.json");
+    const map = JSON.parse(readFileSync(mapFile, "utf8")) as MapFile;
+    map.routes["evil"] = "../outside.json";
+    map.routes["evil2"] = "../../../anything.json";
+    map.routes["elsewhere"] = "places.json";
+    writeFileSync(mapFile, JSON.stringify(map));
+    const fresh = new TaplineTools(hosts[0] as TaplineHost, { connect: { url: "", name: "Dev PC" }, maps: new MapRegistry({ mapsDir: join(world.mapFolder, "..") }), scriptsDir: world.scriptsDir, reloadWaitMs: 50, policy: { version: 1, confirm: [], block: [] } });
+    for (const name of ["evil", "evil2", "elsewhere"]) {
+      const answer = await fresh.replay({ name });
+      expect(textOf(answer)).toMatch(/^Error not_found: no script/);
+    }
+    expect(existsSync(join(world.mapFolder, "..", "outside.references"))).toBe(false);
+    expect(existsSync(join(world.mapFolder, "..", "outside.diff"))).toBe(false);
   });
 
   it("version 1 files still replay", async () => {

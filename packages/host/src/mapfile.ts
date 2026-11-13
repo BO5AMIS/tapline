@@ -527,7 +527,7 @@ async function sweepLeftovers(io: MapIo, dir: string): Promise<void> {
 }
 
 // Route files (§18.5) live next to the map. Only paths inside the folder are touched.
-function insideDir(dir: string, relative: string): string | null {
+export function insideDir(dir: string, relative: string): string | null {
   const full = resolve(dir, relative);
   return full.startsWith(resolve(dir) + sep) ? full : null;
 }

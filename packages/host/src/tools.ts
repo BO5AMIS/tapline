@@ -48,7 +48,7 @@ import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type Ux
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
-import { escapeParams, routePathOf, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
+import { escapeParams, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -4159,8 +4159,11 @@ export class TaplineTools {
     // A route's variables are filled before anything runs; replay has no values to give, so one with a variable is refused (§18.5).
     const accountStore = this.options.accounts?.store ?? undefined;
     if (script.version === 2) {
-      const filled = substituteSteps(script.steps, {}, accountStore);
+      const filled = substituteSteps(script.steps, {}, accountStore, script.variables ?? []);
       if (!filled.ok) return fail(`Error ${filled.code}: ${filled.message}`);
+      // A route that can't run from where the app is stops here, before the fresh start restarts the app.
+      const early = this.host.current() === undefined ? null : await reachStart(script, this.routeContext(() => Promise.resolve(null)));
+      if (early !== null) return fail(`Error ${early.code}: ${early.message}`);
     }
     const ref = refStep(script.steps);
     if (ref !== null) return fail(`Error bad_params: step ${ref + 1} targets a ref; a script needs an id, label, text or point.`);

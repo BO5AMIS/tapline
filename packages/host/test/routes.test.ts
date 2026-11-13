@@ -83,6 +83,15 @@ describe("route names", () => {
     expect(routeSlug("a.b-c_9")).toBe("a.b-c_9");
     expect(routeSlug("x".repeat(80))).toHaveLength(60);
     expect(routeSlug("***")).toBeNull();
+    // Windows device names can't be files, with or without an extension; trailing dots go.
+    expect(routeSlug("con")).toBe("_con");
+    expect(routeSlug("NUL.txt")).toBe("_NUL.txt");
+    expect(routeSlug("com1")).toBe("_com1");
+    expect(routeSlug("lpt9.json")).toBe("_lpt9.json");
+    expect(routeSlug("console")).toBe("console");
+    expect(routeSlug("trip...")).toBe("trip");
+    expect(routeSlug("trip. . ")).toBe("trip");
+    expect(routeSlug("x".repeat(59) + "...")).toBe("x".repeat(59));
     expect(routeSlug("..")).toBeNull();
   });
 });
@@ -113,8 +122,32 @@ describe("variables", () => {
   it("$${ round trips: what escapeLiteral writes, substitute reads back", () => {
     expect(escapeLiteral("cost ${x}")).toBe("cost $${x}");
     expect(escapeLiteral("plain")).toBe("plain");
-    const done = substituteVariables(typed(escapeLiteral("cost ${x} and ${account.password}")), {});
-    expect(done).toEqual({ ok: true, step: typed("cost ${x} and ${account.password}") });
+    const done = substituteVariables(typed(escapeLiteral("cost ${x} and ${y}")), {});
+    expect(done).toEqual({ ok: true, step: typed("cost ${x} and ${y}") });
+  });
+
+  it("a literal $${account. never becomes an account placeholder after filling", () => {
+    const whole = substituteVariables(typed("$${account.password}"), {});
+    expect(whole.ok).toBe(false);
+    const joined = substituteVariables(typed(escapeLiteral("cost ${x} and ${account.password}")), {});
+    expect(joined.ok).toBe(false);
+    // A value split across a literal and a variable is the same case.
+    const split = substituteVariables(typed("$${account.${part}}"), { part: "password" });
+    expect(split.ok).toBe(false);
+    // The real placeholder, whole, still passes unchanged.
+    expect(substituteVariables(typed("${account.password}"), {}).ok).toBe(true);
+  });
+
+  it("with the route's variables, a value for a name it doesn't list, and a token it doesn't list, are refused", () => {
+    const extra = substituteVariables(typed("${city}"), { city: "Paris", other: "x" }, undefined, ["city"]);
+    expect(extra.ok).toBe(false);
+    if (!extra.ok) expect(extra.message).toContain("other");
+    const token = substituteVariables(typed("${city}"), { city: "Paris" }, undefined, ["place"]);
+    expect(token.ok).toBe(false);
+    if (!token.ok) expect(token.message).toContain("city");
+    expect(substituteVariables(typed("${city}"), { city: "Paris" }, undefined, ["city"]).ok).toBe(true);
+    // The account placeholder needs no listing.
+    expect(substituteVariables(typed("${account.username}"), {}, undefined, []).ok).toBe(true);
   });
 
   it("an account value in a route stays whole-text and stays a placeholder", () => {
