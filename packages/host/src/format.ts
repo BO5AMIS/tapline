@@ -24,6 +24,14 @@ function quote(text: string, more = 0): string {
   return JSON.stringify(clip(text, MAX_TEXT, more));
 }
 
+/** AGENT-TOOLS 1.14 §21.1: the mark between the role and the quoted text of text the app says others wrote. */
+export const FROM_OTHERS_MARK = "(from others)";
+
+/** The mark for an element, as a part of its line; none when the app didn't say. */
+function markOf(element: Pick<TreeElement, "fromOthers">): string[] {
+  return element.fromOthers === true ? [FROM_OTHERS_MARK] : [];
+}
+
 /** An element's text in quotes, counting what the app left out of it. */
 function quoteText(element: Pick<TreeElement, "text" | "textMore">): string {
   return quote(element.text ?? "", element.textMore ?? 0);
@@ -124,8 +132,11 @@ export function formatElement(element: TreeElement, options: { actions?: boolean
   const text = element.text ?? "";
   const label = element.label ?? "";
   if (options.eyes === true) {
+    // The mark isn't a thing on the glass, but it is a safety hint, so a user's eyes keep it where the text shows (§21.1).
+    if (text !== "") parts.push(...markOf(element));
     parts.push(...userEyesName(kind, text, label, quoteText(element)));
   } else {
+    if (text !== "" || label !== "") parts.push(...markOf(element));
     if (text !== "") parts.push(quoteText(element));
     else if (label !== "") parts.push(quote(label));
     if (text !== "" && label !== "" && label.toLowerCase() !== text.toLowerCase()) {
@@ -193,6 +204,7 @@ export function describeElement(element: TreeElement): string {
   if (kind !== null) parts.push(kind);
   const text = element.text ?? "";
   const label = element.label ?? "";
+  if (text !== "" || label !== "") parts.push(...markOf(element));
   if (text !== "") parts.push(quoteText(element));
   else if (label !== "") parts.push(quote(label));
   else if (element.testID !== null && element.testID !== undefined && element.testID !== "") {
@@ -260,10 +272,11 @@ function describeGone(element: TreeElement, eyes = false): string {
   const label = element.label ?? "";
   const id = element.testID ?? "";
   if (eyes) {
-    const seen = userEyesName(kind, text, label, quoteText(element)).join(" ");
+    const seen = [...(text !== "" ? markOf(element) : []), ...userEyesName(kind, text, label, quoteText(element))].join(" ");
     return [kind, seen].filter((part) => part !== null && part !== "").join(" ") || "element";
   }
-  const rest = text !== "" ? quoteText(element) : label !== "" ? quote(label) : id !== "" ? `id=${id}` : "";
+  const shown = text !== "" ? quoteText(element) : label !== "" ? quote(label) : "";
+  const rest = shown !== "" ? [...markOf(element), shown].join(" ") : id !== "" ? `id=${id}` : "";
   const line = [kind, rest].filter((part) => part !== null && part !== "").join(" ");
   return line !== "" ? line : "element";
 }
