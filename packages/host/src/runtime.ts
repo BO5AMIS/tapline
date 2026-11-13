@@ -16,6 +16,7 @@ import {
   type ViewerMode,
 } from "./config.js";
 import { loadAccounts, type GitProbe } from "./accounts.js";
+import { createOtpService, type OtpService } from "./otpclient.js";
 import { Confirmations } from "./confirm.js";
 import { ControlQueue } from "./control.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -55,6 +56,8 @@ export interface RuntimeOptions extends ResolveOptions {
   accounts?: string;
   /** Tests: the git questions the accounts file is checked with. */
   gitProbe?: GitProbe;
+  /** Tests: how a one-time code is asked of Tapwright's daemon (AGENT-TOOLS 1.14 §20.4). Default: the real daemon. */
+  otp?: OtpService;
   /** `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). */
   brief?: boolean;
   /** `--maps DIR`: where the apps' maps live, `<DIR>/<app id>/` (AGENT-TOOLS 1.13 §18.9). Default `~/.tapline/maps`. */
@@ -139,8 +142,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
 
   const config = await resolveConfig(options);
   const clients = new Map<string, { tools: TaplineTools; lastUsed: number }>();
+  // One-time codes (AGENT-TOOLS 1.14 §20.4): a code typed in this session is scrubbed from everything the host passes on, as a vault value is.
+  const otp = options.otp ?? createOtpService({ env: options.env });
+  const vaultRedact = accounts?.store != null ? accounts.store.redact : undefined;
   const host = new TaplineHost({
-    ...(accounts?.store != null ? { redact: accounts.store.redact } : {}),
+    redact: (text: string) => otp.codes.redact(vaultRedact === undefined ? text : vaultRedact(text)),
+    redactsVault: vaultRedact !== undefined,
     token: config.token,
     port: config.port,
     portFallback: config.portFallback,
@@ -199,6 +206,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const toolsOptions: ToolsOptions = {
     maps,
     audit,
+    otp,
     ...(grants !== undefined ? { grants } : {}),
     ...(options.brief === true ? { brief: true } : {}),
     policy,

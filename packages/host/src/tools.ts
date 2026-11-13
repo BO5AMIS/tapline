@@ -50,6 +50,7 @@ import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
 import { Dialogs, askDone, draftCaption, okCaption, plainText, type MomentOutcome } from "./elicit.js";
 import type { AuditSink } from "./auditlog.js";
+import { createOtpService, otpReference, type OtpFetch, type OtpService } from "./otpclient.js";
 import { GrantBook, REACH_WORDS, elementNeverGrantable, grantCaption, grantNameBase, neverGrantable, reachesPeople, type GrantDecision, type GrantSpec } from "./grants.js";
 import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
@@ -574,6 +575,11 @@ export interface ToolsOptions {
   uxRules?: UxRules;
   /** The test accounts (`--accounts FILE`, AGENT-TOOLS 1.13 §18.6): loaded, or refused with the reason. Default: none. */
   accounts?: AccountsLoad;
+  /**
+   * One-time codes (`${otp.<app>}`, AGENT-TOOLS 1.14 §20.4): how a code is asked of Tapwright's daemon, and the codes' redaction. Share
+   * `codes.redact` with the host's own redaction so a code is scrubbed from the app's answers too. Default: the real daemon.
+   */
+  otp?: OtpService;
   /** The apps' maps (AGENT-TOOLS 1.13 §18.9): places, roads and links grow as the agent drives. Default: none (no `Place:` line). */
   maps?: MapRegistry;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
@@ -1419,6 +1425,7 @@ export class TaplineTools {
   private journeyBusy: "starting" | "stopping" | undefined;
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly otp: OtpService;
 
   constructor(
     private readonly host: TaplineHost,
@@ -1433,7 +1440,8 @@ export class TaplineTools {
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
-    this.actionLog?.setBackstop(options.accounts?.store != null ? (value) => this.backstop(value) : undefined);
+    this.otp = options.otp ?? createOtpService();
+    this.actionLog?.setBackstop((value) => this.backstop(value));
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
     this.stillGapMs = options.stillGapMs ?? 150;
     this.stillCapMs = options.stillCapMs ?? 2000;
@@ -2767,6 +2775,9 @@ export class TaplineTools {
         const named = (params as { account?: unknown }).account;
         const used = typeof typed === "string" ? this.accountText(typed, typeof named === "string" ? named : undefined, session) : null;
         if (used !== null && !used.ok) return fail(`Error ${used.code}: step ${i + 1} (${describeRunStep(step)}): ${used.message}`);
+        // A one-time code names the connected app and nothing else (§20.4); nothing is asked of the daemon before the step runs.
+        const wrongApp = typeof typed === "string" ? this.otpPrecheck(typed, session) : null;
+        if (wrongApp !== null) return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${wrongApp}`);
         // `as` is checked before any step runs too (§18.5): it goes only while a route records.
         const as = (params as { as?: unknown }).as;
         const badAs = typeof as === "string" ? this.asRefusal(as, typeof typed === "string" ? typed : "", typeof named === "string" ? named : undefined) : null;
@@ -5598,14 +5609,53 @@ export class TaplineTools {
   }
 
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
+    const otpApp = otpReference(args.text);
+    if (otpApp === null) return this.typeTextWith(args, undefined);
+    // A one-time code (§20.4): the same checks as any typed text first, then the code is asked of Tapwright's daemon, and only
+    // for the connected app's own id, only now that a step types it.
+    const hiddenField = this.hiddenTarget(args.target);
+    if (hiddenField !== null) return Promise.resolve(hiddenField);
+    const badAs = this.asRefusal(args.as, args.text, args.account);
+    if (badAs !== null) return Promise.resolve(fail(badAs));
+    if (args.account !== undefined) return Promise.resolve(fail("Error bad_params: a one-time code takes no account; write ${otp.<app>} alone."));
+    const session = this.host.current();
+    if (session === undefined) return Promise.resolve(this.notConnected());
+    const refused = this.otpRefusal(otpApp, session);
+    if (refused !== null) return Promise.resolve(fail(`Error bad_params: ${refused}`));
+    const app = session.app.id ?? session.app.name;
+    // A dry run checks the field and asks for nothing: no code is fetched, and none is spent.
+    if (args.dry_run === true) return this.typeTextWith(args, { value: "", source: undefined, sessionId: session.id });
+    return this.otp.fetch(app).then((got: OtpFetch) =>
+      got.ok
+        ? this.typeTextWith(args, { value: got.code, source: got.source, sessionId: session.id })
+        : fail(`Error ${got.reason === "none" ? "not_found" : "unsupported"}: ${got.message}`),
+    );
+  }
+
+  /** Why `${otp.<app>}` can't be typed for the connected app, or null: the id must be the connected app's own. */
+  private otpRefusal(named: string, session: SessionInfo): string | null {
+    const own = session.app.id ?? session.app.name;
+    return named === own ? null : `\${otp.${named}} names another app than the connected one; a one-time code is typed only for the connected app (${own}), as \${otp.${own}}.`;
+  }
+
+  /** What `${otp.<app>}` checks before any step runs: the app it names, as for an account. Null when it holds or isn't a code. */
+  private otpPrecheck(text: string, session: SessionInfo): string | null {
+    const named = otpReference(text);
+    return named === null ? null : this.otpRefusal(named, session);
+  }
+
+  private typeTextWith(args: Shape<"type_text">, otp: { value: string; source: string | undefined; sessionId: string } | undefined): Promise<CallToolResult> {
     const hiddenField = this.hiddenTarget(args.target);
     if (hiddenField !== null) return Promise.resolve(hiddenField);
     const badAs = this.asRefusal(args.as, args.text, args.account);
     if (badAs !== null) return Promise.resolve(fail(badAs));
     // A test account's value (§18.6): `params` keeps the placeholder for the log, the viewer and a recording; the
-    // value goes to the app only, through `wire`.
+    // value goes to the app only, through `wire`. A one-time code goes the same way.
     const session = this.host.current();
-    const account = this.accountText(args.text, args.account, session);
+    const account =
+      otp !== undefined
+        ? ({ ok: true, value: otp.value, kind: undefined, use: undefined } as const)
+        : this.accountText(args.text, args.account, session);
     if (account !== null && !account.ok) return Promise.resolve(fail(`Error ${account.code}: ${account.message}`));
     const params: Record<string, unknown> = {
       text: args.text,
@@ -5618,7 +5668,7 @@ export class TaplineTools {
     if (args.force === true) params["force"] = true;
     const wire =
       account !== null && account.ok && session !== undefined
-        ? { values: { text: account.value, kind: account.kind }, sessionId: session.id }
+        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id }
         : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) {
@@ -5662,6 +5712,16 @@ export class TaplineTools {
       undefined,
       wire,
     );
+    if (otp !== undefined && session !== undefined) {
+      // One `otp` line per code typed: the app and the source, never the code (§20.4, §23). The answer is scrubbed as well,
+      // whatever the app echoed back.
+      return typed.then((answer) => {
+        if (answer.isError !== true) {
+          this.options.audit?.write({ kind: "otp", app: session.app.id ?? session.app.name, detail: `from ${otp.source ?? "Tapwright"}` });
+        }
+        return { ...answer, content: answer.content.map((part) => (part.type === "text" ? { ...part, text: this.otp.codes.redact(part.text) } : part)) };
+      });
+    }
     if (use === undefined || session === undefined) return typed;
     // Every use of a vault value is one `vault` line: the entry and the field, never the value (§20.1, §23).
     return typed.then((answer) => {
@@ -5744,8 +5804,13 @@ export class TaplineTools {
 
   /** The backstop at the writers of files (§20.3): content values lose any vault value; keys and `${…}` stay. */
   private backstop<T>(value: T): T {
+    return redactContent(value, (text) => this.scrubSecrets(text)) as T;
+  }
+
+  /** A vault value or a one-time code typed in this session becomes its placeholder. */
+  private scrubSecrets(text: string): string {
     const store = this.options.accounts?.store;
-    return store == null ? value : (redactContent(value, store.redact) as T);
+    return this.otp.codes.redact(store == null ? text : store.redact(text));
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
@@ -5765,6 +5830,11 @@ export class TaplineTools {
   ): { ok: true; value: string; kind: "secure" | "plain" | undefined; use: VaultUse | undefined } | { ok: false; code: string; message: string } | null {
     const mentions = mentionsVault(text);
     if (!mentions && named === undefined) return null;
+    // `${otp.<app>}` is typed by `typeText` itself and needs no vault file (§20.4); `run` checks its app separately.
+    if (text.includes("${otp.")) {
+      if (otpReference(text) !== null && named === undefined) return null;
+      return { ok: false, code: "bad_params", message: otpReference(text) !== null ? "a one-time code takes no account; write ${otp.<app>} alone." : "a one-time code is the whole text of a step, not part of one." };
+    }
     const loaded = this.options.accounts;
     if (loaded === undefined) return { ok: false, code: "bad_params", message: "no accounts are loaded; start Tapline with --accounts FILE." };
     if (loaded.store === null) return { ok: false, code: "bad_params", message: loaded.blocked };

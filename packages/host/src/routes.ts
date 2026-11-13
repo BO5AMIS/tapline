@@ -29,9 +29,9 @@ export function routeSlug(raw: string): string | null {
 // -- variables
 
 /** `${name}` or `${account.field}`; `$${` is a literal `${`. ASCII names only. */
-const TOKEN = /\$\$\{|\$\{([A-Za-z_]\w*(?:\.\w+){0,2})\}/g;
-const WHOLE_ACCOUNT = /^\$\{(?:account\.\w+|vault\.\w+\.\w+)\}$/;
-const ACCOUNT_BRIEF = "an account or vault value is the whole text of a step, not part of one.";
+const TOKEN = /\$\$\{|\$\{(otp\.[A-Za-z0-9._-]+|[A-Za-z_]\w*(?:\.\w+){0,2})\}/g;
+const WHOLE_ACCOUNT = /^\$\{(?:account\.\w+|vault\.\w+\.\w+|otp\.[A-Za-z0-9._-]+)\}$/;
+const ACCOUNT_BRIEF = "an account, vault or one-time code value is the whole text of a step, not part of one.";
 
 /** Typed text written so a replay reads it back as it was: a literal `${` becomes `$${`. */
 export function escapeLiteral(text: string): string {
@@ -58,7 +58,7 @@ function fillText(text: string, { values, variables }: Fill): string {
   return text.replace(TOKEN, (match: string, name: string | undefined) => {
     if (name === undefined) return "${";
     // An account's value is typed by the tool when the step runs; it stays a placeholder here.
-    if (name.startsWith("account.") || name.startsWith("vault.")) return match;
+    if (name.startsWith("account.") || name.startsWith("vault.") || name.startsWith("otp.")) return match;
     if (variables !== undefined && !variables.includes(name)) throw new Refusal(`the step uses ${name} but the route's variables don't list it.`);
     if (!Object.hasOwn(values, name)) throw new Refusal(`no value given for the variable "${name}".`);
     const value = values[name] as string;
@@ -78,10 +78,10 @@ function fillValue(value: unknown, fill: Fill): unknown {
 
 /** An account placeholder in a typed step's text must be the whole text, and a field an account has. */
 function checkAccountText(text: string, accounts: AccountStore | undefined): void {
-  const found = [...text.matchAll(TOKEN)].filter((m) => m[1]?.startsWith("account.") === true || m[1]?.startsWith("vault.") === true);
+  const found = [...text.matchAll(TOKEN)].filter((m) => m[1]?.startsWith("account.") === true || m[1]?.startsWith("vault.") === true || m[1]?.startsWith("otp.") === true);
   if (found.length === 0) return;
-  if (!WHOLE_ACCOUNT.test(text)) throw new Refusal(text.includes("${vault.") ? ACCOUNT_BRIEF : "an account value is the whole text of a step, not part of one.");
-  if (found[0]?.[1]?.startsWith("vault.") === true) return;
+  if (!WHOLE_ACCOUNT.test(text)) throw new Refusal(text.includes("${vault.") || text.includes("${otp.") ? ACCOUNT_BRIEF : "an account value is the whole text of a step, not part of one.");
+  if (found[0]?.[1]?.startsWith("vault.") === true || found[0]?.[1]?.startsWith("otp.") === true) return;
   const field = (found[0]?.[1] ?? "").slice("account.".length);
   if (accounts !== undefined && field !== "username" && field !== "password") {
     throw new Refusal(`\${account.${field}} isn't a value an account has; use \${account.username} or \${account.password}.`);
