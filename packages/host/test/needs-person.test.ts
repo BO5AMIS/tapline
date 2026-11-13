@@ -609,3 +609,31 @@ describe("needs a person (§11.5): a call that already did something", () => {
     expect(presses(r.app())).toBe(1);
   });
 });
+
+describe("a moment inside a drive", () => {
+  it("says to run the drive again, not to continue from a step", async () => {
+    const { setupDrive, baseMap } = await import("./drive-helpers.js");
+    const client = new FakeDialogClient();
+    const file = JSON.stringify({
+      format: "agent-tools-script", version: 2, app: "com.example.wayfare", name: "go", start: "settings", end: "language",
+      steps: [{ tool: "tap", target: { id: "general-row" } }, { tool: "tap", target: { id: "language-row" } }],
+    });
+    const s = await setupDrive(hosts, apps, dirs, {
+      map: { ...baseMap(), routes: { go: "routes/go.json" } },
+      tools: { dialogs: new Dialogs(client, { ttlMs: 2000 }), personWaitMs: 2000, personPollMs: 5, personDoneGraceMs: 30 },
+    });
+    writeFileSync(join(s.folder, "routes", "go.json"), file);
+    // The app goes to the background right after the first tap, so the second step finds it away.
+    s.world.onPress = (id) => {
+      if (id === "general-row") s.app.send({ type: "event", event: "appState", data: { state: "background" } });
+    };
+    const call = s.tools.drive({ route: "go" });
+    await client.shownCount(1);
+    s.app.send({ type: "event", event: "appState", data: { state: "active" } });
+    const answer = await call;
+    const text = textOf(answer);
+    expect(text).toMatch(/^Error in_background: Ran 1 of 2 steps; stopped at step 2 /);
+    expect(text.split("\n").at(-1)).toBe("The person is done; run the drive again; it plans from where the app is.");
+    expect(text).not.toContain("continue from step");
+  });
+});

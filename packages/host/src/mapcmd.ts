@@ -249,22 +249,18 @@ async function way(to: string, ctx: MapContext): Promise<MapAnswer> {
   if (here?.name === to) return said(`Already at ${to}.`);
   // A jump goes to a place's link from wherever the app is (§18.4).
   const link = saved !== undefined ? saved.link : (up?.link ?? null);
-  if (link !== null && link !== "") return said(`Would drive to ${to} by link (${link}).`);
+  if (link !== null && link !== "") return said(describeWay(to, here?.name ?? "?", [{ from: here?.name ?? "?", to, kind: "link", url: link, proven: true }], map.currentBuild(), false));
   if (here === null) return { text: "Error not_found: the app's current place isn't known, so no way can be planned; look at the screen first.", error: true };
   const chain = cheapestWay(map.data().roads, here.name, to, (road) => map.isProven(road), routeEdges(map));
   if (chain === null) {
     return { text: `Error not_found: no known way from ${here.name} to ${to}; drive it once (the driver), and it is remembered.`, error: true };
   }
-  const names = [here.name, ...chain.map((leg) => leg.to)].join(" > ");
-  // A route counts one move for each of its steps (§18.5).
-  const count = chain.reduce((sum, leg) => sum + (isRouteLeg(leg) ? leg.moves : 1), 0);
-  const taps = chain.every((leg) => !isRouteLeg(leg) && leg.move.tool === "tap");
-  const how = `${count} ${taps ? (count === 1 ? "tap" : "taps") : count === 1 ? "move" : "moves"}`;
-  const roads = chain.filter((leg): leg is MapRoad => !isRouteLeg(leg));
-  const unproven = roads.filter((road) => !map.isProven(road));
-  const via = chain.filter(isRouteLeg).map((leg) => `via route ${leg.route}`);
-  const state = [unproven.length === 0 ? "all proven" : `unproven for build ${map.currentBuild()}: ${unproven.map((road) => `${road.from} > ${road.to}`).join(", ")}`, ...via].join("; ");
-  return said(`Would drive to ${to} by ${how}: ${names} (${state}).`);
+  const legs: WayLeg[] = chain.map((leg) =>
+    isRouteLeg(leg)
+      ? { from: leg.from, to: leg.to, kind: "route" as const, route: leg.route, proven: true }
+      : { from: leg.from, to: leg.to, kind: leg.move.tool === "tap" ? ("tap" as const) : ("other" as const), proven: map.isProven(leg) },
+  );
+  return said(describeWay(to, here.name, legs, map.currentBuild(), false));
 }
 
 // -- `name`
@@ -388,4 +384,47 @@ function forgetPlace(name: string, ctx: MapContext): [MapAnswer, boolean] {
   map.removePlace(name);
   const together = counts.length <= 1 ? counts.join("") : `${counts.slice(0, -1).join(", ")} and ${counts[counts.length - 1] as string}`;
   return [said(`Forgot place ${name}${together === "" ? "" : `, with ${together}`}.`), true];
+}
+
+// -- the words for a way, shared by `map to` and drive's dry run so they can't drift (AGENT-TOOLS 1.13 18.4)
+
+export interface WayLeg {
+  from: string;
+  to: string;
+  kind: "link" | "tap" | "other" | "route";
+  /** The route's name, for a `route` leg. */
+  route?: string;
+  /** The link, for a `link` leg. */
+  url?: string;
+  proven: boolean;
+}
+
+/** `by link`, `by 3 taps`, `by link then 1 tap`, `by route sign_in` (18.4: how it travelled is always said). A person's eyes never see a route's name. */
+export function howText(links: number, taps: number, others: number, routes: readonly string[] = [], eyes = false): string {
+  const asMoves = eyes ? routes.length : 0;
+  const rest = taps + others + asMoves;
+  const noun = others + asMoves === 0 ? (rest === 1 ? "tap" : "taps") : rest === 1 ? "move" : "moves";
+  const link = links === 1 ? "link" : `${links} links`;
+  const parts = [...(links > 0 ? [link] : []), ...(!eyes && routes.length > 0 ? [`route ${routes.join(", ")}`] : []), ...(rest > 0 ? [`${rest} ${noun}`] : [])];
+  return `by ${parts.length > 0 ? parts.join(" then ") : "0 taps"}`;
+}
+
+/**
+ * The dry-run sentence for a way. In a user's eyes it holds no place, link or route name: only how many moves and how many
+ * are unproven (18.12).
+ */
+export function describeWay(to: string, from: string, legs: WayLeg[], build: string, eyes: boolean): string {
+  const links = legs.filter((leg) => leg.kind === "link").length;
+  const taps = legs.filter((leg) => leg.kind === "tap").length;
+  const others = legs.filter((leg) => leg.kind === "other").length;
+  const routes = legs.flatMap((leg) => (leg.kind === "route" && leg.route !== undefined ? [leg.route] : []));
+  const how = howText(links, taps, others, routes, eyes);
+  const unproven = legs.filter((leg) => !leg.proven);
+  if (eyes) return `Would drive to ${to} ${how} (${unproven.length === 0 ? "all proven" : `${unproven.length} unproven`}).`;
+  const only = legs[0];
+  if (legs.length === 1 && only?.kind === "link") return `Would drive to ${to} by link (${only.url ?? ""}).`;
+  const names = [from, ...legs.map((leg) => leg.to)].join(" > ");
+  const via = routes.map((route) => `via route ${route}`);
+  const state = [unproven.length === 0 ? "all proven" : `unproven for build ${build}: ${unproven.map((leg) => `${leg.from} > ${leg.to}`).join(", ")}`, ...via].join("; ");
+  return `Would drive to ${to} ${how}: ${names} (${state}).`;
 }

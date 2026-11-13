@@ -20,7 +20,7 @@ import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { reportFor } from "./report.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
-import { driveArgsError, driveQuietly, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
 import {
   EYES,
@@ -1360,7 +1360,7 @@ export class TaplineTools {
       const original: unknown = Reflect.get(this, name);
       if (typeof original !== "function") continue;
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
-      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args)));
+      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args), name === "drive"));
     }
     // Outermost: every call of the agent is numbered and logged (reads too) once its answer is known.
     for (const [name, tool] of Object.entries(CALL_TOOLS)) {
@@ -1407,7 +1407,12 @@ export class TaplineTools {
       const answer = this.journeyScope.run("run", run);
       return answer instanceof Promise ? answer.then((a) => this.shownToUser(a)) : this.shownToUser(answer);
     }
-    if (scope === "run" || input["dry_run"] === true) return run();
+    if (scope === "run") return run();
+    // A dry run counts as nothing, but what it says is still shown as a person would see it (no ids; a drive's own words are eyes-safe).
+    if (input["dry_run"] === true) {
+      const dry = run();
+      return dry instanceof Promise ? dry.then((a) => this.shownToUser(a)) : this.shownToUser(dry);
+    }
     const at = this.clock();
     const pre = journey.pre();
     this.lastTouch = undefined;
@@ -1778,7 +1783,7 @@ export class TaplineTools {
     this.showAction("agent", method, done, params);
     if (granted !== undefined) this.journeyRun?.noteOk(granted);
     // A jump is a shortcut a user doesn't have; a journey whose `allow` names drive says so in its report (AGENT-TOOLS 1.13 18.12).
-    if (tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
+    if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
     return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}) };
   }
@@ -1795,7 +1800,7 @@ export class TaplineTools {
    * Runs a tool call and ends its answer with a note when the app stopped (AGENT-TOOLS 15.2): during this
    * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
    */
-  private noting(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+  private noting(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false): CallToolResult | Promise<CallToolResult> {
     // Nesting belongs to the call and what it awaits (not to this object), so calls running side by side each
     // count as outermost, and only a step inside a call is skipped.
     if (this.noteScope.getStore() === true) return run();
@@ -1805,7 +1810,7 @@ export class TaplineTools {
     const reflexes: ReflexCall = { fired: new Map(), lines: [] };
     return this.noteScope.run(true, () =>
       this.reflexScope.run(reflexes, () => {
-        const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run));
+        const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
         if (result instanceof Promise) {
           return result.then((answer) => this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))), reflexes));
         }
@@ -1939,7 +1944,7 @@ export class TaplineTools {
    * stopped answering) tells the person in the host's dialog and waits. When the moment clears, the call runs again, so it
    * checks the screen afresh; nothing was done, as the call failed before it began. Without a dialog: today's answer, with a Note.
    */
-  private afterMoments(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+  private afterMoments(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false): CallToolResult | Promise<CallToolResult> {
     const wasNotAnswering = this.host.current() !== undefined && this.host.isNotAnswering(this.host.current()?.id ?? "");
     const failedFor = this.host.current()?.id;
     const actingBefore = this.host.actingMark();
@@ -1947,7 +1952,7 @@ export class TaplineTools {
     // A tool that answers at once (apps, open_app) never waits for a person.
     if (!(first instanceof Promise)) return first;
     return first.then((answer) =>
-      momentCode(answer) === undefined ? answer : this.settleMoments(answer, run, wasNotAnswering ? failedFor : undefined, actingBefore),
+      momentCode(answer) === undefined ? answer : this.settleMoments(answer, run, wasNotAnswering ? failedFor : undefined, actingBefore, isDrive),
     );
   }
 
@@ -1960,6 +1965,7 @@ export class TaplineTools {
     run: () => CallToolResult | Promise<CallToolResult>,
     notAnsweringBefore: string | undefined,
     actingBefore: number,
+    isDrive = false,
   ): Promise<CallToolResult> {
     let answer = first;
     for (let round = 0; round < 4; round++) {
@@ -1977,6 +1983,8 @@ export class TaplineTools {
       // The person may have said Done before the app shows it: give it a moment.
       await this.untilTrue(moment.cleared, this.options.personDoneGraceMs ?? 4000);
       const step = batchStep(answer);
+      // A drive plans from where the app is, so it is called again; a step number means nothing to it.
+      if (step !== undefined && isDrive) return appendNote(answer, "The person is done; run the drive again; it plans from where the app is.");
       if (step !== undefined) return appendNote(answer, `The person is done; continue from step ${step}.`);
       if (this.host.actingMark() !== actingBefore) return appendNote(answer, "The person is done; the call had already acted, so it was not run again. Repeat what is left.");
       // Running it again is the re-check of the screen.
@@ -3189,7 +3197,7 @@ export class TaplineTools {
       if (from !== null && moved) {
         const known = map.data().roads.some((road) => road.from === from.name && road.to === arrived.name && (road.by === "tapline" || road.by === "both") && map.isProven(road));
         const logged = this.callScope.getStore()?.entries.at(-1);
-        if (logged !== undefined && AGENT_TOUCHES.has(logged.entry.tool)) logged.entry.way = { from: from.name, to: arrived.name, known };
+        if (logged !== undefined && logged.entry.of === undefined && AGENT_TOUCHES.has(logged.entry.tool)) logged.entry.way = { from: from.name, to: arrived.name, known };
       }
       let move = classified.move;
       if (move.tool === "open_url") {
@@ -4489,6 +4497,14 @@ export class TaplineTools {
     if (script.version === 2) {
       const filled = substituteSteps(script.steps, {}, accountStore, script.variables ?? []);
       if (!filled.ok) return fail(`Error ${filled.code}: ${filled.message}`);
+      // A start the app has no way to is refused before the fresh start restarts the app (18.5); at the start, nothing to check.
+      const live = this.host.current();
+      const liveMap = live === undefined || script.start === undefined ? undefined : this.mapOf(live);
+      if (live !== undefined && liveMap !== undefined && script.start !== undefined) {
+        const here = await placeSeen(this.placeSource(live), liveMap);
+        const problem = startProblem(liveMap, here, script.start, this.driveRoadsOnly());
+        if (problem !== null) return fail(`Error ${problem.code}: ${problem.message}`);
+      }
     }
     const ref = refStep(script.steps);
     if (ref !== null) return fail(`Error bad_params: step ${ref + 1} targets a ref; a script needs an id, label, text or point.`);

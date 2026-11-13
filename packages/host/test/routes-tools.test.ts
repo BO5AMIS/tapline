@@ -264,15 +264,15 @@ describe("replay a route", () => {
     expect(world.app.requests.filter((r) => r.method === "type" || r.method === "press" || r.method === "reload")).toHaveLength(0);
   });
 
-  it("with the app elsewhere after the fresh start and no road back, fails with off_route and runs no step", async () => {
+  it("with the app elsewhere and no way to the start, refuses off_route before the fresh start restarts the app", async () => {
     const world = await saved();
     world.state.screen = "home";
     world.app.requests.length = 0;
     const answer = await world.tools.replay({ name: "plain" });
     expect(answer.isError).toBe(true);
-    // The map holds no road from home to welcome, so the drive to the start stops there (18.5).
+    // The map holds no road from home to welcome: refused up front, so the app is not restarted (18.5).
     expect(textOf(answer)).toMatch(/^Error off_route: no known way from home to welcome;/);
-    expect(world.app.requests.filter((r) => r.method === "press")).toHaveLength(0);
+    expect(world.app.requests.filter((r) => r.method === "press" || r.method === "reload")).toHaveLength(0);
   });
 
   it("a routes entry outside the map folder's routes/ is never read, and nothing is written beside it", async () => {
@@ -312,7 +312,7 @@ describe("a route in the map", () => {
     await world.tools.record({ stop: true });
     world.state.screen = "welcome";
     const answer = textOf(await world.tools.map({ to: "home" }));
-    expect(answer).toBe("Would drive to home by 1 move: welcome > home (all proven; via route sign_in).");
+    expect(answer).toBe("Would drive to home by route sign_in: welcome > home (all proven; via route sign_in).");
   });
 });
 

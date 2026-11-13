@@ -116,7 +116,8 @@ export function buildCalls(entries: readonly ActionLogEntry[]): CallRecord[] {
       ...(single && first.element !== undefined ? { element: first.element } : {}),
       ...(single && first.target !== undefined ? { target: first.target } : {}),
       ...(single && first.in_list !== undefined ? { inList: first.in_list } : {}),
-      ...(single && first.way !== undefined ? { way: first.way } : {}),
+      // A drive's own moves are the cure, not the waste: only a plain call carries its way (16.1).
+      ...(single && first.way !== undefined && first.of === undefined ? { way: first.way } : {}),
       ...(single && askedPicture(first) ? { askedPicture: true } : {}),
       ...(first.matched_with_changes === true ? { matchedWithChanges: true } : {}),
       ...(approvals.length > 0 ? { approvals } : {}),

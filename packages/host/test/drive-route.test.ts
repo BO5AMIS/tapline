@@ -277,13 +277,14 @@ describe("replay of a route", () => {
     expect(readFileSync(join(s.folder, "map.json"), "utf8")).toBe(before);
   });
 
-  it("an off_route on the way to start fails the replay, and the map is not written", async () => {
+  it("a place the map does not know is refused before the fresh start, and the map is not written", async () => {
     const s = await withRoute(routeFile([{ tool: "tap", target: { id: "language-row" } }]), { world: (w) => (w.screen = "welcome"), tools: { reloadWaitMs: 50 } });
     await s.registry.flushAll();
     const before = readFileSync(join(s.folder, "map.json"), "utf8");
     const answer = await s.tools.replay({ name: "go" });
     expect(answer.isError).toBe(true);
-    expect(textOf(answer)).toMatch(/^Error off_route: /);
+    expect(textOf(answer)).toMatch(/^Error unsupported: the route starts at general, and the app's place isn't known/);
+    expect(s.count("reload")).toBe(0);
     expect(s.count("press")).toBe(0);
     await s.registry.flushAll();
     // The place the failed drive saw (a screen the map didn't hold) is not added.

@@ -137,3 +137,14 @@ describe("the known-way flag", () => {
     expect(said).toContain('- 3 calls in a row on a way the map knows (calls 2–4): drive {"to": "d"} is one call');
   });
 });
+
+describe("a drive's own moves", () => {
+  it("never count: three one-move drives in a row make no flag", () => {
+    const entries = [
+      at(1, "tap", 0, { of: "drive", ...way("a", "b") }),
+      at(2, "tap", 1000, { of: "drive", ...way("b", "c") }),
+      at(3, "tap", 2000, { of: "drive", ...way("c", "d") }),
+    ];
+    expect(flags(entries)).toEqual([]);
+  });
+});

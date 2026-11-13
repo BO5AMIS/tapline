@@ -1,7 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AccountStore } from "./accounts.js";
-import { cheapestWay, isRouteLeg } from "./mapcmd.js";
+import { cheapestWay, describeWay, howText, isRouteLeg, type WayLeg } from "./mapcmd.js";
 import type { MapRoad, Move } from "./mapfile.js";
 import { keyFromState, placeNameFromRoute, placeNow, type AppMap, type KnownPlaces, type Observation, type Place, type PlaceSource } from "./places.js";
 import { elementSchema, placeStateSchema, type PlaceState, type TreeElement, type TreeResult } from "./protocol.js";
@@ -89,6 +89,8 @@ export interface TouchCall {
   guard?: Guard;
   /** Wait for this target after the move (the app's `move` request). */
   next?: { target: Record<string, unknown>; capMs: number };
+  /** Which call made this touch: only a drive's own jump is noted as a journey shortcut (a plain open_url is noted by its own call). */
+  of?: "drive";
   /** Send one `move` request (the app has the capability), else the plain method. */
   pipelined: boolean;
 }
@@ -205,27 +207,11 @@ function stepWords(road: MapRoad, eyes = false): string {
     case "swipe":
       return "swipe";
     case "route":
-      return `route ${road.names?.text ?? ""}`.trim();
+      return eyes ? "route" : `route ${road.names?.text ?? ""}`.trim();
     default:
       return "open the link";
   }
 }
-
-/** `by link`, `by 3 taps`, `by link then 1 tap` (§18.4: how it travelled is always said). */
-function howText(links: number, taps: number, others: number, routes: readonly string[] = []): string {
-  const rest = taps + others;
-  const noun = others === 0 ? (rest === 1 ? "tap" : "taps") : rest === 1 ? "move" : "moves";
-  const link = links === 1 ? "link" : `${links} links`;
-  const parts = [...(links > 0 ? [link] : []), ...(routes.length > 0 ? [`route ${routes.join(", ")}`] : []), ...(rest > 0 ? [`${rest} ${noun}`] : [])];
-  return `by ${parts.length > 0 ? parts.join(" then ") : "0 taps"}`;
-}
-
-const countsOf = (moves: PlannedMove[]): { links: number; taps: number; others: number; routes: string[] } => ({
-  links: moves.filter((move) => move.viaLink).length,
-  taps: moves.filter((move) => !move.viaLink && move.route === undefined && move.road.move.tool === "tap").length,
-  others: moves.filter((move) => !move.viaLink && move.route === undefined && move.road.move.tool !== "tap").length,
-  routes: moves.flatMap((move) => (move.route !== undefined ? [move.route.route] : [])),
-});
 
 const said = (message: string): CallToolResult => ({ content: [{ type: "text", text: message }] });
 const failed = (message: string): CallToolResult => ({ content: [{ type: "text", text: message }], isError: true });
@@ -540,7 +526,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
     prepared.set(planned.route.route, ready.steps);
   }
   if (args.dry_run === true) {
-    const line = describePlan(plan, map, here, target);
+    const line = describePlan(plan, map, here, target, eyes);
     return { ok: true, answer: said(line), line, notes: [], arrived: to };
   }
 
@@ -685,6 +671,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         ...(guard !== undefined ? { guard } : {}),
         ...(pipelined && nextWire !== undefined ? { next: { target: nextWire, capMs } } : {}),
         pipelined,
+        of: "drive",
       };
       const movedAt = svc.clock();
       const outcome = await svc.touch(call);
@@ -772,7 +759,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
 
   // 4. Arrived and checked.
   // `, 1 reflex` when one fired (§18.4).
-  const how = `${howText(run.links, run.taps, run.others, run.routes)}${run.reflexes > 0 ? `, ${plural(run.reflexes, "reflex", "reflexes")}` : ""}`;
+  const how = `${howText(run.links, run.taps, run.others, run.routes, eyes)}${run.reflexes > 0 ? `, ${plural(run.reflexes, "reflex", "reflexes")}` : ""}`;
   const roadsDriven = run.taps + run.others + run.routes.length;
   // A person can't see the app's place names (18.12).
   const path = !eyes && roadsDriven > 0 && run.path.length > 1 ? ` (${run.path.join(" > ")})` : "";
@@ -835,18 +822,17 @@ async function pollNext(svc: DriveServices, target: Record<string, unknown>, cap
 
 // -- answers that touch nothing
 
-function describePlan(plan: DrivePlan, map: AppMap, from: Place | null, to: { name: string; link: string | null }): string {
-  const first = plan.moves[0];
-  if (plan.by === "link" && first !== undefined) return `Would drive to ${to.name} by link (${first.road.move.url ?? to.link ?? ""}).`;
-  const counts = countsOf(plan.moves);
-  const how = howText(counts.links, counts.taps, counts.others, counts.routes);
-  const names = [from?.name ?? "?", ...plan.moves.map((move) => move.road.to)].join(" > ");
-  const unproven = plan.moves.filter((move) => !move.viaLink && move.route === undefined && !map.isProven(move.road));
-  const via = counts.routes.map((route) => `via route ${route}`);
-  const state = [unproven.length === 0 ? "all proven" : `unproven for build ${map.currentBuild()}: ${unproven.map((move) => `${move.road.from} > ${move.road.to}`).join(", ")}`, ...via].join("; ");
-  return `Would drive to ${to.name} ${how}: ${names} (${state}).`;
+function describePlan(plan: DrivePlan, map: AppMap, from: Place | null, to: { name: string; link: string | null }, eyes: boolean): string {
+  const legs: WayLeg[] = plan.moves.map((move) => ({
+    from: move.road.from,
+    to: move.road.to,
+    kind: move.viaLink ? "link" : move.route !== undefined ? "route" : move.road.move.tool === "tap" ? "tap" : "other",
+    ...(move.route !== undefined ? { route: move.route.route } : {}),
+    ...(move.viaLink ? { url: move.road.move.url ?? to.link ?? "" } : {}),
+    proven: move.viaLink || move.route !== undefined || map.isProven(move.road),
+  }));
+  return describeWay(to.name, from?.name ?? "?", legs, map.currentBuild(), eyes);
 }
-
 async function stopBeforeAnything(
   svc: DriveServices,
   error: "no_way" | "unknown_start",
@@ -990,4 +976,20 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
   const line = `Arrived ${place !== undefined && !svc.eyes ? "at " : ""}${arrived}.`;
   const core: Core = { ok: true, answer: appendLines(withFirstLine(ran, line), startNotes), line, notes: startNotes, arrived };
   return afterThen(core, args, rs);
+}
+
+/**
+ * Whether the app, as it is now, has a way to a route's start place: null when it does (or is there already). A replay asks this
+ * before it restarts the app, so a route that can't be reached never costs a restart (AGENT-TOOLS 1.13 18.5).
+ */
+export function startProblem(map: AppMap, here: string | null, start: string, tapsOnly: boolean): { code: "unsupported" | "off_route"; message: string } | null {
+  if (here === start) return null;
+  const saved = map.data().places[here ?? ""];
+  if (here === null || saved === undefined) {
+    return { code: "unsupported", message: `the route starts at ${start}, and the app's place isn't known. Go to ${start} first, then run it again.` };
+  }
+  const goal = map.data().places[start];
+  const plan = planWay(map, { name: here, key: saved.key, link: saved.link }, { name: start, link: goal?.link ?? null }, { by: "any", tapsOnly });
+  if (!("error" in plan)) return null;
+  return { code: "off_route", message: `no known way from ${here} to ${start}; drive it once (the driver), and it is remembered.` };
 }

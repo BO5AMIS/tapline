@@ -137,6 +137,45 @@ describe("drive in a user's eyes", () => {
   });
 });
 
+describe("a dry run in a user's eyes", () => {
+  it("says only how many moves and how many are unproven, with no place, link or route name", async () => {
+    const s = await setup({ map: linked() });
+    await begin(s);
+    expect(textOf(await callTool(s.tools, "drive", { to: "language", dry_run: true }))).toBe("Would drive to language by 2 taps (all proven).");
+    const old = baseMap();
+    old.roads = [road("settings", "general", "general-row", "General", "1.4.0 (212)"), road("general", "language", "language-row", "Language")];
+    const t = await setup({ map: old });
+    await begin(t);
+    expect(textOf(await callTool(t.tools, "drive", { to: "language", dry_run: true }))).toBe("Would drive to language by 2 taps (1 unproven).");
+    expect(s.count("move") + s.count("press") + t.count("move") + t.count("press")).toBe(0);
+  });
+
+  it("says no link either, also when allow names drive", async () => {
+    const s = await setup({ map: linked() });
+    await begin(s, { allow: ["drive"] });
+    const said = textOf(await callTool(s.tools, "drive", { to: "language", dry_run: true }));
+    expect(said).toBe("Would drive to language by link (all proven).");
+    expect(said).not.toMatch(/wayfare|>|general/);
+  });
+
+  it("a drive step in a dry run batch says the same", async () => {
+    const s = await setup();
+    await begin(s);
+    expect(textOf(await callTool(s.tools, "run", { steps: [{ tool: "drive", to: "language" }], dry_run: true }))).toBe("Would run 1 step; step 1 would drive to language by 2 taps (all proven).");
+  });
+});
+
+describe("a shortcut is noted once", () => {
+  it("a plain allowed open_url is one shortcut, and a drive's jump adds its own", async () => {
+    const s = await setup({ map: linked() });
+    await begin(s, { allow: ["open_url", "drive"] });
+    await callTool(s.tools, "open_url", { url: "wayfare://settings" });
+    expect(s.tools.currentJourney()?.state.shortcuts).toHaveLength(1);
+    await callTool(s.tools, "drive", { to: "language" });
+    expect(s.tools.currentJourney()?.state.shortcuts).toHaveLength(2);
+  });
+});
+
 describe("allow lifts only what it names", () => {
   it("drive lets a jump through, still aimed by text, and the report says a shortcut was used", async () => {
     const s = await setup({ map: linked() });
