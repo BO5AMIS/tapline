@@ -29,6 +29,9 @@ import {
   type PlaceState,
 } from "./protocol.js";
 
+/** What replaces a text the redactor could not scrub: never the text itself. */
+export const REDACTION_FAILED = "<text hidden: redaction failed>";
+
 export const CLOSE_REPLACED = 4010;
 export const CLOSE_SILENT = 4011;
 
@@ -853,7 +856,16 @@ export class TaplineHost extends EventEmitter<HostEvents> {
    */
   private get ingress(): ((text: string) => string) | undefined {
     const redact = this.redact;
-    return redact === undefined ? undefined : (text) => redact(text, this.typedNow);
+    if (redact === undefined) return undefined;
+    return (text) => {
+      try {
+        return redact(text, this.typedNow);
+      } catch (error) {
+        // Fail closed: a redactor that throws must neither end the host nor let the text through. The error is named, never its text.
+        this.safely(() => this.emit("warning", `Redaction failed (${error instanceof Error ? error.name : "error"}); the text was hidden.`));
+        return REDACTION_FAILED;
+      }
+    };
   }
 
   /**

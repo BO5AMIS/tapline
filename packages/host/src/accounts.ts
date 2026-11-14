@@ -195,6 +195,28 @@ function asciiJson(text: string): string {
 const CUT = 200;
 
 /**
+ * The first `length` code units of a text, never ending inside a surrogate pair (the cut backs off one unit when it would
+ * leave a high surrogate at the end). A cut that is not at a pair is exact.
+ */
+export function safeHead(text: string, length: number): string {
+  if (text.length <= length) return text;
+  const last = text.charCodeAt(length - 1);
+  const next = text.charCodeAt(length);
+  const splits = last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+  return text.slice(0, splits ? length - 1 : length);
+}
+
+/** A text with each lone surrogate replaced by U+FFFD, as a browser's URL serializer does. */
+export function wellFormed(text: string): string {
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
+}
+
+/** `encodeURIComponent` that never throws: a lone surrogate becomes `%EF%BF%BD`. */
+export function safeEncode(text: string): string {
+  return encodeURIComponent(wellFormed(text));
+}
+
+/**
  * The shapes a value can take on its way back: as it is, with direction marks and zero-width characters stripped, with
  * whitespace collapsed (as the app's `normalizeText` leaves it), each of those inside a JSON string (also twice, and with
  * non-ASCII escaped), and in a URL (percent or form encoded, either case of hex). A value the app cuts at 200 characters
@@ -204,18 +226,22 @@ export function variantsOf(value: string): string[] {
   const collapse = (text: string): string => text.replace(/\s+/g, " ").trim();
   const stripped = value.replace(INVISIBLE, "");
   const bases = new Set<string>([value, stripped, collapse(value), collapse(stripped)]);
-  for (const base of [...bases]) if (base.length > CUT) bases.add(base.slice(0, CUT));
+  for (const base of [...bases]) {
+    if (base.length <= CUT) continue;
+    bases.add(safeHead(base, CUT));
+    bases.add(base.slice(0, CUT)); // the app's own cut may split a pair
+  }
   const forms = new Set<string>();
   for (const base of bases) {
     const jsons = [base, JSON.stringify(base).slice(1, -1), asciiJson(base), JSON.stringify(JSON.stringify(base)).slice(1, -1)];
     for (const form of jsons) {
       forms.add(form);
-      const percent = encodeURIComponent(form);
+      const percent = safeEncode(form);
       forms.add(percent);
       forms.add(percent.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
       forms.add(percent.replace(/%20/g, "+"));
       // URLSearchParams encodes more than encodeURIComponent does (`~` becomes %7E).
-      forms.add(new URLSearchParams({ k: form }).toString().slice(2));
+      forms.add(new URLSearchParams({ k: wellFormed(form) }).toString().slice(2));
     }
   }
   return [...forms].filter((form) => form !== "");
@@ -502,7 +528,7 @@ interface Probe {
 }
 
 function probeOf(base: string, token: string): Probe {
-  const head = base.slice(0, PREFIX_MIN);
+  const head = safeHead(base, PREFIX_MIN);
   const gate = head.split(" ")[0] as string;
   return { base, token, head: new RegExp([...head].map((c) => (c === " " ? "[ +]" : escapeRegExp(c))).join(""), "g"), ...(gate.length >= GRAM ? { gate } : {}) };
 }
@@ -552,7 +578,7 @@ const sameChar = (seen: string | undefined, wanted: string | undefined): boolean
  */
 function probeSpans(views: readonly View[], probe: Probe, out: Span[], grams: ReadonlyArray<Uint8Array | null>): void {
   const { base, head, token } = probe;
-  const need = Math.min(PREFIX_MIN, base.length);
+  const need = Math.min(safeHead(base, PREFIX_MIN).length, base.length);
   for (const [v, view] of views.entries()) {
     if (view.text.length < need) continue;
     const gate = grams[v];
@@ -577,11 +603,11 @@ const ENCODERS: ReadonlyArray<(text: string) => string> = [
   (s) => JSON.stringify(s).slice(1, -1),
   (s) => asciiJson(s),
   (s) => asciiJson(s).replace(/\\u([0-9a-f]{4})/g, (_m, h: string) => `\\u${h.toUpperCase()}`),
-  (s) => encodeURIComponent(s),
-  (s) => encodeURIComponent(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
-  (s) => encodeURIComponent(s).replace(/%20/g, "+"),
-  (s) => encodeURIComponent(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()).replace(/%20/g, "+"),
-  (s) => new URLSearchParams({ k: s }).toString().slice(2),
+  (s) => safeEncode(s),
+  (s) => safeEncode(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+  (s) => safeEncode(s).replace(/%20/g, "+"),
+  (s) => safeEncode(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()).replace(/%20/g, "+"),
+  (s) => new URLSearchParams({ k: wellFormed(s) }).toString().slice(2),
   (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"),
   (s) => [...s].map((c) => (/[a-zA-Z0-9]/.test(c) ? c : `&#${c.codePointAt(0)};`)).join(""),
   // a serializer that names the four markup characters and writes every other symbol as a number
@@ -710,7 +736,9 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
   const bases = new Map<string, string>();
   const formBases = new Map<string, string>();
   for (const [name, entry] of Object.entries(entries)) {
-    for (const [field, value] of Object.entries(entry.values)) {
+    // A value with a lone surrogate reaches the host from the app as U+FFFD (UTF-8 has no lone surrogate): both readings are scrubbed.
+    const readings = Object.entries(entry.values).flatMap(([field, raw]): Array<[string, string]> => (wellFormed(raw) === raw ? [[field, raw]] : [[field, raw], [field, wellFormed(raw)]]));
+    for (const [field, value] of readings) {
       if (value.length < MIN_SCRUB) continue;
       const token = tokenOf(name, field);
       for (const form of variantsOf(value)) if (!literals.has(form)) literals.set(form, token);
