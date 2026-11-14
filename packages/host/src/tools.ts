@@ -436,9 +436,10 @@ export const toolShapes = {
         confirm: z.boolean().optional(),
         public: z.boolean().optional(),
         with_picture: z.boolean().optional(),
+        path: z.string().optional(),
       })
       .optional()
-      .describe("With bug: send it out of the bugs folder, to a GitHub issue ({to: \"issue\", repo, confirm: true, public?, with_picture?}: confirm only when your user asked) or a local zip ({to: \"zip\", with_picture?}); every file is checked again and each export is logged"),
+      .describe("With bug: send it out of the bugs folder, to a GitHub issue ({to: \"issue\", repo, confirm: true, public?, with_picture?}: confirm only when your user asked) or a local zip ({to: \"zip\", with_picture?, path? (inside the bugs folder; default <bug id>.zip next to the bug)}); every file is checked again and each export is logged"),
   },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),

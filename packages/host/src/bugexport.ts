@@ -196,7 +196,7 @@ export async function exportBug(deps: BugExportDeps, app: string, id: string, ta
     const entries = [
       ...Object.entries(parcel.files).map(([name, text]) => ({ name: `${id}/${name}`, data: Buffer.from(text, "utf8") })),
       ...(parcel.picture !== null ? [{ name: `${id}/picture.jpg`, data: parcel.picture }] : []),
-    ].sort((a, b) => a.name.localeCompare(b.name));
+    ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     try {
       mkdirSync(dirname(zipPath), { recursive: true });
       const temp = `${zipPath}.part`;
@@ -228,7 +228,9 @@ async function exportIssue(deps: BugExportDeps, stored: NonNullable<ReturnType<B
   }
   const title = deps.redact(bugTitle(stored.finding));
   const where = `.tapline/bugs/${id}`;
-  const md = parcel.files["report.md"] ?? "";
+  // The page's picture is a file of the folder: in an issue it is the one on the branch, or it isn't there at all (§29.7).
+  const shot = "![The screen at the moment](picture.jpg)";
+  const md = (parcel.files["report.md"] ?? "").replace(shot, sent ? `![The screen at the moment](${rawUrl(repo, QA_BRANCH, `${where}/picture.jpg`)})` : "(The picture isn't part of this issue.)");
   const links = [`- [repro.json](${rawUrl(repo, QA_BRANCH, `${where}/repro.json`)})`, ...(sent ? [`- [picture.jpg](${rawUrl(repo, QA_BRANCH, `${where}/picture.jpg`)})`] : [])];
   const body = `${noPing(md.trimEnd())}\n\n## Files\n${links.join("\n")}\n\nWritten by Tapline.\n`;
   // The title and the body are sent too: they pass the same check.
