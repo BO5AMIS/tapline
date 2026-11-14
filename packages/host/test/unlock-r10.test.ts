@@ -12,8 +12,9 @@ const A_DEAD = 999_001;
 const B_LIVE = 4243;
 const UNLOCKER = 4244;
 const alive = (pid: number): boolean => pid === B_LIVE || pid === UNLOCKER;
-const startOf = (pid: number): string | null => (pid === A_DEAD ? null : "T");
-const holder = (pid: number, owner: string): string => `${JSON.stringify({ owner, pid, started: "T" })}\n`;
+const T = 1_700_000_000_000;
+const startOf = (pid: number): number | null => (pid === A_DEAD ? null : T);
+const holder = (pid: number, owner: string): string => `${JSON.stringify({ owner, pid, started: T })}\n`;
 
 let dir: string;
 let lock: string;

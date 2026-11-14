@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditLog, readAuditLines } from "../src/auditlog.js";
+import { inspectPidLock, parseLstart, unlockPidLock } from "../src/pidlock.js";
 import { BUSY_WAIT_MS, dropLock, processStartTime, runSchedule, takeLock, type CallAnswer, type RunDeps, type ScheduleHost } from "../src/runschedule.js";
 import { schedulePath, schedulesDir, type Schedule } from "../src/schedule.js";
 
@@ -414,9 +415,9 @@ describe("a file trigger's check", () => {
 
 describe("the run lock answers only 'is a run still going' (PR 12, 1.14.1)", () => {
   const lockFile = (r: Rig): string => join(schedulesDir(r.dir), "daily.lock");
-  const holderOf = (r: Rig): { owner: string; pid: number; started: string | null } => JSON.parse(readFileSync(lockFile(r), "utf8")) as { owner: string; pid: number; started: string | null };
+  const holderOf = (r: Rig): { owner: string; pid: number; started: number | string | null } => JSON.parse(readFileSync(lockFile(r), "utf8")) as { owner: string; pid: number; started: number | string | null };
   /** A lock left by a run in process 999. */
-  const leftBy999 = (r: Rig, started: string | null = null): string => {
+  const leftBy999 = (r: Rig, started: number | string | null = null): string => {
     const text = `${JSON.stringify({ owner: "dead-999", pid: 999, started })}\n`;
     writeFileSync(lockFile(r), text);
     return text;
@@ -426,9 +427,10 @@ describe("the run lock answers only 'is a run still going' (PR 12, 1.14.1)", () 
 
   it("the lock holds the owner, the process id and the process's start time", () => {
     const r = rig();
-    const deps: RunDeps = { ...r.deps, pid: 1111, alive: () => true, startOf: (pid) => `started-${pid}` };
+    const deps: RunDeps = { ...r.deps, pid: 1111, alive: () => true, startOf: (pid) => 1_700_000_000_000 + pid * 1000 };
     const token = takeLock(deps, "daily");
-    expect(holderOf(r)).toEqual({ owner: token, pid: 1111, started: "started-1111" });
+    expect(holderOf(r)).toEqual({ owner: token, pid: 1111, started: 1_700_001_111_000 });
+    expect(Number.isInteger(holderOf(r).started)).toBe(true);
     dropLock(deps, "daily", token as string);
     expect(existsSync(lockFile(r))).toBe(false);
   });
@@ -467,15 +469,15 @@ describe("the run lock answers only 'is a run still going' (PR 12, 1.14.1)", () 
 
   it("a process id reused by another program counts as dead: its start time differs", () => {
     const r = rig();
-    const text = leftBy999(r, "2026-11-13T05:00:00.0000000Z");
+    const text = leftBy999(r, 1_794_546_000_000);
     const alive = (): boolean => true; // the id runs now, but it is another program
-    const sameProgram: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? "2026-11-13T05:00:00.0000000Z" : "mine") };
+    const sameProgram: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? 1_794_546_000_000 : 1_794_000_000_000) };
     expect(takeLock(sameProgram, "daily")).toBeNull(); // same start time: the same run, still going
     expect(readFileSync(lockFile(r), "utf8")).toBe(text);
-    const reused: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? "2026-11-14T08:00:00.0000000Z" : "mine") };
+    const reused: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? 1_794_646_000_000 : 1_794_000_000_000) };
     const token = takeLock(reused, "daily");
     expect(token).not.toBeNull();
-    expect(holderOf(r)).toEqual({ owner: token, pid: 1111, started: "mine" });
+    expect(holderOf(r)).toEqual({ owner: token, pid: 1111, started: 1_794_000_000_000 });
     // a start time that can't be told now proves nothing: the holder stays
     const unknown: RunDeps = { ...r.deps, pid: 3333, alive, startOf: () => null };
     expect(takeLock(unknown, "daily")).toBeNull();
@@ -638,17 +640,37 @@ describe("the run lock answers only 'is a run still going' (PR 12, 1.14.1)", () 
 });
 
 describe("a process's start time (the lock's check against a reused process id)", () => {
-  it("asks PowerShell on Windows and ps elsewhere, through the injected runner", () => {
+  it("asks PowerShell for the creation time in Unix milliseconds on Windows, through the injected runner", () => {
     const calls: Array<{ file: string; args: string[] }> = [];
     const run = (file: string, args: string[]): string => {
       calls.push({ file, args });
-      return "  2026-11-14T05:00:00.0000000Z\r\n";
+      return "  1794546000123\r\n";
     };
-    expect(processStartTime(4242, "win32", run)).toBe("2026-11-14T05:00:00.0000000Z");
+    expect(processStartTime(4242, "win32", run)).toBe(1_794_546_000_123);
     expect(calls[0]?.file).toBe("powershell.exe");
-    expect(calls[0]?.args.join(" ")).toContain("Get-Process -Id 4242");
-    expect(processStartTime(4242, "linux", () => "Fri Nov 13 05:00:00 2026\n")).toBe("Fri Nov 13 05:00:00 2026");
-    expect(processStartTime(4242, "darwin", (file, args) => `${file} ${args.join(" ")}`)).toBe("ps -o lstart= -p 4242");
+    const command = calls[0]?.args.join(" ") ?? "";
+    expect(command).toContain("Get-Process -Id 4242");
+    expect(command).toContain("StartTime");
+    expect(command).toContain("ToUnixTimeMilliseconds()");
+    expect(processStartTime(4242, "win32", () => "Fri Nov 13 05:00:00 2026")).toBeNull();
+  });
+
+  it("macOS and Linux run ps with LC_ALL=C and TZ=UTC and parse the text to UTC milliseconds", () => {
+    const calls: Array<{ file: string; args: string[]; env?: Record<string, string> }> = [];
+    const run = (file: string, args: string[], env?: Record<string, string>): string => {
+      calls.push({ file, args, env });
+      return "Fri Nov 13 05:00:00 2026\n";
+    };
+    const expected = Date.UTC(2026, 10, 13, 5, 0, 0);
+    expect(processStartTime(4242, "linux", run)).toBe(expected);
+    expect(processStartTime(4242, "darwin", run)).toBe(expected);
+    expect(calls[0]).toEqual({ file: "ps", args: ["-o", "lstart=", "-p", "4242"], env: { LC_ALL: "C", TZ: "UTC" } });
+    expect(calls[1]?.env).toEqual({ LC_ALL: "C", TZ: "UTC" });
+    // a single-digit day is padded with a space
+    expect(processStartTime(4242, "linux", () => "Tue Nov  3 05:00:09 2026\n")).toBe(Date.UTC(2026, 10, 3, 5, 0, 9));
+    expect(parseLstart("Sat Jan  1 00:00:00 2000")).toBe(946_684_800_000);
+    expect(parseLstart("not a date")).toBeNull();
+    expect(parseLstart("Fri Xxx 13 05:00:00 2026")).toBeNull();
   });
 
   it("is null when it can't be told: a failing runner, empty output, a bad process id", () => {
@@ -658,10 +680,41 @@ describe("a process's start time (the lock's check against a reused process id)"
     expect(processStartTime(1.5, "linux", () => "x")).toBeNull();
   });
 
-  it("gives this process a start time with the real runner (or null where nothing can tell)", () => {
+  it("gives this process an integer start time with the real runner (or null where nothing can tell)", () => {
     const first = processStartTime(process.pid);
-    expect(first === null || first.length > 0).toBe(true);
+    expect(first === null || Number.isInteger(first)).toBe(true);
     expect(processStartTime(process.pid)).toBe(first);
+  });
+
+  describe("the lock compares whole seconds (section 22.3, v1.16)", () => {
+    const T = 1_794_546_000_000;
+    it("the same second counts as the same process, however the milliseconds differ (a Python-style ms value)", () => {
+      const r = rig();
+      const alive = (): boolean => true;
+      const file = join(schedulesDir(r.dir), "daily.lock");
+      const text = `${JSON.stringify({ owner: "py-999", pid: 999, started: T + 123 })}\n`;
+      writeFileSync(file, text);
+      const deps: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? T + 999 : T) };
+      expect(takeLock(deps, "daily")).toBeNull();
+      expect(readFileSync(file, "utf8")).toBe(text);
+      // the next second is another process
+      const reused: RunDeps = { ...deps, startOf: (pid) => (pid === 999 ? T + 1000 : T) };
+      expect(takeLock(reused, "daily")).not.toBeNull();
+    });
+
+    it("a text `started` (an older Tapline) counts as alive while the pid runs, and unlock clears it", () => {
+      const r = rig();
+      const file = join(schedulesDir(r.dir), "daily.lock");
+      writeFileSync(file, `${JSON.stringify({ owner: "old-999", pid: 999, started: "2026-11-13T05:00:00.0000000Z" })}\n`);
+      const alive = (): boolean => true;
+      const deps: RunDeps = { ...r.deps, pid: 1111, alive, startOf: () => T };
+      expect(takeLock(deps, "daily")).toBeNull();
+      expect(inspectPidLock({ pid: 1111, alive, startOf: () => T }, file)).toEqual({ state: "live", pid: 999, legacy: true });
+      // when the pid no longer runs, it is dead as before, and unlock clears it
+      const gone = { pid: 1111, alive: (pid: number): boolean => pid !== 999, startOf: () => T };
+      expect(inspectPidLock(gone, file).state).toBe("stuck");
+      expect(unlockPidLock(gone, file).status).toBe("removed");
+    });
   });
 });
 

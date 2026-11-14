@@ -19,8 +19,8 @@ import { closeSync, linkSync, openSync, readFileSync, renameSync, rmSync, unlink
 export interface PidLockDeps {
   pid: number;
   alive: (pid: number) => boolean;
-  /** When a process started, as text that is the same each time for one process (null: unknown). A lock keeps it so a reused process id is not taken for the holder. */
-  startOf?: (pid: number) => string | null;
+  /** When a process started: whole milliseconds since 1970-01-01 UTC (null: unknown). A lock keeps it so a reused process id is not taken for the holder (§22.3, v1.16). */
+  startOf?: (pid: number) => number | null;
   /** For tests: runs after a run found a leftover lock and before it takes the lock over (another run may get in between). */
   beforeReclaim?: () => void;
   /** For tests: runs after the temp file is written and before it is linked to the lock's name. */
@@ -50,24 +50,41 @@ function parseHolder(text: string): LockHolder {
 }
 
 /** What runs a program and answers its output; throws when it fails. Injectable, so the start time of a process can be tested. */
-export type RunProgram = (file: string, args: string[]) => string;
+export type RunProgram = (file: string, args: string[], env?: Record<string, string>) => string;
 
-const runProgram: RunProgram = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+const runProgram: RunProgram = (file, args, env) =>
+  execFileSync(file, args, { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ...env } });
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Parses `ps -o lstart=` read under `LC_ALL=C` and `TZ=UTC` (`Fri Nov 13 05:00:00 2026`, the day may be padded) to UTC milliseconds; null when it isn't that shape. */
+export function parseLstart(text: string): number | null {
+  const m = /^[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(text.trim());
+  if (m === null) return null;
+  const month = MONTHS.indexOf(m[1] ?? "");
+  if (month < 0) return null;
+  return Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
+}
 
 /**
- * When a process started, as text that is the same each time it is asked for the same process; null when it can't be told. A lock
- * keeps it beside the process id, so a process id that was reused by another program is not mistaken for the holder. Windows asks
- * PowerShell (`Get-Process -Id N`, about half a second, asked only for a lock's own holder and when a lock is found), elsewhere `ps`.
+ * When a process started (§22.3, v1.16): an integer, milliseconds since 1970-01-01 UTC, rounded down; null when it can't be told. A
+ * lock keeps it beside the process id, so a process id that was reused by another program is not mistaken for the holder. Windows
+ * asks PowerShell for the creation time (`Get-Process -Id N`, about half a second, asked only for a lock's own holder and when a
+ * lock is found); macOS and Linux run `ps -o lstart=` with `LC_ALL=C` and `TZ=UTC` (whole seconds).
  */
-export function processStartTime(pid: number, platform: string = process.platform, run: RunProgram = runProgram): string | null {
+export function processStartTime(pid: number, platform: string = process.platform, run: RunProgram = runProgram): number | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const out =
-      platform === "win32"
-        ? run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`])
-        : run("ps", ["-o", "lstart=", "-p", String(pid)]);
-    const text = out.trim();
-    return text === "" ? null : text;
+    if (platform === "win32") {
+      const out = run("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `([DateTimeOffset](Get-Process -Id ${pid} -ErrorAction Stop).StartTime).ToUnixTimeMilliseconds()`,
+      ]).trim();
+      return /^\d+$/.test(out) ? Number(out) : null;
+    }
+    return parseLstart(run("ps", ["-o", "lstart=", "-p", String(pid)], { LC_ALL: "C", TZ: "UTC" }));
   } catch {
     return null;
   }
@@ -83,7 +100,7 @@ export function processAlive(pid: number): boolean {
   }
 }
 
-let ownStart: string | null | undefined;
+let ownStart: number | null | undefined;
 /** The deps of this process for a lock of its own (this process's start time is asked once and kept). */
 export function ownLockDeps(): PidLockDeps {
   return {
@@ -101,9 +118,10 @@ export function ownLockDeps(): PidLockDeps {
 function holderIsDead(deps: PidLockDeps, holder: LockHolder): boolean {
   if (typeof holder.pid !== "number" || !Number.isInteger(holder.pid)) return false;
   if (!deps.alive(holder.pid)) return true;
-  if (typeof holder.started === "string" && deps.startOf !== undefined) {
+  // An integer `started` is compared in whole seconds; anything else (an older tool's text, missing, null) can't prove a reuse (§22.3, v1.16).
+  if (typeof holder.started === "number" && Number.isInteger(holder.started) && deps.startOf !== undefined) {
     const now = deps.startOf(holder.pid);
-    return now !== null && now !== holder.started;
+    return now !== null && Math.floor(now / 1000) !== Math.floor(holder.started / 1000);
   }
   return false;
 }
@@ -269,14 +287,16 @@ export function holdsPidLock(path: string, token: string): boolean {
  * held by a process that is provably dead. `live` is a holder that is proven alive (never displaced).
  */
 export type StuckState = { state: "stuck"; why: "empty" | "unreadable" | "dead"; pid?: number };
-export type PidLockState = { state: "absent" } | { state: "live"; pid: number } | StuckState;
+export type PidLockState = { state: "absent" } | { state: "live"; pid: number; legacy?: true } | StuckState;
 
 /** Judges the exact bytes of a lock file (a snapshot): the holder is looked at in THIS text, never in a later read of the file. */
 function judgeText(deps: PidLockDeps, text: string): Exclude<PidLockState, { state: "absent" }> {
   if (text.trim() === "") return { state: "stuck", why: "empty" };
   const holder = parseHolder(text);
   if (typeof holder.pid !== "number" || !Number.isInteger(holder.pid) || typeof holder.owner !== "string") return { state: "stuck", why: "unreadable" };
-  return holderIsDead(deps, holder) ? { state: "stuck", why: "dead", pid: holder.pid } : { state: "live", pid: holder.pid };
+  if (holderIsDead(deps, holder)) return { state: "stuck", why: "dead", pid: holder.pid };
+  // An older tool's text `started` can't prove a reuse: the holder counts as alive, but `unlock` may clear it (section 22.3, v1.16).
+  return typeof holder.started === "string" ? { state: "live", pid: holder.pid, legacy: true } : { state: "live", pid: holder.pid };
 }
 
 /** What reading a file gave: its exact text, nothing there, or something that can't be read as text. */
@@ -305,6 +325,11 @@ export function stuckWords(state: StuckState): string {
   if (state.why === "empty") return "empty";
   if (state.why === "unreadable") return "unreadable";
   return `held by a process that is gone (pid ${state.pid ?? "?"})`;
+}
+
+/** The words for a removable file: a stuck one, or a live-looking holder whose `started` is an older tool's text. */
+function wordsFor(state: StuckState | { state: "live"; pid: number; legacy?: true }): string {
+  return state.state === "stuck" ? stuckWords(state) : `started in an older format, cleared by unlock (pid ${state.pid})`;
 }
 
 export interface UnlockResult {
@@ -381,11 +406,11 @@ export function unlockPidLock(deps: PidLockDeps, path: string): UnlockResult {
     if (got === "error") return failed(takeoverPath);
     const snap = snapshotOf(takeoverPath);
     const state = judgeSnapshot(deps, snap);
-    if (state.state === "live") return { status: "live", pid: state.pid, removed, path: takeoverPath };
+    if (state.state === "live" && state.legacy !== true) return { status: "live", pid: state.pid, removed, path: takeoverPath };
     if (state.state === "absent") continue;
     deps.beforeRemove?.(takeoverPath);
     const outcome = removeJudged(deps, takeoverPath, snap);
-    if (outcome === "removed") removed.push({ path: takeoverPath, why: stuckWords(state) });
+    if (outcome === "removed") removed.push({ path: takeoverPath, why: wordsFor(state) });
     else if (outcome === "failed") return failed(takeoverPath);
     else return { status: "live", pid: outcome.live, removed, path: takeoverPath };
   }
@@ -393,11 +418,11 @@ export function unlockPidLock(deps: PidLockDeps, path: string): UnlockResult {
   try {
     const snap = snapshotOf(path);
     const state = judgeSnapshot(deps, snap);
-    if (state.state === "live") return { status: "live", pid: state.pid, removed, path };
+    if (state.state === "live" && state.legacy !== true) return { status: "live", pid: state.pid, removed, path };
     if (state.state === "absent") return removed.length === 0 ? { status: "none", removed } : { status: "removed", removed };
     deps.beforeRemove?.(path);
     const outcome = removeJudged(deps, path, snap);
-    if (outcome === "removed") removed.push({ path, why: stuckWords(state) });
+    if (outcome === "removed") removed.push({ path, why: wordsFor(state) });
     else if (outcome === "failed") return failed(path);
     else return { status: "live", pid: outcome.live, removed, path };
     return { status: "removed", removed };
