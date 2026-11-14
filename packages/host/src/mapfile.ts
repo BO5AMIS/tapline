@@ -285,12 +285,14 @@ export function mergeExplored(disk: ExploredRecord, mine: ExploredRecord): Explo
   }
   const older = compareLast(mine.last, disk.last) >= 0 ? disk : mine;
   const newer = older === disk ? mine : disk;
+  // What the merged actions completed leaves the frontier before it is cut at 50, or completed signatures would crowd out the untried ones.
+  const completed = (sig: string): boolean => bySig.has(sig);
   const merged: ExploredRecord = {
     ...older,
     ...newer,
     last: compareLast(mine.last, disk.last) >= 0 ? mine.last : disk.last,
     actions: [...bySig.values()],
-    frontier: capFrontier([...realFrontier(disk.frontier), ...realFrontier(mine.frontier)], disk.frontier.includes(FRONTIER_MORE) || mine.frontier.includes(FRONTIER_MORE)),
+    frontier: capFrontier([...realFrontier(disk.frontier), ...realFrontier(mine.frontier)].filter((sig) => !completed(sig)), disk.frontier.includes(FRONTIER_MORE) || mine.frontier.includes(FRONTIER_MORE)),
   };
   return recomputeFrontier(merged);
 }

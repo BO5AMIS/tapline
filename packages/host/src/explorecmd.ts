@@ -97,8 +97,8 @@ export function exitCodeOf(result: ExploreCliResult): number {
 /** Runs `tapline explore`. The host, the clock and the sleeping are injected, so every case runs without a phone. */
 export async function runExplore(flags: ExploreFlags, deps: ExploreCliDeps): Promise<number> {
   const wait = flags.wait === undefined ? (deps.appWaitMs ?? APP_WAIT_MS) / 1000 : Number(flags.wait);
-  if (!(wait > 0)) {
-    deps.err("--wait is in seconds, above 0");
+  if (!(wait > 0) || !Number.isFinite(wait)) {
+    deps.err("--wait is in seconds, above 0 and finite");
     return 2;
   }
   const parsed = exploreArgs(flags);

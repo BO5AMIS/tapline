@@ -744,6 +744,10 @@ export class AppMap {
       if (road.from === from) road.from = to;
       if (road.to === from) road.to = to;
     }
+    // Explored actions remember where they led: a later explore finds the renamed place through them.
+    for (const record of Object.values(this.map.places)) {
+      for (const action of record.explored?.actions ?? []) if (action.to === from) action.to = to;
+    }
     for (const reflex of this.map.reflexes) if (reflex.at === from) reflex.at = to;
     // A rename of a rename is one rename.
     const chained = Object.entries(this.pending.renamed).find(([, now]) => now === from);

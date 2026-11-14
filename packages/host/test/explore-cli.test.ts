@@ -108,6 +108,8 @@ describe("tapline explore: exit codes", () => {
     expect(await runExplore({ minutes: "x" }, bad.deps)).toBe(2);
     expect(bad.log.err.join("\n")).toContain("--minutes is a number");
     expect(bad.log.asked).toEqual([]);
+    for (const wait of ["Infinity", "-Infinity", "1e999", "NaN"]) expect(await runExplore({ wait }, bad.deps)).toBe(2);
+    expect(bad.log.asked).toEqual([]);
     expect(await runExplore({ wait: "0" }, bad.deps)).toBe(2);
     const closed = fakeHost(done(), { open: false });
     expect(await runExplore({}, closed.deps)).toBe(2);
