@@ -521,6 +521,112 @@ function probeSpans(views: readonly View[], probe: Probe, out: Span[]): void {
   }
 }
 
+// -- encoded forms matched directly (the literal reading is never lost to decoding)
+
+/** One layer of encoding a value can be wrapped in on its way back. */
+const ENCODERS: ReadonlyArray<(text: string) => string> = [
+  (s) => JSON.stringify(s).slice(1, -1),
+  (s) => asciiJson(s),
+  (s) => asciiJson(s).replace(/\\u([0-9a-f]{4})/g, (_m, h: string) => `\\u${h.toUpperCase()}`),
+  (s) => encodeURIComponent(s),
+  (s) => encodeURIComponent(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+  (s) => encodeURIComponent(s).replace(/%20/g, "+"),
+  (s) => encodeURIComponent(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()).replace(/%20/g, "+"),
+  (s) => new URLSearchParams({ k: s }).toString().slice(2),
+  (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"),
+  (s) => [...s].map((c) => (/[a-zA-Z0-9]/.test(c) ? c : `&#${c.codePointAt(0)};`)).join(""),
+  // a serializer that names the four markup characters and writes every other symbol as a number
+  (s) => [...s].map((c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : /[a-zA-Z0-9]/.test(c) ? c : `&#${c.codePointAt(0)};`)).join(""),
+  (s) => [...s].map((c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : /[a-zA-Z0-9]/.test(c) ? c : `&#x${(c.codePointAt(0) ?? 0).toString(16)};`)).join(""),
+  (s) => [...s].map((c) => (/[a-zA-Z0-9]/.test(c) ? c : `&#x${(c.codePointAt(0) ?? 0).toString(16)};`)).join(""),
+  (s) => [...s].map((c) => (/[a-zA-Z0-9]/.test(c) ? c : `&#x${(c.codePointAt(0) ?? 0).toString(16).toUpperCase()};`)).join(""),
+];
+
+/** How many layers of encoding are combined, by how long the value is (the forms are values times encoders to that power). */
+function layerLimit(length: number): number {
+  return length <= 64 ? 3 : length <= 300 ? 2 : 1;
+}
+
+const FORM_CAP = 20000;
+
+/**
+ * Every way the value reads once it is encoded: each encoding alone and the combinations in any order up to the layer limit
+ * (JSON inside a URL, a URL inside HTML ...). A literal `%41`, a quote or an ampersand in the value is written, not decoded, in
+ * each, so the form a text really holds can be found without decoding it first.
+ */
+function encodedForms(base: string): string[] {
+  const seen = new Set<string>([base]);
+  let layer = [base];
+  for (let depth = 0; depth < layerLimit(base.length); depth++) {
+    const next: string[] = [];
+    for (const text of layer) {
+      for (const encode of ENCODERS) {
+        const form = encode(text);
+        if (form.length > FORM_CAP || seen.has(form)) continue;
+        seen.add(form);
+        next.push(form);
+      }
+    }
+    layer = next;
+  }
+  seen.delete(base);
+  return [...seen].filter((form) => form !== "");
+}
+
+/** The encoded forms of the values, searched by their first 12 characters (a form shorter than that is searched whole). */
+interface FormIndex {
+  heads: Map<string, Array<{ form: string; token: string }>>;
+  shorts: Array<{ form: string; token: string }>;
+}
+
+function formIndexOf(bases: ReadonlyMap<string, string>): FormIndex {
+  const heads = new Map<string, Array<{ form: string; token: string }>>();
+  const shorts: Array<{ form: string; token: string }> = [];
+  const seen = new Set<string>();
+  for (const [base, token] of bases) {
+    for (const form of [base, ...encodedForms(base)]) {
+      const key = `${token}\u0000${form}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (form.length < PREFIX_MIN) {
+        if (form.length >= MIN_SCRUB) shorts.push({ form, token });
+        continue;
+      }
+      const head = form.slice(0, PREFIX_MIN);
+      const list = heads.get(head);
+      if (list === undefined) heads.set(head, [{ form, token }]);
+      else list.push({ form, token });
+    }
+  }
+  return { heads, shorts };
+}
+
+/**
+ * Every place the text holds an encoded form of a value, or a prefix of 12 or more characters of one. The text is searched as it
+ * stands and in each decoded view, so a form that decoding would damage is found at the stage where it still reads literally.
+ */
+function formSpans(views: readonly View[], index: FormIndex, out: Span[]): void {
+  for (const view of views) {
+    const text = view.text;
+    for (const { form, token } of index.shorts) {
+      let at = text.indexOf(form);
+      while (at !== -1) {
+        out.push({ start: view.start[at] as number, end: view.end[at + form.length - 1] as number, token });
+        at = text.indexOf(form, at + 1);
+      }
+    }
+    for (let i = 0; i + PREFIX_MIN <= text.length; i++) {
+      const list = index.heads.get(text.slice(i, i + PREFIX_MIN));
+      if (list === undefined) continue;
+      for (const { form, token } of list) {
+        let len = PREFIX_MIN;
+        while (len < form.length && i + len < text.length && text.charCodeAt(i + len) === form.charCodeAt(len)) len++;
+        out.push({ start: view.start[i] as number, end: view.end[i + len - 1] as number, token });
+      }
+    }
+  }
+}
+
 /**
  * Every value's every form, found in one pass and cut into spans. Where spans overlap the leftmost wins (the longest of those
  * that start together), and one that runs past its end is scrubbed beyond it too, so no fragment of a longer value survives a
@@ -530,6 +636,7 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
   const literals = new Map<string, string>();
   const patterns = new Map<string, string>();
   const bases = new Map<string, string>();
+  const formBases = new Map<string, string>();
   for (const [name, entry] of Object.entries(entries)) {
     for (const [field, value] of Object.entries(entry.values)) {
       if (value.length < MIN_SCRUB) continue;
@@ -543,11 +650,14 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
       if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base));
       // The value whole, and what an app's cut leaves of it (a prefix of 12 or more characters), in every layer of encoding.
       if (collapsed.length >= MIN_SCRUB && !bases.has(collapsed)) bases.set(collapsed, token);
+      // The value's encoded forms are searched in the raw text itself, so decoding can never lose the literal reading.
+      for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB && !formBases.has(base)) formBases.set(base, token);
     }
   }
   const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token }));
   const forms = [...literals];
   const probes = [...bases].map(([base, token]) => probeOf(base, token));
+  const formIndex = formIndexOf(formBases);
   if (forms.length === 0 && regexes.length === 0 && probes.length === 0) return (text) => text;
   return (text) => {
     if (text.length < MIN_SCRUB) return text;
@@ -567,8 +677,10 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
       }
     }
     if (probes.length > 0) {
-      const views = viewsOf(text).map(normalizedView);
+      const raw = viewsOf(text);
+      const views = raw.map(normalizedView);
       for (const probe of probes) probeSpans(views, probe, spans);
+      formSpans(raw, formIndex, spans);
     }
     if (spans.length === 0) return text;
     spans.sort((a, b) => a.start - b.start || b.end - a.end);
