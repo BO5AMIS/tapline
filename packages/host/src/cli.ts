@@ -20,6 +20,10 @@ import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runAuditLog, runGrants } from "./grantscmd.js";
 import { ownExploreHost, runExplore } from "./explorecmd.js";
+import { BUG_USAGE, runBug, type BugCliDeps } from "./bugcmd.js";
+import { loadAccounts } from "./accounts.js";
+import { DEFAULT_POLICY, loadPolicy } from "./policy.js";
+import { loadMap, mapDir } from "./mapfile.js";
 import { runInit } from "./init.js";
 import { scheduleAdd, scheduleList, scheduleRemove, type ScheduleDeps } from "./schedule.js";
 import { runReport } from "./report.js";
@@ -74,6 +78,10 @@ Commands:
            tapline explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue]
            [--account NAME] [--policy FILE] [--accounts FILE] [--maps DIR]  (exit 0: nothing found, 1: findings, a crash included,
            2: it couldn't start, or a person or a pause stopped it; the report is still written)
+  bug      Make a one-page bug report from a finding of an explore report, with no phone, or list the bugs kept (~/.tapline/bugs/<app>/<bug id>/):
+           tapline bug <report folder> <finding id> [--with-picture]; tapline bug list [--app ID]; tapline bug <bug id> shows one
+           (exit 0: a bug was made or updated, 1: it didn't reproduce, 2: it couldn't be made or was refused;
+           from "now" and from "failure" need the live session: tapline call bug_report '{...}')
   run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
            (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
   vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
@@ -383,12 +391,81 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
   };
 }
 
+/** `tapline bug ...` (AGENT-TOOLS 1.16 §29.3): its own flags (`--app` takes an app id here), and no host. */
+async function runBugCommand(args: string[]): Promise<number> {
+  let parsed: ReturnType<typeof parseBugArgs>;
+  try {
+    parsed = parseBugArgs(args);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n${BUG_USAGE}\n`);
+    return 2;
+  }
+  const { values, positionals } = parsed;
+  let redact = (text: string): string => text;
+  if (values.accounts !== undefined) {
+    try {
+      const loaded = await loadAccounts(values.accounts);
+      if (loaded.store === null) {
+        process.stderr.write(`${loaded.blocked}\n`);
+        return 2;
+      }
+      const store = loaded.store;
+      redact = (text) => store.redact(text);
+    } catch (error) {
+      process.stderr.write(`the vault couldn't be read: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
+  let policy = DEFAULT_POLICY;
+  if (values.policy !== undefined) {
+    try {
+      policy = loadPolicy(values.policy);
+    } catch (error) {
+      process.stderr.write(`the policy file couldn't be read: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
+  const mapsDir = values.maps ?? join(configDir(), "maps");
+  const deps: BugCliDeps = {
+    bugsDir: join(configDir(), "bugs"),
+    redact,
+    map: (app) => {
+      const loaded = loadMap(mapDir(app, { mapsDir }), app);
+      return loaded.status === "ok" ? loaded.map : undefined;
+    },
+    policy,
+    out: (text) => process.stdout.write(`${text}\n`),
+    err: (text) => process.stderr.write(`${text}\n`),
+  };
+  return runBug(positionals, values, deps);
+}
+
+function parseBugArgs(args: string[]) {
+  return parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      verify: { type: "string" },
+      "with-picture": { type: "boolean" },
+      app: { type: "string" },
+      to: { type: "string" },
+      repo: { type: "string" },
+      public: { type: "boolean" },
+      yes: { type: "boolean" },
+      accounts: { type: "string" },
+      maps: { type: "string" },
+      policy: { type: "string" },
+    },
+  });
+}
+
 export async function main(argv: string[]): Promise<number> {
   // The thin call has its own light entry (bin.ts); this keeps "node dist/cli.js call" working too.
   if (argv[0] === "call") {
     const { runThinCall } = await import("./thincall.js");
     return runThinCall(argv.slice(1));
   }
+  if (argv[0] === "bug") return runBugCommand(argv.slice(1));
   const { values, positionals } = parseCli(argv);
   const command = positionals[0];
   if (values.help === true || command === undefined || command === "help") {
