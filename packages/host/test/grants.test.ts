@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -493,7 +494,11 @@ describe("the lock is owned, and the state file is fenced (PR 12 review)", () =>
     expect(existsSync(lock)).toBe(false);
     const state = JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { uses: { instagram_posting: Record<string, string[]> } };
     expect(state.uses.instagram_posting["2026-11-14"]).toHaveLength(1);
-    expect(r.audit.lines.filter((l) => l["kind"] === "grant")).toHaveLength(1);
+    // one use is counted; the displaced holder's refusal is its own line, "lost the lock", and counts for nothing
+    expect(r.audit.lines.filter((l) => l["kind"] === "grant" && l["detail"] !== "lost the lock")).toHaveLength(1);
+    expect(r.audit.lines.filter((l) => l["kind"] === "grant" && l["detail"] === "lost the lock")).toEqual([
+      { kind: "grant", app: "com.instagram.ios", name: "instagram_posting", detail: "lost the lock" },
+    ]);
   });
 
   it("a lock that holds someone else's token is never removed by a release", async () => {
@@ -521,6 +526,134 @@ describe("the lock is owned, and the state file is fenced (PR 12 review)", () =>
     expect((await pa).kind).toBe("ask");
     expect(readFileSync(lock, "utf8")).toBe(other);
     expect(existsSync(`${r.path}.state.json`)).toBe(false);
+    expect(r.audit.lines.map((l) => [l["kind"], l["detail"]])).toEqual([["grant", "lost the lock"]]);
+  });
+
+  describe("lock precisions (§19.4, 1.14.1)", () => {
+    const real = (path: string, audit: MemoryAudit, extra: Partial<ConstructorParameters<typeof GrantBook>[0]> = {}): GrantBook =>
+      new GrantBook({ policyPath: path, audit, now: () => NOW, ...extra });
+
+    it("the lock is held only around the read, the check and the count write: gone when decide returns, and no handle is kept open", async () => {
+      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
+      const lock = `${r.path}.state.lock`;
+      let during: boolean | undefined;
+      const book = real(r.path, r.audit, { beforeCommit: async () => void (during = existsSync(lock)) });
+      expect((await book.decide(touch(), "use", "a")).kind).toBe("covered");
+      expect(during).toBe(true);
+      // The touch happens after decide returns: nothing holds the lock then, so another holder gets it at once.
+      expect(existsSync(lock)).toBe(false);
+      expect(readdirSync(r.dir).filter((name) => name.endsWith(".stale") || name.endsWith(".released") || name.endsWith(".tmp"))).toEqual([]);
+    });
+
+    it("a holder that holds on refreshes the lock file's mtime, so a rival never judges it stale and takes it over", async () => {
+      const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
+      const lock = `${r.path}.state.lock`;
+      const seen: number[] = [];
+      // Real time: the holder stalls 300 ms, keeps the lock fresh every 20 ms; the rival calls anything older than 100 ms stale.
+      const holder = real(r.path, r.audit, {
+        refreshMs: 20,
+        staleMs: 100,
+        beforeCommit: async () => {
+          seen.push(statSync(lock).mtimeMs);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          seen.push(statSync(lock).mtimeMs);
+        },
+      });
+      const rival = real(r.path, r.audit, { staleMs: 100, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
+      const first = holder.decide(touch(), "use", "a");
+      while (seen.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = rival.decide(touch(), "use", "b");
+      expect((await first).kind).toBe("covered");
+      expect((await second).kind).toBe("ask");
+      expect(seen[1]).toBeGreaterThan(seen[0] as number);
+      expect(r.audit.lines.some((l) => l["detail"] === "lost the lock")).toBe(false);
+      expect(r.audit.lines.filter((l) => l["kind"] === "grant")).toHaveLength(1);
+    });
+
+    it("a refresh never touches a lock that another holder has put there", async () => {
+      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
+      const lock = `${r.path}.state.lock`;
+      let theirs = 0;
+      let after = -1;
+      const book = real(r.path, r.audit, {
+        refreshMs: 10,
+        beforeCommit: async () => {
+          rmSync(lock, { force: true });
+          writeFileSync(lock, `${JSON.stringify({ owner: "someone-else-1", pid: 1, t: NOW.toISOString() })}\n`);
+          utimesSync(lock, new Date(1_000_000), new Date(1_000_000));
+          theirs = statSync(lock).mtimeMs;
+          await new Promise((resolve) => setTimeout(resolve, 80)); // the refresh timer fires about eight times
+          after = statSync(lock).mtimeMs;
+        },
+      });
+      expect((await book.decide(touch(), "use", "a")).kind).toBe("ask");
+      expect(after).toBe(theirs);
+    });
+
+    it("a takeover whose rename fails (a handle held open on Windows) waits and reads again; it does not spin, and it takes over once the rename works", async () => {
+      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
+      const lock = `${r.path}.state.lock`;
+      writeFileSync(lock, `${JSON.stringify({ owner: "dead-1", pid: 1, t: NOW.toISOString() })}\n`);
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(lock, old, old);
+      let failures = 3;
+      const renames: string[] = [];
+      const sleeps: number[] = [];
+      const book = real(r.path, r.audit, {
+        sleep: async (ms) => void sleeps.push(ms),
+        renameFile: async (from, to) => {
+          renames.push(from);
+          if (from === lock && failures > 0) {
+            failures--;
+            throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+          }
+          await rename(from, to);
+        },
+      });
+      expect((await book.decide(touch(), "use", "a")).kind).toBe("covered");
+      expect(failures).toBe(0);
+      // every failed rename was followed by a short wait before the lock was read again
+      expect(sleeps.length).toBeGreaterThanOrEqual(3);
+      expect(renames.filter((from) => from === lock).length).toBeGreaterThanOrEqual(4);
+    });
+
+    it("a stale lock that can't be moved at all is left alone: the touch asks a person, and nothing is written", async () => {
+      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
+      const lock = `${r.path}.state.lock`;
+      const theirs = `${JSON.stringify({ owner: "dead-1", pid: 1, t: NOW.toISOString() })}\n`;
+      writeFileSync(lock, theirs);
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(lock, old, old);
+      const book = real(r.path, r.audit, {
+        sleep: async () => undefined,
+        renameFile: async () => {
+          throw Object.assign(new Error("EBUSY: resource busy or locked, rename"), { code: "EBUSY" });
+        },
+      });
+      expect((await book.decide(touch(), "use", "a")).kind).toBe("ask");
+      expect(readFileSync(lock, "utf8")).toBe(theirs);
+      expect(existsSync(`${r.path}.state.json`)).toBe(false);
+      expect(r.audit.lines).toEqual([]);
+    });
+
+    it("a release whose rename is blocked for a moment is retried, and the lock is gone afterwards", async () => {
+      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
+      const lock = `${r.path}.state.lock`;
+      let blocked = 2;
+      const book = real(r.path, r.audit, {
+        sleep: async () => undefined,
+        renameFile: async (from, to) => {
+          if (from === lock && blocked > 0 && existsSync(`${r.path}.state.json`)) {
+            blocked--;
+            throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+          }
+          await rename(from, to);
+        },
+      });
+      expect((await book.decide(touch(), "use", "a")).kind).toBe("covered");
+      expect(blocked).toBe(0);
+      expect(existsSync(lock)).toBe(false);
+    });
   });
 
   it("the state file carries a generation that goes up by one at every write", async () => {

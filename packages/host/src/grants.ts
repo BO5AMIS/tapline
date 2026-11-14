@@ -1,4 +1,4 @@
-import { open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { open, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { AuditSink } from "./auditlog.js";
@@ -240,11 +240,24 @@ export interface GrantBookOptions {
   staleMs?: number;
   /** For tests: runs while the lock is held, after the counts were read and before the use is committed (a stalled holder). */
   beforeCommit?: () => Promise<void>;
+  /** How often a holder that holds on refreshes the lock file's mtime (§19.4: at least every 10 s). */
+  refreshMs?: number;
+  /** For tests: the rename the lock's takeover and release go through (a held-open handle on Windows makes a real one fail). */
+  renameFile?: (from: string, to: string) => Promise<void>;
 }
 
 const LOCK_TRIES = 300;
 const LOCK_WAIT_MS = 20;
 const RENAME_TRIES = 5;
+/** A holder that holds the lock longer than this keeps its mtime fresh, so a rival never judges it stale (§19.4). */
+export const LOCK_REFRESH_MS = 10_000;
+
+/** The holder found that it no longer owns the lock (or that the file changed under it): it records nothing. */
+class LostLockError extends Error {
+  constructor() {
+    super("the lock was taken over");
+  }
+}
 
 /** The owner token a lock's content names; undefined for a lock that is not in this format (an older or other tool's). */
 function lockOwner(text: string): string | undefined {
@@ -265,6 +278,8 @@ export class GrantBook {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly staleMs: number;
   private readonly lockClock: () => number;
+  private readonly refreshMs: number;
+  private readonly renameFile: (from: string, to: string) => Promise<void>;
   private readonly statePath: string;
   private readonly lockPath: string;
 
@@ -273,6 +288,8 @@ export class GrantBook {
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
     this.lockClock = options.lockClock ?? Date.now;
     this.staleMs = options.staleMs ?? LOCK_STALE_MS;
+    this.refreshMs = options.refreshMs ?? LOCK_REFRESH_MS;
+    this.renameFile = options.renameFile ?? rename;
     this.statePath = `${options.policyPath}.state.json`;
     this.lockPath = `${options.policyPath}.state.lock`;
   }
@@ -578,8 +595,13 @@ export class GrantBook {
       const date = localDate(at);
       const count = counts.today + 1;
       await this.options.beforeCommit?.();
-      // A holder that stalled past the takeover no longer owns the lock: its counts are old, so it records nothing and its touch asks a person.
-      if (!(await hold.owns())) return null;
+      // A holder that stalled past the takeover no longer owns the lock: its counts are old, so it records nothing and its touch
+      // asks a person. The audit log says so (§19.4): the line is not a use.
+      const lost = (): null => {
+        audit.write({ kind: "grant", app: app.id ?? app.name, name: grant.name, detail: "lost the lock" });
+        return null;
+      };
+      if (!(await hold.owns())) return lost();
       // A grant needs its line: when it can't be written, the grant doesn't cover the touch (§23).
       if (!audit.write({ kind: "grant", app: app.id ?? app.name, name: grant.name, detail: `${detail} (${count} of ${grant.perDay} today)` })) return null;
       const mine = (uses[grant.name] ??= {});
@@ -587,8 +609,8 @@ export class GrantBook {
       this.prune(uses, date, all);
       try {
         await this.writeState(uses, state.generation, hold);
-      } catch {
-        return null;
+      } catch (error) {
+        return error instanceof LostLockError ? lost() : null;
       }
       return { today: count, stamp, date };
     });
@@ -609,10 +631,26 @@ export class GrantBook {
   private async withLock<T>(run: (hold: LockHold) => Promise<T>): Promise<T | null> {
     const token = await this.acquire();
     if (token === null) return null;
+    // The lock is held only around the read, the check and the count write, never across a touch. A holder that has to hold longer
+    // keeps the lock file's mtime fresh (staleness is judged by mtime), and keeps no handle open on it.
+    const keepFresh = setInterval(() => void this.refresh(token), this.refreshMs);
+    keepFresh.unref();
     try {
       return await run({ owns: () => this.owns(token) });
     } finally {
+      clearInterval(keepFresh);
       await this.unlock(token);
+    }
+  }
+
+  /** Sets the lock file's mtime to now, only while the lock still carries this token (another holder's lock is never touched). */
+  private async refresh(token: string): Promise<void> {
+    try {
+      if (!(await this.owns(token))) return;
+      const at = new Date(this.lockClock());
+      await utimes(this.lockPath, at, at);
+    } catch {
+      // the lock went away or changed hands: the holder finds out at its next check
     }
   }
 
@@ -647,8 +685,8 @@ export class GrantBook {
         // Windows says EPERM or EBUSY while a rival's delete of the lock is under way: it is held.
         if (code !== "EEXIST" && code !== "EPERM" && code !== "EBUSY") return null;
         const seen = await this.staleLock();
-        if (seen !== null) await this.takeOver(seen);
-        else await this.sleep(LOCK_WAIT_MS);
+        // A takeover whose rename fails means someone else is acting on the lock (or, on Windows, has it open): wait briefly, then read it again.
+        if (seen === null || !(await this.takeOver(seen))) await this.sleep(LOCK_WAIT_MS);
         continue;
       }
       try {
@@ -677,12 +715,12 @@ export class GrantBook {
    * does the lock count as removed. A lock that changed hands between the look and the rename is put back, never deleted. The
    * caller then creates its own lock exclusively.
    */
-  private async takeOver(seen: string): Promise<void> {
+  private async takeOver(seen: string): Promise<boolean> {
     const tomb = `${this.lockPath}.${randomBytes(6).toString("hex")}.stale`;
     try {
-      await rename(this.lockPath, tomb);
+      await this.renameFile(this.lockPath, tomb);
     } catch {
-      return; // someone else took it over first, or its holder released it
+      return false; // someone else took it over first, its holder released it, or a handle is open on it: the caller waits and reads again
     }
     try {
       const held = await readFile(tomb, "utf8").catch(() => null);
@@ -690,15 +728,22 @@ export class GrantBook {
     } finally {
       await rm(tomb, { force: true }).catch(() => undefined);
     }
+    return true;
   }
 
   /** Removes the lock only while it still holds this token: through a tombstone, so another holder's lock is never unlinked. */
   private async unlock(token: string): Promise<void> {
     const tomb = `${this.lockPath}.${randomBytes(6).toString("hex")}.released`;
-    try {
-      await rename(this.lockPath, tomb);
-    } catch {
-      return; // already gone
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.renameFile(this.lockPath, tomb);
+        break;
+      } catch (error) {
+        const code = errorCode(error);
+        // Gone already, or not ours to wait for. EPERM and EBUSY mean someone has it open for a moment: wait, then try again.
+        if ((code !== "EPERM" && code !== "EBUSY") || attempt >= RENAME_TRIES) return;
+        await this.sleep(LOCK_WAIT_MS);
+      }
     }
     try {
       const held = await readFile(tomb, "utf8").catch(() => null);
@@ -713,9 +758,9 @@ export class GrantBook {
    * generation must still be the one it read; the new file carries that generation plus one. Otherwise nothing is written.
    */
   private async writeState(uses: Uses, generation: number, hold: LockHold): Promise<void> {
-    if (!(await hold.owns())) throw new Error("the lock was taken over");
+    if (!(await hold.owns())) throw new LostLockError();
     const now = await this.readState();
-    if (now === null || now.generation !== generation) throw new Error("the state file changed");
+    if (now === null || now.generation !== generation) throw new LostLockError();
     await this.writeAtomic(this.statePath, `${JSON.stringify({ version: 1, generation: generation + 1, uses }, null, 2)}\n`);
   }
 

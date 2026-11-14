@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -181,6 +181,22 @@ describe("a grant stands in for a person's OK (§19.3)", () => {
     expect(textOf(dry)).not.toContain("needs a person's OK");
     const real = await r.tools.tap({ target: { id: "post" }, look: false });
     expect(textOf(real)).toContain('(1 of 1 today)');
+  });
+
+  it("the grants' lock is never held across the touch itself (§19.4)", async () => {
+    const r = await setup([GRANT]);
+    const lock = `${r.policyPath}.state.lock`;
+    const heldDuringPress: boolean[] = [];
+    const original = r.app.handler;
+    r.app.handler = (req) => {
+      if (req.method === "press") heldDuringPress.push(existsSync(lock));
+      return original(req);
+    };
+    const answer = await r.tools.tap({ target: { id: "post" }, look: false });
+    expect(textOf(answer)).toContain('allowed by grant "posting"');
+    expect(heldDuringPress.length).toBeGreaterThan(0); // the dry run and the touch
+    expect(heldDuringPress.every((held) => !held)).toBe(true);
+    expect(existsSync(lock)).toBe(false);
   });
 
   it("a touch the app refused gives its use back", async () => {
