@@ -110,9 +110,19 @@ tapline mcp
 - `--policy FILE` sets the words that need a person's OK or are blocked (JSON, per app);
   `--no-policy` turns the policy off, only for a test phone with test data. `--no-log` turns
   off the action log in `~/.tapline/log/`.
+- Grants (1.7) are in the policy file, version 2: a person's standing OK for a touch, with limits. A covered touch
+  answers `Note: allowed by grant "name" (2 of 3 today).` and asks no one; you never create, change or revoke one (only
+  the person does). For the person, in a terminal: `tapline grants --policy FILE` (the grants, today's counts, the last
+  uses), `tapline grants --policy FILE --revoke-all` (the kill switch), `tapline grants unlock --policy FILE` (removes a stuck policy edit lock: empty, unreadable or held by a dead process, never a live one), `tapline audit-log [--since <date>]` and
+  `--delete`, and `tapline doctor --policy FILE` (a refused grant, a broken state file).
+- Scheduled runs (1.7) are for the person: `tapline schedule add <route> --at "09:00 daily"` (or `--on-file FOLDER`), `schedule list`,
+  `schedule remove NAME`, `schedule unlock NAME` (removes a run lock that is empty, unreadable or held by a dead process, never a live one; `tapline doctor` names such locks) and `tapline run-schedule NAME` runs one now with the schedule's policy, accounts and maps (a running host carries it only when it has those same files; else the run has its own host). Set
+  one up only when the user asks for it; the app must be open on the phone, or the run is skipped (`skipped: the app is not
+  open`). Reports are in `~/.tapline/runs/`, lines in `tapline audit-log`.
 - `--no-dialog` keeps a person's OK to the live view (the host's own dialog is off), for a host that
   hands dialogs to the model instead of a person. `--brief` makes actions answer briefly.
-  `--accounts FILE` loads test accounts (outside any git repository, or ignored by it; never print
+  `--accounts FILE` loads the vault: test accounts, cards, addresses, identities, notes (a plain file outside any git
+  repository, or ignored by it, for test data only; `tapline vault protect FILE` encrypts it; never print
   it). `--maps DIR` keeps each app's map in `DIR/<app id>/`. `tapline host` takes the same options
   and serves `tapline call`.
 

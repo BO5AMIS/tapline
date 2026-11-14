@@ -169,6 +169,11 @@ export interface TaplineHostOptions {
    * it: how test accounts' values stay out of every answer (AGENT-TOOLS 1.13 §18.6).
    */
   redact?: (text: string) => string;
+  /**
+   * Whether `redact` hides vault values (what `redacting` answers). Default: true when `redact` is given. A host that scrubs only
+   * one-time codes sets false, so the vault's own handling stays off while no vault is loaded.
+   */
+  redactsVault?: boolean;
 }
 
 /** The longest touch another tool may announce (`POST /agent-touch`), in milliseconds. */
@@ -398,6 +403,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private listenCalled = false;
   private closed = false;
   private readonly redact: ((text: string) => string) | undefined;
+  private readonly redactsVault: boolean;
 
   constructor(options: TaplineHostOptions) {
     super();
@@ -413,6 +419,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     this.agentTouchSlackMs = options.agentTouchSlackMs ?? 1500;
     this.api = options.api;
     this.redact = options.redact;
+    this.redactsVault = options.redactsVault ?? true;
   }
 
   /**
@@ -831,7 +838,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
 
   /** Whether account values are scrubbed from what the apps send (a test accounts file is loaded). */
   get redacting(): boolean {
-    return this.redact !== undefined;
+    return this.redact !== undefined && this.redactsVault;
   }
 
   /** Scrubs a value (text and property names) the way every answer from an app is; for what an `internal` request gave. */

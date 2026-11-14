@@ -5,14 +5,14 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
 import { annotateScreenshot, type ShotImage } from "./annotate.js";
-import type { ControlQueue } from "./control.js";
+import type { ControlQueue, PhoneLease } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
-import { alertNotes, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine } from "./format.js";
+import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine, roleOf } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -22,7 +22,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { substituteAccount, type AccountField, type AccountsLoad } from "./accounts.js";
+import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -48,13 +48,16 @@ import { JOURNEYS_KEPT, JourneyRecorder, findingsLine, freshFolder, pruneJourney
 import { exportRefusal, exportReport, type Runner } from "./journeyexport.js";
 import { randomBytes } from "node:crypto";
 import { Confirmations, type OkVia } from "./confirm.js";
-import { Dialogs, askDone, okCaption, plainText, type MomentOutcome } from "./elicit.js";
+import { Dialogs, askDone, draftCaption, okCaption, plainText, type MomentOutcome } from "./elicit.js";
+import type { AuditSink } from "./auditlog.js";
+import { createOtpService, otpReference, type OtpFetch, type OtpService } from "./otpclient.js";
+import { GrantBook, REACH_WORDS, elementNeverGrantable, grantCaption, grantNameBase, neverGrantable, reachesPeople, type GrantDecision, type GrantSpec } from "./grants.js";
 import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
-import { escapeParams, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
+import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
   EXPECT_TIMEOUT_S,
@@ -369,6 +372,7 @@ export const toolShapes = {
     account: z.string().optional().describe("With route: a test account's name; the tool types its values, you never see the password"),
     then: z.array(stepSchema).optional().describe("run steps that go on after arriving, in the same call"),
     by: z.enum(["any", "taps", "link"]).optional().describe('"any" (default), "taps" (roads only, never a jump) or "link" (a jump only)'),
+    look: lookField,
     brief: briefField,
     dry_run: dryRunField,
   },
@@ -564,10 +568,19 @@ export interface ToolsOptions {
   clientId?: () => string | undefined;
   /** The safety policy (AGENT-TOOLS 1.8 §11). Default: the built-in words; --no-policy passes empty lists. */
   policy?: PolicyFile;
+  /** The policy file's grants (AGENT-TOOLS 1.14 §19): read again at every touch. None: no grants (the built-in policy has none). */
+  grants?: GrantBook;
+  /** The audit log (AGENT-TOOLS 1.14 §23): a person's OK or refusal is a line in it. It has no off switch; tests pass none. */
+  audit?: AuditSink;
   /** The user's UX house rules (`--ux-rules FILE`, AGENT-TOOLS 1.12 §17.3). Default: none. */
   uxRules?: UxRules;
   /** The test accounts (`--accounts FILE`, AGENT-TOOLS 1.13 §18.6): loaded, or refused with the reason. Default: none. */
   accounts?: AccountsLoad;
+  /**
+   * One-time codes (`${otp.<app>}`, AGENT-TOOLS 1.14 §20.4): how a code is asked of Tapwright's daemon, and the codes' redaction. Share
+   * `codes.redact` with the host's own redaction so a code is scrubbed from the app's answers too. Default: the real daemon.
+   */
+  otp?: OtpService;
   /** The apps' maps (AGENT-TOOLS 1.13 §18.9): places, roads and links grow as the agent drives. Default: none (no `Place:` line). */
   maps?: MapRegistry;
   /** Where a person's OK is asked for and given (the live viewer listens). Default: a fresh one. */
@@ -615,6 +628,8 @@ export interface ToolsOptions {
   baselinesDir?: string;
   /** The live viewer's queue: agent actions wait for a person and stop while paused. */
   control?: ControlQueue;
+  /** A scheduled run's hold on the phone (§22.3): while it stands, other agents' actions wait. */
+  lease?: PhoneLease;
   /** Shows each agent action to people watching the live viewer. */
   onAction?: (action: ViewerAction) => void;
   /** The live viewer's links (with its token), for the `viewer` tool. */
@@ -730,7 +745,7 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
 
 /** A step that types an account's value: its text is a placeholder, kept in the script (the value never is). */
 function isAccountStep(step: ScriptStep): boolean {
-  return step.method === "type" && typeof step.params["text"] === "string" && step.params["text"].includes("${account.");
+  return step.method === "type" && typeof step.params["text"] === "string" && mentionsVault(step.params["text"]);
 }
 
 /**
@@ -998,6 +1013,39 @@ function appendNote(answer: CallToolResult, note: string): CallToolResult {
   return { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), note].join("\n") }, ...rest] };
 }
 
+/** Several notes at the end of an answer, in order. */
+function appendNotes(answer: CallToolResult, notes: string[]): CallToolResult {
+  return notes.reduce((done, note) => appendNote(done, note), answer);
+}
+
+/** Takes the notes collected so far (a call's grant notes) onto the end of the answer and empties the list. */
+function flushNotes(answer: CallToolResult, notes: string[]): CallToolResult {
+  return appendNotes(answer, notes.splice(0));
+}
+
+/**
+ * Codes that say a request was refused before anything was touched: the host never sent it (not connected, app in the background)
+ * or the app refused it before it dispatched (target missing, not touchable, ambiguous, stale, bad arguments). Anything else
+ * (a timeout, a disconnect, an app error, a handler that threw) leaves it uncertain whether the touch was made.
+ */
+const NOT_DELIVERED_CODES: ReadonlySet<string> = new Set(["not_found", "not_actionable", "ambiguous", "stale", "bad_params", "unsupported", "not_allowed", "not_connected", "in_background", "busy", "paused"]);
+
+/** True when a request's failure proves the touch was not made. */
+function notDelivered(error: unknown): boolean {
+  return error instanceof TaplineError && NOT_DELIVERED_CODES.has(error.code);
+}
+
+/** A grant that let a touch through: what its answer says, and what a failed touch gives back (§19.3, §19.4). */
+interface GrantUse {
+  name: string;
+  /** `2 of 3`: the count including this use. */
+  counts: string;
+  line: string;
+  /** Who made the use and its slot files (§19.4): `release` and the re-check before the touch go by them. */
+  owner: string;
+  slots: string[];
+}
+
 /** The app's refusal when an alert it can't answer is open (a stand-in's own buttons are an ordinary screen). */
 const ALERT_IN_WAY = /behind_alert: (An alert is open|Tapline's own prompt is open)/;
 
@@ -1183,10 +1231,34 @@ interface CallState {
 const CHANGED_WHILE_WAITING = "Error not_allowed: needs_confirmation: the screen changed while waiting for the OK; ask again.";
 
 /** A person's OK given while the call waited: what the screen showed then, and where it was given. */
-interface Waited {
-  fp: string;
-  via: OkVia;
+type Waited = { fp: string; via: OkVia; /** The OK was for a draft (§21.3), and where the draft came from. */ draft?: Draft["source"] } | { fp: string; pre: PreUse };
+
+/** A draft shown to a person before the touch that sends it (AGENT-TOOLS 1.14 §21.3): where it came from, the question and the field's text. */
+interface Draft {
+  source: "grant" | "route";
+  /** The policy word that matched, as the dialog says it. */
+  word: string;
+  caption: string;
+  /** The field's text, redacted: what the person was shown and what the OK is bound to. */
+  text: string;
 }
+
+/** What binds a person's OK to the draft they saw: the text. A changed draft is another question. */
+const draftBinding = (draft: Draft | null): string => (draft === null ? "" : `|draft|${draft.text}`);
+
+/**
+ * A grant's use taken before the dialog stage (§19.4): a grant that covers the touch asks no one, and when taking its use fails
+ * (the audit line can't be written, the limit was reached meanwhile) the touch asks a person through the dialog as usual.
+ * `handed` is true once the check right before the touch has taken it over, or it has been given back.
+ */
+interface PreUse {
+  use: GrantUse;
+  handed: boolean;
+}
+
+/** What a grant offer asks for: the counts and days of a grant a person may create after allowing a touch (§19.6). */
+export const GRANT_OFFER_PER_DAY = 3;
+export const GRANT_OFFER_DAYS = 7;
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
 export class TaplineTools {
@@ -1238,8 +1310,11 @@ export class TaplineTools {
   readonly confirmations: Confirmations;
   private dialogs: Dialogs | undefined;
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
-  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal }>();
-  private readonly policy: PolicyFile;
+  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string }>();
+  /** Read at each use: a host that reloads its policy (a scheduled run asks for its facts) hands every client the new one. */
+  private get policy(): PolicyFile {
+    return this.options.policy ?? DEFAULT_POLICY;
+  }
   private readonly uxRules: UxRules;
   /**
    * Hook for the journey (AGENT-TOOLS 1.12 §17): gives `ux_check` the action labels of earlier screens, and is told
@@ -1255,6 +1330,8 @@ export class TaplineTools {
   private readonly listed = new Set<string>();
   /** Sessions whose previous answer had an alert open, so the next change block can say `Alert: gone`. */
   private readonly alertOpen = new Set<string>();
+  /** What each session's open alert said in the previous answer (title, message, buttons), to see a change of the message alone. */
+  private readonly alertSeen = new Map<string, string>();
   /** Per session: how many actions answered with `look: false` since the agent was last given a list or a change block. */
   private readonly unlistedActions = new Map<string, number>();
   /** The route of the latest element list, for recording and checking replays. */
@@ -1295,6 +1372,17 @@ export class TaplineTools {
    * that runs inside it (its own action) can never reset or set the outer action's state.
    */
   private readonly okScope = new AsyncLocalStorage<{ used: boolean }>();
+  /** Whether a guarded touch's request may have reached the app (AGENT-TOOLS 1.14 §19.4): a grant's use is given back only when it surely did not. */
+  private readonly deliveryScope = new AsyncLocalStorage<{ sent: boolean }>();
+  /** The saved routes running in this call (a drive, a replay): a grant with a `route` covers touches made inside it only (§19.1). */
+  private readonly routeScope = new AsyncLocalStorage<string[]>();
+  /** True inside a route that carries `"draftsOnly": true` (§18.5, §21.3); it nests: a route inside one is drafts-only too. */
+  private readonly draftsScope = new AsyncLocalStorage<boolean>();
+  /** The input the agent last typed into (§21.3): the draft's field. A secure field is never kept. */
+  private lastTyped: { sessionId: string; ref: string; testID?: string } | undefined;
+  /** The grant notes of the call in flight (§19.3): they end its answer, before the call's other closing notes. */
+  private readonly grantNotes = new AsyncLocalStorage<string[]>();
+  private grantNoticeDone = false;
   private setOk(used: boolean): void {
     const state = this.okScope.getStore();
     if (state !== undefined) state.used = used;
@@ -1360,6 +1448,7 @@ export class TaplineTools {
   private journeyBusy: "starting" | "stopping" | undefined;
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly otp: OtpService;
 
   constructor(
     private readonly host: TaplineHost,
@@ -1370,10 +1459,11 @@ export class TaplineTools {
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.confirmations = options.confirmations ?? new Confirmations();
     this.dialogs = options.dialogs;
-    this.policy = options.policy ?? DEFAULT_POLICY;
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
+    this.otp = options.otp ?? createOtpService();
+    this.actionLog?.setBackstop((value) => this.backstop(value));
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
     this.stillGapMs = options.stillGapMs ?? 150;
     this.stillCapMs = options.stillCapMs ?? 2000;
@@ -1456,7 +1546,7 @@ export class TaplineTools {
 
   /** Runs a measuring call with fast animations normal, then puts them back, and says so in the answer (E8). */
   private async pausingAnimations(run: () => CallToolResult | Promise<CallToolResult>): Promise<CallToolResult> {
-    const { value, paused, failed } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run());
+    const { value, paused, failed } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run(), this.leased);
     return failed ? appendNote(value, ANIMATIONS_NOT_PAUSED_NOTE) : paused ? appendNote(value, ANIMATIONS_PAUSED_NOTE) : value;
   }
 
@@ -1601,6 +1691,45 @@ export class TaplineTools {
       return this.shortcutWords("app_command", name).replace("Error not_allowed: ", `Error not_allowed: step ${index + 1}: `);
     }
     return null;
+  }
+
+  /**
+   * An agent action on the phone: behind a scheduled run's lease when another holds it, then in the live viewer's queue
+   * (a person goes first; paused refuses).
+   */
+  private agentTurn<T>(run: () => Promise<T>): Promise<T> {
+    const control = this.options.control;
+    const go = control !== undefined ? () => control.runAgent(run) : run;
+    return this.leaseGate(go);
+  }
+
+  /**
+   * Behind a scheduled run's lease: another client's call waits (then answers `busy`) while the lease stands. Only the credential the
+   * run was given gets through; the client label never does (PR 12 Codex cycle 2).
+   */
+  leaseGate<T>(run: () => Promise<T>): Promise<T> {
+    const lease = this.options.lease;
+    if (lease === undefined) return run();
+    const who = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60) ?? "";
+    return lease.run(who, run, this.holdScope.getStore()?.lease);
+  }
+
+  /** `sendRequest` as a value, for helpers that send requests of their own (the animation switch). */
+  private readonly leased: TaplineHost["request"] = (...args) => this.sendRequest(...args);
+
+  /** Every request to the app goes through the lease check: a run's call whose lease ran out after it was queued sends nothing (§22.3). */
+  private sendRequest(...args: Parameters<TaplineHost["request"]>): ReturnType<TaplineHost["request"]> {
+    try {
+      this.checkLease();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.host.request(...args);
+  }
+
+  /** Throws `lease_lost` when this call carries a lease credential that is not the standing holder's (right before something is sent). */
+  checkLease(): void {
+    this.options.lease?.assertCurrent(this.holdScope.getStore()?.lease);
   }
 
   /** The MCP server gives the dialog once it can ask its client (the client's capabilities are known after initialize). */
@@ -1763,13 +1892,23 @@ export class TaplineTools {
     const map = this.mapOf(session);
     if (map === undefined) return fail("Error unsupported: this app reports no id of its own, so it has no map.");
     // As a `run` step a drive builds no screen of its own: the batch answers once (9.1).
-    const given: Shape<"drive"> & { quiet?: boolean } = options.asStep === true ? { ...args, quiet: true } : args;
+    // `look: false` (1.13.3) answers the first line only on arrival; a step's own `look` is ignored (§9.1).
+    const { look: askedLook, ...withoutLook } = args;
+    // With `then`, the run steps answer and take the `look` (drive.ts afterThen).
+    const quietLook = options.asStep !== true && askedLook === false && args.dry_run !== true && args.then === undefined;
+    const given: Shape<"drive"> & { quiet?: boolean } =
+      options.asStep === true ? { ...withoutLook, quiet: true } : quietLook ? { ...args, quiet: true } : args;
     const services = this.driveServices(session, map);
     const routes = this.routeServices(session, args.account, args.brief);
     const drove = (): Promise<CallToolResult> => (given.route !== undefined ? driveRoute(services, routes, given) : driveTo(services, given, routes));
     // A batch keeps only `Note:` lines of a step's answer, so a repair is said as one there.
     const go = async (): Promise<CallToolResult> => {
       const answer = await drove();
+      if (quietLook && answer.isError !== true) {
+        // No list and no changes were given: the next answer's changes cover this call too, and says so.
+        this.markListUnseen();
+        this.unlistedActions.set(session.id, (this.unlistedActions.get(session.id) ?? 0) + 1);
+      }
       if (options.asStep !== true) return answer;
       return { ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: block.text.replace(/^Road repaired/gm, "Note: Road repaired") } : block)) };
     };
@@ -1800,7 +1939,7 @@ export class TaplineTools {
       known: async () => (session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] })),
       tree: async () => {
         // In a user's eyes a drive reads only what is on the glass (17.1).
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", this.userEyes() ? { glass: true } : {}, { sessionId: session.id }));
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", this.userEyes() ? { glass: true } : {}, { sessionId: session.id }));
         if (!tree.success) throw new TaplineError("internal", "the app returned an element list the host could not read.");
         return tree.data;
       },
@@ -1811,14 +1950,36 @@ export class TaplineTools {
     };
   }
 
+  /** Runs what a saved route does with its name in scope: a grant that names the route covers touches made inside it (§19.1). */
+  private inRoute<T>(route: string | undefined, run: () => T, draftsOnly = false): T {
+    if (route === undefined) return run();
+    const drafts = draftsOnly || this.draftsScope.getStore() === true;
+    return this.routeScope.run([...(this.routeScope.getStore() ?? []), route], () => this.draftsScope.run(drafts, run));
+  }
+
+  /** Whether the saved route of that name in this app's map carries `"draftsOnly": true` (§18.5). */
+  private routeDraftsOnly(session: SessionInfo, route: string | undefined): boolean {
+    const map = route === undefined ? undefined : this.mapOf(session);
+    return route !== undefined && map !== undefined && loadRoute(map.folder(), route)?.draftsOnly === true;
+  }
+
+  /**
+   * The policy's lists for a touch. In a drafts-only route (§21.3) the words that reach other people ask a person whatever the
+   * policy file lists, so that every such touch stops at a draft.
+   */
+  private touchLists(session: SessionInfo): { confirm: string[]; block: string[] } {
+    const lists = listsFor(this.policy, session.app);
+    return this.draftsScope.getStore() === true ? { confirm: [...lists.confirm, ...REACH_WORDS], block: lists.block } : lists;
+  }
+
   private routeServices(session: SessionInfo, account: string | undefined, brief: boolean | undefined): RouteServices {
     return {
       accounts: this.options.accounts?.store ?? undefined,
       probeAccount: (field, named) => {
-        const used = this.accountText("$" + "{account." + field + "}", named, session);
+        const used = this.accountText(field.startsWith("${") ? field : "$" + "{account." + field + "}", named, session);
         return used !== null && !used.ok ? used.message : null;
       },
-      runSteps: (steps, look) => this.run({ steps, account, brief, ...(look ? {} : { look: false }) }),
+      runSteps: (steps, look, route) => this.inRoute(route, () => this.run({ steps, account, brief, ...(look ? {} : { look: false }) }), this.routeDraftsOnly(session, route)),
       checkSteps: (steps) => {
         // The call's account is the steps' default account here too, as when `run` runs them.
         const before = this.runAccount;
@@ -1840,7 +2001,7 @@ export class TaplineTools {
   private async driveTouch(session: SessionInfo, call: TouchCall): Promise<TouchOutcome> {
     this.logExtra = undefined;
     this.actionStartedAt = Date.now();
-    const lists = listsFor(this.policy, session.app);
+    const lists = this.touchLists(session);
     const { tool, method, params } = call;
     const short = tool === "swipe" && Math.hypot(Number(params["x1"]) - Number(params["x0"]), Number(params["y1"]) - Number(params["y0"])) < 10;
     // A jump's link comes from the map, which an agent can write: its path words are checked as a link-shaped element (§11).
@@ -1881,11 +2042,14 @@ export class TaplineTools {
       waited = ready.waited;
     }
     let granted: OkVia | undefined;
+    let sentDraft = false;
+    let covered: GrantUse | undefined;
     const wire = call.pipelined
       ? { method: "move", params: { method, params, ...(guard !== undefined ? { guard } : {}), ...(call.next !== undefined ? { next: call.next } : {}) } }
       : { method, params };
     const timeoutMs = call.pipelined ? (call.next?.capMs ?? 0) + 15_000 : undefined;
     let raw: unknown;
+    let moveSent = false;
     try {
       const run = async (): Promise<unknown> => {
         this.setOk(false);
@@ -1894,12 +2058,23 @@ export class TaplineTools {
           const gate = await this.gatePreflight(session, guardedTool, method, params, lists, waited, waited !== null && tool !== "open_url" ? undefined : known === undefined ? undefined : { elements: known, raw: knownRaw ?? known });
           if ("stop" in gate) throw new PolicyStop(gate.stop);
           granted = gate.via;
+          sentDraft = gate.draft === true;
+          covered = gate.grant;
         }
-        return this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        moveSent = true;
+        try {
+          return await this.sendRequest(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+        } catch (error) {
+          if (notDelivered(error)) moveSent = false;
+          throw error;
+        }
       };
-      raw = this.options.control ? await this.options.control.runAgent(run) : await run();
+      raw = await this.agentTurn(run);
     } catch (error) {
+      await this.dropPreUse(waited);
       if (error instanceof PolicyStop) return { kind: "stop", answer: error.answer };
+      // The touch surely wasn't made: the grant's use is given back; a sent or uncertain one stays counted (§19.4).
+      if (covered !== undefined && !moveSent) await this.releaseGrant(covered);
       this.logExtra = undefined;
       const code = error instanceof TaplineError ? error.code : "internal";
       this.showAction("agent", method, undefined, params, code, error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
@@ -1909,10 +2084,11 @@ export class TaplineTools {
     this.noteTouch(method, params, done);
     this.showAction("agent", method, done, params);
     if (granted !== undefined) this.journeyRun?.noteOk(granted);
+    if (covered !== undefined) this.grantNotes.getStore()?.push(covered.line);
     // A jump is a shortcut a user doesn't have; a journey whose `allow` names drive says so in its report (AGENT-TOOLS 1.13 18.12).
     if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
-    return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}) };
+    return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}), ...(sentDraft ? { sent: true as const } : {}) };
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
@@ -1935,14 +2111,22 @@ export class TaplineTools {
     const startedWith: AppIdentity | undefined = this.host.current();
     // Reflexes fired during the call are counted for it, and said in its answer (§18.7).
     const reflexes: ReflexCall = { fired: new Map(), lines: [] };
-    return this.noteScope.run(true, () =>
-      this.reflexScope.run(reflexes, () => {
-        const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
-        if (result instanceof Promise) {
-          return result.then((answer) => this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(answer, mark, startedWith))), reflexes));
-        }
-        return this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(result, mark, startedWith))), reflexes);
-      }),
+    const grantLines: string[] = [];
+    return this.grantNotes.run(grantLines, () =>
+      this.noteScope.run(true, () =>
+        this.reflexScope.run(reflexes, () => {
+          const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
+          const finish = (answer: CallToolResult): CallToolResult =>
+            this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes);
+          // The first answer of a session with grants says which grant is refused, and whether the state file is broken (§19.1, §19.4).
+          if (this.options.grants !== undefined && !this.grantNoticeDone) {
+            this.grantNoticeDone = true;
+            const grants = this.options.grants;
+            return Promise.resolve(result).then(async (answer) => finish(appendNotes(answer, GrantBook.noticeLines(await grants.inspect()))));
+          }
+          return result instanceof Promise ? result.then(finish) : finish(result);
+        }),
+      ),
     );
   }
 
@@ -1985,7 +2169,7 @@ export class TaplineTools {
       let tree: TreeResult;
       let place: string | null;
       try {
-        const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+        const read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }));
         if (!read.success) break;
         tree = read.data;
         place = at ?? (await placeNow(this.placeSource(session), map))?.place.name ?? null;
@@ -2052,7 +2236,7 @@ export class TaplineTools {
     const t = target as Record<string, unknown>;
     if ("index" in t || "ref" in t || "x" in t || !("testID" in t || "label" in t || "text" in t)) return null;
     try {
-      const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+      const read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }));
       return read.success ? candidatesFor(target, read.data.elements) : null;
     } catch {
       return null;
@@ -2234,7 +2418,7 @@ export class TaplineTools {
   private async openOsAlert(): Promise<NonNullable<TreeResult["alerts"]>[number] | null> {
     const session = this.host.current();
     if (session === undefined) return null;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
     return tree.success ? (tree.data.alerts ?? []).find((alert) => !alert.standIn) ?? null : null;
   }
 
@@ -2268,12 +2452,15 @@ export class TaplineTools {
   /** The first answer of the session says an accounts file was refused (it sits in a git repo), once (AGENT-TOOLS 1.13 §18.6). */
   private withAccountsNote(answer: CallToolResult): CallToolResult {
     const loaded = this.options.accounts;
-    if (this.accountsNoteDone || loaded === undefined || loaded.store !== null) return answer;
+    if (this.accountsNoteDone || loaded === undefined) return answer;
+    // A plain vault file carries its warning (§20.2); a refused one says why.
+    const line = loaded.store !== null ? loaded.note : `Note: ${loaded.blocked}`;
+    if (line === undefined) return answer;
     if (answer.content[0]?.type !== "text") return answer;
     this.accountsNoteDone = true;
     // An answer that is the refusal itself already says it.
-    if (answer.content[0].text.includes(loaded.blocked)) return answer;
-    return appendNote(answer, `Note: ${loaded.blocked}`);
+    if (loaded.store === null && answer.content[0].text.includes(loaded.blocked)) return answer;
+    return appendNote(answer, line);
   }
 
   /** The first call has been answered, so the "needs a person" note has had its turn. */
@@ -2666,6 +2853,9 @@ export class TaplineTools {
         const named = (params as { account?: unknown }).account;
         const used = typeof typed === "string" ? this.accountText(typed, typeof named === "string" ? named : undefined, session) : null;
         if (used !== null && !used.ok) return fail(`Error ${used.code}: step ${i + 1} (${describeRunStep(step)}): ${used.message}`);
+        // A one-time code names the connected app and nothing else (§20.4); nothing is asked of the daemon before the step runs.
+        const wrongApp = typeof typed === "string" ? this.otpPrecheck(typed, session) : null;
+        if (wrongApp !== null) return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): ${wrongApp}`);
         // `as` is checked before any step runs too (§18.5): it goes only while a route records.
         const as = (params as { as?: unknown }).as;
         const badAs = typeof as === "string" ? this.asRefusal(as, typeof typed === "string" ? typed : "", typeof named === "string" ? named : undefined) : null;
@@ -2829,14 +3019,14 @@ export class TaplineTools {
       let holds: boolean;
       if (once) {
         try {
-          const raw = await this.host.request("waitFor", params, { sessionId: session.id });
+          const raw = await this.sendRequest("waitFor", params, { sessionId: session.id });
           holds = typeof raw === "object" && raw !== null && (raw as { found?: unknown }).found === true;
         } catch {
           // A check that couldn't be made doesn't hide the step: it runs and says what is wrong itself.
           holds = true;
         }
       } else {
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
         holds = tree.success ? holdsIn(tree.data.elements, condition) : true;
       }
       if (!holds) return skippedLine(number, condition.kind, condition.label, condition.gone);
@@ -2946,7 +3136,7 @@ export class TaplineTools {
   private async currentRoute(): Promise<string[] | null> {
     const session = this.host.current();
     if (session === undefined) return null;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
     return tree.success && tree.data.route !== undefined ? tree.data.route.names : null;
   }
 
@@ -2972,7 +3162,7 @@ export class TaplineTools {
     const until = Date.now() + seconds * 1000;
     let actual: string | undefined;
     for (;;) {
-      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+      const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
       const element = tree.success
         ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : labelOfElement(el).toLowerCase() === (e.label ?? "").toLowerCase()))
         : undefined;
@@ -2996,13 +3186,13 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     let raw: unknown;
     try {
-      raw = await this.host.request("inspect", { target: toWireTarget(args.target) }, { sessionId: session.id });
+      raw = await this.sendRequest("inspect", { target: toWireTarget(args.target) }, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
     const parsed = inspectResultSchema.safeParse(raw);
     if (!parsed.success) return fail("Error internal: the app returned an inspect answer the host could not read.");
-    return text(formatInspect(parsed.data));
+    return text(formatInspect(parsed.data, undefined, (t) => this.scrubSecrets(t)));
   }
 
   // -- audit (AGENT-TOOLS 1.8 §10)
@@ -3015,7 +3205,7 @@ export class TaplineTools {
     }
     let raw: unknown;
     try {
-      raw = await this.host.request("audit", args.types !== undefined ? { types: args.types } : {}, { sessionId: session.id });
+      raw = await this.sendRequest("audit", args.types !== undefined ? { types: args.types } : {}, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
@@ -3041,7 +3231,7 @@ export class TaplineTools {
     const earlier = this.uxJourney?.earlier() ?? null;
     let raw: unknown;
     try {
-      raw = await this.host.request(
+      raw = await this.sendRequest(
         "uxCheck",
         { ...(this.userEyes() ? { glass: true } : {}), ...(this.uxRules.wayBack ? { wayBack: true } : {}), ...(earlier !== null ? { earlier } : {}) },
         { sessionId: session.id },
@@ -3097,7 +3287,7 @@ export class TaplineTools {
     return runMedia(args, {
       state: this.mediaState,
       session,
-      request: (params) => this.host.request("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
+      request: (params) => this.sendRequest("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
       describeError,
       askPerson: (message) => this.personForMedia(message),
     });
@@ -3110,7 +3300,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     let raw: unknown;
     try {
-      raw = await this.host.request("check", {}, { sessionId: session.id });
+      raw = await this.sendRequest("check", {}, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
@@ -3166,11 +3356,10 @@ export class TaplineTools {
     // counts on from the highest one; `look` (onlyChanges false) always restarts at e1.
     const eyes = this.userEyes();
     const treeParams: Record<string, unknown> = { ...(askChanges ? { changes: true } : {}), ...(eyes ? { glass: true } : {}) };
-    const treePromise = this.host.request("tree", treeParams, { sessionId: sid });
+    const treePromise = this.sendRequest("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
-        ? this.host
-            .request("screenshot", { format: "jpg", quality: 0.75, maxWidth: width }, { sessionId: sid })
+        ? this.sendRequest("screenshot", { format: "jpg", quality: 0.75, maxWidth: width }, { sessionId: sid })
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error }))
         : Promise.resolve(undefined);
@@ -3197,7 +3386,12 @@ export class TaplineTools {
     const alertGone = this.alertOpen.has(sid) && !alertsNow;
     if (alertsNow) this.alertOpen.add(sid);
     else this.alertOpen.delete(sid);
-    const changeBlock = askChanges ? changeParts(tree, { alertGone, eyes }) : null;
+    // An alert that was open before and now reads differently (its message alone, say) is a change of the alert.
+    const signature = alertsNow ? alertSignature(tree) : undefined;
+    const alertChanged = signature !== undefined && this.alertSeen.has(sid) && this.alertSeen.get(sid) !== signature;
+    if (signature !== undefined) this.alertSeen.set(sid, signature);
+    else this.alertSeen.delete(sid);
+    const changeBlock = askChanges ? changeParts(tree, { alertGone, alertChanged, eyes }) : null;
     const changesText = changeBlock === null ? null : [changeBlock.label, ...changeBlock.header, ...changeBlock.changes].join("\n");
     // For the call log: the list the agent now has (a change block leaves it as it was, but no longer certain).
     if (changesText === null) this.listBase = { elements: tree.elements, stale: false, unseen: false };
@@ -3295,7 +3489,7 @@ export class TaplineTools {
     return {
       capabilities: session.capabilities,
       latest: () => this.host.sessions().find((s) => s.id === session.id)?.place,
-      request: (method, params) => this.host.request(method, params ?? {}, { sessionId: session.id }),
+      request: (method, params) => this.sendRequest(method, params ?? {}, { sessionId: session.id }),
     };
   }
 
@@ -3432,7 +3626,7 @@ export class TaplineTools {
     if (wire !== undefined && wire.sessionId !== session.id) {
       return fail("Error not_connected: the app changed while the account's value was being prepared; try again.");
     }
-    if (wire === undefined && method === "type" && typeof params === "object" && params !== null && String((params as { text?: unknown }).text ?? "").includes("${account.")) {
+    if (wire === undefined && method === "type" && typeof params === "object" && params !== null && mentionsVault(String((params as { text?: unknown }).text ?? ""))) {
       return fail("Error bad_params: an account value can't be typed as plain text; it needs a loaded account and a connected app.");
     }
     const shortAnswer = this.briefOn(brief);
@@ -3458,10 +3652,18 @@ export class TaplineTools {
           // `as` is a recording's name for the text, never the app's business.
           const kept = typeof params === "object" && params !== null ? Object.fromEntries(Object.entries(params).filter(([key]) => key !== "as" && (wire === undefined || key !== "account"))) : params;
           const sent = wire === undefined ? kept : { ...(kept as Record<string, unknown>), ...wire.values };
-          return this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+          // From here the request may reach the app; only a failure that proves it didn't takes that back (a grant's use stays counted).
+          const delivery = this.deliveryScope.getStore();
+          if (delivery !== undefined) delivery.sent = true;
+          try {
+            return await this.sendRequest(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+          } catch (error) {
+            if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
+            throw error;
+          }
         };
         // With the live viewer, a person watching goes first.
-        result = this.options.control ? await this.options.control.runAgent(run) : await run();
+        result = await this.agentTurn(run);
         break;
       } catch (error) {
         const failure = error instanceof PolicyStop ? parseError(answerText(error.answer)) : error instanceof TaplineError ? { code: error.code, message: error.message } : null;
@@ -3625,7 +3827,7 @@ export class TaplineTools {
       ? elementSchema.safeParse((result as { element: unknown }).element)
       : null;
     if (!element?.success) return chosen;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId }).catch(() => null));
     if (!tree.success) return chosen;
     const t = target as { testID?: unknown; label?: unknown; text?: unknown };
     const same = tree.data.elements.filter((el) =>
@@ -3750,7 +3952,7 @@ export class TaplineTools {
   async readOverlay(sessionId?: string): Promise<OverlayRead | null> {
     const sid = sessionId ?? this.host.current()?.id;
     if (sid === undefined) return null;
-    const parsed = overlaySchema.safeParse(await this.host.request("overlay", {}, { sessionId: sid }));
+    const parsed = overlaySchema.safeParse(await this.sendRequest("overlay", {}, { sessionId: sid }));
     if (!parsed.success) return null;
     const { rev, screen, elements } = parsed.data;
     this.lastScreen = { w: screen.width, h: screen.height };
@@ -3772,7 +3974,7 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return { ok: false, message: "No app is connected." };
     try {
-      await this.host.request("feed", feedParams(on, quality), { sessionId: session.id });
+      await this.sendRequest("feed", feedParams(on, quality), { sessionId: session.id });
       return { ok: true };
     } catch (error) {
       return {
@@ -3797,7 +3999,7 @@ export class TaplineTools {
       // nothing does (a list moves natively), it scrolls, as before.
       if (swipe !== undefined) {
         try {
-          const swiped = await this.host.request("swipe", swipe, { sessionId: session.id });
+          const swiped = await this.sendRequest("swipe", swipe, { sessionId: session.id });
           return { ok: true, action: this.describeAction(personKind(input, "swipe"), swiped, point) };
         } catch (error) {
           if (!(error instanceof TaplineError && error.code === "not_actionable")) {
@@ -3806,7 +4008,7 @@ export class TaplineTools {
         }
       }
       try {
-        const result = await this.host.request(method, params, { sessionId: session.id });
+        const result = await this.sendRequest(method, params, { sessionId: session.id });
         return { ok: true, action: this.describeAction(personKind(input, method), result, point) };
       } catch (error) {
         return { ...failure(error), action: { kind: personKind(input, method), ...(point ? { point } : {}) } };
@@ -3891,7 +4093,7 @@ export class TaplineTools {
     const session = this.host.current();
     if (feed?.on === true && session !== undefined) {
       try {
-        const answer = feedAnswerSchema.safeParse(await this.host.request("feed", feedParams(true, feed.quality), { sessionId: session.id }));
+        const answer = feedAnswerSchema.safeParse(await this.sendRequest("feed", feedParams(true, feed.quality), { sessionId: session.id }));
         const stats = answer.success ? answer.data.stats : undefined;
         if (stats !== undefined) {
           lines.push(
@@ -3916,7 +4118,7 @@ export class TaplineTools {
   // -- compare_screen and filmstrip
 
   private async takeShot(sessionId: string, width: number, quality: number): Promise<ShotImage> {
-    const raw = await this.host.request("screenshot", { format: "jpg", quality, maxWidth: width }, { sessionId });
+    const raw = await this.sendRequest("screenshot", { format: "jpg", quality, maxWidth: width }, { sessionId });
     const parsed = screenshotResultSchema.safeParse(raw);
     if (!parsed.success) throw new TaplineError("internal", "The app returned a screenshot the host could not read.");
     return parsed.data;
@@ -3977,7 +4179,7 @@ export class TaplineTools {
   /** The element list for naming regions and masking, read as a peek: the agent's refs and baseline must stay as they are. */
   private async peekElements(sessionId: string): Promise<{ scaleBase: number | undefined; elements: TreeResult["elements"] }> {
     try {
-      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId }));
+      const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId }));
       if (tree.success && tree.data.screen) return { scaleBase: tree.data.screen.width, elements: tree.data.elements };
     } catch {
       // positions stay in pixels
@@ -3991,7 +4193,7 @@ export class TaplineTools {
    */
   private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
     // A comparison, from a step's `expect` too, is made with animations normal (the tools that say so add the note).
-    return (await withNormalAnimations(this.host, session.id, () => this.checkAgainstReferenceNow(session, name, options))).value;
+    return (await withNormalAnimations(this.host, session.id, () => this.checkAgainstReferenceNow(session, name, options), this.leased)).value;
   }
 
   private async checkAgainstReferenceNow(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
@@ -4394,7 +4596,7 @@ export class TaplineTools {
         // A screenshot takes a few hundred ms on a phone, so frame 1 is the "before".
         // The tap is a touch like any other: the safety policy decides first.
         const pressParams = { target: toWireTarget(args.tap), ...(this.userEyes() ? { noScroll: true } : {}) };
-        const tapLists = listsFor(this.policy, session.app);
+        const tapLists = this.touchLists(session);
         const ready = await this.awaitOk(session, "tap", "press", pressParams, tapLists);
         if ("stop" in ready) return ready.stop;
         // The policy check, the "before" frame and the tap are one turn of the live view's queue: a pause refuses
@@ -4402,11 +4604,29 @@ export class TaplineTools {
         const turn = async (): Promise<CallToolResult | null> => {
           const gate = await this.policyGate(session, "tap", "press", pressParams, tapLists, ready.waited);
           if ("stop" in gate) return gate.stop;
-          frames.push(await this.takeShot(session.id, frameWidth, 0.8));
-          await this.host.request("press", pressParams, { sessionId: session.id });
+          let pressSent = false;
+          try {
+            frames.push(await this.takeShot(session.id, frameWidth, 0.8));
+            pressSent = true;
+            try {
+              await this.sendRequest("press", pressParams, { sessionId: session.id });
+            } catch (error) {
+              if (notDelivered(error)) pressSent = false;
+              throw error;
+            }
+          } catch (error) {
+            if (gate.grant !== undefined && !pressSent) await this.releaseGrant(gate.grant);
+            throw error;
+          }
+          if (gate.grant !== undefined) this.grantNotes.getStore()?.push(gate.grant.line);
           return null;
         };
-        const stopped = this.options.control ? await this.options.control.runAgent(turn) : await turn();
+        let stopped: CallToolResult | null;
+        try {
+          stopped = await this.agentTurn(turn);
+        } finally {
+          await this.dropPreUse(ready.waited);
+        }
         if (stopped !== null) return stopped;
       }
       for (let i = frames.length; i < count; i++) {
@@ -4506,7 +4726,7 @@ export class TaplineTools {
         };
         try {
           mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-          writeFileSync(path, `${JSON.stringify(script, null, 2)}\n`, { mode: 0o600 });
+          writeFileSync(path, `${JSON.stringify(this.backstop(script), null, 2)}\n`, { mode: 0o600 });
         } catch (error) {
           return fail(`Error internal: couldn't save the script: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -4570,7 +4790,7 @@ export class TaplineTools {
     const script = routeScript({ name: recording.name, app: recording.app.id ?? recording.app.name, start: route.start, end: end?.place.name, steps, variables: route.variables });
     let saved: string;
     try {
-      saved = await saveRoute(route.map.folder(), script, route.map);
+      saved = await saveRoute(route.map.folder(), this.backstop(script), route.map);
     } catch (error) {
       // The recording stays, so stop can be tried again.
       return fail(`Error internal: couldn't save the route: ${error instanceof Error ? error.message : String(error)}`);
@@ -4702,7 +4922,7 @@ export class TaplineTools {
         update: options.updateReferences === true,
       };
       try {
-        const answer = await this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false });
+        const answer = await this.inRoute(script.version === 2 ? script.name : undefined, () => this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false }), script.version === 2 && script.draftsOnly === true);
         if (notes.length === 0) return answer;
         const [top, ...rest] = answer.content;
         return top !== undefined && top.type === "text"
@@ -4817,7 +5037,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     this.logExtra = undefined;
     this.actionStartedAt = Date.now();
-    const lists = listsFor(this.policy, session.app);
+    const lists = this.touchLists(session);
     if (!dryRun && lists.confirm.length === 0 && lists.block.length === 0) return perform();
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
@@ -4835,7 +5055,14 @@ export class TaplineTools {
         return fail(this.blockedLine(verdict.element, verdict.word));
       }
       const would = this.wouldLine(tool, shown, resolved.point, resolved.value, resolved.scrolls);
-      const needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
+      let needs = verdict.kind === "confirm" ? ` It needs a person's OK (policy word ${JSON.stringify(verdict.word)}).` : "";
+      if (verdict.kind === "confirm") {
+        // §19.3: a dry run says a grant would allow it, and counts nothing.
+        const grant = await this.grantFor(session, tool, verdict.raw, verdict.word, "peek");
+        if (grant !== null) needs = ` It is allowed by grant ${JSON.stringify(grant.name)} (${grant.counts} today).`;
+        // §21.3: a touch that sends something stops at a draft first; nothing is shown now.
+        else if ((await this.draftSource(session, verdict.raw, verdict.word)) !== null) needs = ` It stops at a draft first, and needs a person's OK (policy word ${JSON.stringify(verdict.word)}).`;
+      }
       this.showAction("agent", method, shown !== undefined ? { element: shown } : undefined, params);
       return text([`${would}${needs}`, ...this.takePersonNote()].join("\n"));
     }
@@ -4843,15 +5070,33 @@ export class TaplineTools {
     const ready = await this.awaitOk(session, tool, method, params, lists);
     if ("stop" in ready) return ready.stop;
     let granted: OkVia | undefined;
-    const answer = await perform(async () => {
-      const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
-      if ("stop" in gate) return gate.stop;
-      granted = gate.via;
-      return null;
-    });
-    if (granted === undefined || answer.isError === true) return answer;
+    let sentDraft = false;
+    let covered: GrantUse | undefined;
+    let answer: CallToolResult;
+    const delivery = { sent: false };
+    try {
+      answer = await this.deliveryScope.run(delivery, () =>
+        perform(async () => {
+          const gate = await this.gatePreflight(session, tool, method, params, lists, ready.waited);
+          if ("stop" in gate) return gate.stop;
+          granted = gate.via;
+          sentDraft = gate.draft === true;
+          covered = gate.grant;
+          return null;
+        }),
+      );
+    } finally {
+      await this.dropPreUse(ready.waited);
+    }
+    // A use is counted when the touch is made: one that surely wasn't made gives its use back (§19.4). A touch that was sent, or
+    // may have been (a timeout, a failed read after it, a handler that threw), stays counted: a repeat must not beat the limits.
+    if (covered !== undefined && answer.isError === true && !delivery.sent) await this.releaseGrant(covered);
+    const notes = this.grantNotes.getStore();
+    const withNotes = notes !== undefined ? flushNotes(answer, notes) : answer;
+    if (covered !== undefined && answer.isError !== true) return appendNote(withNotes, covered.line);
+    if (granted === undefined || answer.isError === true) return withNotes;
     this.journeyRun?.noteOk(granted);
-    return appendNote(answer, `Note: allowed by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
+    return appendNote(withNotes, `Note: ${sentDraft ? "sent" : "allowed"} by a person (in ${granted === "chat" ? "chat" : "the live view"}).`);
   }
 
   /**
@@ -4866,13 +5111,17 @@ export class TaplineTools {
     lists: { confirm: string[]; block: string[] },
     waited: Waited | null,
     known?: KnownElements,
-  ): Promise<{ stop: CallToolResult } | { via?: OkVia }> {
+  ): Promise<{ stop: CallToolResult } | { via?: OkVia; grant?: GrantUse; draft?: true }> {
     const gate = await this.policyGate(session, tool, method, params, lists, waited, known);
     if ("stop" in gate) return gate;
+    if (gate.grant !== undefined) {
+      this.logExtra = { ...(this.logExtra ?? {}), grant: gate.grant.name, grant_use: `${gate.grant.counts} today` };
+      return { grant: gate.grant };
+    }
     if (gate.via === undefined) return {};
-    this.logExtra = { confirmed: true, confirmed_by: gate.via };
+    this.logExtra = { ...(this.logExtra ?? {}), confirmed: true, confirmed_by: gate.via, ...(gate.draft === true ? { draft: true } : {}) };
     this.setOk(true);
-    return { via: gate.via };
+    return { via: gate.via, ...(gate.draft === true ? { draft: true as const } : {}) };
   }
 
   /** What the person was asked for and what the screen showed then; the touch is checked against it right before it happens. */
@@ -4903,24 +5152,43 @@ export class TaplineTools {
     const verdict = this.policyWords(lists, resolved);
     if (verdict.kind !== "confirm") return { waited: null };
     if (this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
+    // A grant that covers the touch asks no one. Its use is taken here, before the dialog stage, so that a use that can't be
+    // taken (the audit line fails) falls back to asking a person; the check right before the touch takes it over (§19.3, §19.4).
+    // §21.3: a touch under a draftsOnly grant, or in a drafts-only route, stops at a draft a person sees first: no grant stands in.
+    const draft = await this.draftOf(session, verdict.raw, verdict.word);
+    const asked: string[] = [];
+    const early = draft === null ? await this.grantFor(session, tool, verdict.raw, verdict.word, "use", asked) : null;
+    if (early !== null) return { waited: { fp: this.fingerprint(verdict.raw), pre: { use: early, handed: false } } };
+    // The reason a grant didn't cover goes into the action log with the touch, also after a long wait.
+    const keepAsked = (): void => {
+      if (asked[0] !== undefined) this.logExtra = { ...(this.logExtra ?? {}), grant_asked: asked[0] };
+    };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
-    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
-    const key = this.confirmKey(session, tool, verdict.raw);
+    const caption = draft?.caption ?? captionFor(tool, label ?? undefined, params) ?? tool;
+    const key = this.confirmKey(session, tool, verdict.raw) + draftBinding(draft);
     const ask = { kind: tool, caption, word: verdict.word };
-    const fp = this.fingerprint(verdict.raw);
+    const fp = this.fingerprint(verdict.raw) + draftBinding(draft);
     const name = this.shortName(verdict.element, false);
-    const refuse = (tail: string): { stop: CallToolResult } => {
+    // `why` is a draft's reason for not being sent (§21.3); without one a draft is waiting in the live view.
+    const refuse = (tail: string, why?: string): { stop: CallToolResult } => {
+      keepAsked();
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      if (draft !== null) return { stop: fail(this.draftRefusal(name, verdict.word, why, tail)) };
       return { stop: fail(`Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${tail}`) };
     };
     const hold = this.holdScope.getStore();
     const cancelled = hold?.signal;
     const wasCancelled = (): boolean => cancelled?.aborted === true;
-    if (wasCancelled()) return refuse("The call was cancelled before anyone answered.");
+    if (wasCancelled()) return refuse("The call was cancelled before anyone answered.", "The call was cancelled before anyone answered.");
     const check = this.confirmations.check(key, ask);
-    if (check.granted) return { waited: { fp, via: check.via } };
+    if (check.granted) {
+      keepAsked();
+      return { waited: { fp, via: check.via, ...(draft !== null ? { draft: draft.source } : {}) } };
+    }
     if ("held" in check) {
+      keepAsked();
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      if (draft !== null) return { stop: fail("Error not_allowed: needs_confirmation: the draft wasn't sent (They declined it just now.). Don't ask again by repeating the call: ask your user what they want.") };
       return {
         stop: fail(
           `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
@@ -4931,9 +5199,10 @@ export class TaplineTools {
     const waitStarted = Date.now();
     // The dialog's answer goes through the same request the live view answers: the first one wins, the other is closed.
     const noDialog = new Promise<"no_dialog">((resolve) => {
-      void dialogs
-        .askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
-        .then((answer) => {
+      void (draft !== null
+        ? dialogs.askDraft(draft.caption, draft.word, abort.signal)
+        : dialogs.askOk(okCaption({ word: verdict.word, tool, role: verdict.element.role ?? "", ...(label !== undefined ? { text: label } : {}), app: session.app.name }), abort.signal)
+      ).then((answer) => {
           if (answer === "unavailable") resolve("no_dialog");
           else if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
         });
@@ -4952,13 +5221,20 @@ export class TaplineTools {
     }
     if (wasCancelled()) {
       if (settled.allow) this.confirmations.check(key, ask);
-      return refuse("The call was cancelled before anyone answered.");
+      return refuse("The call was cancelled before anyone answered.", "The call was cancelled before anyone answered.");
     }
-    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
-    if (!settled.allow) return refuse("They declined. Ask your user what to do.");
+    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.", "Nobody answered.");
+    if (!settled.allow) {
+      this.options.audit?.write({ kind: "approval", app: session.app.id ?? session.app.name, name: verdict.word, detail: "declined" });
+      return refuse("They declined. Ask your user what to do.", "They declined.");
+    }
     const used = this.confirmations.check(key, ask);
     if (!used.granted) return { stop: fail(CHANGED_WHILE_WAITING) };
-    return { waited: { fp, via: used.via } };
+    // The person said yes in the chat's own dialog: they may also want it as a standing grant (§19.6).
+    // A draft a person sends doesn't offer a grant: the next one is shown to them too.
+    if (used.via === "chat" && draft === null) await this.offerGrant(session, verdict.word, verdict.raw, asked, cancelled);
+    keepAsked();
+    return { waited: { fp, via: used.via, ...(draft !== null ? { draft: draft.source } : {}) } };
   }
 
   /** The answer of a reflex's step that the policy flags at the moment it runs: skipped, never asked (§18.7). */
@@ -4983,8 +5259,8 @@ export class TaplineTools {
    * Runs a call of the agent with its own wait counter and, when there is one, the request's abort signal, so a
    * wait for a person's OK is counted for this call only and closes when the call is cancelled.
    */
-  withCall<T>(signal: AbortSignal | undefined, run: () => T): T {
-    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}) }, run);
+  withCall<T>(signal: AbortSignal | undefined, run: () => T, leaseCredential?: string): T {
+    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}), ...(leaseCredential !== undefined ? { lease: leaseCredential } : {}) }, run);
   }
 
   /**
@@ -5001,7 +5277,7 @@ export class TaplineTools {
     waited?: Waited | null,
     /** Elements a drive already read: checked instead of a dry run; the app's guard holds the touch to them (§18.4). */
     known?: KnownElements,
-  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia }> {
+  ): Promise<{ stop: CallToolResult } | { granted: boolean; via?: OkVia; grant?: GrantUse; draft?: true }> {
     if (lists.confirm.length === 0 && lists.block.length === 0) return { granted: false };
     const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     if (resolved.kind === "error") {
@@ -5016,29 +5292,67 @@ export class TaplineTools {
     }
     // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
     if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
+    // §21.3: read again right before the touch: the OK a person gave is for the text they saw.
+    // Whether a draft applies was decided where the person was asked; a grant made by their answer in this very call is for the next touch.
+    const waiting = waited !== undefined && waited !== null;
+    const draftFrom = waiting ? ("draft" in waited ? waited.draft : undefined) : undefined;
+    let draft =
+      verdict.kind !== "confirm" ? null : waiting ? (draftFrom !== undefined ? await this.draftWith(session, draftFrom, verdict.word) : null) : await this.draftOf(session, verdict.raw, verdict.word);
+    // The reserved grant stopped covering the touch while the call waited (R1): its use is back, and the touch goes the way it would have with no grant.
+    let lostGrant = false;
     if (waited !== undefined && waited !== null) {
       // §11.3: the same element, with the same label, still touchable (the dry run passed), in the same app in front.
       // A call that was cancelled while it waited never touches.
       const same =
         verdict.kind === "confirm" &&
-        this.fingerprint(verdict.raw) === waited.fp &&
+        this.fingerprint(verdict.raw) + draftBinding(draft) === waited.fp &&
         this.host.current()?.id === session.id &&
         this.holdScope.getStore()?.signal?.aborted !== true;
       if (!same) {
         this.showAction("agent", method, undefined, params, "not_allowed", "needs_confirmation");
         return { stop: fail(CHANGED_WHILE_WAITING) };
       }
-      return { granted: true, via: waited.via };
+      if ("pre" in waited) {
+        // The grant's use was taken before the dialog stage. The wait for control may have outlasted what it was taken under (a
+        // revocation, draftsOnly, quiet hours, `until`): read the policy again right now, taking no further use.
+        const use = waited.pre.use;
+        let covers = false;
+        try {
+          covers = this.options.grants !== undefined && (await this.options.grants.stillCovers({ app: session.app, element: verdict.raw, routes: this.routeScope.getStore() ?? [] }, use));
+        } catch {
+          covers = false;
+        }
+        if (covers) {
+          // It is this touch's now, and given back if the touch isn't made.
+          waited.pre.handed = true;
+          return { granted: false, grant: use };
+        }
+        waited.pre.handed = true;
+        await this.releaseGrant(use);
+        lostGrant = true;
+        draft = verdict.kind === "confirm" ? await this.draftOf(session, verdict.raw, verdict.word) : null;
+      } else {
+        this.approved(session, verdict.word, waited.via, draft !== null);
+        return { granted: true, via: waited.via, ...(draft !== null ? { draft: true as const } : {}) };
+      }
     }
     if (verdict.kind === "none") return { granted: false };
+    // §19.3: where the policy says a person must OK, a grant may stand in for them: it is used up here, right before the touch.
+    // Not for a draft (§21.3): a person sees it first. Not again after the one reserved for this call stopped covering.
+    const grant = draft === null && !lostGrant ? await this.grantFor(session, tool, verdict.raw, verdict.word, "use") : null;
+    if (grant !== null) return { granted: false, grant };
     const label = verdict.element.label ?? verdict.element.text ?? undefined;
-    const caption = captionFor(tool, label ?? undefined, params) ?? tool;
+    const caption = draft?.caption ?? captionFor(tool, label ?? undefined, params) ?? tool;
     // The client is part of the key, so one agent can't use up an OK a person gave for another's call.
-    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.raw), { kind: tool, caption, word: verdict.word });
-    if (check.granted) return { granted: true, via: check.via };
+    const check = this.confirmations.check(this.confirmKey(session, tool, verdict.raw) + draftBinding(draft), { kind: tool, caption, word: verdict.word });
+    if (check.granted) {
+      this.approved(session, verdict.word, check.via, draft !== null);
+      return { granted: true, via: check.via, ...(draft !== null ? { draft: true as const } : {}) };
+    }
     const name = this.shortName(verdict.element, false);
     if ("held" in check) {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      if (draft !== null) return { stop: fail("Error not_allowed: needs_confirmation: the draft wasn't sent (They declined it just now.). Don't ask again by repeating the call: ask your user what they want.") };
       return {
         stop: fail(
           `Error not_allowed: needs_confirmation: ${name} needs a person's OK (policy word ${JSON.stringify(verdict.word)}), and they declined it just now. Don't ask again by repeating the call: ask your user what they want.`,
@@ -5046,11 +5360,163 @@ export class TaplineTools {
       };
     }
     this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+    if (draft !== null) return { stop: fail(this.draftRefusal(name, verdict.word, undefined, `${this.liveViewLine()}${check.suffix}`)) };
     return {
       stop: fail(
         `Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}). ${this.liveViewLine()}${check.suffix}`,
       ),
     };
+  }
+
+  /**
+   * AGENT-TOOLS 1.14 §19.3: whether a grant covers this touch, which the policy says needs a person. `use` records the use (and
+   * the audit line) and `peek` counts nothing. A grant that matched but can't cover the touch adds its note to the call's answer.
+   * A touch that is never grantable, or has no grant, answers null: it asks as before.
+   */
+  private async grantFor(session: SessionInfo, tool: string, element: TreeElement, word: string, mode: "use" | "peek", askedOut?: string[]): Promise<GrantUse | null> {
+    const book = this.options.grants;
+    if (book === undefined || word === UNREADABLE_LINK) return null;
+    const shown = this.host.redactOut((element.label ?? element.text ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim()).slice(0, 80);
+    let decision: GrantDecision;
+    try {
+      decision = await book.decide({ app: session.app, element, routes: this.routeScope.getStore() ?? [] }, mode, `${tool} ${JSON.stringify(shown)}`);
+    } catch {
+      return null;
+    }
+    // A draftsOnly grant covers nothing by itself: the touch stops at a draft (§21.3).
+    if (decision.kind === "draft") return null;
+    if (decision.kind === "ask") {
+      const notes = this.grantNotes.getStore();
+      if (notes !== undefined) for (const note of decision.notes) if (!notes.includes(note)) notes.push(note);
+      if (mode === "use" && decision.asked[0] !== undefined) {
+        askedOut?.push(...decision.asked);
+        this.logExtra = { ...(this.logExtra ?? {}), grant_asked: decision.asked[0] };
+      }
+      return null;
+    }
+    return { name: decision.name, line: decision.line, owner: decision.owner, slots: decision.slots, counts: decision.counts };
+  }
+
+  /** A person's OK is used up: one `approval` line of the audit log (§23). */
+  private approved(session: SessionInfo, word: string, via: OkVia, draft = false): void {
+    this.options.audit?.write({
+      kind: "approval",
+      app: session.app.id ?? session.app.name,
+      name: word,
+      detail: draft ? "draft sent" : `allowed by a person (in ${via === "chat" ? "chat" : "the live view"})`,
+    });
+  }
+
+  /**
+   * AGENT-TOOLS 1.14 §21.3: why a touch stops at a draft, or null. Under a `draftsOnly` grant that would cover the touch, or in a
+   * route that carries `"draftsOnly": true` for a word that reaches other people. Reads nothing from the phone.
+   */
+  private async draftSource(session: SessionInfo, element: TreeElement, word: string): Promise<"grant" | "route" | null> {
+    if (word === UNREADABLE_LINK) return null;
+    if (this.draftsScope.getStore() === true && matchWord(REACH_WORDS, element) !== null) return "route";
+    const book = this.options.grants;
+    if (book === undefined) return null;
+    try {
+      const decision = await book.decide({ app: session.app, element, routes: this.routeScope.getStore() ?? [] }, "peek", "");
+      return decision.kind === "draft" ? "grant" : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The draft a touch stops at (§21.3), with the question and the field's text as the person will see them; null when none applies. */
+  private async draftOf(session: SessionInfo, element: TreeElement, word: string): Promise<Draft | null> {
+    const source = await this.draftSource(session, element, word);
+    return source === null ? null : this.draftWith(session, source, word);
+  }
+
+  /** The draft as the field holds it now. */
+  private async draftWith(session: SessionInfo, source: Draft["source"], word: string): Promise<Draft> {
+    const text = await this.draftText(session);
+    return { source, word, text, caption: draftCaption({ word, app: session.app.name, text }) };
+  }
+
+  /**
+   * The text of the field the agent last typed into on this screen, else the only input that holds text, read from the app now
+   * (Tapline's host reads it from the app, §21.3). Redacted of vault and account values. A secure field is never kept, and what
+   * can't be read is an empty draft.
+   */
+  private async draftText(session: SessionInfo): Promise<string> {
+    let read: ReturnType<typeof treeResultSchema.safeParse>;
+    try {
+      read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true }));
+    } catch {
+      return "";
+    }
+    if (!read.success) return "";
+    const inputs = read.data.elements.filter((e) => roleOf(e) === "input" || (e.actions ?? []).includes("type"));
+    const last = this.lastTyped;
+    // By id when it has one: a full look renumbers the refs, so a ref may now name another input.
+    const own = last !== undefined && last.sessionId === session.id ? (last.testID !== undefined ? inputs.find((e) => e.testID === last.testID) : inputs.find((e) => e.ref === last.ref)) : undefined;
+    const filled = inputs.filter((e) => typeof e.value === "string" && e.value !== "");
+    const field = own ?? (filled.length === 1 ? filled[0] : undefined);
+    return typeof field?.value === "string" ? this.host.redactOut(field.value) : "";
+  }
+
+  /** A draft that wasn't sent, or one that waits in the live view (§21.3). `why` is the reason in parentheses. */
+  private draftRefusal(name: string, word: string, why: string | undefined, tail: string): string {
+    return why !== undefined
+      ? `Error not_allowed: needs_confirmation: the draft wasn't sent (${why}). Ask your user what to do.`
+      : `Error not_allowed: needs_confirmation: a draft is waiting for a person (${name}, policy word ${JSON.stringify(word)}). ${tail}`;
+  }
+
+  /** A use taken before the dialog stage that no check took over (the call stopped first): given back. */
+  private async dropPreUse(waited: Waited | null | undefined): Promise<void> {
+    if (waited === null || waited === undefined || !("pre" in waited) || waited.pre.handed) return;
+    waited.pre.handed = true;
+    await this.releaseGrant(waited.pre.use);
+  }
+
+  /** Asked once per app and word in a session, whatever the answer: a person who said no isn't asked at every touch. */
+  private readonly grantOffers = new Set<string>();
+
+  /**
+   * AGENT-TOOLS 1.14 §19.6: a person has just allowed a touch in the chat's own dialog; the host offers to make that a standing
+   * grant. The host starts this, the person answers, and the grant is written only from their answers: nothing a model sends
+   * can start, answer or change it. Never offered for what no grant can cover (§19.2), nor where a live grant matched and
+   * ran out (a new grant would only undo its limit); an ended grant is renewed this way.
+   */
+  private async offerGrant(session: SessionInfo, word: string, element: TreeElement, asked: string[], signal: AbortSignal | undefined): Promise<void> {
+    const book = this.options.grants;
+    const dialogs = this.dialogs;
+    if (book === undefined || dialogs === undefined || !dialogs.available() || word === UNREADABLE_LINK || this.inReflexStep()) return;
+    if (asked.some((reason) => reason !== "ended")) return;
+    if (neverGrantable(word, listsFor(this.policy, session.app).block) || elementNeverGrantable(element)) return;
+    const app = session.app.id ?? session.app.name;
+    const key = `${app}|${word.toLowerCase()}`;
+    if (this.grantOffers.has(key)) return;
+    this.grantOffers.add(key);
+    const routes = this.routeScope.getStore() ?? [];
+    const route = routes[routes.length - 1];
+    const spec: GrantSpec = {
+      nameBase: grantNameBase(session.app.name, word),
+      app,
+      words: [word],
+      ...(route !== undefined ? { route } : {}),
+      perDay: GRANT_OFFER_PER_DAY,
+      days: GRANT_OFFER_DAYS,
+    };
+    const caption = grantCaption(
+      { words: spec.words, perDay: spec.perDay, until: book.untilFor(spec.days), ...(route !== undefined ? { route } : {}), draftsOnly: reachesPeople(word) },
+      plainText(session.app.name) || "the app",
+    );
+    if ((await dialogs.askGrant(caption, signal)) !== "allow") return;
+    const lift = reachesPeople(word) ? (await dialogs.askLiftDrafts(signal)) === "allow" : false;
+    await book.create({ ...spec, ...(lift ? { draftsOnly: false as const } : {}) });
+  }
+
+  /** The touch wasn't made: its use is given back (§19.4). */
+  private async releaseGrant(use: GrantUse): Promise<void> {
+    try {
+      await this.options.grants?.release(use);
+    } catch {
+      // a use that can't be given back stays counted: the safe side
+    }
   }
 
   /** Which policy word, if any, the elements the target could mean carry: a block word first, then a confirm word. */
@@ -5094,7 +5560,7 @@ export class TaplineTools {
     this.actionStartedAt = Date.now();
     let result: unknown;
     try {
-      result = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id });
+      result = await this.sendRequest(method, { ...params, dryRun: true }, { sessionId: session.id });
     } catch (error) {
       this.logExtra = { dry_run: true };
       this.showAction("agent", method, undefined, params, error instanceof TaplineError ? error.code : "internal", error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
@@ -5140,7 +5606,7 @@ export class TaplineTools {
     if (session.capabilities.includes("dryRun")) {
       let raw: unknown;
       try {
-        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id, internal: true });
+        raw = await this.sendRequest(method, { ...params, dryRun: true }, { sessionId: session.id, internal: true });
       } catch (error) {
         const reason = error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined;
         return {
@@ -5169,7 +5635,7 @@ export class TaplineTools {
     }
     let raw: unknown;
     try {
-      raw = await this.host.request("tree", {}, { sessionId: session.id, internal: true });
+      raw = await this.sendRequest("tree", {}, { sessionId: session.id, internal: true });
     } catch (error) {
       return { kind: "error", text: describeError(error), code: error instanceof TaplineError ? error.code : "internal" };
     }
@@ -5263,39 +5729,81 @@ export class TaplineTools {
   }
 
   typeText(args: Shape<"type_text">): Promise<CallToolResult> {
+    const otpApp = otpReference(args.text);
+    if (otpApp === null) return this.typeTextWith(args, undefined);
+    // A one-time code (§20.4): the same checks as any typed text first, then the code is asked of Tapwright's daemon, and only
+    // for the connected app's own id, only now that a step types it.
+    const hiddenField = this.hiddenTarget(args.target);
+    if (hiddenField !== null) return Promise.resolve(hiddenField);
+    const badAs = this.asRefusal(args.as, args.text, args.account);
+    if (badAs !== null) return Promise.resolve(fail(badAs));
+    if (args.account !== undefined) return Promise.resolve(fail("Error bad_params: a one-time code takes no account; write ${otp.<app>} alone."));
+    const session = this.host.current();
+    if (session === undefined) return Promise.resolve(this.notConnected());
+    const refused = this.otpRefusal(otpApp, session);
+    if (refused !== null) return Promise.resolve(fail(`Error bad_params: ${refused}`));
+    const app = session.app.id ?? session.app.name;
+    // A dry run checks the field and asks for nothing: no code is fetched, and none is spent.
+    if (args.dry_run === true) return this.typeTextWith(args, { value: "", source: undefined, sessionId: session.id });
+    return this.otp.fetch(app).then((got: OtpFetch) =>
+      got.ok
+        ? this.typeTextWith(args, { value: got.code, source: got.source, sessionId: session.id })
+        : fail(`Error ${got.reason === "none" ? "not_found" : "unsupported"}: ${got.message}`),
+    );
+  }
+
+  /** Why `${otp.<app>}` can't be typed for the connected app, or null: the id must be the connected app's own. */
+  private otpRefusal(named: string, session: SessionInfo): string | null {
+    const own = session.app.id ?? session.app.name;
+    return named === own ? null : `\${otp.${named}} names another app than the connected one; a one-time code is typed only for the connected app (${own}), as \${otp.${own}}.`;
+  }
+
+  /** What `${otp.<app>}` checks before any step runs: the app it names, as for an account. Null when it holds or isn't a code. */
+  private otpPrecheck(text: string, session: SessionInfo): string | null {
+    const named = otpReference(text);
+    return named === null ? null : this.otpRefusal(named, session);
+  }
+
+  private typeTextWith(args: Shape<"type_text">, otp: { value: string; source: string | undefined; sessionId: string } | undefined): Promise<CallToolResult> {
     const hiddenField = this.hiddenTarget(args.target);
     if (hiddenField !== null) return Promise.resolve(hiddenField);
     const badAs = this.asRefusal(args.as, args.text, args.account);
     if (badAs !== null) return Promise.resolve(fail(badAs));
     // A test account's value (§18.6): `params` keeps the placeholder for the log, the viewer and a recording; the
-    // value goes to the app only, through `wire`.
+    // value goes to the app only, through `wire`. A one-time code goes the same way.
     const session = this.host.current();
-    const account = this.accountText(args.text, args.account, session);
+    const account =
+      otp !== undefined
+        ? ({ ok: true, value: otp.value, kind: undefined, use: undefined } as const)
+        : this.accountText(args.text, args.account, session);
     if (account !== null && !account.ok) return Promise.resolve(fail(`Error ${account.code}: ${account.message}`));
     const params: Record<string, unknown> = {
       text: args.text,
       replace: args.replace ?? true,
       submit: args.submit ?? false,
-      ...(account !== null ? { account: args.account ?? this.runAccount } : {}),
+      ...(account !== null && args.text.includes("${account.") ? { account: args.account ?? this.runAccount } : {}),
       ...(this.userEyes() ? { noScroll: true } : {}),
     };
     if (args.target !== undefined) params["target"] = toWireTarget(withIndex(args.target, args.index));
     if (args.force === true) params["force"] = true;
     const wire =
       account !== null && account.ok && session !== undefined
-        ? { values: { text: account.value, kind: account.kind }, sessionId: session.id }
+        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id }
         : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) {
       if (wire === undefined) {
         // A placeholder with no checked account is never sent, not even to be resolved.
-        if (args.text.includes("${account.")) return Promise.resolve(this.notConnected());
+        if (mentionsVault(args.text)) return Promise.resolve(this.notConnected());
         return this.dryRun("type_text", "type", params);
       }
       const { account: _account, ...plain } = params;
-      return this.dryRun("type_text", "type", { ...plain, text: "", kind: wire.values.kind });
+      return this.dryRun("type_text", "type", { ...plain, text: "", ...(wire.values["kind"] !== undefined ? { kind: wire.values["kind"] } : {}) });
     }
-    return this.act(
+    const use = account !== null && account.ok ? account.use : undefined;
+    // What the audit line says about the field the value went into (§23): the app's own answer says whether it was secure.
+    let secureField: boolean | undefined;
+    const typed = this.act(
       "type",
       // `as` is for the recording only: `act` keeps it out of what goes to the app.
       args.as !== undefined ? { ...params, as: args.as } : params,
@@ -5305,6 +5813,13 @@ export class TaplineTools {
         const secure = typeof r === "object" && r !== null && "secure" in r && (r as { secure: unknown }).secure === true;
         // Journey or not, iOS shows the last character of a password for about a second: remember when (finding 4).
         if (secure) this.secureTypedAt = this.clock();
+        secureField = secure;
+        // The draft's field (§21.3): the last input typed into. A secure field's text is never read back.
+        const typedInto = !secure && typeof r === "object" && r !== null && "element" in r ? elementSchema.safeParse((r as { element: unknown }).element) : undefined;
+        const typedSession = this.host.current();
+        if (typedInto?.success === true && typedSession !== undefined) {
+          this.lastTyped = { sessionId: typedSession.id, ref: typedInto.data.ref, ...(typedInto.data.testID ? { testID: typedInto.data.testID } : {}) };
+        }
         const shown = secure ? " The value is hidden (secure field)." : typeof value === "string" ? ` Value is now ${JSON.stringify(value)}.` : "";
         return afterScroll(r, `Typed into ${this.elementName(r, "element", shown !== "")}${args.submit ? " and submitted" : ""}.${shown}`);
       },
@@ -5312,11 +5827,34 @@ export class TaplineTools {
       args.screenshot,
       undefined,
       undefined,
-      undefined,
+      use?.kind === "card" && session !== undefined ? () => this.cardOk(session, use, params) : undefined,
       args.brief,
       undefined,
       wire,
     );
+    if (otp !== undefined && session !== undefined) {
+      // One `otp` line per code typed: the app and the source, never the code (§20.4, §23). The answer is scrubbed as well,
+      // whatever the app echoed back.
+      return typed.then((answer) => {
+        if (answer.isError !== true) {
+          this.options.audit?.write({ kind: "otp", app: session.app.id ?? session.app.name, detail: `from ${otp.source ?? "Tapwright"}` });
+        }
+        return { ...answer, content: answer.content.map((part) => (part.type === "text" ? { ...part, text: this.scrubSecrets(part.text) } : part)) };
+      });
+    }
+    if (use === undefined || session === undefined) return typed;
+    // Every use of a vault value is one `vault` line: the entry and the field, never the value (§20.1, §23).
+    return typed.then((answer) => {
+      if (answer.isError !== true) {
+        this.options.audit?.write({
+          kind: "vault",
+          app: session.app.id ?? session.app.name,
+          name: use.name,
+          detail: `${use.field} into ${secureField === true ? "secure field" : "text field"}`,
+        });
+      }
+      return answer;
+    });
   }
 
   /** Why `as` can't be used on this typed text (AGENT-TOOLS 1.13 §18.5), or null: it goes only while a route records. */
@@ -5325,8 +5863,74 @@ export class TaplineTools {
     if (this.recording?.route === undefined) return "Error bad_params: as goes only while recording a route (record with route).";
     const problem = variableProblem(as);
     if (problem !== null) return `Error bad_params: ${problem}`;
-    if (account !== undefined || text.includes("${account.")) return "Error bad_params: as can't go with an account's value; the route keeps its placeholder already.";
+    if (account !== undefined || mentionsVault(text)) return "Error bad_params: as can't go with an account's value; the route keeps its placeholder already.";
     return null;
+  }
+
+  /**
+   * A card's field is typed only with a person's OK, every time, and no grant covers it (AGENT-TOOLS 1.14 §19.2, §20.1). The
+   * dialog's words name the entry and the field, never the value. Returns an answer that stops the call, or null to go on.
+   */
+  private async cardOk(session: SessionInfo, use: VaultUse, params: Record<string, unknown>): Promise<CallToolResult | null> {
+    const { account: _account, ...plain } = params;
+    const resolved = await this.resolveForPolicy(session, "type", { ...plain, text: "" });
+    if (resolved.kind === "error") return fail(resolved.text);
+    const label = resolved.elements[0]?.label ?? resolved.elements[0]?.text ?? undefined;
+    const role = resolved.elements[0]?.role ?? "field";
+    const app = plainText(session.app.name) || "the app";
+    const what = label !== undefined && plainText(label) !== "" ? `"${plainText(label)}"` : `the ${plainText(role, 30) || "field"}`;
+    const caption = `Allow: type card "${use.name}" ${use.field} into ${what} in ${app}?`;
+    const words = `typing card "${use.name}" ${use.field}`;
+    const refuse = (tail: string): CallToolResult => fail(`Error not_allowed: needs_confirmation: ${words} needs a person's OK, every time (no grant covers a card). ${tail}`);
+    if (this.inReflexStep()) return refuse("A reflex never asks.");
+    const key = this.confirmKey(session, `card:${use.name}.${use.field}`, resolved.raw[0] ?? { ref: "", role: "input" });
+    const ask = { kind: "type_text", caption, word: "card" };
+    const check = this.confirmations.check(key, ask);
+    if (check.granted) {
+      this.approved(session, "card", check.via);
+      return null;
+    }
+    if ("held" in check) return refuse("They declined it just now. Don't ask again by repeating the call: ask your user what they want.");
+    const dialogs = this.dialogs;
+    if (dialogs === undefined || !dialogs.available()) return refuse(`${this.liveViewLine()}${check.suffix}`);
+    const hold = this.holdScope.getStore();
+    const cancelled = hold?.signal;
+    const abort = new AbortController();
+    const waitStarted = Date.now();
+    const noDialog = new Promise<"no_dialog">((done) => {
+      void dialogs.askOk(caption, abort.signal).then((answer) => {
+        if (answer === "unavailable") done("no_dialog");
+        else if (answer !== "aborted") this.confirmations.answer(check.request.id, answer === "allow", "chat");
+      });
+    });
+    const onCancel = (): void => this.confirmations.withdraw(check.request.id);
+    cancelled?.addEventListener("abort", onCancel, { once: true });
+    const settled = await Promise.race([this.confirmations.wait(check.request.id), noDialog]);
+    cancelled?.removeEventListener("abort", onCancel);
+    abort.abort();
+    if (hold !== undefined) hold.ms += Date.now() - waitStarted;
+    if (settled === "no_dialog") return refuse(this.liveViewLine());
+    if (cancelled?.aborted === true) return refuse("The call was cancelled before anyone answered.");
+    if (settled.expired) return refuse("Nobody answered. Ask your user, or repeat the call to ask again.");
+    if (!settled.allow) {
+      this.options.audit?.write({ kind: "approval", app: session.app.id ?? session.app.name, name: "card", detail: "declined" });
+      return refuse("They declined. Ask your user what to do.");
+    }
+    const used = this.confirmations.check(key, ask);
+    if (!used.granted) return fail(CHANGED_WHILE_WAITING);
+    this.approved(session, "card", used.via);
+    return null;
+  }
+
+  /** The backstop at the writers of files (§20.3): content values lose any vault value; keys and `${…}` stay. */
+  private backstop<T>(value: T): T {
+    return redactContent(value, (text) => this.scrubSecrets(text)) as T;
+  }
+
+  /** A vault value or a one-time code typed in this session becomes its placeholder. */
+  private scrubSecrets(text: string): string {
+    const store = this.options.accounts?.store;
+    return redactAll(store, this.otp.codes, text);
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
@@ -5343,9 +5947,14 @@ export class TaplineTools {
     text: string,
     named: string | undefined,
     session: SessionInfo | undefined,
-  ): { ok: true; value: string; kind: "secure" | "plain" } | { ok: false; code: string; message: string } | null {
-    const mentions = text.includes("${account.");
+  ): { ok: true; value: string; kind: "secure" | "plain" | undefined; use: VaultUse | undefined } | { ok: false; code: string; message: string } | null {
+    const mentions = mentionsVault(text);
     if (!mentions && named === undefined) return null;
+    // `${otp.<app>}` is typed by `typeText` itself and needs no vault file (§20.4); `run` checks its app separately.
+    if (text.includes("${otp.")) {
+      if (otpReference(text) !== null && named === undefined) return null;
+      return { ok: false, code: "bad_params", message: otpReference(text) !== null ? "a one-time code takes no account; write ${otp.<app>} alone." : "a one-time code is the whole text of a step, not part of one." };
+    }
     const loaded = this.options.accounts;
     if (loaded === undefined) return { ok: false, code: "bad_params", message: "no accounts are loaded; start Tapline with --accounts FILE." };
     if (loaded.store === null) return { ok: false, code: "bad_params", message: loaded.blocked };
@@ -5358,11 +5967,12 @@ export class TaplineTools {
     if (!substituted.ok) return substituted;
     if (substituted.field === null) return null;
     // An older app ignores the kind and would type a password into any field.
-    if (!session.capabilities.includes("typeKind")) {
+    if ((substituted.field === "password" || substituted.field === "username") && !session.capabilities.includes("typeKind")) {
       return { ok: false, code: "unsupported", message: "this app's Tapline is too old to type an account's value safely; update react-native-tapline." };
     }
-    const field: AccountField = substituted.field;
-    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : "plain" };
+    // Only a password and a username are held to a kind of field (§18.6); the rest of the vault goes where the app lets it.
+    const field = substituted.field;
+    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : field === "username" ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {
@@ -5462,7 +6072,7 @@ export class TaplineTools {
       if (session === undefined) return this.notConnected();
       let raw: unknown;
       try {
-        raw = await this.host.request("commands", {}, { sessionId: session.id });
+        raw = await this.sendRequest("commands", {}, { sessionId: session.id });
       } catch (error) {
         return fail(describeError(error));
       }
@@ -5632,7 +6242,7 @@ export class TaplineTools {
     if (entries.length === 0) {
       // Nothing streamed to the host yet; ask the app for the lines it buffered before we connected.
       try {
-        const raw = await this.host.request("logs", args.since !== undefined ? { since: args.since } : {}, { sessionId: session.id });
+        const raw = await this.sendRequest("logs", args.since !== undefined ? { since: args.since } : {}, { sessionId: session.id });
         const list = typeof raw === "object" && raw !== null && "entries" in raw ? (raw as { entries: unknown }).entries : [];
         entries = z.array(logEntrySchema).catch([]).parse(list);
       } catch {
@@ -5663,7 +6273,7 @@ export class TaplineTools {
       try {
         // The app goes away on purpose: that is no crash.
         this.host.expectEnd(session.id);
-        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+        await this.sendRequest("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
       } catch (error) {
         // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
         const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
@@ -5702,7 +6312,7 @@ export class TaplineTools {
       try {
         // The app goes away on purpose: that is no crash.
         this.host.expectEnd(session.id);
-        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+        await this.sendRequest("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
       } catch (error) {
         // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
         const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
@@ -5735,7 +6345,7 @@ export class TaplineTools {
     // The first settled screen: the app waits until React hasn't committed for a moment (§6).
     // The first settled screen: a launch time is only reported when the app said it settled.
     try {
-      await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
+      await this.sendRequest("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
     } catch (error) {
       return { stop: fail(describeError(error)) };
     }
@@ -5743,12 +6353,12 @@ export class TaplineTools {
   }
 
   /** One measuring window in the app: start, (the tap,) wait out `seconds`, stop. */
-  private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>): Promise<PerfResult> {
+  private async measureWindow(session: SessionInfo, seconds: number, press?: Record<string, unknown>, delivery?: { sent: boolean }): Promise<PerfResult> {
     const id = { sessionId: session.id };
     // The window's number: the stop names it, so a call never takes another call's numbers (an older SDK has none).
     let stopParams: Record<string, unknown> = {};
     try {
-      const started = await this.host.request("perfStart", {}, id);
+      const started = await this.sendRequest("perfStart", {}, id);
       const windowId = typeof started === "object" && started !== null ? (started as { id?: unknown }).id : undefined;
       if (typeof windowId === "number") stopParams = { id: windowId };
     } catch (error) {
@@ -5760,14 +6370,22 @@ export class TaplineTools {
     const started = Date.now();
     try {
       // The caller holds the live view's queue for the whole window when there is a tap (see performance).
-      if (press !== undefined) await this.host.request("press", press, id);
+      if (press !== undefined) {
+        if (delivery !== undefined) delivery.sent = true;
+        try {
+          await this.sendRequest("press", press, id);
+        } catch (error) {
+          if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
+          throw error;
+        }
+      }
       const rest = seconds * 1000 - (Date.now() - started);
       if (rest > 0) await sleep(rest);
     } catch (error) {
-      await this.host.request("perfStop", stopParams, id).catch(() => undefined);
+      await this.sendRequest("perfStop", stopParams, id).catch(() => undefined);
       throw error;
     }
-    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", stopParams, id));
+    const parsed = perfResultSchema.safeParse(await this.sendRequest("perfStop", stopParams, id));
     if (!parsed.success) throw new TaplineError("internal", "the app returned performance numbers the host could not read.");
     return parsed.data;
   }
@@ -5798,7 +6416,7 @@ export class TaplineTools {
         }
         let ready: { waited: Waited | null } = { waited: null };
         if (press !== undefined) {
-          const waitedFor = await this.awaitOk(session, "tap", "press", press, listsFor(this.policy, session.app));
+          const waitedFor = await this.awaitOk(session, "tap", "press", press, this.touchLists(session));
           if ("stop" in waitedFor) return waitedFor.stop;
           ready = waitedFor;
         }
@@ -5808,12 +6426,26 @@ export class TaplineTools {
         const tapped = press;
         const window = async (): Promise<{ stop: CallToolResult } | { result: PerfResult }> => {
           if (tapped !== undefined) {
-            const gate = await this.policyGate(session, "tap", "press", tapped, listsFor(this.policy, session.app), ready.waited);
+            const gate = await this.policyGate(session, "tap", "press", tapped, this.touchLists(session), ready.waited);
             if ("stop" in gate) return { stop: gate.stop };
+            const delivery = { sent: false };
+            try {
+              const result = await this.measureWindow(session, seconds, tapped, delivery);
+              if (gate.grant !== undefined) this.grantNotes.getStore()?.push(gate.grant.line);
+              return { result };
+            } catch (error) {
+              if (gate.grant !== undefined && !delivery.sent) await this.releaseGrant(gate.grant);
+              throw error;
+            }
           }
           return { result: await this.measureWindow(session, seconds, tapped) };
         };
-        const outcome = tapped !== undefined && this.options.control ? await this.options.control.runAgent(window) : await window();
+        let outcome: { stop: CallToolResult } | { result: PerfResult };
+        try {
+          outcome = tapped !== undefined ? await this.agentTurn(window) : await window();
+        } finally {
+          await this.dropPreUse(ready.waited);
+        }
         if ("stop" in outcome) return outcome.stop;
         measure = { result: outcome.result };
       }
@@ -5923,7 +6555,7 @@ export class TaplineTools {
       if (!record.applied) notes.push(`Note: condition ${name} ${value} was not applied: ${record.failure ?? "the app refused"}.`);
     }
     // A user waits for animations: fast ones end here unless the journey's allow keeps them (PLAN-1.6 F4, E8).
-    if (journey.userEyes && !journey.allows(FAST_ANIMATIONS_ALLOWED) && (await endAnimations(this.host, session.id))) {
+    if (journey.userEyes && !journey.allows(FAST_ANIMATIONS_ALLOWED) && (await endAnimations(this.host, session.id, this.leased))) {
       notes.push("Note: animations were turned off for this journey: a user waits for them. allow fast_animations keeps them on.");
     }
     this.journeyRun = journey;
@@ -6003,7 +6635,7 @@ export class TaplineTools {
       peek: async () => {
         const session = bound();
         if (session === undefined) return undefined;
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
         if (!tree.success) return undefined;
         const t = tree.data;
         return {
@@ -6019,7 +6651,7 @@ export class TaplineTools {
         if (this.secureWindow()) return undefined;
         try {
           // The picture is taken with fast animations paused, as a user would see the screen (PLAN-1.6 F4, E8).
-          return (await withNormalAnimations(this.host, session.id, () => this.takeShot(session.id, width, quality))).value;
+          return (await withNormalAnimations(this.host, session.id, () => this.takeShot(session.id, width, quality), this.leased)).value;
         } catch {
           return undefined;
         }
@@ -6081,7 +6713,7 @@ export class TaplineTools {
       // A picker stub the journey armed and nobody used goes back, so a person's next pick is their own (finding 5).
       await attempt("the photo picker could not be put back", async () => {
         const live = this.journeySession();
-        if (live !== undefined && live.capabilities.includes("media")) await this.host.request("media", { op: "disarm" }, { sessionId: live.id });
+        if (live !== undefined && live.capabilities.includes("media")) await this.sendRequest("media", { op: "disarm" }, { sessionId: live.id });
       });
       const undoLines: string[] = [];
       // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
@@ -6255,7 +6887,7 @@ export class TaplineTools {
   private async freshScreenSize(): Promise<{ width: number; height: number } | null> {
     const session = this.host.current();
     if (session === undefined) return null;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
     const screen = tree.success ? tree.data.screen : null;
     return screen ? { width: screen.width, height: screen.height } : null;
   }
@@ -6309,7 +6941,7 @@ export class TaplineTools {
     // One OK never covers two touches: a target the policy flags (a word that asks a person, or blocks) is refused whole.
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
-    const lists = listsFor(this.policy, session.app);
+    const lists = this.touchLists(session);
     // Resolved inside the agent's turn, right before the press, as a guarded tap does: a queued person's action can't change
     // what is under the target between the check and the touch.
     const refusal: { answer: CallToolResult | null } = { answer: null };
@@ -6373,7 +7005,7 @@ export class TaplineTools {
     if (session === undefined) return { survived: false, why: "the app isn't connected any more." };
     // What a person sees (AGENT-TOOLS 1.12 §17.4): in a user's eyes the glass only; a label a screen reader hears is no proof.
     const tree = treeResultSchema.safeParse(
-      await this.host.request("tree", { peek: true, ...(this.userEyes() ? { glass: true } : {}) }, { sessionId: session.id }).catch(() => null),
+      await this.sendRequest("tree", { peek: true, ...(this.userEyes() ? { glass: true } : {}) }, { sessionId: session.id }).catch(() => null),
     );
     if (!tree.success) return { survived: false, why: "the app didn't answer when asked what is on screen." };
     const parts: Array<{ ok: boolean | null; why: string }> = [];
@@ -6441,7 +7073,7 @@ export class TaplineTools {
       }
     }
     try {
-      const raw = await this.host.request("command", { name: call.command, args: call.args }, { sessionId: session.id });
+      const raw = await this.sendRequest("command", { name: call.command, args: call.args }, { sessionId: session.id });
       const inner = typeof raw === "object" && raw !== null && "result" in raw ? (raw as { result: unknown }).result : undefined;
       const previous = typeof inner === "object" && inner !== null && "previous" in inner ? (inner as { previous: unknown }).previous : undefined;
       return { ok: true, ...(typeof previous === "string" && previous !== "" ? { previous } : {}) };

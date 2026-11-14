@@ -119,6 +119,8 @@ export const elementSchema = z.object({
   checked: z.union([z.boolean(), z.string()]).nullish(),
   /** Inside a virtualized list item: its text is content, so a road never keeps it (AGENT-TOOLS 1.13 §18.2). */
   row: z.boolean().nullish(),
+  /** Text the app marked as written by other people (AGENT-TOOLS 1.14 §21.1). Absent: nothing is claimed either way. */
+  fromOthers: z.boolean().nullish(),
 });
 export type TreeElement = z.infer<typeof elementSchema>;
 

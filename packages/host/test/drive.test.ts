@@ -254,6 +254,68 @@ describe("drive: people and the policy", () => {
 
 });
 
+describe("drive: look (AGENT-TOOLS 1.13.3)", () => {
+  it("look: false answers the first line only on arrival", async () => {
+    const s = await setup();
+    const answer = await callTool(s.tools, "drive", { to: "language", look: false });
+    expect(answer.isError).not.toBe(true);
+    expect(textOf(answer)).toBe("Arrived at language by 2 taps in 0.0 s (settings > general > language).");
+    expect(s.world.screen).toBe("language");
+  });
+
+  it("look: false wins over brief", async () => {
+    const s = await setup();
+    const said = textOf(await callTool(s.tools, "drive", { to: "language", look: false, brief: true }));
+    expect(said.split("\n")).toHaveLength(1);
+    expect(said.startsWith("Arrived at language by 2 taps")).toBe(true);
+  });
+
+  it("look: false on a drive that is already there is the one line too", async () => {
+    const s = await setup();
+    expect(await drive(s, { to: "settings", look: false })).toBe("Already at settings.");
+  });
+
+  it("look: true is the usual answer, with the screen", async () => {
+    const s = await setup();
+    expect(await drive(s, { to: "language", look: true })).toContain("English");
+  });
+
+  it("a stop carries the screen, whatever look says", async () => {
+    const s = await setup({ world: (w) => { w.elements.general = [note("e3", "Nothing to tap")]; } });
+    s.world.screen = "settings";
+    const answer = await callTool(s.tools, "drive", { to: "language", look: false });
+    expect(answer.isError).toBe(true);
+    const said = textOf(answer);
+    expect(said.split("\n")[0]).toMatch(/^Error off_route: /);
+    expect(said).toContain("Nothing to tap");
+  });
+
+  it("a refusal that needs a person carries the screen too", async () => {
+    const map = withRoads(road("settings", "trips_id", "delete-trip", "Delete trip"));
+    const s = await setup({ map, policy: { version: 1, confirm: ["delete"], block: [] } });
+    const answer = await callTool(s.tools, "drive", { to: "trips_id", by: "taps", look: false });
+    expect(answer.isError).toBe(true);
+    const said = textOf(answer);
+    expect(said).toMatch(/^Error not_allowed: needs_confirmation/);
+    expect(said).toContain("Delete trip");
+  });
+
+  it("the next answer's changes cover the drive, with the note that says so", async () => {
+    const s = await setup({ world: (w) => { w.treeChanges = { sameRoute: true, added: [], removed: [], changed: [], moved: [] }; } });
+    await callTool(s.tools, "look", { screenshot: false });
+    await callTool(s.tools, "drive", { to: "language", look: false });
+    const next = textOf(await callTool(s.tools, "tap", { target: { text: "English" } }));
+    expect(next).toContain("Note: changes are since your last list, 2 actions ago.");
+  });
+
+  it("drive as a run step ignores the step's own look (the batch answers once)", async () => {
+    const s = await setup();
+    const said = textOf(await callTool(s.tools, "run", { steps: [{ tool: "drive", to: "language", look: false }] }));
+    expect(said.split("\n")[0]).toMatch(/^Ran 1 of 1 steps/);
+    expect(said).toContain("English");
+  });
+});
+
 describe("drive: the tool", () => {
   it("carries TOOL-TEXT's paragraph word for word, and is not read-only", () => {
     const text = toolDescription("drive");

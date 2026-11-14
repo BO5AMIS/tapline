@@ -608,3 +608,33 @@ describe("property names are scrubbed too", () => {
     expect(said).toContain("<tester2's username>");
   });
 });
+
+describe("an alert's message (AGENT-TOOLS 1.14 §3.2, §20.3)", () => {
+  async function lookAt(message: string): Promise<string> {
+    const { host, port } = await startHost({ redact: store.redact });
+    hosts.push(host);
+    const alerts = [{ kind: "alert", title: "Heads up", message, buttons: [{ text: "OK", style: "default" }], standIn: false }];
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree"] }, () => ({ ok: true, result: { screen: SCREEN, elements: [], alerts } }));
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, accounts: { store } });
+    return textOf(await tools.look({ screenshot: false }));
+  }
+
+  it("is redacted of an account's values", async () => {
+    const shown = await lookAt(`Signed in as ${USER} with ${PASS}.`);
+    expect(shown).toContain('Alert: "Heads up" "Signed in as <tester2\'s username> with <tester2\'s password>." [OK]');
+    expect(shown).not.toContain(PASS);
+    expect(shown).not.toContain(USER);
+  });
+
+  it("is redacted before the cut: a value straddling the cut point leaks no fragment", async () => {
+    // The password starts 5 characters before the 200-character cut of the unredacted text.
+    for (const lead of [195, 190, 199, 150]) {
+      const shown = await lookAt(`${"x".repeat(lead)}${PASS} and more text after it ${"z".repeat(120)}`);
+      const line = shown.split("\n").find((l) => l.startsWith("Alert:")) ?? "";
+      expect(line).toMatch(/…\(\+\d+\)" \[OK\]$/);
+      expect(line).not.toContain("fake");
+      expect(line).not.toContain("9137");
+    }
+  });
+});

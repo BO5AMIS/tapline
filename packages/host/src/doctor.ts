@@ -4,7 +4,11 @@ import { createServer } from "node:net";
 import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNTS_WARNING, loadAccounts, type GitProbe } from "./accounts.js";
-import { DEFAULT_PORT, DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
+import { GrantBook } from "./grants.js";
+import { configDir, DEFAULT_PORT,DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
+import { ownLockDeps, type PidLockDeps } from "./pidlock.js";
+import { bounded, VAULT_LOAD_TIMEOUT_MS } from "./runschedule.js";
+import { findStuckLocks } from "./unlockcmd.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -33,6 +37,44 @@ export interface DoctorDeps {
   accountsFile?: string;
   /** The git questions the accounts file is checked with; default: the user's own git. */
   gitProbe?: GitProbe;
+  /** `--policy FILE`: its grants are checked when given (AGENT-TOOLS 1.14 §19.1, §19.4). */
+  policyFile?: string;
+
+  now?: () => Date;
+  /** The process facts the stuck-lock check uses (pid, liveness, start time); default: this process. */
+  lockDeps?: PidLockDeps;
+}
+
+/** The grants of a policy file: refused grants and a uses folder that can't be read are warnings (§19.1, §19.4). */
+async function checkGrants(file: string, now: (() => Date) | undefined): Promise<CheckResult> {
+  const book = new GrantBook({ policyPath: file, audit: null, ...(now !== undefined ? { now } : {}) });
+  const report = await book.inspect();
+  if (!report.fileOk) {
+    return { name: "Grants", status: "warn", detail: `can't read the policy file ${file}, so no grant covers anything`, fix: "Fix the file (it must be JSON, version 1 or 2)." };
+  }
+  const problems = GrantBook.noticeLines(report).map((line) => line.replace(/^Note: /, "").replace(/\.$/, ""));
+  if (problems.length === 0) {
+    const n = report.grants.length;
+    return { name: "Grants", status: "pass", detail: n === 0 ? "none in the policy file" : `${n} ${n === 1 ? "grant" : "grants"} load` };
+  }
+  return {
+    name: "Grants",
+    status: "warn",
+    detail: problems.join("; "),
+    fix: report.usesBroken ? `Make ${file}.uses a readable folder that holds only slot files, or delete it (until then a grant whose uses can't be read counts as used up).` : "A refused grant covers nothing; fix it in the policy file, or remove it.",
+  };
+}
+
+/** Locks no run will clear by itself (§22.3, §19.5): empty, unreadable, or held by a dead process. Each is named with its path and the command that removes it. */
+function checkLocks(deps: DoctorDeps): CheckResult {
+  const stuck = findStuckLocks({ configDir: configDir(deps.env), ...(deps.policyFile !== undefined ? { policyFile: deps.policyFile } : {}), deps: deps.lockDeps ?? ownLockDeps() });
+  if (stuck.length === 0) return { name: "Locks", status: "pass", detail: "no stuck lock" };
+  return {
+    name: "Locks",
+    status: "warn",
+    detail: stuck.map((s) => `${s.path} is stuck (${s.why})`).join("; "),
+    fix: [...new Set(stuck.map((s) => s.command))].join("\n"),
+  };
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -381,12 +423,27 @@ async function checkMetro(deps: DoctorDeps, binary: string | null): Promise<Chec
 async function checkAccounts(file: string, probe: GitProbe | undefined): Promise<CheckResult> {
   const name = "Test accounts";
   try {
-    const loaded = await loadAccounts(file, probe);
+    const loaded = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, (signal) => loadAccounts(file, probe, undefined, signal));
     if (loaded.store === null) {
-      return { name, status: "fail", detail: loaded.blocked, fix: "Move the file outside the repository, or add it to .gitignore." };
+      const opened = loaded.blocked.startsWith("the vault file can't be opened");
+      return {
+        name,
+        status: "fail",
+        detail: loaded.blocked,
+        fix: opened ? "Open it as the user who protected it, on the same computer, from where it was protected; or protect the plain file again with tapline vault protect." : "Move the file outside the repository, or add it to .gitignore.",
+      };
     }
     const names = loaded.store.names();
-    return { name, status: "pass", detail: `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}. ${ACCOUNTS_WARNING}` };
+    const onlyAccounts = names.every((entry) => loaded.store?.kindOf(entry) === "account");
+    const listed = onlyAccounts
+      ? `${names.length} ${names.length === 1 ? "account" : "accounts"}: ${names.join(", ")}`
+      : `${names.length} ${names.length === 1 ? "entry" : "entries"}: ${names.map((entry) => `${entry} (${loaded.store?.kindOf(entry) ?? "account"})`).join(", ")}`;
+    return {
+      name,
+      status: "pass",
+      detail: `${listed}. ${ACCOUNTS_WARNING}${loaded.note !== undefined ? ` ${loaded.note}` : ""}`,
+      ...(loaded.note !== undefined ? { fix: "Run tapline vault protect FILE to keep it protected for this user." } : {}),
+    };
   } catch (error) {
     return { name, status: "fail", detail: errorText(error), fix: "Fix the file, or leave out --accounts." };
   }
@@ -421,6 +478,12 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
     const file = deps.accountsFile;
     results.push(await guard("Test accounts", "fail", () => checkAccounts(file, deps.gitProbe)));
   }
+  if (deps.policyFile !== undefined) {
+    const file = deps.policyFile;
+    results.push(await guard("Grants", "warn", () => checkGrants(file, deps.now)));
+  }
+  const locks = await guard("Locks", "warn", () => checkLocks(deps));
+  if (locks.status !== "pass") results.push(locks);
   return results;
 }
 

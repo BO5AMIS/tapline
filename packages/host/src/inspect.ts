@@ -55,12 +55,13 @@ export function shownPath(file: string, files: FileAccess = realFiles): string {
 }
 
 /** The source line, trimmed and cut to 120 characters; null when the file isn't on this computer. */
-export function sourceLine(file: string, line: number, files: FileAccess = realFiles): string | null {
+export function sourceLine(file: string, line: number, files: FileAccess = realFiles, redact: (text: string) => string = (t) => t): string | null {
   try {
     if (!files.exists(file)) return null;
     const text = files.read(file).split(/\r?\n/)[line - 1];
     if (text === undefined) return null;
-    const trimmed = text.trim();
+    // Redacted before the cut (AGENT-TOOLS §20.3): a value must not be left half shown by it.
+    const trimmed = redact(text.trim());
     return trimmed.length > 120 ? `${trimmed.slice(0, 119)}…` : trimmed;
   } catch {
     return null;
@@ -80,7 +81,7 @@ export function literalLine(file: string, id: string, files: FileAccess = realFi
   }
 }
 
-export function formatInspect(result: InspectResult, files: FileAccess = realFiles): string {
+export function formatInspect(result: InspectResult, files: FileAccess = realFiles, redact: (text: string) => string = (t) => t): string {
   const lines = [formatElement(result.element)];
   const { components, location, props } = result.source;
   if (components.length > 0) lines.push(`Components: ${components.join(" › ")}`);
@@ -92,7 +93,7 @@ export function formatInspect(result: InspectResult, files: FileAccess = realFil
         ? `Drawn by a library, inside: ${where}${inComponent}`
         : `Written at: ${where}${inComponent}`,
     );
-    const code = sourceLine(location.file, location.line, files);
+    const code = sourceLine(location.file, location.line, files, redact);
     if (code !== null) lines.push(`  ${location.line} | ${code}`);
     // Inside the app's own shared component: where the screen uses it. Of the call sites up the chain, the
     // first whose line names the element (its label, text or id, or the id's last part), else the nearest.
@@ -101,13 +102,13 @@ export function formatInspect(result: InspectResult, files: FileAccess = realFil
     const elementId = el.testID ?? "";
     const words = [el.label, el.text, elementId, elementId.split(/[-_.:]/).pop()].filter((w): w is string => typeof w === "string" && w.length >= 2);
     const names = (site: { file: string; line: number }): boolean => {
-      const code = sourceLine(site.file, site.line, files) ?? "";
+      const code = sourceLine(site.file, site.line, files, redact) ?? "";
       return words.some((w) => code.includes(`"${w}"`) || code.includes(`'${w}'`) || code.includes(`>${w}<`));
     };
     const used = sites.find(names) ?? sites[0];
     if (used !== undefined) {
       lines.push(`Used at: ${shownPath(used.file, files)}:${used.line}${used.component ? ` (in ${used.component})` : ""}`);
-      const usedCode = sourceLine(used.file, used.line, files);
+      const usedCode = sourceLine(used.file, used.line, files, redact);
       if (usedCode !== null) lines.push(`  ${used.line} | ${usedCode}`);
     }
     // A library drew it: the app still wrote the element's id somewhere in that file (a tab's options).
@@ -116,14 +117,24 @@ export function formatInspect(result: InspectResult, files: FileAccess = realFil
       const at = literalLine(location.file, id, files);
       if (at !== null) {
         lines.push(`Its id is set at: ${shownPath(location.file, files)}:${at}`);
-        const set = sourceLine(location.file, at, files);
+        const set = sourceLine(location.file, at, files, redact);
         if (set !== null) lines.push(`  ${at} | ${set}`);
       }
     }
   } else {
     lines.push("Written at: unknown (Metro didn't map it; the app may be a release build or loaded without Metro).");
   }
-  const shown = Object.entries(props).map(([k, v]) => `${k}=${v}`);
+  // A prop arrives whole and is redacted first; only then is it cut for display, so a cut can't leave half a value.
+  const shown = Object.entries(props).map(([k, v]) => `${k}=${displayProp(redact(v))}`);
   if (shown.length > 0) lines.push(`Props: ${shown.join(", ")}`);
   return lines.join("\n");
+}
+
+/** A quoted string prop cut to 40 characters for display (the app sends it whole; redaction came first). */
+function displayProp(value: string): string {
+  if (value.length < 2 || !value.startsWith('"') || !value.endsWith('"')) return value;
+  const inner = value.slice(1, -1);
+  if (inner.length <= 40) return value;
+  const last = inner.charCodeAt(39);
+  return `"${inner.slice(0, last >= 0xd800 && last <= 0xdbff ? 39 : 40)}…"`;
 }

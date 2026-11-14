@@ -18,15 +18,23 @@ import {
 import { setUpDevServe } from "./dev.js";
 import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
+import { runAuditLog, runGrants } from "./grantscmd.js";
 import { runInit } from "./init.js";
+import { scheduleAdd, scheduleList, scheduleRemove, type ScheduleDeps } from "./schedule.js";
 import { runReport } from "./report.js";
 import { runMcp } from "./mcp.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
+import { APP_WAIT_MS, processStartTime, runSchedule } from "./runschedule.js";
+import { AuditLog } from "./auditlog.js";
+import { ownLockDeps } from "./pidlock.js";
+import { grantsUnlock, scheduleUnlock } from "./unlockcmd.js";
+import { connectScheduleHost, realTaskEntry, redactorFor, spawnSchedRunner } from "./schedulehost.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
+import { protectedLine, protectVaultFile } from "./vault.js";
 
 const HELP = `tapline - let agents see and drive your own app on a test phone, over the same Wi-Fi
 
@@ -50,6 +58,20 @@ Commands:
            (exit 0: all held, 1: one stopped, 2: one couldn't start)
   report   Where an agent's calls went and the waste in them, from the action log:
            tapline report [--since <90m | 2h | 1d | date | epoch ms>] (default: the last 24 hours)
+  grants   List the grants in the policy file, today's counts and the last uses: tapline grants --policy <file>;
+           --revoke-all revokes every grant in it at once (a running route stops at its next touch that needs one)
+           tapline grants unlock --policy <file> removes a stuck edit lock (empty, unreadable or held by a dead process; never a live one)
+  audit-log  What was done under a person's standing permission (grants used, revoked, approvals):
+           tapline audit-log [--since <date or ISO time>] lists the lines; --delete deletes the log
+  schedule Run a saved route on a time or when a file appears, with no model (Windows Task Scheduler; a time schedule wakes the PC, a file trigger does not):
+           tapline schedule add <route> --at "09:00 daily" [--with caption=@captions.txt] [--name NAME]
+           [--policy FILE] [--accounts FILE] [--maps DIR]  (or --on-file FOLDER in place of --at);
+           tapline schedule list; tapline schedule remove NAME;
+           tapline schedule unlock NAME removes a stuck run lock (empty, unreadable or held by a dead process; never a live one)
+  run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
+           (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
+  vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
+           (Windows DPAPI for the current user, or the macOS keychain); Tapwright reads the same file
   token    Print the token (only for connecting without pairing, e.g. a simulator)
   skill    \`tapline skill install\` gives agents the skill for testing with Tapline:
            Claude Code (~/.claude/skills), Codex and other agents (~/.agents/skills);
@@ -66,17 +88,23 @@ Options:
   --client <name>  For call: the agent's name, so its report and journey stay its own (default: the parent process id)
   --json         For call: print {"text", "image_path"} instead of the text
   --no-log       For mcp: don't write the action log (~/.tapline/log/actions-YYYY-MM-DD.jsonl)
-  --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked)
+  --policy <file>  For mcp: the safety policy (JSON: words that need a person's OK, words that are blocked, and its grants).
+                 For grants and doctor: the policy file whose grants they read
+  --revoke-all   For grants: revoke every grant in the policy file (it stays in the file, marked revoked)
+  --delete       For audit-log: delete the audit log
   --no-policy    For mcp: no confirmation and nothing blocked (a test device with test data)
   --no-dialog    For mcp: don't ask a person's OK in the host's dialog, only in the live view (for a host that
                  passes dialogs to the model instead of showing them to a person)
   --brief        For mcp and host: actions answer briefly (a call's brief: false overrides it); look is never brief
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
-  --accounts <file>  For mcp and host: test accounts (JSON; the tool types an account's username and password so the
-                 agent never sees them). The file must sit outside any git repo, or be ignored by it.
-                 A password stays out of pictures only while its field is secure (a "show password" toggle shows it).
-                 Keep the file outside the folders the agent may read
+  --accounts <file>  For mcp and host: the vault (JSON, version 2: accounts, cards, addresses, identities and notes;
+                 version 1 accounts files still load). The tool types a value by name, \${vault.<name>.<field>} or an
+                 account's \${account.username} and \${account.password}, so the agent never sees it, and scrubs every
+                 value from what it shows. A plain file must sit outside any git repo, or be ignored by it, and is for test
+                 data only (tapline vault protect FILE encrypts it). A card's fields are typed only with a person's OK
+                 each time. A password stays out of pictures only while its field is secure (a "show password" toggle
+                 shows it). Keep the file outside the folders the agent may read
   --maps <dir>   For mcp and host: keep each app's map (its places, roads and links) in <dir>/<app id>/ instead of
                  ~/.tapline/maps/<app id>/, so a team and both tools can share one folder with a project
   --viewer-link  For mcp: the viewer tool gives the agent the live view's link (benchmarks, scripts); by
@@ -88,7 +116,12 @@ Options:
   --metro-port <n>   For dev: Metro's port (default 8081)
   --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
   --stop             For dev: stop serving Metro
-  --wait <s>         For replay: how long to wait for the app to connect (default 60)
+  --wait <s>         For replay and run-schedule: how long to wait for the app to connect (default 60)
+  --at <when>        For schedule add: "HH:MM daily", "HH:MM weekdays" or an ISO date-time (one run)
+  --with <name=value>  For schedule add: a value for one of the route's variables; "@file" is the text of that file,
+                     read when the run starts (a relative path is relative to ~/.tapline/schedules). Repeat for more
+  --name <name>      For schedule add: the schedule's name (default: the route's)
+  --on-file <folder> For schedule add: run when a new file appears in the folder (in place of --at)
   --update-references  For replay: compare_screen steps and matches checks save the screen into the
                      script's .references folder instead of comparing (exit 0 when every step ran)
   --project <dir>    For skill install: install into that project's .claude/skills and
@@ -272,9 +305,17 @@ export function parseCli(argv: string[]) {
       since: { type: "string" },
       junit: { type: "string" },
       "update-references": { type: "boolean" },
+      at: { type: "string" },
+      with: { type: "string", multiple: true },
+      name: { type: "string" },
+      "on-file": { type: "string" },
+      "on-notification": { type: "string" },
+      "check-trigger": { type: "boolean" },
       "no-log": { type: "boolean" },
       policy: { type: "string" },
       "no-policy": { type: "boolean" },
+      "revoke-all": { type: "boolean" },
+      delete: { type: "boolean" },
       "no-dialog": { type: "boolean" },
       brief: { type: "boolean" },
       "ux-rules": { type: "string" },
@@ -349,7 +390,10 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "doctor": {
-      const results = await runDoctor(values.accounts !== undefined ? { accountsFile: values.accounts } : {});
+      const results = await runDoctor({
+        ...(values.accounts !== undefined ? { accountsFile: values.accounts } : {}),
+        ...(values.policy !== undefined ? { policyFile: values.policy } : {}),
+      });
       process.stdout.write(`${formatDoctor(results, needsAPerson(results))}\n`);
       let failed = results.some((r) => r.status === "fail");
       if (values.app === true) {
@@ -378,6 +422,104 @@ export async function main(argv: string[]): Promise<number> {
       const outcome = runReport({ dir: join(configDir(), "log"), ...(values.since !== undefined ? { since: values.since } : {}) });
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
+    }
+    case "grants": {
+      // For a person at a terminal (AGENT-TOOLS 1.14 §19.5, §19.7): it reads and edits the policy file; needs no host and no app.
+      if (positionals[1] === "unlock") {
+        const unlocked = grantsUnlock(values.policy, { audit: new AuditLog(join(configDir(), "audit")), deps: ownLockDeps() });
+        (unlocked.code === 0 ? process.stdout : process.stderr).write(`${unlocked.text}\n`);
+        return unlocked.code;
+      }
+      const outcome = await runGrants({ policy: values.policy, auditDir: join(configDir(), "audit"), revokeAll: values["revoke-all"] === true });
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "audit-log": {
+      const outcome = runAuditLog({
+        dir: join(configDir(), "audit"),
+        ...(values.since !== undefined ? { since: values.since } : {}),
+        ...(values.delete === true ? { delete: true } : {}),
+      });
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "schedule": {
+      // For a person at a terminal (AGENT-TOOLS 1.14 §22.1); needs no host and no app.
+      const deps: ScheduleDeps = { configDir: configDir(), platform: process.platform, now: () => new Date(), cwd: process.cwd(), run: spawnSchedRunner, entry: realTaskEntry() };
+      const verb = positionals[1];
+      const outcome =
+        verb === "add"
+          ? await scheduleAdd(
+              {
+                route: positionals[2],
+                name: values.name,
+                at: values.at,
+                with: values.with,
+                onFile: values["on-file"],
+                onNotification: values["on-notification"],
+                policy: values.policy,
+                accounts: values.accounts,
+                maps: values.maps,
+              },
+              deps,
+            )
+          : verb === "list"
+            ? scheduleList(deps.configDir)
+            : verb === "unlock"
+              ? scheduleUnlock(positionals[2], { configDir: deps.configDir, audit: new AuditLog(join(deps.configDir, "audit")), deps: ownLockDeps() })
+              : verb === "remove"
+              ? await scheduleRemove(positionals[2], deps)
+              : { text: 'Usage: tapline schedule add <route> --at "09:00 daily" | --on-file FOLDER\n       tapline schedule list\n       tapline schedule remove NAME\n       tapline schedule unlock NAME', code: 2 };
+      (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "run-schedule": {
+      const wait = values.wait === undefined ? APP_WAIT_MS / 1000 : Number(values.wait);
+      if (!(wait > 0)) {
+        process.stderr.write("--wait is in seconds, above 0\n");
+        return 2;
+      }
+      const dir = configDir();
+      const outcome = await runSchedule(
+        positionals[1],
+        { checkTrigger: values["check-trigger"] === true },
+        {
+          configDir: dir,
+          now: () => new Date(),
+          clock: Date.now,
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          connect: (schedule, name) => connectScheduleHost(schedule, name),
+          audit: new AuditLog(join(dir, "audit")),
+          redactFor: redactorFor,
+          pid: process.pid,
+          alive: (pid) => {
+            try {
+              process.kill(pid, 0);
+              return true;
+            } catch (error) {
+              return (error as NodeJS.ErrnoException).code === "EPERM";
+            }
+          },
+          startOf: (pid) => processStartTime(pid),
+          appWaitMs: wait * 1000,
+        },
+      );
+      if (outcome.text !== "") (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
+      return outcome.code;
+    }
+    case "vault": {
+      // For a person at a terminal (AGENT-TOOLS 1.14 §20.2); needs no host and no app.
+      if (positionals[1] !== "protect" || positionals[2] === undefined) {
+        process.stderr.write("Usage: tapline vault protect FILE\n");
+        return 2;
+      }
+      const done = await protectVaultFile(positionals[2]);
+      if (!done.ok) {
+        process.stderr.write(`${done.message}\n`);
+        return 1;
+      }
+      process.stdout.write(`${protectedLine(positionals[2], done.how)}\n`);
+      return 0;
     }
     case "token":
       process.stdout.write(`${(await resolveConfig(options)).token}\n`);

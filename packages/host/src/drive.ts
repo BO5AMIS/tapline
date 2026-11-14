@@ -106,7 +106,7 @@ export interface NextWait {
 export type TouchOutcome =
   | { kind: "stop"; answer: CallToolResult }
   | { kind: "error"; code: string; message: string }
-  | { kind: "done"; place: PlaceState | null; next?: NextWait; via?: "chat" | "live view" };
+  | { kind: "done"; place: PlaceState | null; next?: NextWait; via?: "chat" | "live view"; /** The person's OK was for a draft (§21.3): the note says sent. */ sent?: true };
 
 export interface DriveServices {
   map: AppMap;
@@ -148,6 +148,8 @@ export interface DriveArgs {
   then?: unknown[] | undefined;
   by?: "any" | "taps" | "link" | undefined;
   brief?: boolean | undefined;
+  /** `false` (1.13.3): the first line only on arrival. A stop always carries the screen. */
+  look?: boolean | undefined;
   dry_run?: boolean | undefined;
   /** Set by the host for a drive that is a `run` step or a route's way to its start: no screen is built on success. */
   quiet?: boolean | undefined;
@@ -449,7 +451,7 @@ export async function driveTo(svc: DriveServices, args: DriveArgs, rs: RouteServ
     const refused = rs.checkSteps(steps);
     if (refused !== null) return refused;
   }
-  return afterThen(await driveCore(svc, args, rs, steps !== undefined || args.quiet === true), args, rs);
+  return afterThen(svc, await driveCore(svc, args, rs, steps !== undefined || args.quiet === true), args, rs);
 }
 
 /** A drive for a caller that wants no screen on success (a replay going to a route's start). */
@@ -458,12 +460,29 @@ export async function driveQuietly(svc: DriveServices, args: DriveArgs, rs?: Rou
   return core.ok ? { ok: true } : { ok: false, message: core.message };
 }
 
+/**
+ * A stop always carries the screen (§18.4, 1.13.3), whatever `look` says: a failed answer that was built without one gets
+ * the screen as it is now, under its own text.
+ */
+async function withStopScreen(svc: DriveServices, failed: CallToolResult, brief: boolean | undefined): Promise<CallToolResult> {
+  const lines = failed.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+  if (failed.content.some((block) => block.type === "image") || /^Screen \d+x\d+/m.test(lines)) return failed;
+  try {
+    return { ...(await svc.screen(lines, brief)), isError: true };
+  } catch {
+    return failed;
+  }
+}
+
 /** `then`: the steps go on after the arrival, in the same call; the answer follows `run`'s (18.4, 9.3). */
-async function afterThen(core: Core, args: DriveArgs, rs: RouteServices | undefined): Promise<CallToolResult> {
+async function afterThen(svc: DriveServices, core: Core, args: DriveArgs, rs: RouteServices | undefined): Promise<CallToolResult> {
   // A dry run touches nothing, so the steps after it don't run either.
   if (!core.ok || args.then === undefined || rs === undefined || args.dry_run === true) return core.answer;
-  const ran = await rs.runSteps(args.then as Step[], true);
-  if (ran.isError === true) return appendLines(ran, [...core.notes, `Note: arrived at ${core.arrived} before the steps ran.`]);
+  const ran = await rs.runSteps(args.then as Step[], args.look !== false);
+  if (ran.isError === true) {
+    const stopped = args.look === false ? await withStopScreen(svc, ran, args.brief) : ran;
+    return appendLines(stopped, [...core.notes, `Note: arrived at ${core.arrived} before the steps ran.`]);
+  }
   return withLinesBefore(ran, [core.line, ...core.notes]);
 }
 
@@ -568,6 +587,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
   // Each leg gives reflexes one chance before a failure is answered (1.13.1 item 10).
   const reflexTried = new Set<number>();
   const allowed = new Set<string>();
+  const sent = new Set<string>();
   let fresh: TreeElement[] | null = tree.elements;
   let waiting: NextWait | undefined;
   const droppedNote = (road: string): string => (eyes ? "Note: dropped a road (it failed twice in a row)." : `Note: dropped the road ${road} (it failed twice in a row).`);
@@ -613,7 +633,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
         fresh = null;
         const leave = enterRoute(svc.map.folder(), planned.route.route);
         if (leave === null) return finish("bad_params", repeatedRoute(planned.route.route), leg, here, false);
-        const ran = await rs.runSteps(steps, false).finally(leave);
+        const ran = await rs.runSteps(steps, false, planned.route.route).finally(leave);
         if (ran.isError === true) {
           const body = ran.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
           const found = /^Error (\w+): ([\s\S]*)$/.exec(body);
@@ -723,7 +743,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
       }
       run.done++;
       svc.moved?.(road.move.tool, viaLink);
-      if (outcome.via !== undefined) allowed.add(outcome.via);
+      if (outcome.via !== undefined) (outcome.sent === true ? sent : allowed).add(outcome.via);
       if (viaLink) run.links++;
       else if (road.move.tool === "tap") run.taps++;
       else run.others++;
@@ -794,6 +814,7 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
   const line = `Arrived at ${arrived}${path}.`;
   const notes = [
     ...[...allowed].map((via) => `Note: allowed by a person (in ${via === "chat" ? "chat" : "the live view"}).`),
+    ...[...sent].map((via) => `Note: sent by a person (in ${via === "chat" ? "chat" : "the live view"}).`),
     ...run.repairs,
     ...(run.provenAgain > 0 ? [`Note: ${plural(run.provenAgain, "road", "roads")} proven again for build ${map.currentBuild()}.`] : []),
     ...run.dropped.map(droppedNote),
@@ -892,12 +913,24 @@ export interface RouteServices {
   /** Whether the account can be typed here: the message when it can't (never a value). */
   probeAccount(field: string, account: string | undefined): string | null;
   /** The steps, the way `run` runs them, with the call's account as their default; `look: false` answers no screen. */
-  runSteps(steps: Step[], look: boolean): Promise<CallToolResult>;
+  runSteps(steps: Step[], look: boolean, route?: string): Promise<CallToolResult>;
   /** `run`'s own checks of steps (their tools, their words, an account), made before anything is touched; null when they hold. */
   checkSteps(steps: Step[]): CallToolResult | null;
 }
 
 const ACCOUNT_FIELD = /\$\{account\.([a-z]+)\}/g;
+const VAULT_REF = /\$\{vault\.\w+\.\w+\}/g;
+
+/** The vault references a route's steps type, whole, once each. */
+function vaultRefsUsed(steps: Step[]): string[] {
+  const refs = new Set<string>();
+  for (const step of steps) {
+    const typed = (step as { text?: unknown }).text;
+    if (typeof typed !== "string") continue;
+    for (const found of typed.matchAll(VAULT_REF)) refs.add(found[0]);
+  }
+  return [...refs];
+}
 
 /** The account fields a route's steps type, in order, once each. */
 export function accountFieldsUsed(steps: Step[]): string[] {
@@ -923,10 +956,11 @@ function prepareRoute(svc: DriveServices, rs: RouteServices, name: string, value
   const route = loadRoute(svc.map.folder(), name);
   if (route === null) return { ok: false, code: "not_found", message: `no route named "${name}"; map lists the routes.` };
   const used = accountFieldsUsed(route.steps);
-  if (strictAccount && used.length === 0 && account !== undefined) {
+  if (strictAccount && used.length === 0 && account !== undefined && vaultRefsUsed(route.steps).length === 0) {
     return { ok: false, code: "bad_params", message: `account "${account}" is named but the route ${route.name} types no \${account.username} or \${account.password}.` };
   }
-  for (const field of used) {
+  // A vault value is probed whole (`${vault.home.street}`); an account's by its field.
+  for (const field of [...used, ...vaultRefsUsed(route.steps)]) {
     const refused = rs.probeAccount(field, account);
     if (refused !== null) return { ok: false, code: "bad_params", message: refused };
   }
@@ -977,20 +1011,24 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
       startFailure = result.code === "not_found" && result.message.startsWith("no known way") ? withFirstLine(result.answer, `Error off_route: ${result.message}`) : result.answer;
       return { ok: false, message: result.message };
     },
-    runSteps: (steps: Step[]) => rs.runSteps(steps, !quiet),
+    runSteps: (steps: Step[]) => rs.runSteps(steps, !quiet, route.name),
   };
   const leave = enterRoute(svc.map.folder(), route.name);
   if (leave === null) return failed(`Error bad_params: ${repeatedRoute(route.name)}`);
   const outcome = await routeRunner.run(route, args.with ?? {}, ctx, rs.accounts).finally(leave);
   if (outcome.kind === "refused") return startFailure ?? failed(`Error ${outcome.code}: ${outcome.message}`);
   const ran = outcome.answer;
-  if (ran.isError === true) return ran;
+  // The route's own steps ran without a screen when `look` is false or `then` follows: a stop carries one anyway.
+  if (ran.isError === true) return args.look === false || then !== undefined ? withStopScreen(svc, ran, args.brief) : ran;
 
   // The end is checked, never assumed.
   const now = await placeNow(svc.source, svc.map);
   const wanted = route.end;
   if (wanted !== undefined) {
-    const stop = (why: string): CallToolResult => ({ ...withFirstLine(ran, `Error off_route: ${why}`), isError: true });
+    const stop = (why: string): Promise<CallToolResult> => {
+      const stopped: CallToolResult = { ...withFirstLine(ran, `Error off_route: ${why}`), isError: true };
+      return args.look === false || then !== undefined ? withStopScreen(svc, stopped, args.brief) : Promise.resolve(stopped);
+    };
     if (now === null) return stop(`the app's place can't be read, so the end of the route ${route.name} isn't checked.`);
     if (now.place.name !== wanted) {
       return stop(
@@ -1004,7 +1042,7 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
   const arrived = `${place !== undefined && !svc.eyes ? `${place} ` : ""}by route ${route.name} in ${seconds(svc.clock() - started)} s`;
   const line = `Arrived ${place !== undefined && !svc.eyes ? "at " : ""}${arrived}.`;
   const core: Core = { ok: true, answer: appendLines(withFirstLine(ran, line), startNotes), line, notes: startNotes, arrived };
-  return afterThen(core, args, rs);
+  return afterThen(svc, core, args, rs);
 }
 
 /**

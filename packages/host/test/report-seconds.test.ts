@@ -264,7 +264,9 @@ describe("the accounts line", () => {
     apps.push(app);
     const store: AccountStore = {
       names: () => ["tester1", "tester2"],
+      kindOf: () => "account",
       resolve: () => ({ ok: false, code: "not_found", message: "none" }),
+      resolveEntry: () => ({ ok: false, code: "not_found", message: "none" }),
       redact: (value) => value,
     };
     const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, logDir: dir, accounts: { store } });

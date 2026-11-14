@@ -13,7 +13,7 @@ export const OK_DENY = "Don't allow";
  */
 export interface ElicitSchema {
   type: "object";
-  properties: Record<string, { type: "string"; title: string; enum: string[] }>;
+  properties: Record<string, { type: "string"; title: string; enum: string[]; default?: string }>;
   required: string[];
 }
 
@@ -33,6 +33,53 @@ export const DONE_SCHEMA: ElicitSchema = {
   properties: { [DONE_FIELD]: { type: "string", title: "Has it been done?", enum: [CANT_NOW, DONE] } },
   required: [DONE_FIELD],
 };
+
+/** AGENT-TOOLS 1.14 §19.6: the grant's question. One required field, no default; Don't allow first, as for an OK. */
+export const GRANT_FIELD = "answer";
+export const GRANT_ALLOW = "Allow";
+export const GRANT_DENY = "Don't allow";
+export const GRANT_SCHEMA: ElicitSchema = {
+  type: "object",
+  properties: { [GRANT_FIELD]: { type: "string", title: "Allow this grant?", enum: [GRANT_DENY, GRANT_ALLOW] } },
+  required: [GRANT_FIELD],
+};
+
+/** §19.6: the separate second question for a word that reaches other people. It defaults to No; only Yes lifts drafts-only. */
+export const DRAFTS_FIELD = "answer";
+export const DRAFTS_YES = "Yes";
+export const DRAFTS_NO = "No";
+export const DRAFTS_QUESTION = "Send these without showing you each one first?";
+export const DRAFTS_SCHEMA: ElicitSchema = {
+  type: "object",
+  properties: { [DRAFTS_FIELD]: { type: "string", title: "Send without showing drafts?", enum: [DRAFTS_NO, DRAFTS_YES], default: DRAFTS_NO } },
+  required: [DRAFTS_FIELD],
+};
+
+/**
+ * AGENT-TOOLS 1.14 §21.3: the draft's question. One required field, no default; the refusal comes first, as for an OK, so a
+ * host that fills in the first choice by itself doesn't send. The choices carry the policy word: `Post` and `Don't post`.
+ */
+export const DRAFT_FIELD = "answer";
+export const DRAFT_MAX = 500;
+
+/** The policy word as the choices and the caption say it: cleaned, first letter capital. */
+export function draftWord(word: string): string {
+  const clean = plainText(word, 30);
+  const first = [...clean][0];
+  return first === undefined ? "Send" : first.toUpperCase() + clean.slice(first.length);
+}
+
+/** `Post` and `Don't post`. */
+export function draftChoices(word: string): { send: string; dont: string } {
+  const send = draftWord(word);
+  const first = [...send][0] ?? "";
+  return { send, dont: `Don't ${first.toLowerCase()}${send.slice(first.length)}` };
+}
+
+export function draftSchema(word: string): ElicitSchema {
+  const { send, dont } = draftChoices(word);
+  return { type: "object", properties: { [DRAFT_FIELD]: { type: "string", title: "Send this draft?", enum: [dont, send] } }, required: [DRAFT_FIELD] };
+}
 
 export interface ElicitAnswer {
   action: "accept" | "decline" | "cancel";
@@ -90,6 +137,37 @@ export class Dialogs {
       const answer = await this.ask(message, DONE_SCHEMA, signal);
       if (answer === "aborted" || answer === "unavailable") return answer;
       return answer.action === "accept" && answer.content?.[DONE_FIELD] === DONE ? "done" : "cant";
+    });
+  }
+
+  /**
+   * §21.3: a draft shown before the touch that sends it. Only an accepted `<Word>` is `allow`; `Don't <word>`, a decline, a cancel
+   * and an error are `deny` (an error before any choice is `unavailable`, as for `askOk`).
+   */
+  askDraft(caption: string, word: string, signal?: AbortSignal): Promise<OkAnswer> {
+    return this.queued(async () => {
+      const answer = await this.ask(caption, draftSchema(word), signal);
+      if (answer === "aborted" || answer === "unavailable") return answer;
+      return answer.action === "accept" && answer.content?.[DRAFT_FIELD] === draftChoices(word).send ? "allow" : "deny";
+    });
+  }
+
+  /** §19.6: the grant's question. Only an accepted "Allow" is `allow`; anything else is `deny`. */
+  askGrant(caption: string, signal?: AbortSignal): Promise<OkAnswer> {
+    return this.queued(async () => {
+      const answer = await this.ask(caption, GRANT_SCHEMA, signal);
+      if (answer === "aborted" || answer === "unavailable") return answer;
+      return answer.action === "accept" && answer.content?.[GRANT_FIELD] === GRANT_ALLOW ? "allow" : "deny";
+    });
+  }
+
+  /** §19.6: the drafts question. Only an accepted "Yes" is `allow`; No, a decline, a cancel and an error are `deny`. */
+  askLiftDrafts(signal?: AbortSignal): Promise<OkAnswer> {
+    return this.queued(async () => {
+      const answer = await this.ask(DRAFTS_QUESTION, DRAFTS_SCHEMA, signal);
+      if (answer === "aborted") return "aborted";
+      if (answer === "unavailable") return "deny";
+      return answer.action === "accept" && answer.content?.[DRAFTS_FIELD] === DRAFTS_YES ? "allow" : "deny";
     });
   }
 
@@ -212,4 +290,20 @@ export function okCaption(v: { word: string; tool: string; role: string; text?: 
   const what = text !== "" ? `"${text}"` : `the ${plainText(v.role, 30) || "element"}`;
   const app = plainText(v.app) || "the app";
   return `Allow: ${verb} ${what} in ${app}? (policy word "${plainText(v.word)}")`;
+}
+
+/**
+ * §21.3: a draft's text as the dialog shows it: line breaks as spaces, no control character, no quote that could end the question,
+ * cut at 500 characters with `…(+N)`. Vault and account values are redacted by the caller, before the cut, so one that straddles it
+ * can't show its start.
+ */
+export function cutDraft(value: string, max = DRAFT_MAX): string {
+  const clean = value.replace(/[\r\n\t]+/g, " ").replace(NOT_SHOWN, "").replace(/"/g, "'").trim();
+  const letters = [...clean];
+  return letters.length > max ? `${letters.slice(0, max).join("")}…(+${letters.length - max})` : clean;
+}
+
+/** §21.3: `Post this in Instagram? "…"`. The word is the policy word that matched. */
+export function draftCaption(v: { word: string; app: string; text: string }): string {
+  return `${draftWord(v.word)} this in ${plainText(v.app) || "the app"}? "${cutDraft(v.text)}"`;
 }

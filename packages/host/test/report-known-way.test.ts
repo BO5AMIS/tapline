@@ -14,9 +14,11 @@ import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
 const dirs: string[] = [];
+const registries: MapRegistry[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
+  await Promise.all(registries.splice(0).map((r) => r.flushAll()));
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
@@ -130,7 +132,9 @@ describe("the known-way flag", () => {
         reflexes: [],
       }),
     );
-    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, maps: new MapRegistry({ mapsDir }), logDir: join(root, "log"), policy: { version: 1, confirm: [], block: [] } });
+    const maps = new MapRegistry({ mapsDir });
+    registries.push(maps);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, maps, logDir: join(root, "log"), policy: { version: 1, confirm: [], block: [] } });
     await tools.look({ screenshot: false });
     for (const id of ["go-a", "go-b", "go-c"]) await tools.tap({ target: { id }, look: false });
     const said = tools.sessionReport().content.map((c) => (c.type === "text" ? c.text : "")).join("\n");

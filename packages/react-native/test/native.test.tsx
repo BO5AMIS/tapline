@@ -110,6 +110,13 @@ describe('what UIKit draws over the app', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  test('an OS alert with no message reports message null (the host leaves it out of the Alert: line)', async () => {
+    await mountScreen(jest.fn());
+    setNativeModule(fakeNative({ kind: 'alert', title: 'Saved', message: '', buttons: ['OK'], destructive: [false] }).module);
+    const result = await run(() => tree({}));
+    expect(result.alerts?.map((alert) => [alert.title, alert.message])).toEqual([['Saved', null]]);
+  });
+
   test('the share sheet reads as an OS alert named "Share sheet"', async () => {
     await mountScreen(jest.fn());
     setNativeModule(fakeNative({ kind: 'share', title: '', message: '', buttons: [], destructive: [] }).module);

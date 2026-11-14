@@ -74,6 +74,36 @@ describe("drive {route}: the answer", () => {
     expect(textOf(answer)).toMatch(/^Error not_found: Ran 0 of 1 steps; stopped at step 1 \(tap id=missing-row\)/);
   });
 
+  it("a failed route with look: false still carries the screen (a stop always carries it)", async () => {
+    const s = await withRoute(routeFile([{ tool: "tap", target: { id: "missing-row" } }], { end: "language" }));
+    const answer = await callTool(s.tools, "drive", { route: "go", look: false });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error not_found: Ran 0 of 1 steps; stopped at step 1 \(tap id=missing-row\)/);
+    expect(textOf(answer)).toMatch(/Screen \d+x\d+/);
+  });
+
+  it("a route that arrives with look: false is still the first line only", async () => {
+    const s = await withRoute(routeFile([{ tool: "tap", target: { id: "language-row" } }], { end: "language" }));
+    const answer = await callTool(s.tools, "drive", { route: "go", look: false });
+    expect(textOf(answer)).toBe("Arrived at language by route go in 0.0 s.");
+  });
+
+  it("a failing route step before then carries the screen", async () => {
+    const s = await withRoute(routeFile([{ tool: "tap", target: { id: "missing-row" } }], { end: "language" }));
+    const answer = await callTool(s.tools, "drive", { route: "go", then: [{ tool: "wait", seconds: 0.1 }], look: false });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error not_found: Ran 0 of 1 steps/);
+    expect(textOf(answer)).toMatch(/Screen \d+x\d+/);
+  });
+
+  it("a failing then step with look: false carries the screen", async () => {
+    const s = await setupDrive(hosts, apps, dirs, { capabilities: CAPS });
+    const answer = await callTool(s.tools, "drive", { to: "language", then: [{ tool: "tap", target: { id: "nope" } }], look: false });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("Note: arrived at language by 2 taps in 0.0 s before the steps ran.");
+    expect(textOf(answer)).toMatch(/Screen \d+x\d+/);
+  });
+
   it("variables and the account fill in; a missing one is bad_params and nothing moves", async () => {
     const steps = [
       { tool: "tap", target: { id: "language-row" } },

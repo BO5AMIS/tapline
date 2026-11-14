@@ -67,6 +67,8 @@ export interface Report {
   flags: Flag[];
   /** The `Time:` line; absent when no call has a time (older logs). */
   time?: string;
+  /** The `Grants:` line (AGENT-TOOLS 1.14 §19.7); absent when no grant was involved. */
+  grants?: string;
   /** Person's OKs used, by where they were given; absent when none (§11.3). */
   approvals?: { chat: number; liveView: number };
   /** Calls that ran with fast animations on; absent when none did (PLAN-1.6 F4). */
@@ -420,6 +422,7 @@ export function formatReport(report: Report, accounts: readonly string[] = []): 
   const top = [
     head,
     ...(report.time !== undefined ? [report.time] : []),
+    ...(report.grants !== undefined ? [report.grants] : []),
     ...(approvalsLine !== undefined ? [approvalsLine] : []),
     ...(animationsLine !== undefined ? [animationsLine] : []),
     ...(accountsLine !== undefined ? [accountsLine] : []),
@@ -466,7 +469,37 @@ export function readLogEntries(dir: string, sinceMs: number): ActionLogEntry[] {
 /** The report text for a log folder: `since` on, optionally only one session's calls. */
 export function reportFor(dir: string, sinceMs: number, onlySession?: string, accounts?: readonly string[]): string {
   const entries = readLogEntries(dir, sinceMs).filter((e) => onlySession === undefined || e.session === onlySession);
-  return formatReport(analyze(buildCalls(entries)), accounts);
+  const grants = grantsLine(entries);
+  return formatReport({ ...analyze(buildCalls(entries)), ...(grants !== undefined ? { grants } : {}) }, accounts);
+}
+
+/**
+ * AGENT-TOOLS 1.14 §19.7: `Grants: instagram_posting 2 uses (2 of 3 today); asked a person 1 time (limit reached).` From the touches
+ * the log says a grant let through (`grant`, `grant_use`) and the ones a grant matched but didn't cover (`grant_asked`). Nothing
+ * when no grant was involved.
+ */
+export function grantsLine(entries: readonly ActionLogEntry[]): string | undefined {
+  const uses = new Map<string, { n: number; last: string | undefined }>();
+  const asked = new Map<string, number>();
+  let askedTotal = 0;
+  for (const e of entries) {
+    if (e.by !== "agent" || e.dry_run === true) continue;
+    if (e.grant !== undefined && e.ok) {
+      const seen = uses.get(e.grant);
+      uses.set(e.grant, { n: (seen?.n ?? 0) + 1, last: e.grant_use ?? seen?.last });
+    } else if (e.grant_asked !== undefined) {
+      asked.set(e.grant_asked, (asked.get(e.grant_asked) ?? 0) + 1);
+      askedTotal++;
+    }
+  }
+  if (uses.size === 0 && askedTotal === 0) return undefined;
+  const parts = [...uses].map(([name, { n, last }]) => `${name} ${n} ${n === 1 ? "use" : "uses"}${last !== undefined ? ` (${last})` : ""}`);
+  if (askedTotal > 0) {
+    const reasons = [...asked].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const why = reasons.length === 1 ? (reasons[0] as [string, number])[0] : reasons.map(([reason, n]) => `${reason} ${n}`).join(", ");
+    parts.push(`asked a person ${askedTotal} ${askedTotal === 1 ? "time" : "times"} (${why})`);
+  }
+  return `Grants: ${parts.join("; ")}.`;
 }
 
 /** `--since`: epoch ms, an ISO date or time, or how long ago (`90m`, `2h`, `1d`). Null when it isn't one. */

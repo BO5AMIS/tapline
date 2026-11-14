@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -213,6 +213,45 @@ describe("saving a route", () => {
     await saveRoute(dir, { ...signIn, end: "settings" });
     expect(loadRoute(dir, "sign_in")?.end).toBe("settings");
     expect(Object.keys(loadMap(dir, APP.id).map.routes)).toEqual(["sign_in"]);
+  });
+
+  describe("an existing route's security metadata (PR 12 finding 4)", () => {
+    const protectedFile = (dir: string): void => {
+      mkdirSync(join(dir, "routes"), { recursive: true });
+      writeFileSync(join(dir, "routes", "sign_in.json"), `${JSON.stringify({ ...signIn, draftsOnly: true }, null, 2)}\n`);
+    };
+
+    it("a re-record keeps draftsOnly: true from the old file", async () => {
+      const dir = tmp();
+      protectedFile(dir);
+      await saveRoute(dir, { ...signIn, end: "settings" });
+      const saved = loadRoute(dir, "sign_in");
+      expect(saved?.draftsOnly).toBe(true);
+      expect(saved?.end).toBe("settings");
+    });
+
+    it("a save that says draftsOnly: false over a protected route is refused, and the file is untouched", async () => {
+      const dir = tmp();
+      protectedFile(dir);
+      const before = readFileSync(join(dir, "routes", "sign_in.json"), "utf8");
+      await expect(saveRoute(dir, { ...signIn, draftsOnly: false })).rejects.toThrow(/person must edit the route file/);
+      expect(readFileSync(join(dir, "routes", "sign_in.json"), "utf8")).toBe(before);
+    });
+
+    it("an old file that can't be read is not overwritten", async () => {
+      const dir = tmp();
+      mkdirSync(join(dir, "routes"), { recursive: true });
+      writeFileSync(join(dir, "routes", "sign_in.json"), "{ not json");
+      await expect(saveRoute(dir, signIn)).rejects.toThrow(/person must edit the route file/);
+      expect(readFileSync(join(dir, "routes", "sign_in.json"), "utf8")).toBe("{ not json");
+    });
+
+    it("a route that was never protected is saved as before", async () => {
+      const dir = tmp();
+      await saveRoute(dir, signIn);
+      await saveRoute(dir, { ...signIn, end: "settings" });
+      expect(loadRoute(dir, "sign_in")?.draftsOnly).toBeUndefined();
+    });
   });
 });
 

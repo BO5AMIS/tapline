@@ -140,3 +140,13 @@ test("inside a shared component that makes its own id (LabButton), it also names
   expect(source?.location).toMatchObject({ file: '/proj/src/ui.tsx', line: 43, direct: true });
   expect(source?.usedAt?.[0]).toMatchObject({ file: '/proj/src/screens/SignUpScreen.tsx', line: 112, component: 'SignUpScreen' });
 });
+
+test('a long string prop goes to the host whole, so the host can redact before it cuts (AGENT-TOOLS §20.3)', async () => {
+  function Field(): null { return null; }
+  const password = 'Zq7-fake-long-passphrase-for-tests-0123456789-abcdefghijklmnop';
+  const field = fiber(0, Field, { defaultValue: password, testID: 'pw' }, stack(['jsxDEV', 100, 1], ['SignUpScreen', 400, 9]));
+  const view = fiber(5, 'RCTView', {}, stack(['jsxDEV', 100, 1], ['Field', 200, 7]), field);
+  const [source] = await sourcesOf([view]);
+  expect(source?.props['defaultValue']).toBe(JSON.stringify(password));
+  expect(source?.props['defaultValue']).not.toContain('…');
+});

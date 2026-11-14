@@ -58,9 +58,12 @@ export async function afterPause(host: TaplineHost, sessionId: string): Promise<
   for (let pause = pausesOf(host).get(sessionId); pause !== undefined; pause = pausesOf(host).get(sessionId)) await pause.over;
 }
 
-async function send(host: TaplineHost, sessionId: string, speed: "fast" | "normal"): Promise<boolean> {
+/** What sends a request to the app: the host itself, or a caller's own path (the tools' lease-checked one). */
+export type Sender = TaplineHost["request"];
+
+async function send(host: TaplineHost, sessionId: string, speed: "fast" | "normal", request?: Sender): Promise<boolean> {
   try {
-    await host.request("command", { name: "animations", args: { speed } }, { sessionId });
+    await (request ?? ((...args: Parameters<Sender>) => host.request(...args)))("command", { name: "animations", args: { speed } }, { sessionId });
     return true;
   } catch {
     return false;
@@ -77,6 +80,7 @@ export async function withNormalAnimations<T>(
   host: TaplineHost,
   sessionId: string | undefined,
   run: () => Promise<T>,
+  request?: Sender,
 ): Promise<{ value: T; paused: boolean; failed: boolean }> {
   if (sessionId === undefined || !animationsOn(host, sessionId)) return { value: await run(), paused: false, failed: false };
   const all = pausesOf(host);
@@ -84,7 +88,7 @@ export async function withNormalAnimations<T>(
   if (pause === undefined) {
     let end: () => void = () => undefined;
     const over = new Promise<void>((resolve) => (end = resolve));
-    pause = { count: 0, ready: send(host, sessionId, "normal"), over, end };
+    pause = { count: 0, ready: send(host, sessionId, "normal", request), over, end };
     all.set(sessionId, pause);
   }
   pause.count += 1;
@@ -98,7 +102,7 @@ export async function withNormalAnimations<T>(
       if (all.get(sessionId) === mine) all.delete(sessionId);
       // A switch made during the call wins: only put fast back when it is still meant to be on.
       try {
-        if (animationsOn(host, sessionId)) await send(host, sessionId, "fast");
+        if (animationsOn(host, sessionId)) await send(host, sessionId, "fast", request);
       } finally {
         mine.end();
       }
@@ -110,10 +114,10 @@ export async function withNormalAnimations<T>(
  * Puts one session back to normal for good (a journey in a user's eyes starts). False when they were not on, or when
  * the app refused the switch: the session then stays tracked as fast, so nothing reports animations as normal.
  */
-export async function endAnimations(host: TaplineHost, sessionId: string): Promise<boolean> {
+export async function endAnimations(host: TaplineHost, sessionId: string, request?: Sender): Promise<boolean> {
   const sessions = setOf(on, host);
   if (!sessions.has(sessionId)) return false;
-  if (!(await send(host, sessionId, "normal"))) return false;
+  if (!(await send(host, sessionId, "normal", request))) return false;
   sessions.delete(sessionId);
   return true;
 }

@@ -10,6 +10,7 @@ import {
   type FiberRootLike,
 } from './fiber';
 import { openAlerts } from './alerts';
+import { marksFromOthers } from './fromothers';
 import { placeFrom, type PlaceParts } from './placekey';
 import { keyboardState } from './keyboard';
 import { refreshCover } from './native';
@@ -73,6 +74,8 @@ export interface HostNode {
   insideText: boolean;
   /** Inside a virtualized list's item (AGENT-TOOLS 1.13 §18.2: the host never saves what a row said). */
   row?: true;
+  /** Inside a subtree the app marked as text from other people (AGENT-TOOLS 1.14 §21.1). */
+  fromOthers?: true;
 }
 
 /** Invisible direction marks (AGENT-TOOLS v1.3): U+200E, U+200F, U+202A–U+202E, U+2066–U+2069. */
@@ -157,6 +160,8 @@ interface Collected {
   tabs: TabFound[];
   /** Open modals' host fibers (not inside a hidden subtree), in tree order. */
   modals: Fiber[];
+  /** The open modals that sit inside text marked as from others: what is shown inside one carries the marker too. */
+  markedModals: Set<Fiber>;
   /** Set while a modal is open: the topmost modal's host, and the whole tree walked with it (the screen behind included). */
   behind?: { sheet: Fiber; nodes: HostNode[] };
 }
@@ -225,6 +230,7 @@ function walk(
   chain: RouteFound[],
   presentation?: string,
   inRow = false,
+  fromOthers = false,
 ): string[] {
   const segments: string[] = [];
   for (let fiber = first; fiber; fiber = fiber.sibling) {
@@ -235,7 +241,11 @@ function walk(
       const hostType = typeof fiber.type === 'string' ? fiber.type : '';
       if (TAB_HOST.test(hostType)) collectTabs(fiber.child, out.tabs);
       if (hidesSubtree(hostType, propsOf(fiber))) continue;
-      if (MODAL_HOSTS.has(hostType)) out.modals.push(fiber);
+      const others = fromOthers || marksFromOthers(fiber);
+      if (MODAL_HOSTS.has(hostType)) {
+        out.modals.push(fiber);
+        if (others) out.markedModals.add(fiber);
+      }
       const isText = TEXT_HOSTS.has(hostType);
       const row = inRow || owners.some(isListItemOwner);
       let shown = presentation;
@@ -253,19 +263,20 @@ function walk(
         isText,
         insideText,
         ...(row ? { row: true as const } : {}),
+        ...(others ? { fromOthers: true as const } : {}),
       };
       out.nodes.push(node);
-      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row);
+      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row, others);
       node.text = normalizeText(isText ? inner.join('') : inner.join(' '), isText);
       if (isText) segments.push(inner.join(''));
       else for (const piece of inner) segments.push(piece);
     } else if (isCompositeTag(fiber.tag)) {
       const route = routeOf(fiber, chain, presentation);
       if (route) out.routes.push(route);
-      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow);
+      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow, fromOthers || marksFromOthers(fiber));
       for (const piece of inner) segments.push(piece);
     } else {
-      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow);
+      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow, fromOthers);
       for (const piece of inner) segments.push(piece);
     }
   }
@@ -273,15 +284,16 @@ function walk(
 }
 
 function collect(roots: FiberRootLike[]): Collected {
-  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
+  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
   for (const root of roots) walk(root.current.child, -1, [], false, out, []);
   // iOS hides what is behind a modal from accessibility, so a person (and Tapwright, which reads
   // that tree) sees only the topmost modal: list only that, no screen behind it and no tab bar.
   const top = out.modals[out.modals.length - 1];
   if (!top) return out;
-  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
-  walk(top.child, -1, [], false, only, []);
-  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, behind: { sheet: top, nodes: out.nodes } };
+  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
+  // The marker a wrapper outside the modal gave it is kept on what the modal shows.
+  walk(top.child, -1, [], false, only, [], undefined, false, out.markedModals.has(top));
+  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, markedModals: out.markedModals, behind: { sheet: top, nodes: out.nodes } };
 }
 
 /** What the place is made of, without describing any element (cheap enough for every commit); null without React roots. */
@@ -305,12 +317,12 @@ export function currentRoute(routes: RouteFound[]): RouteFound | null {
   return best;
 }
 
-/** Route params that read well in a line: top-level strings (cut to 80), numbers, booleans, null. */
+/** Route params that read well in a line: top-level strings (whole: the host redacts, then cuts for display), numbers, booleans, null. */
 function simpleParams(params: unknown): Record<string, string | number | boolean | null> | undefined {
   if (!isRecord(params)) return undefined;
   const out: Record<string, string | number | boolean | null> = {};
   for (const [key, value] of Object.entries(params)) {
-    if (typeof value === 'string') out[key] = value.length > 80 ? `${value.slice(0, 80)}…` : value;
+    if (typeof value === 'string') out[key] = value.length > MAX_KEPT_TEXT ? sliceWhole(value, MAX_KEPT_TEXT) : value;
     else if (typeof value === 'number' || typeof value === 'boolean' || value === null) out[key] = value;
   }
   return Object.keys(out).length > 0 ? out : undefined;
@@ -631,6 +643,8 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
         if (!ancestor || !info) break;
         if (info.actions.length > 0 && info.text === node.text) {
           redundantText = true;
+          // The ancestor now shows this text as its own: the marker goes with it, or the default list would show others' words unmarked.
+          if (node.fromOthers === true) ancestor.fromOthers = true;
           break;
         }
         p = ancestor.parent;
@@ -1309,6 +1323,7 @@ export function toElement(entry: Entry, frame: Frame | null, ref: string = refFo
     selected: info.selected,
     checked: info.checked,
     ...(entry.node.row === true ? { row: true as const } : {}),
+    ...(entry.node.fromOthers === true ? { fromOthers: true as const } : {}),
   };
 }
 

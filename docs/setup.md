@@ -117,13 +117,36 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 **Options for the agent's side (1.6).** `tapline mcp` and the standalone `tapline host` take these:
 
 - `--brief`: actions answer in at most 12 element lines (a call's `brief: false` overrides it).
-- `--accounts FILE`: test accounts, so an agent can sign in by name without seeing a password:
-  `{"version": 1, "accounts": {"tester2": {"username": "...", "password": "...", "apps": ["com.example.wayfare"]}}}`.
-  The file must sit outside any git repository, or be ignored by it, or Tapline refuses it. Keep it
-  outside the folders the agent can read. A password stays out of pictures only while its field is
-  secure. `tapline doctor --accounts FILE` checks it and prints the names, never the values.
+- `--accounts FILE`: the vault (AGENT-TOOLS 1.14 §20), so an agent can sign in and fill forms by name without
+  seeing a value:
+  `{"version": 2, "vault": {"tester2": {"kind": "account", "username": "...", "password": "...", "apps": ["com.example.wayfare"]}, "home": {"kind": "address", "street": "...", "city": "...", "postcode": "...", "country": "..."}, "visa": {"kind": "card", "number": "...", "expiry": "...", "cvc": "..."}}}`.
+  Kinds: `account`, `card`, `address`, `identity`, `note`, and `phone` (Tapwright's; Tapline never types it).
+  The agent refers to `${vault.home.street}` (the whole text of a step), or `account: "tester2"` with
+  `${account.username}`. A card's fields are typed only with a person's OK each time. A version 1 file
+  (`{"version": 1, "accounts": {...}}`) still loads.
+  A plain file is for test data only: it must sit outside any git repository, or be ignored by it, or Tapline
+  refuses it, and every start says it is not encrypted. `tapline vault protect FILE` rewrites it in this
+  system's protected form (Windows DPAPI for the current user, or the macOS keychain; a protected file has no
+  values in it, so it may sit anywhere, and Tapwright reads it too). Keep the file outside the folders the
+  agent can read. A password stays out of pictures only while its field is secure.
+  `tapline doctor --accounts FILE` checks it and prints the names and kinds, never the values.
 - `--maps DIR`: keep each app's map (places, roads, links, routes, reflexes) in `DIR/<app id>/`
   instead of `~/.tapline/maps/<app id>/`. A team can share one folder.
+- `tapline schedule` and `tapline run-schedule` (1.7) run a saved route with no agent, on a time or when a file
+  appears. `tapline schedule add <route> --at "09:00 daily" [--with name=value|name=@file] [--name NAME]
+  [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as
+  absolute paths, and `@file` is read when the run starts, relative to that folder) and, on Windows, registers a Task
+  Scheduler task that runs `tapline run-schedule <name>` (a time schedule sets `WakeToRun`, so it wakes the PC). `--on-file FOLDER` runs when a
+  new file appears there (the task checks every minute and does not wake the PC). `tapline schedule list`, `tapline schedule remove NAME`, `tapline schedule unlock NAME`. The
+  phone's app must be open and connected: a running `tapline host` is used only when it runs with the schedule's own policy, accounts and maps
+  (the run asks it, and never drives through a host that differs); otherwise the run starts its own host with the schedule's
+  policy, accounts and maps and waits `--wait` seconds (default 60) for the app, and skips if the app doesn't connect to it. Skips:
+  `skipped: the phone was in use` (after waiting 10 minutes), `skipped: the previous run is still going`,
+  `skipped: the app is not open`; a draft with no one to show it to ends `stopped: a draft is waiting for a person.`.
+  Reports go to `~/.tapline/runs/`, lines to the audit log. Other systems: the schedule is saved; start it from cron or
+  launchd with `tapline run-schedule <name>`.
+  **Stuck locks.** A lock that is empty or unreadable (a run crashed mid-write where hard links are not available) is never taken over, so it blocks its schedule, or edits of the policy file, until a person removes it. `tapline doctor` (with `--policy FILE` for the policy edit lock) names each stuck lock with its full path and the command that removes it: `tapline schedule unlock NAME` or `tapline grants unlock --policy FILE`. Both remove the lock (and its `.takeover`) only when no live holder is proven, name the pid when there is one, and write an audit line.
+$P
 - `--no-dialog` (`mcp`): don't open the host's dialog for a person's OK or a "needs a person" moment;
   the live view still asks. Use it with a chat app that passes dialogs to the model instead of
   showing them to a person.
