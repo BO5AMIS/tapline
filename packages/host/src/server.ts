@@ -408,8 +408,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private closed = false;
   private redact: ((text: string, typed: TypedSource) => string) | undefined;
   private readonly redactsVault: boolean;
-  /** The texts the active runs (an explore, a replay with its repairs) have typed. Per run: cleared when the last run ends. */
-  private readonly typedRuns = new Set<{ values: string[] }>();
+  /** Every text any run typed in this session (cumulative; a new array whenever one is added, so the matcher is rebuilt). */
   private typedNow: TypedSource = { values: [], token: TYPED };
 
   constructor(options: TaplineHostOptions) {
@@ -858,26 +857,18 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   }
 
   /**
-   * Registers the texts one run types with the ingress scrubber until `end()`. Register a text BEFORE it is sent. The list is per
-   * run: it is gone when the run ends (it would hide ordinary app text afterwards), and runs that overlap share one list.
+   * Registers the texts a run (explore, replay, repair) types with the ingress scrubber. Register a text BEFORE it is sent. The list
+   * is cumulative for the session, like retired vault values: a typed text stays scrubbed until the process ends, so a late reply, log
+   * line or crash stack that arrives after the run cannot show it. (Later app text that equals test data is scrubbed too, on purpose.)
+   * `end()` is harmless and keeps nothing to undo.
    */
   typedRun(): { add(value: string): void; end(): void } {
-    const run: { values: string[] } = { values: [] };
-    this.typedRuns.add(run);
-    const publish = (): void => {
-      const all: string[] = [];
-      for (const each of this.typedRuns) for (const value of each.values) if (!all.includes(value)) all.push(value);
-      this.typedNow = { values: all, token: TYPED };
-    };
     return {
       add: (value) => {
-        if (value === "" || run.values.includes(value)) return;
-        run.values.push(value);
-        publish();
+        if (value === "" || this.typedNow.values.includes(value)) return;
+        this.typedNow = { values: [...this.typedNow.values, value], token: TYPED };
       },
-      end: () => {
-        if (this.typedRuns.delete(run)) publish();
-      },
+      end: () => undefined,
     };
   }
 

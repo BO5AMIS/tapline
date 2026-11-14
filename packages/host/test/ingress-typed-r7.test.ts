@@ -2,11 +2,11 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ingressRedactor, loadAccounts, type GitProbe } from "../src/accounts.js";
+import { ingressRedactor, loadAccounts, vaultStore, type GitProbe } from "../src/accounts.js";
 import { OtpCodes } from "../src/otpclient.js";
 import type { TaplineHost } from "../src/server.js";
 import { btn, flushExploreMaps, input, setupExplore, type ExWorld } from "./explore-helpers.js";
-import type { FakeApp } from "./helpers.js";
+import { FakeApp, startHost } from "./helpers.js";
 import { repairRig, textOf } from "./repair-helpers.js";
 
 // PR 13 security review, Codex cycle 5 (R7): the host's ingress redaction (every reply and event the app sends) uses the same
@@ -127,21 +127,43 @@ describe("R7: ingress redaction matches vault values, codes and typed texts toge
     await exploreCase("test@example.com.vaultcopy", "test@example.com", ["vaultcopy", "${typed}.vault"]);
   });
 
-  it("the typed list is per run: it is registered at once, shared by overlapping runs, and gone when the last run ends", async () => {
-    const { startHost } = await import("./helpers.js");
+  it("the typed list is cumulative for the session: a value stays scrubbed after its run ends, also in a reply that arrives after end", async () => {
     const loaded = await vaultWith("jane");
-    const { host } = await startHost(ingress(loaded));
+    const { host, port } = await startHost(ingress(loaded));
     hosts.push(host);
     const scrub = (text: string): string => host.redactOut(text);
     expect(scrub("a jane.quill@example.test b")).toBe("a <tester's username>.quill@example.test b");
-    const one = host.typedRun();
-    const two = host.typedRun();
-    one.add("jane.quill@example.test");
+    const run = host.typedRun();
+    run.add("jane.quill@example.test");
     expect(scrub("a jane.quill@example.test b")).toBe("a ${typed} b");
-    one.end();
-    two.add("jane.quill@example.test");
+    run.end();
+    run.end();
     expect(scrub("a jane.quill@example.test b")).toBe("a ${typed} b");
-    two.end();
-    expect(scrub("a jane.quill@example.test b")).toBe("a <tester's username>.quill@example.test b");
+    // A real reply from a connected app, requested after the run ended.
+    const { app } = await FakeApp.connect(port, {}, () => ({ ok: true, result: { stack: "at x (jane.quill@example.test)", note: "jane.quill@example.test" } }));
+    apps.push(app);
+    const answer = await host.request("anything");
+    expect(JSON.stringify(answer)).not.toContain("quill");
+    expect(answer).toEqual({ stack: "at x (${typed})", note: "${typed}" });
+  });
+
+  it("200 accumulated typed texts: a 200 KB scrub over 50 accounts stays under 300 ms warm", () => {
+    const vault: Record<string, { kind: "account"; username: string; password: string }> = {};
+    for (let i = 0; i < 50; i++) vault[`acct${i}`] = { kind: "account", username: `user-name-${i}-abcdef`, password: `pass-word-${i}-ghijkl-XYZ` };
+    const store = vaultStore({ version: 2, vault });
+    const redact = ingressRedactor(() => store, new OtpCodes());
+    const source = { values: Array.from({ length: 200 }, (_, i) => `typed-text-${i}-qwerty`), token: "${typed}" };
+    const text = `${"The quick brown fox jumps over the lazy dog 12345. ".repeat(4000)} leak pass-word-7-ghijkl-XYZ and typed-text-150-qwerty`;
+    redact(text, source);
+    const times: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      const t = performance.now();
+      const out = redact(text, source);
+      times.push(Math.round(performance.now() - t));
+      expect(out).not.toContain("ghijkl");
+      expect(out).not.toContain("qwerty");
+    }
+    console.log(`200 typed values + 50 accounts, 200 KB (ms): ${times.join(", ")}`);
+    expect(Math.min(...times)).toBeLessThan(300);
   });
 });

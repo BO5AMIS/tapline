@@ -497,11 +497,51 @@ interface Probe {
   base: string;
   token: string;
   head: RegExp;
+  /** The head's text up to its first space (a space may read as a plus): what a view must hold, when it is long enough to gate on. */
+  gate?: string;
 }
 
 function probeOf(base: string, token: string): Probe {
   const head = base.slice(0, PREFIX_MIN);
-  return { base, token, head: new RegExp([...head].map((c) => (c === " " ? "[ +]" : escapeRegExp(c))).join(""), "g") };
+  const gate = head.split(" ")[0] as string;
+  return { base, token, head: new RegExp([...head].map((c) => (c === " " ? "[ +]" : escapeRegExp(c))).join(""), "g"), ...(gate.length >= GRAM ? { gate } : {}) };
+}
+
+// -- a cheap necessary condition for a long text
+
+const GRAM = 3;
+/** Shorter texts are searched directly: indexing them would cost more than it saves. */
+const GRAM_TEXT_MIN = 4096;
+const GRAM_BITS = 20;
+
+/** The text's 3-character pieces as a bit table (hashed: a collision only lets a candidate through, never drops one). */
+function gramsOf(text: string): Uint8Array {
+  const table = new Uint8Array(1 << GRAM_BITS);
+  let a = text.charCodeAt(0);
+  let b = text.charCodeAt(1);
+  for (let i = 2; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    table[gramHash(a, b, c)] = 1;
+    a = b;
+    b = c;
+  }
+  return table;
+}
+
+function gramHash(a: number, b: number, c: number): number {
+  return (Math.imul(a, 0x9e3779b1) ^ Math.imul(b, 0x85ebca6b) ^ Math.imul(c, 0xc2b2ae35)) >>> (32 - GRAM_BITS);
+}
+
+/** Whether the pieces of `needle` (every one, or 48 spread over a long one, first and last included) are all in the text (false: it certainly isn't there). */
+function hasGrams(table: Uint8Array, needle: string): boolean {
+  const last = needle.length - GRAM;
+  if (last < 0) return true;
+  const step = last < 48 ? 1 : last / 47;
+  for (let at = 0; at <= last; at += step) {
+    const i = Math.floor(at);
+    if (table[gramHash(needle.charCodeAt(i), needle.charCodeAt(i + 1), needle.charCodeAt(i + 2))] !== 1) return false;
+  }
+  return table[gramHash(needle.charCodeAt(last), needle.charCodeAt(last + 1), needle.charCodeAt(last + 2))] === 1;
 }
 
 const sameChar = (seen: string | undefined, wanted: string | undefined): boolean => seen === wanted || (wanted === " " && seen === "+");
@@ -510,11 +550,13 @@ const sameChar = (seen: string | undefined, wanted: string | undefined): boolean
  * Every place a decoded view holds a value (all of it, when it is shorter than 12 characters) or a prefix of 12 or more of its
  * characters: the first 12 and as many more as the text goes on to match. The span is the original text of those characters.
  */
-function probeSpans(views: readonly View[], probe: Probe, out: Span[]): void {
+function probeSpans(views: readonly View[], probe: Probe, out: Span[], grams: ReadonlyArray<Uint8Array | null>): void {
   const { base, head, token } = probe;
   const need = Math.min(PREFIX_MIN, base.length);
-  for (const view of views) {
+  for (const [v, view] of views.entries()) {
     if (view.text.length < need) continue;
+    const gate = grams[v];
+    if (gate !== null && gate !== undefined && probe.gate !== undefined && !hasGrams(gate, probe.gate)) continue;
     head.lastIndex = 0;
     for (let m = head.exec(view.text); m !== null; m = head.exec(view.text)) {
       const from = m.index;
@@ -663,6 +705,8 @@ function formSpans(views: readonly View[], index: FormIndex, out: Span[]): void 
 function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, field: string) => string = placeholderOf): (text: string) => string {
   const literals = new Map<string, string>();
   const patterns = new Map<string, string>();
+  // The raw text a pattern needs when the text holds no escape or invisible character: its first word (see `Grams`).
+  const needles = new Map<string, string>();
   const bases = new Map<string, string>();
   const formBases = new Map<string, string>();
   for (const [name, entry] of Object.entries(entries)) {
@@ -671,18 +715,21 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
       const token = tokenOf(name, field);
       for (const form of variantsOf(value)) if (!literals.has(form)) literals.set(form, token);
       const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
-      const addPattern = (source: string): void => {
-        if (!patterns.has(source)) patterns.set(source, token);
+      const addPattern = (source: string, base: string): void => {
+        if (patterns.has(source)) return;
+        patterns.set(source, token);
+        const word = base.split(/\s+/).find((piece) => piece !== "");
+        if (word !== undefined && word.length >= GRAM) needles.set(source, word);
       };
-      if (value.length <= 500) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(fuzzySource(base));
-      if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base));
+      if (value.length <= 500) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(fuzzySource(base), base);
+      if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base), base);
       // The value whole, and what an app's cut leaves of it (a prefix of 12 or more characters), in every layer of encoding.
       if (collapsed.length >= MIN_SCRUB && !bases.has(collapsed)) bases.set(collapsed, token);
       // The value's encoded forms are searched in the raw text itself, so decoding can never lose the literal reading.
       for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB && !formBases.has(base)) formBases.set(base, token);
     }
   }
-  const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token }));
+  const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token, needle: needles.get(source) }));
   const forms = [...literals];
   const probes = [...bases].map(([base, token]) => probeOf(base, token));
   const formIndex = formIndexOf(formBases);
@@ -690,14 +737,20 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
   return (text) => {
     if (text.length < MIN_SCRUB) return text;
     const spans: Span[] = [];
+    // A long text is indexed once by its 3-character pieces; a form or pattern whose own pieces are not all in the text can't match.
+    const grams = text.length >= GRAM_TEXT_MIN ? gramsOf(text) : null;
+    // With no escape, no invisible character and no markup character in the text, a pattern reads as its first word, raw.
+    const plain = grams !== null && !ESCAPE_HINT.test(text);
     for (const [form, token] of forms) {
+      if (grams !== null && !hasGrams(grams, form)) continue;
       let at = text.indexOf(form);
       while (at !== -1) {
         spans.push({ start: at, end: at + form.length, token });
         at = text.indexOf(form, at + 1);
       }
     }
-    for (const { re, token } of regexes) {
+    for (const { re, token, needle } of regexes) {
+      if (plain && needle !== undefined && grams !== null && !hasGrams(grams, needle)) continue;
       re.lastIndex = 0;
       for (const m of text.matchAll(re)) {
         const got = (m[1] as string).length;
@@ -707,7 +760,8 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
     if (probes.length > 0) {
       const raw = viewsOf(text);
       const views = raw.map(normalizedView);
-      for (const probe of probes) probeSpans(views, probe, spans);
+      const viewGrams = views.map((view) => (view.text === text ? grams : view.text.length >= GRAM_TEXT_MIN ? gramsOf(view.text) : null));
+      for (const probe of probes) probeSpans(views, probe, spans, viewGrams);
       formSpans(raw, formIndex, spans);
     }
     if (spans.length === 0) return text;
