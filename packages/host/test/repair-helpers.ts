@@ -6,6 +6,7 @@ import type { AuditEntry, AuditSink } from "../src/auditlog.js";
 import type { MapFile } from "../src/mapfile.js";
 import type { PolicyFile } from "../src/policy.js";
 import type { TaplineHost } from "../src/server.js";
+import type { ToolsOptions } from "../src/tools.js";
 import { APP, BUILD } from "./drive-helpers.js";
 import { setupExplore, type ExWorld, type ExploreSetup } from "./explore-helpers.js";
 import type { FakeApp } from "./helpers.js";
@@ -37,6 +38,8 @@ export interface RigOptions {
   auditFails?: boolean;
   /** No audit sink at all. */
   noAudit?: boolean;
+  /** More tools options (a folder for reference pictures, say). */
+  tools?: Partial<ToolsOptions>;
 }
 
 export async function repairRig(hosts: TaplineHost[], apps: FakeApp[], dirs: string[], options: RigOptions = {}): Promise<RepairRig> {
@@ -54,7 +57,7 @@ export async function repairRig(hosts: TaplineHost[], apps: FakeApp[], dirs: str
     ...(options.world !== undefined ? { world: options.world } : {}),
     map: options.map ?? mapWith({ home: ["home"], settings: ["settings"], language: ["settings", "language"], trips: ["trips"], trips_id: ["trips", "[id]"], form: ["form"] }, []),
     ...(options.policy !== undefined ? { policy: options.policy } : {}),
-    tools: { scriptsDir, ...(options.noAudit === true ? {} : { audit }) },
+    tools: { scriptsDir, ...(options.noAudit === true ? {} : { audit }), ...options.tools },
   });
   return {
     s,

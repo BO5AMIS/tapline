@@ -1459,7 +1459,7 @@ export class TaplineTools {
    * While a script replays (AGENT-TOOLS 1.9 §14.3): the references folder next to it (looked in first), where a
    * failed check puts its red picture, and whether the checks save instead of compare (`--update-references`).
    */
-  private replayContext: { referencesDir: string; diffDir: string; update: boolean } | null = null;
+  private replayContext: { referencesDir: string; diffDir: string; update: boolean; gateRepaired: boolean } | null = null;
   /** Where the latest failed check of the running batch saved its picture. */
   private diffSaved: string | null = null;
   /** What the last `performance` call measured, for the `under` limits of a `run` step. */
@@ -3412,7 +3412,9 @@ export class TaplineTools {
       }
       stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
-      const answer = await this.runStep(step).finally(() => {
+      // The verification replay of a repaired script: a step a repair wrote or changed keeps the whole floor (the gate in repair mode); the user's own steps run as written.
+      const gated = this.replayContext?.gateRepaired === true && (step as { repaired?: unknown }).repaired !== undefined;
+      const answer = await (gated ? this.repairScope(() => this.runStep(step)) : this.runStep(step)).finally(() => {
         this.batch = outerBatch;
       });
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
@@ -5388,7 +5390,7 @@ export class TaplineTools {
   }
 
   /** `adopt` is a person's choice and only the command line passes it: no tool parameter reaches it (AGENT-TOOLS 1.15 §26.5). */
-  async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string } = {}): Promise<CallToolResult> {
+  async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string; gateRepaired?: boolean } = {}): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
@@ -5451,6 +5453,7 @@ export class TaplineTools {
         referencesDir: this.scriptSideFolder(sidePath, "references"),
         diffDir: this.scriptSideFolder(sidePath, "diff"),
         update: options.updateReferences === true,
+        gateRepaired: options.gateRepaired === true,
       };
       try {
         const answer = await this.inRoute(script.version === 2 ? script.name : undefined, () => this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false }), script.version === 2 && script.draftsOnly === true);
@@ -5648,7 +5651,15 @@ export class TaplineTools {
     const repairedText = `${JSON.stringify(repaired, null, 2)}\n`;
     const markdown = this.scrubSecrets(repairMarkdown(script.name || stem, { date: at.toISOString().slice(0, 10), version: EXPLORE_TOOL_VERSION, build }, run.repairs));
     // The script as it will be written must pass a fresh, ordinary replay (no repair) on this app; nothing is written when it doesn't (§26.4).
-    const refused = await this.verifyEmitted(scriptPath, repairedText, backAtStart);
+    // The emitted file is proven against exactly the pictures it will use: an adopted file keeps the original's folder; a file written beside the
+    // original gets its own sidecar, refreshed from the original's folder first (an older one is replaced, never trusted).
+    const picturesFrom = this.scriptSideFolder(scriptPath, "references");
+    const picturesTo = this.scriptSideFolder(repairedPath, "references");
+    if (!adopt) {
+      const stale = this.refreshSidecar(picturesFrom, picturesTo);
+      if (stale !== null) return fail(`Error internal: the repaired script's picture references couldn't be refreshed (${stale}); nothing was written.`);
+    }
+    const refused = await this.verifyEmitted(scriptPath, repairedText, backAtStart, adopt ? scriptPath : repairedPath);
     if (refused !== null) {
       for (const record of run.repairs) this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: this.host.redactOut(`step ${record.step}: ${repairPhrase(record)}, rejected (the repaired script failed its replay as written)`) });
       return fail(refused);
@@ -5656,10 +5667,6 @@ export class TaplineTools {
     try {
       writeFileSync(repairedPath, repairedText, { mode: 0o600 });
       writeFileSync(notesPath, markdown, { mode: 0o600 });
-      // A replay of the repaired file looks for its pictures beside it: the original's folder is copied once, an existing one is never touched.
-      const picturesFrom = this.scriptSideFolder(scriptPath, "references");
-      const picturesTo = this.scriptSideFolder(repairedPath, "references");
-      if (existsSync(picturesFrom) && !existsSync(picturesTo)) cpSync(picturesFrom, picturesTo, { recursive: true, errorOnExist: true, force: false });
     } catch (error) {
       return fail(`Error internal: the run passed, but the repaired script couldn't be written: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -5694,10 +5701,41 @@ export class TaplineTools {
   }
 
   /**
+   * Makes `to` (the repaired file's picture folder) a copy of `from` (the original's), atomically: copied to a temporary folder, then renamed over
+   * the old one, which is put back if the rename fails. With no original folder an older sidecar is removed. Null when done, else why not.
+   */
+  private refreshSidecar(from: string, to: string): string | null {
+    const temporary = `${to}.${process.pid}.tmp`;
+    const old = `${to}.${process.pid}.old`;
+    try {
+      rmSync(temporary, { recursive: true, force: true });
+      rmSync(old, { recursive: true, force: true });
+      if (!existsSync(from)) {
+        rmSync(to, { recursive: true, force: true });
+        return null;
+      }
+      cpSync(from, temporary, { recursive: true });
+      const had = existsSync(to);
+      if (had) renameSync(to, old);
+      try {
+        renameSync(temporary, to);
+      } catch (error) {
+        if (had) renameSync(old, to);
+        throw error;
+      }
+      rmSync(old, { recursive: true, force: true });
+      return null;
+    } catch (error) {
+      rmSync(temporary, { recursive: true, force: true });
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /**
    * Replays the repaired script exactly as it would be written, as an ordinary replay of its own (repair off), from the start the
    * original had. Null when it passes; else the failure to answer with. The probe file lives beside the script for a moment only.
    */
-  private async verifyEmitted(scriptPath: string, text: string, backAtStart: () => Promise<boolean>): Promise<string | null> {
+  private async verifyEmitted(scriptPath: string, text: string, backAtStart: () => Promise<boolean>, picturesOf: string): Promise<string | null> {
     const stem = basename(scriptPath).replace(/\.json$/i, "");
     const probe = join(dirname(scriptPath), `${stem}.repaired.json.${process.pid}.probe.json`);
     const nothing = "nothing was written";
@@ -5708,7 +5746,7 @@ export class TaplineTools {
     }
     try {
       if (!(await backAtStart())) return `Error not_connected: the run passed, but the app couldn't be taken back to where the script starts, so the repaired script couldn't be replayed as written; ${nothing}.`;
-      const answer = await this.replay({ path: probe }, { sideOf: scriptPath });
+      const answer = await this.replay({ path: probe }, { sideOf: picturesOf, gateRepaired: true });
       if (answer.isError !== true) return null;
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
       const [first = "", ...rest] = said.split("\n");

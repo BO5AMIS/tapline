@@ -104,6 +104,8 @@ export interface ExWorld {
   /** Pressing these ids opens a system alert (a permission prompt) that blocks every touch until a reload or a reset. */
   alertOn: Set<string>;
   alertOpen: boolean;
+  /** A real JPEG (base64, 300x600) the fake serves as the screenshot; the default is a stub that cannot be decoded. */
+  shot?: string;
   /** After a link out the app comes back to the front after this many ms (real time); none: it stays away. */
   comeBackMs?: number;
   /** After a crash the app opens again after this many ms (real time); none: it stays closed. */
@@ -469,7 +471,7 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
       case "uxCheck":
         return { ok: true, result: { issues: (world.ux[world.screen] ?? []).map((i) => ({ ...i, basis: "test" })), checked: ["choices"], actions: [] } };
       case "screenshot":
-        return { ok: true, result: { mime: "image/jpeg", data: Buffer.from("JPEGDATA").toString("base64"), width: 300, height: 650 } };
+        return { ok: true, result: { mime: "image/jpeg", data: world.shot ?? Buffer.from("JPEGDATA").toString("base64"), width: 300, height: world.shot !== undefined ? 600 : 650 } };
       case "openURL":
         return { ok: true, result: { settledMs: 10 } };
       default:
