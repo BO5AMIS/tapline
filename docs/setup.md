@@ -148,6 +148,9 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   `${typed}` step (never from a file or a call). `tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes]` opens a
   GitHub issue with your own `gh` (it asks `Send to GitHub? [y/N]`; `--yes` answers it without a terminal), `--zip <path>` writes a zip; each
   export is a line of kind `export` in the audit log.
+  **Trust boundary:** the run folder you pass to `tapline bug` and every folder above it must be trusted: your own explore output under
+  `~/.tapline`, or a folder that only you can write. Files are read by their real path and checked to stay inside the run, but a folder that
+  others can write (a shared or downloaded folder) is not supported in 1.8.5: someone who can change it while a bug is made can swap what is read.
 - `tapline schedule` and `tapline run-schedule` (1.7) run a saved route with no agent, on a time or when a file
   appears. `tapline schedule add <route> --at "09:00 daily" [--with name=value|name=@file] [--name NAME]
   [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as

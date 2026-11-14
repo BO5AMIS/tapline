@@ -84,6 +84,8 @@ Commands:
   bug      Make a one-page bug report from a finding of an explore report, with no phone, or list the bugs kept (~/.tapline/bugs/<app>/<bug id>/):
            tapline bug <report folder> <finding id> [--with-picture]; tapline bug list [--app ID]; tapline bug <bug id> shows one
            (exit 0: a bug was made or updated, 1: it didn't reproduce, 2: it couldn't be made or was refused;
+           the report folder and the folders above it must be trusted: your own explore output under ~/.tapline, or a folder only you can
+           write; a folder others can write is not supported;
            from "now" and from "failure" need the live session: tapline call bug_report '{...}';
            tapline bug <report folder> <finding id> --verify N and tapline bug verify <bug id> run the reproduction check on the phone;
            tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes] | --zip <path>)
