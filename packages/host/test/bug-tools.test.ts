@@ -85,7 +85,7 @@ describe("from a finding of an explore report (§29.3)", () => {
     const finding = reportOf(r.s).findings.find((f) => f.kind === "js_error");
     expect(finding?.picture).toEqual({ file: `findings/${finding?.id}.jpg`, private: true });
     const answer = textOf(await r.s.tools.bugReport({ finding: finding?.id as string }));
-    expect(answer).toMatch(/^New bug: JS error on home: TypeError: form failed\nReproduced: not checked \(the reproduction check isn't available in this version\)\.\nSeen: 1 time, 2026-11-14, build 1\.5\.0 \(220\)\.\nFolder: .*bug_[0-9a-f]{16}$/);
+    expect(answer).toMatch(/^New bug: JS error on home: TypeError: form failed\nReproduced: 3 of 3 runs\.\nSeen: 1 time, 2026-11-14, build 1\.5\.0 \(220\)\.\nFolder: .*bug_[0-9a-f]{16}$/);
     const id = idIn(answer);
     expect(r.bugs()).toEqual([id]);
     const dir = r.bugDir(id);
@@ -205,7 +205,7 @@ describe("from the last failed check (§29.3)", () => {
     const md = read(r.bugDir(id), "report.md");
     expect(md).toMatch(/\n1\. Tap .*open-settings.*\n2\. Tap .*open-language.*\n/);
     expect(md.split("\n").filter((line) => /^\d+\. /.test(line))).toHaveLength(2);
-    expect(md).toContain("not checked (the reproduction check isn't available in this version)");
+    expect(md).toContain("3 of 3 runs. Script: repro.json");
     const stored = JSON.parse(read(r.bugDir(id), "finding.json")) as { kind: string; bug: BugMeta };
     expect(stored.kind).toBe("expect_failed");
     expect(stored.bug.source.how).toBe("failure");
@@ -319,21 +319,15 @@ describe("the call itself (§29.3)", () => {
     expect(textOf(await t.bugReport({ finding: "f1", verify: 11 }))).toMatch(/^Error bad_params: verify is true, false or a whole number from 0 to 10/);
   });
 
-  it("verify and export are hooks for the next piece of work: a call that asks for one is refused, and nothing is made", async () => {
+  it("verify takes true, false or 1 to 10; false and 0 mean no check", async () => {
     const r = await rig({ world: broken });
     await r.s.tools.explore({});
-    for (const verify of [true, 3, 10]) {
-      const refused = await r.s.tools.bugReport({ finding: "f1", verify });
-      expect(refused.isError).toBe(true);
-      expect(textOf(refused)).toMatch(/^Error unsupported: verify \(the reproduction check\) isn't available in this version/);
-    }
-    const exported = await r.s.tools.bugReport({ finding: "f1", export: { to: "zip" } });
-    expect(textOf(exported)).toMatch(/^Error unsupported: export isn't available in this version/);
-    expect(r.bugs()).toEqual([]);
-    // false and 0 mean no check, and are fine
     const f = reportOf(r.s).findings.find((x) => x.kind === "js_error")?.id as string;
-    expect(textOf(await r.s.tools.bugReport({ finding: f, verify: false }))).toMatch(/^New bug/);
+    expect(textOf(await r.s.tools.bugReport({ finding: f, verify: false }))).toMatch(/^New bug.*\nReproduced: not checked \(no check was asked for\)\./s);
     expect(textOf(await r.s.tools.bugReport({ finding: f, verify: 0 }))).toMatch(/^Known bug/);
+    expect(textOf(await r.s.tools.bugReport({ finding: f, verify: 2 }))).toMatch(/\nReproduced: 2 of 2 runs\./);
+    // export goes with bug, alone
+    expect(textOf(await r.s.tools.bugReport({ finding: f, export: { to: "zip" } }))).toMatch(/^Error bad_params: export goes with bug/);
   });
 
   it("a check given through the hook runs, and the page and the answer say the result", async () => {
@@ -489,14 +483,14 @@ describe("tapline bug (§29.3, the CLI)", () => {
     expect(await runBug([m.run, m.finding], { verify: "abc" }, deps)).toBe(2);
   });
 
-  it("exit 2 for verify and export, which are hooks for the next piece of work", async () => {
+  it("exit 2 for verify with no way to reach the phone, and for an export of a bug that isn't kept", async () => {
     const m = await made();
     const { deps, err } = cli(m.bugsDir);
     expect(await runBug([m.run, m.finding], { verify: "3" }, deps)).toBe(2);
-    expect(err.at(-1)).toMatch(/verify \(the reproduction check\) isn't available/);
+    expect(err.at(-1)).toMatch(/verify \(the reproduction check\) needs the phone/);
     expect(await runBug(["verify", "bug_0123456789abcdef"], {}, deps)).toBe(2);
-    expect(await runBug(["export", "bug_0123456789abcdef"], { to: "zip" }, deps)).toBe(2);
-    expect(err.at(-1)).toMatch(/export isn't available/);
+    expect(await runBug(["export", "bug_0123456789abcdef"], { zip: "x.zip" }, deps)).toBe(2);
+    expect(err.at(-1)).toMatch(/^no bug bug_0123456789abcdef/);
     expect(existsSync(join(m.bugsDir, APP.id))).toBe(false);
   });
 

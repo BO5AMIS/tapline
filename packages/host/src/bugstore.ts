@@ -82,10 +82,17 @@ export interface BugMade {
 }
 
 /**
- * The reproduction check (§29.4), as a hook: task C gives it. It runs the bug's script `n` times and says how many runs showed the same bug.
- * With no hook a call that asks for a check is refused (`unsupported`), and a bug made without one says why it wasn't checked.
+ * The reproduction check (§29.4): runs the bug's script `n` times and says how many runs showed the same bug. The tools give their own (bugcheck.ts);
+ * a hook replaces it (tests).
  */
-export type BugCheck = (bug: { app: string; id: string; dir: string; finding: BugFinding; meta: BugMeta }, n: number, options: { reset: "own" | "app"; account?: string }) => Promise<BugMeta["reproduced"]>;
+export interface BugCheckOptions {
+  reset: "own" | "app";
+  account?: string;
+  /** A value for `${typed}`, from a person at a prompt of the command line; never from a call or a file. None: the check stops at such a step (§29.4). */
+  typed?: (name: string) => Promise<string | null>;
+}
+
+export type BugCheck = (bug: { app: string; id: string; dir: string; finding: BugFinding; meta: BugMeta }, n: number, options: BugCheckOptions) => Promise<BugMeta["reproduced"]>;
 
 export interface BugListEntry {
   app: string;

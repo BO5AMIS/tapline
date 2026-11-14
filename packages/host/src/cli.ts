@@ -35,6 +35,8 @@ import { MapRegistry } from "./places.js";
 import { TaplineHost } from "./server.js";
 import { APP_WAIT_MS, processStartTime, runSchedule } from "./runschedule.js";
 import { AuditLog } from "./auditlog.js";
+import { realRunner } from "./journeyexport.js";
+import { createInterface } from "node:readline";
 import { ownLockDeps } from "./pidlock.js";
 import { grantsUnlock, scheduleUnlock } from "./unlockcmd.js";
 import { connectScheduleHost, realTaskEntry, redactorFor, spawnSchedRunner } from "./schedulehost.js";
@@ -81,7 +83,9 @@ Commands:
   bug      Make a one-page bug report from a finding of an explore report, with no phone, or list the bugs kept (~/.tapline/bugs/<app>/<bug id>/):
            tapline bug <report folder> <finding id> [--with-picture]; tapline bug list [--app ID]; tapline bug <bug id> shows one
            (exit 0: a bug was made or updated, 1: it didn't reproduce, 2: it couldn't be made or was refused;
-           from "now" and from "failure" need the live session: tapline call bug_report '{...}')
+           from "now" and from "failure" need the live session: tapline call bug_report '{...}';
+           tapline bug <report folder> <finding id> --verify N and tapline bug verify <bug id> run the reproduction check on the phone;
+           tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes] | --zip <path>)
   run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
            (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
   vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
@@ -391,7 +395,44 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
   };
 }
 
-/** `tapline bug ...` (AGENT-TOOLS 1.16 §29.3): its own flags (`--app` takes an app id here), and no host. */
+/** A line from the terminal, typed visibly (a yes or no) or hidden (a value for `${typed}`); null when there is no terminal (§29.4, §29.7). */
+function terminalAsk(question: string, hidden: boolean): Promise<string | null> {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return Promise.resolve(null);
+  if (!hidden) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolve) => rl.question(`${question} `, (answer) => (rl.close(), resolve(answer))));
+  }
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    process.stdout.write(`${question} `);
+    let value = "";
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    const onData = (chunk: string): void => {
+      for (const char of chunk) {
+        if (char === "\r" || char === "\n" || char === "\u0004") {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.off("data", onData);
+          process.stdout.write("\n");
+          return resolve(value);
+        }
+        if (char === "\u0003") {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.off("data", onData);
+          process.stdout.write("\n");
+          return resolve(null);
+        }
+        value = char === "\u007f" || char === "\b" ? value.slice(0, -1) : value + char;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+/** `tapline bug ...` (AGENT-TOOLS 1.16 §29.3): its own flags (`--app` takes an app id here). Only the reproduction check starts a host of its own, for the phone. */
 async function runBugCommand(args: string[]): Promise<number> {
   let parsed: ReturnType<typeof parseBugArgs>;
   try {
@@ -426,9 +467,32 @@ async function runBugCommand(args: string[]): Promise<number> {
     }
   }
   const mapsDir = values.maps ?? join(configDir(), "maps");
+  // The check needs the phone: a host of its own, started only when a check is asked for and closed at the end (as `explore` does).
+  let own: Runtime | undefined;
+  const bugRuntime: RuntimeOptions = { ...(values.policy !== undefined ? { policy: values.policy } : {}), ...(values.accounts !== undefined ? { accounts: values.accounts } : {}), ...(values.maps !== undefined ? { maps: values.maps } : {}) };
   const deps: BugCliDeps = {
     bugsDir: join(configDir(), "bugs"),
     redact,
+    audit: new AuditLog(join(configDir(), "audit")),
+    runner: realRunner,
+    askYes: async (question) => {
+      const said = await terminalAsk(question, false);
+      return said === null ? null : /^y(es)?$/i.test(said.trim());
+    },
+    askValue: (question) => terminalAsk(question, true),
+    check: async (bug, n, options) => {
+      own ??= await createRuntime({ ...bugRuntime, screenshots: "file", log: () => undefined });
+      const runtime = own;
+      const until = Date.now() + APP_WAIT_MS;
+      while (runtime.host.current() === undefined && Date.now() < until) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      if (runtime.host.current() === undefined) return { checked: false, why: "no phone connected" };
+      if (runtime.phoneInUse()) return { checked: false, why: "stopped (busy)" };
+      const tools = runtime.toolsFor("bug");
+      return tools.withCall(undefined, () => tools.runBugCheck(bug, n, options));
+    },
+    close: async () => {
+      await own?.close();
+    },
     map: (app) => {
       const loaded = loadMap(mapDir(app, { mapsDir }), app);
       return loaded.status === "ok" ? loaded.map : undefined;
@@ -448,8 +512,8 @@ function parseBugArgs(args: string[]) {
       verify: { type: "string" },
       "with-picture": { type: "boolean" },
       app: { type: "string" },
-      to: { type: "string" },
-      repo: { type: "string" },
+      issue: { type: "string" },
+      zip: { type: "string" },
       public: { type: "boolean" },
       yes: { type: "boolean" },
       accounts: { type: "string" },

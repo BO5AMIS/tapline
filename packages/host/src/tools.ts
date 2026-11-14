@@ -61,8 +61,10 @@ import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.j
 import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { seenOf, type Seen } from "./seen.js";
-import { type BugMade, BugGateError, BugStore, appFolderName, isBugId, type BugCheck } from "./bugstore.js";
-import { bugTitle, cutDownLink, type BugFinding } from "./bug.js";
+import { type BugMade, BugGateError, BugStore, appFolderName, isBugId, type BugCheck, type BugCheckOptions } from "./bugstore.js";
+import { RUN_LIMIT_MS, VERIFY_DEFAULT, runCheck, type CheckHost, type StepResult } from "./bugcheck.js";
+import { bugTitle, cutDownLink, type BugFinding, type BugMeta } from "./bug.js";
+import { exportBug, type BugExportTarget } from "./bugexport.js";
 import { bugAnswer, makeBug, newestRun, observedFinding, readRunFinding, reproducedAnswer, shownPath, writablePath, type BugContext } from "./bugreport.js";
 
 /** A bug just made, and whether its answer says why it wasn't checked. */
@@ -72,7 +74,7 @@ interface Built {
 }
 const isBuilt = (value: Built | CallToolResult): value is Built => "made" in value && "reasonShown" in value && Array.isArray((value as { content?: unknown }).content) === false;
 import { namedTarget } from "./signature.js";
-import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, fixtureRef, isOutcome, type ExploreArgs, type ExploreFill, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
+import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, crashFacts, errorLine, fixtureRef, isOutcome, type ExploreArgs, type ExploreFill, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
@@ -422,9 +424,9 @@ export const toolShapes = {
     from: z.enum(["now", "failure"]).optional().describe("\"failure\": the last failed replay or run of this session; \"now\": what you saw while driving, with note, built from the last touches of the action log"),
     note: z.string().optional().describe("With from \"now\": what is wrong, one line, at most 300 characters (required)"),
     expected: z.string().optional().describe("With from \"now\": what should have happened, one line, at most 300 characters"),
-    verify: z.union([z.boolean(), z.number()]).optional().describe("How many reproduction runs, 1 to 10 (true: 3). Not available in this version: only false or 0 is accepted"),
-    reset: z.enum(["own", "app"]).optional().describe("With verify: the reset between runs (not available in this version)"),
-    account: z.string().optional().describe("With verify: a test account for the way back after a reset (not available in this version)"),
+    verify: z.union([z.boolean(), z.number()]).optional().describe("How many reproduction runs from a fresh start, 1 to 10 (true: 3; a bug from a finding or a failed run is checked 3 times when you say nothing, false or 0: not at all). A step that needs a person stops the check; a `${typed}` value can only be given by a person at the command line"),
+    reset: z.enum(["own", "app"]).optional().describe("With verify: \"own\" (default) reloads the app and keeps its data; \"app\" also runs the app's standard reset command, which clears its data"),
+    account: z.string().optional().describe("With verify: a vault account marked \"explore\": true, for the way back after a reset"),
     bug: z.string().optional().describe("A bug id kept earlier (bug_7bc2e91c152d416e): shows it, or with with_picture adds its picture"),
     with_picture: z.boolean().optional().describe("true: a private picture may go into the bug's folder. Say so only when your user asked"),
     export: z
@@ -436,7 +438,7 @@ export const toolShapes = {
         with_picture: z.boolean().optional(),
       })
       .optional()
-      .describe("Export a bug to a GitHub issue or a zip (not available in this version)"),
+      .describe("With bug: send it out of the bugs folder, to a GitHub issue ({to: \"issue\", repo, confirm: true, public?, with_picture?}: confirm only when your user asked) or a local zip ({to: \"zip\", with_picture?}); every file is checked again and each export is logged"),
   },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
@@ -728,7 +730,7 @@ export interface ToolsOptions {
   exploreDir?: string;
   /** Where `bug_report` keeps its bugs (e.g. ~/.tapline/bugs): `<app id>/<bug id>/` (AGENT-TOOLS 1.16 §29.2). Unset: bug_report answers that it can't keep one. */
   bugsDir?: string;
-  /** The reproduction check (§29.4): a hook for the next piece of work. Unset: a call that asks for a check is refused, and a bug says why it wasn't checked. */
+  /** The reproduction check (§29.4) replaced by a hook (tests). Unset: the tool's own check (bugcheck.ts). */
   bugCheck?: BugCheck;
   /** Wall-clock time in ms for the times in a finding and a report (tests pass their own). Default: Date.now. */
   wallClock?: () => number;
@@ -2461,6 +2463,17 @@ export class TaplineTools {
     return { answer: text(lines.join("\n")), outcome: result, ...(reportPath !== null ? { reportPath } : {}) };
   }
 
+  /** Runs one move inside the explore scope: the one gate every touch goes through (§25.1, §25.5). Used by the explorer and by the reproduction check. */
+  private exploreWithin(run: ExploreRun) {
+    return async <T>(go: () => Promise<T>, restoring = false, mayType = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
+      const scope: ExploreScope = { count: 0, run, ...(restoring ? { restoring: true } : {}), ...(mayType ? { mayType: true } : {}) };
+      const before = run.used;
+      const value = await this.exploreScope.run(scope, go);
+      // The steps a move cost are the requests the gate let through, successful or not: the same count the budget holds.
+      return { value, count: run.used - before, last: scope.last };
+    };
+  }
+
   /** What the explorer needs from this host. Every move is an ordinary action of this tool, inside the explorer's scope (§25.1, §25.5). */
   private exploreHost(session: SessionInfo, map: AppMap, wall: () => number, progress: ((line: string, steps: number) => void) | undefined, run: ExploreRun): ExploreHost {
     const identity = identityOf(session);
@@ -2469,13 +2482,7 @@ export class TaplineTools {
       return now !== undefined && identityOf(now) === identity ? now : undefined;
     };
     const sleepMs = (ms: number): Promise<void> => this.sleep(ms);
-    const within = async <T>(go: () => Promise<T>, restoring = false, mayType = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
-      const scope: ExploreScope = { count: 0, run, ...(restoring ? { restoring: true } : {}), ...(mayType ? { mayType: true } : {}) };
-      const before = run.used;
-      const value = await this.exploreScope.run(scope, go);
-      // The steps a move cost are the requests the gate let through, successful or not: the same count the budget holds.
-      return { value, count: run.used - before, last: scope.last };
-    };
+    const within = this.exploreWithin(run);
     const refusal = (answer: CallToolResult): { code: string; message: string; text: string } => {
       const said = answerText(answer);
       const m = /^Error (\w+):\s*([\s\S]*)$/.exec(said);
@@ -2713,19 +2720,20 @@ export class TaplineTools {
     if (given !== 1) return fail("Error bad_params: give exactly one of finding, from and bug.");
     if (args.run !== undefined && args.finding === undefined) return fail("Error bad_params: run goes with finding.");
     if ((args.note !== undefined || args.expected !== undefined) && args.from !== "now") return fail('Error bad_params: note and expected go with from: "now".');
-    // The reproduction check (§29.4) and the export (§29.7) are not part of this version: a call that asks for one is refused before anything is made.
+    if (args.export !== undefined) {
+      if (args.bug === undefined) return fail("Error bad_params: export goes with bug (the id of a kept bug).");
+      if (args.finding !== undefined || args.from !== undefined || args.verify !== undefined || args.with_picture !== undefined) return fail("Error bad_params: export is a call of its own: give bug and export, and with_picture inside export.");
+      return this.bugExport(store, args.bug, args.export);
+    }
     const verify = args.verify === undefined || args.verify === false || args.verify === 0 ? 0 : args.verify === true ? 3 : args.verify;
     if (!Number.isInteger(verify) || verify < 0 || verify > 10) return fail("Error bad_params: verify is true, false or a whole number from 0 to 10.");
-    const check = this.options.bugCheck;
-    if (verify > 0 && check === undefined) return fail("Error unsupported: verify (the reproduction check) isn't available in this version; the bug can be made without it.");
-    if (args.export !== undefined) return fail("Error unsupported: export isn't available in this version.");
-    // Without `verify` a bug from a finding or a failure is checked 3 times when a check exists; one from `now` is not checked (§29.3).
-    const runs = args.verify === undefined && args.from !== "now" && args.bug === undefined && check !== undefined ? 3 : verify;
+    // Without `verify` a bug from a finding or a failure is checked 3 times; one from `now` is not checked (§29.3, §29.4).
+    const runs = args.verify === undefined && args.from !== "now" && args.bug === undefined ? VERIFY_DEFAULT : verify;
     try {
       if (args.bug !== undefined) return await this.bugShow(store, args.bug, args.with_picture === true, runs, args);
       const built =
         args.finding !== undefined
-          ? await this.bugFromRun(store, args.finding, args.run, args.with_picture === true, args.verify === undefined)
+          ? await this.bugFromRun(store, args.finding, args.run, args.with_picture === true)
           : args.from === "failure"
             ? this.bugFromFailure(store)
             : await this.bugFromNow(store, args);
@@ -2737,12 +2745,164 @@ export class TaplineTools {
     }
   }
 
-  private static readonly NO_CHECK = "the reproduction check isn't available in this version";
+  /** The check this server runs unless a hook replaces it (tests). */
+  private readonly ownCheck: BugCheck = (bug, n, options) => this.runBugCheck(bug, n, options);
+
+  /**
+   * The reproduction check (AGENT-TOOLS 1.16 §29.4): `n` runs of the bug's `repro.json`, each from a fresh start, every move through the one
+   * explore gate (§25.5: the floor on the real recipient, no dialog, no grant). A step that needs a person stops the check with no move of it.
+   */
+  async runBugCheck(bug: Parameters<BugCheck>[0], n: number, options: BugCheckOptions): Promise<BugMeta["reproduced"]> {
+    const not = (why: string): BugMeta["reproduced"] => ({ checked: false, why });
+    const session = this.host.current();
+    if (session === undefined) return not("no phone connected");
+    if (this.exploring) return not("an explore or another check is running here");
+    if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return not("a journey is running");
+    if (this.recordingState !== null || this.replayingState || this.rivals > 0) return not("a script is being recorded or replayed");
+    const map = this.mapOf(session);
+    if (map === undefined) return not("this app reports no id of its own, so it has no map");
+    let script: { start: string | null; steps: PathStep[] };
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(bug.dir, "repro.json"), "utf8"));
+      const o = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+      script = { start: typeof o["start"] === "string" ? o["start"] : null, steps: Array.isArray(o["steps"]) ? (o["steps"] as PathStep[]) : [] };
+    } catch {
+      return not("repro.json can't be read");
+    }
+    this.exploring = true;
+    const keptFailure = this.lastFailure;
+    let run: ExploreRun | undefined;
+    let eh: ExploreHost | undefined;
+    const wall = this.options.wallClock ?? Date.now;
+    const fresh = (): { run: ExploreRun; eh: ExploreHost } => {
+      run?.ingress?.end();
+      // A run lasts at most a minute (§29.4); the budget of the gate holds it to that.
+      const made: ExploreRun = { used: 0, steps: 300, minutes: RUN_LIMIT_MS / 60_000, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], ingress: this.host.typedRun() };
+      run = made;
+      eh = this.exploreHost(session, map, wall, undefined, made);
+      return { run: made, eh };
+    };
+    const current = (): { run: ExploreRun; eh: ExploreHost } => (run !== undefined && eh !== undefined ? { run, eh } : fresh());
+    const resultOf = (answer: CallToolResult, last: { method: string; result: unknown } | undefined, unwrap?: string): StepResult => {
+      if (answer.isError !== true) {
+        const result = last?.result;
+        const settled = typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
+        return { kind: "ok", ...(typeof settled === "number" && Number.isFinite(settled) ? { settledMs: settled } : {}) };
+      }
+      let said = answerText(answer);
+      if (unwrap !== undefined) {
+        // `run` says `Error <code>: Ran 0 of 1 steps; stopped at step 1 (<step>): <message>`; the step's own answer is what the finding holds.
+        const head = /^Error (\w+): Ran \d+ of \d+ steps; stopped at step \d+ \(/.exec(said);
+        if (head !== null) {
+          const rest = said.slice(head[0].length);
+          said = `Error ${head[1] ?? "internal"}: ${rest.startsWith(`${unwrap}): `) ? rest.slice(unwrap.length + 3) : rest}`;
+        }
+      }
+      const m = /^Error (\w+):\s*([\s\S]*)$/.exec(said);
+      const code = m?.[1] ?? "internal";
+      const message = m?.[2] ?? said;
+      if (code === "busy" || code === "paused" || code === "locked") return { kind: "stop", code };
+      if (code === "not_allowed" && /explore budget/.test(message)) return { kind: "error", code: "budget", message: firstLine(message) };
+      if (code === "not_allowed" && /needs_confirmation|blocked|explore skip|policy word|explore touches nothing|explore won't/.test(message)) {
+        const word = /policy word "([^"]+)"/.exec(message)?.[1];
+        const why = /explore skip: (\w+)/.exec(message)?.[1];
+        return { kind: "person", why: word !== undefined ? `the policy word "${this.host.redactOut(word)}"` : why !== undefined ? `the skip floor: ${why}` : "a policy word" };
+      }
+      return { kind: "error", code, message: firstLine(message) };
+    };
+    const host: CheckHost = {
+      clock: () => this.clock(),
+      wall: () => new Date(wall()),
+      build: () => {
+        const now = this.host.current();
+        if (now === undefined) return null;
+        const build = now.app.build ?? "";
+        return `${now.app.version ?? ""} (${/\((.*)\)\s*$/.exec(build)?.[1] ?? build})`;
+      },
+      reset: async (mode) => {
+        const { eh: h } = fresh();
+        const reloaded = await h.reload();
+        let wiped = false;
+        // The standard `app_command reset` clears the app's data: only when it was asked for (§29.4).
+        if (mode === "app" && (await h.commands()).includes("reset")) wiped = (await h.runCommand("reset")).ok;
+        if (!reloaded.ok && !wiped) return { ok: false };
+        // A reset that brought the app to no readable place isn't one (§29.4).
+        if ((await h.tree()) === null) return { ok: false };
+        const words = wiped ? (reloaded.ok ? "reload and the app's reset command, data cleared" : "the app's reset command, data cleared") : "reload only, data kept";
+        return { ok: true, words };
+      },
+      start: async (place) => (await current().eh.go(place, "any", options.account)).ok,
+      step: async (step, typed) => {
+        const within = this.exploreWithin(current().run);
+        const { tool, expect, ...rest } = step as PathStep & { expect?: unknown };
+        const params: Record<string, unknown> = { ...rest, look: false };
+        const asShape = <T extends keyof typeof toolShapes>(): Shape<T> => params as unknown as Shape<T>;
+        if (tool === "type_text") {
+          if (typed === null) return { kind: "person", why: "a typed value" };
+          params["text"] = typed;
+          const { value, last } = await within(() => this.typeText(asShape<"type_text">()), false, true);
+          return resultOf(value, last);
+        }
+        if (expect !== undefined) {
+          const runStep: Record<string, unknown> = { tool, ...rest, expect };
+          const { value, last } = await within(() => this.run({ steps: [runStep], look: false } as unknown as Shape<"run">));
+          return resultOf(value, last, describeRunStep(runStep as unknown as Step));
+        }
+        const call = (): Promise<CallToolResult> | null => {
+          switch (tool) {
+            case "tap":
+              return this.tap(asShape<"tap">());
+            case "long_press":
+              return this.longPress(asShape<"long_press">());
+            case "toggle":
+              return this.toggle(asShape<"toggle">());
+            case "scroll":
+              return this.scroll(asShape<"scroll">());
+            case "swipe":
+              return this.swipe(asShape<"swipe">());
+            case "back":
+              return this.back(asShape<"back">());
+            case "open_url":
+              return this.openUrl(asShape<"open_url">());
+            default:
+              return null;
+          }
+        };
+        if (!["tap", "long_press", "toggle", "scroll", "swipe", "back", "open_url"].includes(tool)) return { kind: "error", code: "bad_params", message: `the check doesn't run a "${String(tool)}" step` };
+        const { value, last } = await within(() => call() as Promise<CallToolResult>);
+        return resultOf(value, last);
+      },
+      mark: () => current().eh.mark(),
+      since: async (raw) => {
+        const { eh: h } = current();
+        const after = h.since(raw);
+        return {
+          crash: after.crash === null ? null : (({ line, crash }) => ({ line, crash }))(crashFacts(after.crash)),
+          disconnected: after.disconnected,
+          errors: after.errors.map((entry) => errorLine(entry, (t) => h.redact(t))),
+        };
+      },
+      placeKey: async () => {
+        const tree = await current().eh.tree();
+        return tree === null ? null : map.observe(tree).place.key;
+      },
+      issues: async (kind) => (kind === "a11y" ? await current().eh.audit() : await current().eh.ux()),
+      inFront: () => current().eh.frontState() === "front",
+      redact: (t) => current().eh.redact(t),
+    };
+    try {
+      return await this.noteScope.run(true, () => runCheck(host, { finding: bug.finding, meta: bug.meta, script }, n, { reset: options.reset, ...(options.typed !== undefined ? { typed: options.typed } : {}) }));
+    } finally {
+      run?.ingress?.end();
+      this.exploring = false;
+      this.lastFailure = keptFailure;
+    }
+  }
 
   /** Runs the reproduction check on a bug just made, when there is one and it was asked for; the page and `finding.json` take its result (§29.4). */
   private async bugChecked(store: BugStore, made: BugMade, runs: number, args: Shape<"bug_report">): Promise<BugMade> {
-    const check = this.options.bugCheck;
-    if (check === undefined || runs <= 0) return made;
+    if (runs <= 0) return made;
+    const check = this.options.bugCheck ?? this.ownCheck;
     const app = made.finding.app;
     const reproduced = await check({ app, id: made.meta.id, dir: made.dir, finding: made.finding, meta: made.meta }, runs, { reset: args.reset ?? "own", ...(args.account !== undefined ? { account: args.account } : {}) });
     const meta = store.recordCheck(app, made.meta.id, reproduced, (t) => this.bugScrub(t));
@@ -2750,7 +2910,7 @@ export class TaplineTools {
   }
 
   /** `{finding, run}`: a finding of an explore report folder (or `"last"`, the newest of the app in front). */
-  private async bugFromRun(store: BugStore, findingId: string, run: string | undefined, withPicture: boolean, byDefault: boolean): Promise<Built | CallToolResult> {
+  private async bugFromRun(store: BugStore, findingId: string, run: string | undefined, withPicture: boolean): Promise<Built | CallToolResult> {
     const exploreDir = this.options.exploreDir;
     if (exploreDir === undefined) return fail("Error unsupported: this server keeps no explore reports.");
     let runDir: string | null;
@@ -2776,7 +2936,7 @@ export class TaplineTools {
       script: read.script,
       picture: read.picture,
       withPicture,
-      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : byDefault ? TaplineTools.NO_CHECK : "no check was asked for",
+      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : "no check was asked for",
     });
     return { made, reasonShown: true };
   }
@@ -2792,7 +2952,7 @@ export class TaplineTools {
       how: "failure",
       sourceKey: `failure/${failure.when}`,
       stepsCut: cut,
-      notChecked: TaplineTools.NO_CHECK,
+      notChecked: "no check was asked for",
     });
     return { made, reasonShown: true };
   }
@@ -2854,6 +3014,20 @@ export class TaplineTools {
     return { made, reasonShown: false };
   }
 
+  /** `{bug, export}`: sends a kept bug out of the tool's folder, to a GitHub issue or a zip (§29.7). */
+  private async bugExport(store: BugStore, id: string, target: BugExportTarget): Promise<CallToolResult> {
+    if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
+    const session = this.host.current();
+    const found = store.locate(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined) ?? store.locate(id);
+    if (found === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    try {
+      const done = await exportBug({ store, redact: (t) => this.bugScrub(t), audit: this.options.audit, run: this.options.exportRunner }, found.app, id, target);
+      return done.ok ? text(this.bugScrub(done.lines.join("\n"))) : fail(`Error ${done.code}: ${this.bugScrub(done.message)}`);
+    } catch (error) {
+      return fail(`Error internal: the export couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /** `{bug}`: shows a kept bug; with `with_picture` adds its private picture while the explore report still holds it. */
   private async bugShow(store: BugStore, id: string, withPicture: boolean, runs: number, args: Shape<"bug_report">): Promise<CallToolResult> {
     if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
@@ -2879,7 +3053,7 @@ export class TaplineTools {
       if (done === "gone") return fail(`Error not_found: ${note}`);
     }
     // A later check of a kept bug replaces `reproduced` and its line (§29.4).
-    if (runs > 0 && this.options.bugCheck !== undefined) {
+    if (runs > 0) {
       const made: BugMade = { meta: stored.meta, dir: stored.dir, isNew: false, title: bugTitle(stored.finding), finding: stored.finding };
       const meta = (await this.bugChecked(store, made, runs, args)).meta;
       note = `${note}${note === "" ? "" : "\n"}${reproducedAnswer({ meta }, true)}`;
