@@ -812,7 +812,7 @@ export function vaultStore(file: VaultFile): AccountStore {
  * value, so that rule doesn't apply to it). A protected file that can't be opened loads nothing and says why. A file that
  * can't be read or isn't the format throws a plain message that never quotes the file (it holds secrets).
  */
-export async function loadAccounts(file: string, probe: GitProbe = realGitProbe, deps: VaultDeps = realVaultDeps()): Promise<AccountsLoad> {
+export async function loadAccounts(file: string, probe: GitProbe = realGitProbe, deps: VaultDeps = realVaultDeps(), signal?: AbortSignal): Promise<AccountsLoad> {
   const path = resolve(file);
   if (!existsSync(path)) throw new Error(`the vault file ${path} doesn't exist`);
   // Through a symlink or a junction the file may really sit in a repo: ask about where it is.
@@ -832,7 +832,7 @@ export async function loadAccounts(file: string, probe: GitProbe = realGitProbe,
   let json: unknown;
   if (peek?.protected !== undefined) {
     try {
-      json = JSON.parse(await openProtected(real, peek, deps));
+      json = JSON.parse(await openProtected(real, peek, deps, signal));
     } catch (error) {
       if (error instanceof VaultOpenError) return { store: null, blocked: `the vault file can't be opened: ${error.message.replace(/[.\s]+$/, "")}.` };
       throw new Error(`the vault file ${path} was opened, but what it holds isn't valid JSON`);

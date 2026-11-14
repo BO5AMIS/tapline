@@ -23,6 +23,8 @@ export const APP_WAIT_MS = 60_000;
 export const CONNECT_TIMEOUT_MS = 120_000;
 /** How long closing a host (giving the lease back, stopping an own host) may take. */
 export const CLOSE_TIMEOUT_MS = 30_000;
+/** Loading a schedule's vault (a keychain or DPAPI subprocess that asks something of the system can stall). */
+export const VAULT_LOAD_TIMEOUT_MS = 30_000;
 
 /** A wait in a run that didn't end in time (§22.3): the run fails with `what` named, never waits for ever. */
 export class ScheduleTimeout extends Error {
@@ -90,7 +92,7 @@ export interface RunDeps extends PidLockDeps {
   connect: (schedule: Schedule, name: string) => Promise<ScheduleHost>;
   audit: AuditLog;
   /** Scrubs vault values from the report (§20.3): the scrubber for this schedule's accounts file. */
-  redactFor: (schedule: Schedule) => Promise<(text: string) => string>;
+  redactFor: (schedule: Schedule, signal?: AbortSignal) => Promise<(text: string) => string>;
   pid: number;
   alive: (pid: number) => boolean;
   /** When a process started, as text that is the same each time for one process (null: unknown). A lock keeps it so a reused process id is not taken for the holder. */
@@ -222,7 +224,16 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
   }
 
   const startedAt = deps.now();
-  const redact = await deps.redactFor(schedule);
+  // The first load of the vault is bounded, and its subprocess (the keychain, DPAPI) is killed when the time runs out. Without the vault
+  // there is no scrubber to report through, so the run doesn't start and never goes on with one that hides nothing. No lock is held yet.
+  let redact: (text: string) => string;
+  try {
+    redact = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, (signal) => deps.redactFor(schedule, signal));
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    deps.audit.write({ kind: "schedule", name, detail: "failed at step 0 (timeout)" });
+    return { text: `Schedule "${name}" couldn't start: ${why}`, code: 2 };
+  }
   const base = { schedule: name, tool: "tapline" as const, route: schedule.route, with: Object.keys(schedule.with) };
   const finishWith = (
     status: RunStatus,

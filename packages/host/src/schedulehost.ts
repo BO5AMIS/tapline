@@ -7,7 +7,7 @@ import { loadAccounts, type GitProbe } from "./accounts.js";
 import { loadPolicy } from "./policy.js";
 import type { VaultDeps } from "./vault.js";
 import { callTool, isToolName } from "./dispatch.js";
-import { bounded, isBusyAnswer, ScheduleTimeout, type CallAnswer, type ScheduleHost } from "./runschedule.js";
+import { bounded, isBusyAnswer, ScheduleTimeout, VAULT_LOAD_TIMEOUT_MS, type CallAnswer, type ScheduleHost } from "./runschedule.js";
 import type { ProcResult, SchedRunner, Schedule, TaskEntry } from "./schedule.js";
 import { canonicalPath, createRuntime, HOST_FACTS_TOOL, LEASE_TOOL, LEASE_TTL_MS, type HostFacts } from "./runtime.js";
 import { runThinCall, type ThinCallIO } from "./thincall.js";
@@ -98,7 +98,7 @@ function asFacts(text: string): HostFacts | null {
  */
 export interface FactHasher {
   policy(path: string): string | null;
-  accounts(path: string): Promise<string | null>;
+  accounts(path: string, signal?: AbortSignal): Promise<string | null>;
   maps(dir: string): string;
 }
 
@@ -112,11 +112,11 @@ export function factHasher(env: NodeJS.ProcessEnv = process.env, vaultDeps?: Vau
         return null;
       }
     },
-    async accounts(path) {
+    async accounts(path, signal) {
       try {
         const token = readFileSync(tokenFilePath(env), "utf8").trim();
         if (token === "") return null;
-        const loaded = await loadAccounts(path, gitProbe, vaultDeps);
+        const loaded = await loadAccounts(path, gitProbe, vaultDeps, signal);
         return loaded.store === null || loaded.fingerprint === undefined ? null : loaded.fingerprint(token);
       } catch {
         return null;
@@ -131,7 +131,7 @@ export function factHasher(env: NodeJS.ProcessEnv = process.env, vaultDeps?: Vau
  * schedule's (both the built-in policy when the schedule names none), the accounts file and the maps folder the same, and what the host
  * LOADED must be what this run would load now: asked, the host reloads first, and a block word or a permission changed since is in its hashes.
  */
-export async function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: NodeJS.ProcessEnv = process.env, hasher: FactHasher = factHasher(env)): Promise<string | null> {
+export async function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: NodeJS.ProcessEnv = process.env, hasher: FactHasher = factHasher(env), signal?: AbortSignal): Promise<string | null> {
   if (facts === null) return "its policy, accounts and maps can't be read";
   if (facts.noPolicy) return "it runs with --no-policy";
   const same = (wanted: string | null, had: string | null): boolean => (wanted === null ? had === null : had !== null && canonicalPath(wanted) === had);
@@ -144,7 +144,7 @@ export async function factsMismatch(schedule: Schedule, facts: HostFacts | null,
     if (now === null || facts.policyHash === null || now !== facts.policyHash) return "the policy the host holds is not the one in the file";
   }
   if (schedule.accounts !== null) {
-    const now = await hasher.accounts(schedule.accounts);
+    const now = await hasher.accounts(schedule.accounts, signal);
     if (now === null || facts.accountsHash === null || now !== facts.accountsHash) return "the vault the host holds is not the one the accounts file gives";
   }
   if (hasher.maps(maps) !== facts.mapsHash) return "the maps the host holds are not the ones on disk";
@@ -161,8 +161,7 @@ export const LEASE_CALL_TIMEOUT_MS = 10_000;
 export const DISCOVERY_TIMEOUT_MS = 30_000;
 /** The running host's facts (its policy, accounts and maps, reloaded when asked). */
 export const FACTS_TIMEOUT_MS = 30_000;
-/** Loading the schedule's vault to compare it with the host's (a vault that asks something of the system can stall). */
-export const VAULT_LOAD_TIMEOUT_MS = 30_000;
+export { VAULT_LOAD_TIMEOUT_MS };
 /** Starting a host of its own (the runtime and its listener). */
 export const OWN_HOST_SETUP_TIMEOUT_MS = 30_000;
 /**
@@ -194,7 +193,7 @@ async function runningHost(
   const port = first.port;
   const asked = await bounded("the host's facts", FACTS_TIMEOUT_MS, (signal) => thin(env, client, HOST_FACTS_TOOL, {}, { port }, signal));
   const facts = asked === null || asked.isError ? null : asFacts(asked.text);
-  const mismatch = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, () => factsMismatch(schedule, facts, env, hasher));
+  const mismatch = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, (signal) => factsMismatch(schedule, facts, env, hasher, signal));
   if (mismatch !== null || facts === null) return { host: null, mismatch: mismatch ?? "its policy, accounts and maps can't be read" };
   const instance = facts.instance;
   let credential: string | undefined;
@@ -380,12 +379,14 @@ export async function connectScheduleHost(schedule: Schedule, name: string, env:
 }
 
 /** The vault's redaction for a schedule's report: the accounts file the schedule names, else nothing to scrub. */
-export async function redactorFor(schedule: Schedule): Promise<(text: string) => string> {
+export async function redactorFor(schedule: Schedule, signal?: AbortSignal): Promise<(text: string) => string> {
   if (schedule.accounts === null) return (text) => text;
   try {
-    const loaded = await loadAccounts(schedule.accounts);
+    const loaded = await loadAccounts(schedule.accounts, undefined, undefined, signal);
     return loaded.store === null ? (text) => text : (text) => loaded.store.redact(text);
-  } catch {
+  } catch (error) {
+    // A load that was cut off is not "no vault": the caller fails the run instead of going on with a scrubber that hides nothing.
+    if (signal?.aborted === true) throw error;
     return (text) => text;
   }
 }

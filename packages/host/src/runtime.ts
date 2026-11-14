@@ -17,6 +17,7 @@ import {
   type ViewerMode,
 } from "./config.js";
 import { combinedRedact, loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
+import { bounded, ScheduleTimeout, VAULT_LOAD_TIMEOUT_MS } from "./runschedule.js";
 import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
 import { Confirmations } from "./confirm.js";
@@ -187,7 +188,17 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
   if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
   // The test accounts (AGENT-TOOLS 1.13 §18.6). A refused file still starts the server, with no accounts and the reason.
-  const accounts = options.accounts !== undefined ? await loadAccounts(options.accounts, options.gitProbe, options.vaultDeps) : undefined;
+  // The load is bounded: a keychain or DPAPI call that stalls is killed, and the host starts with no accounts and says why (never hangs).
+  let accounts: AccountsLoad | undefined;
+  if (options.accounts !== undefined) {
+    const file = options.accounts;
+    try {
+      accounts = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, (signal) => loadAccounts(file, options.gitProbe, options.vaultDeps, signal));
+    } catch (error) {
+      if (!(error instanceof ScheduleTimeout)) throw error;
+      accounts = { store: null, blocked: `the vault file can't be opened: ${error.message}` };
+    }
+  }
   if (accounts !== undefined) {
     const said = accounts.store === null ? accounts.blocked : accounts.note;
     if (said !== undefined) log(said);
@@ -366,7 +377,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
       let nextAccounts: AccountsLoad | undefined;
       let accountsHash: string | null = null;
       if (options.accounts !== undefined) {
-        const loaded = await loadAccounts(options.accounts, options.gitProbe, options.vaultDeps);
+        const loaded = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, (signal) => loadAccounts(options.accounts as string, options.gitProbe, options.vaultDeps, signal));
         if (loaded.store === null) throw new Error(loaded.blocked.replace(/[.\s]+$/, ""));
         if (loaded.fingerprint === undefined) throw new Error("the vault can't be fingerprinted");
         accountsHash = loaded.fingerprint(config.token);

@@ -7,6 +7,7 @@ import { ACCOUNTS_WARNING, loadAccounts, type GitProbe } from "./accounts.js";
 import { GrantBook } from "./grants.js";
 import { configDir, DEFAULT_PORT,DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
 import { ownLockDeps, type PidLockDeps } from "./pidlock.js";
+import { bounded, VAULT_LOAD_TIMEOUT_MS } from "./runschedule.js";
 import { findStuckLocks } from "./unlockcmd.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
@@ -422,7 +423,7 @@ async function checkMetro(deps: DoctorDeps, binary: string | null): Promise<Chec
 async function checkAccounts(file: string, probe: GitProbe | undefined): Promise<CheckResult> {
   const name = "Test accounts";
   try {
-    const loaded = await loadAccounts(file, probe);
+    const loaded = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, (signal) => loadAccounts(file, probe, undefined, signal));
     if (loaded.store === null) {
       const opened = loaded.blocked.startsWith("the vault file can't be opened");
       return {

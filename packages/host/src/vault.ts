@@ -32,31 +32,48 @@ export interface ProcResult {
   stderr: string;
 }
 /** Runs a program with text on its stdin. The text may hold a secret: it never goes on the command line. */
-export type ProcRunner = (command: string, args: string[], input: string) => Promise<ProcResult>;
+export type ProcRunner = (command: string, args: string[], input: string, signal?: AbortSignal) => Promise<ProcResult>;
 
-export const spawnRunner: ProcRunner = (command, args, input) =>
+export const spawnRunner: ProcRunner = (command, args, input, signal) =>
   new Promise((done) => {
     let out = "";
     let err = "";
     let child: ReturnType<typeof spawn>;
+    if (signal?.aborted === true) {
+      done({ code: null, stdout: "", stderr: "aborted" });
+      return;
+    }
     try {
       child = spawn(command, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     } catch {
       done({ code: null, stdout: "", stderr: "couldn't start" });
       return;
     }
+    // An abort (the caller's time ran out) kills the program: a stalled keychain or PowerShell call never outlives its wait.
+    const onAbort = (): void => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      done({ code: null, stdout: "", stderr: "aborted" });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => (out += chunk));
     child.stderr?.setEncoding("utf8").on("data", (chunk: string) => (err += chunk));
     child.on("error", () => done({ code: null, stdout: out, stderr: "couldn't start" }));
-    child.on("close", (code) => done({ code, stdout: out, stderr: err }));
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      done({ code, stdout: out, stderr: err });
+    });
     child.stdin?.on("error", () => undefined);
     child.stdin?.end(input);
   });
 
 /** CryptProtectData and CryptUnprotectData, current-user scope, with the entropy given. */
 export interface Dpapi {
-  protect(data: Buffer, entropy: Buffer): Promise<Buffer>;
-  unprotect(blob: Buffer, entropy: Buffer): Promise<Buffer>;
+  protect(data: Buffer, entropy: Buffer, signal?: AbortSignal): Promise<Buffer>;
+  unprotect(blob: Buffer, entropy: Buffer, signal?: AbortSignal): Promise<Buffer>;
 }
 
 /**
@@ -75,21 +92,21 @@ const DPAPI_SCRIPT = [
 ].join("; ");
 
 export function powershellDpapi(run: ProcRunner = spawnRunner): Dpapi {
-  const call = async (mode: "protect" | "unprotect", data: Buffer, entropy: Buffer): Promise<Buffer> => {
-    const out = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", DPAPI_SCRIPT], `${mode}\n${data.toString("base64")}\n${entropy.toString("base64")}\n`);
+  const call = async (mode: "protect" | "unprotect", data: Buffer, entropy: Buffer, signal?: AbortSignal): Promise<Buffer> => {
+    const out = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", DPAPI_SCRIPT], `${mode}\n${data.toString("base64")}\n${entropy.toString("base64")}\n`, signal);
     if (out.code !== 0 || out.stdout.trim() === "") {
       throw new Error(mode === "protect" ? "Windows couldn't protect the data" : "Windows couldn't decrypt it (it was protected for another user or another computer)");
     }
     return Buffer.from(out.stdout.trim(), "base64");
   };
-  return { protect: (data, entropy) => call("protect", data, entropy), unprotect: (blob, entropy) => call("unprotect", blob, entropy) };
+  return { protect: (data, entropy, signal) => call("protect", data, entropy, signal), unprotect: (blob, entropy, signal) => call("unprotect", blob, entropy, signal) };
 }
 
 /** The macOS keychain's generic passwords under the vault's service. */
 export interface Keychain {
   /** The stored UTF-8 JSON, or null when there is no entry for this account. */
-  read(account: string): Promise<string | null>;
-  write(account: string, json: string): Promise<void>;
+  read(account: string, signal?: AbortSignal): Promise<string | null>;
+  write(account: string, json: string, signal?: AbortSignal): Promise<void>;
 }
 
 function securityQuote(text: string): string {
@@ -137,8 +154,8 @@ export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
    * data that isn't plain text as hex, but plain text made only of hex digits (a chunk such as "41" repeated) looks the same: both
    * readings are kept, and the caller (the manifest's checksum, or the writer's own piece) says which one is right.
    */
-  const readBoth = async (account: string): Promise<{ raw: string; decoded: string | null } | null> => {
-    const out = await run("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"], "");
+  const readBoth = async (account: string, signal?: AbortSignal): Promise<{ raw: string; decoded: string | null } | null> => {
+    const out = await run("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"], "", signal);
     if (out.code !== 0) return null;
     const text = out.stdout.replace(/\r?\n$/, "");
     if (text === "") return null;
@@ -151,18 +168,19 @@ export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
     }
   };
   /** The stored text of one entry, or null when there is none (real hex decodes to UTF-8; for a lone item the decoded reading is the one). */
-  const readText = async (account: string): Promise<string | null> => {
-    const both = await readBoth(account);
+  const readText = async (account: string, signal?: AbortSignal): Promise<string | null> => {
+    const both = await readBoth(account, signal);
     return both === null ? null : (both.decoded ?? both.raw);
   };
-  const read = async (account: string): Promise<string | null> => {
-    const text = await readText(account);
+  const read = async (account: string, signal?: AbortSignal): Promise<string | null> => {
+    const text = await readText(account, signal);
     const manifest = manifestOf(text);
     if (manifest === null) return text;
     if (manifest.chunks === 0 || manifest.sha256 === null) throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunk list is unreadable)");
     const readings: { raw: Buffer; decoded: Buffer | null }[] = [];
     for (let i = 1; i <= manifest.chunks; i++) {
-      const chunk = await readBoth(chunkAccount(account, i));
+      signal?.throwIfAborted();
+      const chunk = await readBoth(chunkAccount(account, i), signal);
       if (chunk === null) throw new VaultIncompleteError(`the vault in the keychain is incomplete (chunk ${i} of ${manifest.chunks} is missing)`);
       readings.push({ raw: Buffer.from(chunk.raw, "utf8"), decoded: chunk.decoded === null ? null : Buffer.from(chunk.decoded, "utf8") });
     }
@@ -271,12 +289,12 @@ export function peekFile(text: string): { protected?: string; data?: string } | 
 export class VaultOpenError extends Error {}
 
 /** The decrypted JSON text of a protected file. Throws `VaultOpenError` with the reason (never a value). */
-export async function openProtected(path: string, file: { protected?: string; data?: string }, deps: VaultDeps): Promise<string> {
+export async function openProtected(path: string, file: { protected?: string; data?: string }, deps: VaultDeps, signal?: AbortSignal): Promise<string> {
   if (file.protected === "dpapi-user") {
     if (deps.platform !== "win32") throw new VaultOpenError("the file is protected with Windows DPAPI and can only be opened on Windows");
     if (file.data === undefined || file.data === "") throw new VaultOpenError("the protected file holds no data");
     try {
-      return (await deps.dpapi.unprotect(Buffer.from(file.data, "base64"), DPAPI_ENTROPY)).toString("utf8");
+      return (await deps.dpapi.unprotect(Buffer.from(file.data, "base64"), DPAPI_ENTROPY, signal)).toString("utf8");
     } catch (error) {
       throw new VaultOpenError(error instanceof Error ? error.message : "Windows couldn't decrypt it");
     }
@@ -285,7 +303,7 @@ export async function openProtected(path: string, file: { protected?: string; da
     if (deps.platform !== "darwin") throw new VaultOpenError("the file is protected with the macOS keychain and can only be opened on a Mac");
     let found: string | null;
     try {
-      found = await deps.keychain.read(realPathOf(path));
+      found = await deps.keychain.read(realPathOf(path), signal);
     } catch (error) {
       // a chunked vault with a missing chunk or a wrong checksum: fail closed, and say why (§20.2)
       if (error instanceof VaultIncompleteError) throw new VaultOpenError(error.message);
