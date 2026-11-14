@@ -31,6 +31,8 @@ export interface MapPlace {
   link: string | null;
   titles?: Record<string, string>;
   last: string;
+  /** What the explorer tried here (AGENT-TOOLS 1.15 §28.1). Absent on an older map; the map's version stays 1. */
+  explored?: ExploredRecord;
   [unknown: string]: unknown;
 }
 
@@ -190,6 +192,109 @@ export function mapDir(app: string, options: { mapsDir?: string; home?: string }
   return join(base, id);
 }
 
+// The explored record (AGENT-TOOLS 1.15 §28.1, §28.2). It lives here, not in explored.ts, because this file imports nothing of
+// ours (a child process runs it as source); explored.ts re-exports it with the helpers.
+
+export const FRONTIER_MAX = 50;
+/** The mark that says the frontier was cut at 50 (§28.1). */
+export const FRONTIER_MORE = "…";
+
+export type TriedKind = "road" | "same" | "refused" | "crash" | "left";
+export type ActionResult = TriedKind | "skipped";
+/** Why an action was skipped (§28.3). */
+export type SkipWhy = "policy" | "floor" | "skip_list" | "app_mark" | "may_submit" | "system";
+
+export const SKIP_WHYS: readonly SkipWhy[] = ["policy", "floor", "skip_list", "app_mark", "may_submit", "system"];
+
+/** What `markTried` is told. A road names where it arrived; a refusal says how. */
+export type TriedResult =
+  | { result: "road"; to: string }
+  | { result: "same" }
+  | { result: "refused"; code: string }
+  | { result: "crash" }
+  | { result: "left" };
+
+export interface ExploredAction {
+  sig: string;
+  result: ActionResult | (string & {});
+  to?: string;
+  code?: string;
+  why?: string;
+  word?: string;
+  build?: string;
+  last: string;
+  [unknown: string]: unknown;
+}
+
+export interface ExploredRecord {
+  last: string;
+  actions: ExploredAction[];
+  /** Signatures seen on the place and not yet tried or skipped; at most 50, then `…`. */
+  frontier: string[];
+  [unknown: string]: unknown;
+}
+
+// Loose: a field a newer tool adds survives. `result` is a plain string so a new kind doesn't make the file unreadable.
+export const exploredActionSchema = z.looseObject({
+  sig: z.string(),
+  result: z.string(),
+  to: z.string().optional(),
+  code: z.string().optional(),
+  why: z.string().optional(),
+  word: z.string().optional(),
+  build: z.string().optional(),
+  last: z.string(),
+});
+export const exploredSchema = z.looseObject({
+  last: z.string(),
+  actions: z.array(exploredActionSchema).default([]),
+  frontier: z.array(z.string()).default([]),
+});
+
+/** The frontier as signatures only, without the cut mark. */
+export function realFrontier(frontier: readonly string[]): string[] {
+  return frontier.filter((sig) => sig !== FRONTIER_MORE);
+}
+
+/** At most 50 signatures, in order and without repeats, then `…` when some were left out (or already were, `more`). */
+export function capFrontier(sigs: readonly string[], more = false): string[] {
+  const unique = [...new Set(sigs)];
+  const cut = unique.length > FRONTIER_MAX || more;
+  const kept = unique.slice(0, FRONTIER_MAX);
+  return cut ? [...kept, FRONTIER_MORE] : kept;
+}
+
+/**
+ * After a merge or a change the frontier is recomputed: a signature that is in `actions` leaves it (§28.2). Whether an
+ * old build's action is tried again is `frontierOf`'s question, not the stored list's.
+ */
+export function recomputeFrontier(record: ExploredRecord): ExploredRecord {
+  const done = new Set(record.actions.map((action) => action.sig));
+  const more = record.frontier.includes(FRONTIER_MORE);
+  return { ...record, frontier: capFrontier(realFrontier(record.frontier).filter((sig) => !done.has(sig)), more) };
+}
+
+/** Two records of one place, merged: by `sig`, the newest `last` wins and on a tie `mine`; then the frontier is recomputed. */
+export function mergeExplored(disk: ExploredRecord, mine: ExploredRecord): ExploredRecord {
+  const bySig = new Map<string, ExploredAction>();
+  for (const action of disk.actions) bySig.set(action.sig, action);
+  for (const action of mine.actions) {
+    const have = bySig.get(action.sig);
+    // Equal stamps: mine is the newer one.
+    if (have === undefined || compareLast(action.last, have.last) >= 0) bySig.set(action.sig, action);
+  }
+  const older = compareLast(mine.last, disk.last) >= 0 ? disk : mine;
+  const newer = older === disk ? mine : disk;
+  const merged: ExploredRecord = {
+    ...older,
+    ...newer,
+    last: compareLast(mine.last, disk.last) >= 0 ? mine.last : disk.last,
+    actions: [...bySig.values()],
+    frontier: capFrontier([...realFrontier(disk.frontier), ...realFrontier(mine.frontier)], disk.frontier.includes(FRONTIER_MORE) || mine.frontier.includes(FRONTIER_MORE)),
+  };
+  return recomputeFrontier(merged);
+}
+
 // What the file must hold. Every object is loose so unknown fields survive a round trip.
 const keySchema = z.union([
   z.looseObject({ route: z.array(z.string()), tab: z.string().optional(), layer: z.string().optional() }),
@@ -200,6 +305,8 @@ const placeSchema = z.looseObject({
   link: z.string().nullable(),
   titles: z.record(z.string(), z.string()).optional(),
   last: z.string(),
+  // A record that doesn't fit is dropped, not a reason to refuse the whole file: a map without it still drives.
+  explored: exploredSchema.optional().catch(undefined),
 });
 const moveSchema = z.looseObject({
   tool: z.string(),
@@ -306,6 +413,13 @@ function mergePlace(disk: MapPlace, mine: MapPlace): MapPlace {
   const titles = { ...older.titles, ...newer.titles };
   const merged: MapPlace = { ...older, ...newer, link: newer.link ?? older.link };
   if (Object.keys(titles).length > 0) merged.titles = titles;
+  // The explored record merges by signature, so the newer place never drops the other's work (§28.2).
+  if (disk.explored !== undefined && mine.explored !== undefined) merged.explored = mergeExplored(disk.explored, mine.explored);
+  else {
+    const only = disk.explored ?? mine.explored;
+    if (only !== undefined) merged.explored = only;
+    else delete merged.explored;
+  }
   return merged;
 }
 

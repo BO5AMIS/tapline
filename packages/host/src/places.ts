@@ -1,5 +1,16 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import {
+  countsAsTried,
+  frontierOf,
+  withSeen,
+  withSkipped,
+  withTried,
+  type ExploredAction,
+  type ExploredRecord,
+  type SkipWhy,
+  type TriedResult,
+} from "./explored.js";
 import { roleOf } from "./format.js";
 import {
   loadMap,
@@ -633,6 +644,50 @@ export class AppMap {
     this.map.roads.push(updated);
     this.touch();
     return updated;
+  }
+
+  // -- the explored record (§28): only `explore` calls these; a replay's read-only map never writes
+
+  /** What the explorer still has to try at a place: the saved frontier and the actions of an older build (§28.1). Empty for an unknown place. */
+  frontier(place: string): string[] {
+    return frontierOf(this.map.places[place]?.explored, this.currentBuild());
+  }
+
+  /** Whether an action counts as tried now: tried on this build, or skipped (§28.1). */
+  isTried(place: string, sig: string): boolean {
+    const action = this.map.places[place]?.explored?.actions.find((candidate) => candidate.sig === sig);
+    return action !== undefined && countsAsTried(action, this.currentBuild());
+  }
+
+  /** The saved entry for an action, or undefined. */
+  triedAction(place: string, sig: string): ExploredAction | undefined {
+    return this.map.places[place]?.explored?.actions.find((candidate) => candidate.sig === sig);
+  }
+
+  /** Signatures seen on a place that nothing has tried or skipped yet join its frontier. False for an unknown place or a replay. */
+  markSeen(place: string, sigs: readonly string[]): boolean {
+    return this.editExplored(place, (record, now) => withSeen(record, sigs, now));
+  }
+
+  /** The result of an action tried at a place, on the current build. A new try replaces the old entry. */
+  markTried(place: string, sig: string, result: TriedResult): boolean {
+    const build = this.currentBuild();
+    return this.editExplored(place, (record, now) => withTried(record, sig, result, build, now));
+  }
+
+  /** An action skipped by policy (§28.3): kept for every build, and never an allowance. */
+  markSkipped(place: string, sig: string, why: SkipWhy, word?: string): boolean {
+    return this.editExplored(place, (record, now) => withSkipped(record, sig, why, word, now));
+  }
+
+  private editExplored(place: string, change: (record: ExploredRecord | undefined, now: string) => ExploredRecord): boolean {
+    const saved = this.map.places[place];
+    if (saved === undefined || this.readOnly) return false;
+    const now = this.iso();
+    saved.explored = change(saved.explored, now);
+    saved.last = now;
+    this.touch();
+    return true;
   }
 
   // -- edits the `map` tool makes
