@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
 import { normalizedBases, variantsOf } from "./accounts.js";
@@ -198,6 +198,8 @@ export class BugStore {
   constructor(
     readonly base: string,
     private readonly kept: number = BUGS_KEPT,
+    /** The lstat the store uses to tell an absent script from one it can't reach (tests inject a failing one). */
+    private readonly lstat: (path: string) => unknown = lstatSync,
   ) {}
 
   appDir(app: string): string {
@@ -455,7 +457,14 @@ export class BugStore {
   /** The texts of a bug's folder that an update keeps unchanged. */
   private retained(dir: string): Record<string, string> {
     const path = join(dir, "repro.json");
-    if (!existsSync(path)) return {};
+    // Only a plain "absent" (ENOENT, or ENOTDIR above it) means no script; a link whose target can't be reached, or any other error, refuses the update.
+    try {
+      this.lstat(path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return {};
+      throw new BugGateError("repro.json", "repro.json can't be reached, so it can't be checked.");
+    }
     try {
       return { "repro.json": readContainedText(dir, path) };
     } catch {
