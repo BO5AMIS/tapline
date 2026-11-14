@@ -1,4 +1,5 @@
-import { open, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { AuditSink } from "./auditlog.js";
@@ -7,14 +8,12 @@ import { listsFor, matchWord, policySchema } from "./policy.js";
 
 /**
  * AGENT-TOOLS 1.14 §19: grants. A person's standing OK for a kind of touch, with limits, given ahead of time. A grant lives
- * in the policy file (version 2), is counted in `<policy file>.state.json` under `<policy file>.state.lock`, and every use is a
+ * in the policy file (version 2), is counted as slot files under `<policy file>.uses/` (no lock, no state file), and every use is a
  * line of the audit log (§23). Only a person makes a grant; nothing here creates, edits or lifts one.
  */
 
 /** The most days away a grant's `until` may be, counted from the day the file is loaded (§19.1). */
 export const GRANT_MAX_DAYS = 30;
-/** A lock older than this is taken over (§19.4). */
-export const LOCK_STALE_MS = 30_000;
 
 export interface Grant {
   name: string;
@@ -73,7 +72,7 @@ export function localDate(d: Date): string {
   return `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** ISO 8601 in local time with its offset, as §19.4's state file keeps it. */
+/** ISO 8601 in local time with its offset, as a slot file keeps it (§19.4). */
 export function localIso(d: Date): string {
   const off = -d.getTimezoneOffset();
   const sign = off >= 0 ? "+" : "-";
@@ -138,6 +137,7 @@ export function parseGrants(raw: unknown, today: string, block: (app: string) =>
     if (!parsed.success) return refuse("it isn't an object.");
     const g = parsed.data;
     if (label.startsWith("#")) return refuse("name is missing.");
+    if (!safeGrantName(label)) return refuse("name may only use letters, digits, _, . and - (it names a folder), and not be . or .. or end in a dot.");
     if (seen.has(label)) return refuse("name is already used by an earlier grant.");
     seen.add(label);
     if (typeof g.app !== "string" || g.app.trim() === "") return refuse("app is missing.");
@@ -183,68 +183,60 @@ export function parseGrants(raw: unknown, today: string, block: (app: string) =>
   return { grants, refused };
 }
 
-// -- the state file (§19.4)
+// -- the uses: slot files (§19.4, 1.14.1)
 
 /**
- * `generation` is the fence (PR 12 review): it goes up by one at every write, and a writer that finds it changed since it read
- * the file, or that no longer owns the lock, writes nothing. A file without it (the other tool's) reads as generation 0.
+ * A grant's uses are files, with no state file, no lock, no takeover and no generation. A use is a file created exclusively
+ * (`wx`), so the file system decides who got it:
+ *   a day slot:  `<policy file>.uses/<grant name>/<YYYY-MM-DD>/<k>`   for k = 1..perDay
+ *   an hour slot: `<policy file>.uses/<grant name>/<YYYY-MM-DDTHH>/h<k>` for k = 1..perHour (the clock hour, not a rolling 60 minutes)
+ * all in local time. A count is the number of entries in the folder, whatever their names or content: an unreadable or garbage
+ * file counts, which fails closed. A stalled writer can only ever fill a slot nobody else has taken, so none can approve a use
+ * another one already made.
  */
-/** The uses of a state file, copied entry by entry as own properties (a schema's record would drop a grant named `__proto__`); null when the shape is wrong. */
-function parseUses(value: unknown): Uses | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const uses: Uses = {};
-  for (const [name, days] of Object.entries(value)) {
-    if (typeof days !== "object" || days === null || Array.isArray(days)) return null;
-    const mine = ensureUses(uses, name);
-    for (const [date, stamps] of Object.entries(days)) {
-      if (!Array.isArray(stamps) || !stamps.every((stamp) => typeof stamp === "string")) return null;
-      Object.defineProperty(mine, date, { value: [...stamps], enumerable: true, writable: true, configurable: true });
-    }
-  }
-  return uses;
+
+/** Whether a grant's name is safe as a folder name: letters, digits, `_`, `.` and `-`; never `.`, `..` or one that ends in a dot (Windows drops it). */
+export function safeGrantName(name: string): boolean {
+  return /^[\w.-]+$/.test(name) && name !== "." && name !== ".." && !name.endsWith(".");
 }
-type Uses = Record<string, Record<string, string[]>>;
 
-const hasOwn = (object: object, key: string): boolean => Object.prototype.hasOwnProperty.call(object, key);
+const hourFolder = (at: Date): string => `${localDate(at)}T${pad(at.getHours())}`;
 
-/** A grant's own entry in the uses: a name like `constructor` or `__proto__` is never read through the prototype chain. */
 /** The one key a grant scope is compared with: the app's id, or its name when it has none (the Grant.app contract). */
 function appKey(app: { id?: string; name: string }): string {
   return app.id ?? app.name;
 }
 
-function usesOf(uses: Uses, name: string): Record<string, string[]> | undefined {
-  return hasOwn(uses, name) ? uses[name] : undefined;
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code: unknown }).code === "string" ? (error as { code: string }).code : undefined;
 }
 
-/** The grant's entry, created as an own property (plain assignment is not safe for `__proto__`). */
-function ensureUses(uses: Uses, name: string): Record<string, string[]> {
-  const found = usesOf(uses, name);
-  if (found !== undefined) return found;
-  const created: Record<string, string[]> = {};
-  Object.defineProperty(uses, name, { value: created, enumerable: true, writable: true, configurable: true });
-  return created;
-}
-interface State {
-  uses: Uses;
-  generation: number;
+/** A folder's entries; `[]` when it doesn't exist yet; null when it can't be read (a file in the way, no permission): fail closed. */
+async function listDir(path: string): Promise<string[] | null> {
+  try {
+    return await readdir(path);
+  } catch (error) {
+    return errorCode(error) === "ENOENT" ? [] : null;
+  }
 }
 
-/** What a holder of the lock can ask: does the lock file still carry my token? */
-interface LockHold {
-  owns(): Promise<boolean>;
-}
-
-/** What the touch is, for a grant to match: the app, the element's own label and text, and the saved routes running now. */
+/** What a touch is, for a grant to match: the app, the element's own label and text, and the saved routes running now. */
 export interface GrantTouch {
   app: { id?: string; name: string };
   element: { label?: string | null; text?: string | null };
   routes: string[];
 }
 
+/** What `release` and `stillCovers` need to know of a use: who made it and which slot files (relative to the uses folder, `/`-separated) hold it. */
+export interface GrantUseRef {
+  name: string;
+  owner: string;
+  slots: string[];
+}
+
 export type GrantDecision =
-  /** `stamp` and `date` name the recorded use, so `release` can take it back when the touch wasn't made. */
-  | { kind: "covered"; name: string; line: string; /** `2 of 3`, for a dry run's words. */ counts: string; counted: boolean; stamp: string; date: string }
+  /** `owner` and `slots` name the recorded use, so `release` can take it back when the touch wasn't made (`peek` has none). */
+  | { kind: "covered"; name: string; line: string; /** `2 of 3`, for a dry run's words. */ counts: string; counted: boolean; owner: string; slots: string[] }
   /**
    * A draftsOnly grant covers the touch (§19.3): the touch stops before it is made and shows a draft to a person (§21.3). Nothing is
    * counted: a draft a person sends isn't a use of the grant, the person's OK let it through.
@@ -253,79 +245,43 @@ export type GrantDecision =
   /** The touch asks a person; `notes` say why a grant that matched didn't cover it (§19.3). */
   | { kind: "ask"; notes: string[]; /** Why each matching grant didn't cover it, in the report's words: `limit reached`, `quiet hours`, `ended`, `revoked`. */ asked: string[] };
 
-/** What a look at the policy file and the state file found, for `doctor` and the first answer (§19.1, §19.4). */
+/** What a look at the policy file and the uses folder found, for `doctor` and the first answer (§19.1, §19.4). */
 export interface GrantReport {
   /** False when the policy file can't be read or parsed any more: no grant covers anything. */
   fileOk: boolean;
   grants: Grant[];
   refused: GrantRefusal[];
-  /** The state file doesn't parse: every grant counts as used up. */
-  stateBroken: boolean;
+  /** The uses folder (or a grant's folder in it) can't be read: that grant counts as used up. */
+  usesBroken: boolean;
 }
 
 export interface GrantBookOptions {
   policyPath: string;
   /** The audit log. Without one no grant covers a touch: a grant needs its line (§23). */
   audit: AuditSink | null;
+  /** The clock. A claim reads it again when it claims, so the day and the hour it counts against are the ones it claims in. */
   now?: () => Date;
-  /** The wall clock in ms, for the age of a lock (a lock's file time is the real time, whatever the grants' clock says). */
-  lockClock?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  staleMs?: number;
-  /** For tests: runs while the lock is held, after the counts were read and before the use is committed (a stalled holder). */
-  beforeCommit?: () => Promise<void>;
-  /** How often a holder that holds on refreshes the lock file's mtime (§19.4: at least every 10 s). */
-  refreshMs?: number;
-  /** For tests: the rename the lock's takeover and release go through (a held-open handle on Windows makes a real one fail). */
-  renameFile?: (from: string, to: string) => Promise<void>;
+  /** For tests: runs before each exclusive create of a slot file (a writer that pauses at any point). */
+  beforeCreate?: (path: string) => Promise<void>;
+  /** For tests: runs after a use's slot files exist and before the policy is read again and the audit line written. */
+  afterClaim?: () => Promise<void>;
 }
 
-const LOCK_TRIES = 300;
-const LOCK_WAIT_MS = 20;
 const RENAME_TRIES = 5;
-/** A holder that holds the lock longer than this keeps its mtime fresh, so a rival never judges it stale (§19.4). */
-export const LOCK_REFRESH_MS = 10_000;
+const RENAME_WAIT_MS = 20;
 
-/** The holder found that it no longer owns the lock (or that the file changed under it): it records nothing. */
-class LostLockError extends Error {
-  constructor() {
-    super("the lock was taken over");
-  }
-}
+/** A claimed use: the day's count including this use, who made it, and its slot files. */
+type Claimed = { today: number; owner: string; slots: string[] };
 
-/** The owner token a lock's content names; undefined for a lock that is not in this format (an older or other tool's). */
-function lockOwner(text: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && typeof (parsed as { owner?: unknown }).owner === "string" ? (parsed as { owner: string }).owner : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code: unknown }).code === "string" ? (error as { code: string }).code : undefined;
-}
+type SlotResult = { file: string; count: number } | { full: number } | null;
 
 export class GrantBook {
   private readonly now: () => Date;
-  private readonly sleep: (ms: number) => Promise<void>;
-  private readonly staleMs: number;
-  private readonly lockClock: () => number;
-  private readonly refreshMs: number;
-  private readonly renameFile: (from: string, to: string) => Promise<void>;
-  private readonly statePath: string;
-  private readonly lockPath: string;
+  private readonly usesRoot: string;
 
   constructor(private readonly options: GrantBookOptions) {
     this.now = options.now ?? (() => new Date());
-    this.sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
-    this.lockClock = options.lockClock ?? Date.now;
-    this.staleMs = options.staleMs ?? LOCK_STALE_MS;
-    this.refreshMs = options.refreshMs ?? LOCK_REFRESH_MS;
-    this.renameFile = options.renameFile ?? rename;
-    this.statePath = `${options.policyPath}.state.json`;
-    this.lockPath = `${options.policyPath}.state.lock`;
+    this.usesRoot = `${options.policyPath}.uses`;
   }
 
   get policyPath(): string {
@@ -347,31 +303,26 @@ export class GrantBook {
     return parseGrants(file.data.grants, localDate(this.now()), (app) => listsFor(file.data, { id: app, name: app }).block);
   }
 
-  /** The state file's uses and generation; null when it doesn't parse (it is left alone, §19.4). A missing file is no uses. */
-  private async readState(): Promise<State | null> {
-    let text: string;
-    try {
-      text = await readFile(this.statePath, "utf8");
-    } catch (error) {
-      return errorCode(error) === "ENOENT" ? { uses: {}, generation: 0 } : null;
-    }
-    try {
-      const file: unknown = JSON.parse(text);
-      if (typeof file !== "object" || file === null || Array.isArray(file)) return null;
-      const { version, generation, uses } = file as { version?: unknown; generation?: unknown; uses?: unknown };
-      if (version !== 1 || (generation !== undefined && !(typeof generation === "number" && Number.isInteger(generation) && generation >= 0))) return null;
-      const parsed = parseUses(uses);
-      return parsed === null ? null : { uses: parsed, generation: typeof generation === "number" ? generation : 0 };
-    } catch {
-      return null;
-    }
+  /** The uses of a grant in the day and the hour of `at`, by listing the folders; null when one can't be read (fails closed). */
+  private async countsAt(grant: Grant, at: Date): Promise<{ today: number; hour: number } | null> {
+    if (!safeGrantName(grant.name)) return null;
+    if ((await listDir(this.usesRoot)) === null) return null;
+    const base = join(this.usesRoot, grant.name);
+    const day = await listDir(join(base, localDate(at)));
+    const hour = await listDir(join(base, hourFolder(at)));
+    return day === null || hour === null ? null : { today: day.length, hour: hour.length };
   }
 
-  /** Every grant, what was refused, and whether the state file is broken: for `doctor` and the session's first answer. */
+  /** Every grant, what was refused, and whether a uses folder can't be read: for `doctor` and the session's first answer. */
   async inspect(): Promise<GrantReport> {
     const policy = await this.readPolicy();
-    const state = await this.readState();
-    return { fileOk: policy !== null, grants: policy?.grants ?? [], refused: policy?.refused ?? [], stateBroken: state === null };
+    let usesBroken = (await listDir(this.usesRoot)) === null;
+    const at = this.now();
+    for (const grant of policy?.grants ?? []) {
+      if (usesBroken) break;
+      if (!safeGrantName(grant.name) || (await listDir(join(this.usesRoot, grant.name))) === null || (await this.countsAt(grant, at)) === null) usesBroken = true;
+    }
+    return { fileOk: policy !== null, grants: policy?.grants ?? [], refused: policy?.refused ?? [], usesBroken };
   }
 
   /** The date, `YYYY-MM-DD`, that is `days` from today (at most 30), for the dialog's question and a new grant's `until`. */
@@ -380,20 +331,46 @@ export class GrantBook {
     return localDate(new Date(at.getFullYear(), at.getMonth(), at.getDate() + Math.min(GRANT_MAX_DAYS, Math.max(0, days))));
   }
 
-  /** Every grant with today's and this hour's counts (null when the state file is broken), for `tapline grants` (§19.7). */
+  /** Every grant with today's and this hour's counts (null when its uses can't be read), for `tapline grants` (§19.7). */
   async listing(): Promise<{ report: GrantReport; usage: Map<string, { today: number; hour: number } | null> }> {
     const report = await this.inspect();
-    const uses = await this.readState();
     const at = this.now();
     const usage = new Map<string, { today: number; hour: number } | null>();
-    for (const grant of report.grants) usage.set(grant.name, uses === null ? null : this.counts(uses.uses, grant, at));
+    for (const grant of report.grants) usage.set(grant.name, await this.countsAt(grant, at));
     return { report, usage };
   }
 
   /**
+   * Prune (at start, §19.4): the uses of a grant that has ended (today is after its `until`) or was revoked are deleted. Nothing else
+   * is ever counted from an earlier day or hour, so nothing else is needed. Returns the names it cleared.
+   */
+  async prune(): Promise<string[]> {
+    const policy = await this.readPolicy();
+    if (policy === null) return [];
+    const today = localDate(this.now());
+    const cleared: string[] = [];
+    for (const grant of policy.grants) {
+      if (grant.revoked === undefined && today <= grant.until) continue;
+      if (await this.removeUses(grant.name)) cleared.push(grant.name);
+    }
+    return cleared;
+  }
+
+  /** Deletes a grant's whole uses folder; false for a name that isn't safe as a folder name or when it can't be deleted. */
+  private async removeUses(name: string): Promise<boolean> {
+    if (!safeGrantName(name)) return false;
+    try {
+      await rm(join(this.usesRoot, name), { recursive: true, force: true, maxRetries: 3, retryDelay: RENAME_WAIT_MS });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * `grants --revoke-all` (§19.5): marks every grant in the policy file `"revoked": "<today>"` and writes one `revoke` audit
-   * line each. A grant that is already revoked keeps its date. The file is changed under the state lock (a temporary file and
-   * a rename), and every running tool sees it at its very next touch, because each touch reads the file again.
+   * line each, and deletes the revoked grants' uses. A grant that is already revoked keeps its date. The file is changed with a
+   * temporary file and a rename, and every running tool sees it at its very next touch, because each touch reads the file again.
    */
   async revokeAll(detail = "grants --revoke-all"): Promise<{ revoked: string[]; already: string[] } | { error: string }> {
     const today = localDate(this.now());
@@ -420,6 +397,7 @@ export class GrantBook {
     if (typeof done === "string") return { error: done };
     // The kill switch never waits for its record: a line that can't be written doesn't undo the revocation.
     for (const grant of revoked) this.options.audit?.write({ kind: "revoke", ...(grant.app !== undefined ? { app: grant.app } : {}), name: grant.name, detail });
+    for (const grant of revoked) await this.removeUses(grant.name);
     return { revoked: revoked.map((g) => g.name), already };
   }
 
@@ -470,41 +448,45 @@ export class GrantBook {
     return { grant: made };
   }
 
-  /** Reads the policy file as it is, lets `change` edit it, and writes it back when it says it did. A string is why it couldn't. */
+  /**
+   * Reads the policy file as it is, lets `change` edit it, and writes it back when it says it did. A string is why it couldn't.
+   * There is no lock: the file is written with a temporary file and a rename, and a file that changed while it was edited is not overwritten.
+   */
   private async editPolicy(change: (file: Record<string, unknown>) => boolean): Promise<true | string> {
     const path = this.options.policyPath;
-    const outcome = await this.withLock(async (hold): Promise<true | string> => {
-      let file: unknown;
-      try {
-        file = JSON.parse(await readFile(path, "utf8"));
-      } catch (error) {
-        return `couldn't read the policy file: ${error instanceof Error ? error.message : String(error)}`;
-      }
-      if (typeof file !== "object" || file === null || Array.isArray(file)) return "the policy file isn't a policy.";
-      if (!change(file as Record<string, unknown>)) return true;
-      if (!(await hold.owns())) return "the grants' lock was taken over while the file was being changed; try again.";
-      try {
-        await this.writeAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
-      } catch (error) {
-        return `couldn't write the policy file: ${error instanceof Error ? error.message : String(error)}`;
-      }
-      return true;
-    });
-    return outcome ?? "the grants' lock is held by another tool; try again.";
+    let before: { mtimeMs: number; size: number };
+    let file: unknown;
+    try {
+      const info = await stat(path);
+      before = { mtimeMs: info.mtimeMs, size: info.size };
+      file = JSON.parse(await readFile(path, "utf8"));
+    } catch (error) {
+      return `couldn't read the policy file: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (typeof file !== "object" || file === null || Array.isArray(file)) return "the policy file isn't a policy.";
+    if (!change(file as Record<string, unknown>)) return true;
+    try {
+      const now = await stat(path);
+      if (now.mtimeMs !== before.mtimeMs || now.size !== before.size) return "the policy file changed while it was being edited; try again.";
+      await this.writeAtomic(path, `${JSON.stringify(file, null, 2)}\n`);
+    } catch (error) {
+      return `couldn't write the policy file: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    return true;
   }
 
-  /** The `Note:` lines of an inspection: each refused grant, and a state file that doesn't parse. */
+  /** The `Note:` lines of an inspection: each refused grant, and a uses folder that can't be read. */
   static noticeLines(report: GrantReport): string[] {
     const lines = report.refused.map(refusalLine);
     if (!report.fileOk) lines.push("Note: the policy file can't be read now, so no grant covers anything; every touch asks a person.");
-    if (report.stateBroken) lines.push("Note: the grants' state file doesn't parse, so every grant counts as used up and every touch asks a person.");
+    if (report.usesBroken) lines.push("Note: the grants' uses folder can't be read, so a grant whose uses can't be counted counts as used up and its touch asks a person.");
     return lines;
   }
 
   /**
    * Whether a grant covers this touch (§19.3). Called where the host has decided the touch needs a person: a covered touch goes
-   * through, and anything else asks as before, with the notes. `use` records the use under the lock and writes the audit line
-   * first; `peek` records and writes nothing (a dry run, and the check before a dialog). `detail` is what the audit line says.
+   * through, and anything else asks as before, with the notes. `use` claims the use's slot files and writes the audit line;
+   * `peek` claims and writes nothing (a dry run, and the check before a dialog). `detail` is what the audit line says.
    */
   async decide(touch: GrantTouch, mode: "use" | "peek", detail: string): Promise<GrantDecision> {
     const policy = await this.readPolicy();
@@ -538,7 +520,7 @@ export class GrantBook {
         continue;
       }
       // A draftsOnly grant only looks: its touch stops at a draft, and a draft a person sends counts no use (§19.3, §21.3).
-      const counted = mode === "use" && !grant.draftsOnly ? await this.use(grant, at, detail, touch, policy.grants) : await this.peek(grant, at);
+      const counted = mode === "use" && !grant.draftsOnly ? await this.use(grant, detail, touch) : await this.peek(grant, at);
       if (counted === null) continue;
       if (typeof counted === "string") {
         notes.push(doesnt(counted));
@@ -546,26 +528,38 @@ export class GrantBook {
         continue;
       }
       if (grant.draftsOnly) return { kind: "draft", name: grant.name };
-      return { kind: "covered", name: grant.name, counts: `${counted.today} of ${grant.perDay}`, counted: mode === "use", stamp: counted.stamp, date: counted.date, line: `Note: allowed by grant ${name} (${counted.today} of ${grant.perDay} today).` };
+      return {
+        kind: "covered",
+        name: grant.name,
+        counts: `${counted.today} of ${grant.perDay}`,
+        counted: mode === "use",
+        owner: counted.owner,
+        slots: counted.slots,
+        line: `Note: allowed by grant ${name} (${counted.today} of ${grant.perDay} today).`,
+      };
     }
     return { kind: "ask", notes, asked };
   }
 
   /**
-   * Whether the grant a use was taken under still covers this touch, right now (§19.3): the policy file is read again, so a
-   * revocation, a `draftsOnly`, quiet hours, `until`, the word and the route condition are current. Takes no use and writes nothing; the
-   * use must still be recorded in the state file. Any doubt (an unreadable file) answers false: the touch then asks a person.
+   * Whether the grant a use was taken under still covers this touch, right now (§19.3): the policy file is read again, and the clock
+   * too, so a revocation, a `draftsOnly`, quiet hours, `until`, the word and the route condition are current. Takes no use and writes
+   * nothing; the use's slot files must all still be there and still be this use's. Any doubt (an unreadable file) answers false: the
+   * touch then asks a person.
    */
-  async stillCovers(touch: GrantTouch, use: { name: string; stamp: string; date: string }): Promise<boolean> {
+  async stillCovers(touch: GrantTouch, use: GrantUseRef): Promise<boolean> {
     const policy = await this.readPolicy();
     if (policy === null) return false;
     if (matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], touch.element) !== null) return false;
     const grant = policy.grants.find((g) => g.name === use.name);
     if (grant === undefined) return false;
-    const at = this.now();
-    if (!this.holds(grant, touch, at)) return false;
-    const state = await this.readState();
-    return (state !== null && usesOf(state.uses, use.name)?.[use.date]?.includes(use.stamp)) === true;
+    if (!this.holds(grant, touch, this.now())) return false;
+    if (use.owner === "" || use.slots.length === 0) return false;
+    for (const slot of use.slots) {
+      const path = this.slotPath(slot, use.name);
+      if (path === null || (await slotOwner(path)) !== use.owner) return false;
+    }
+    return true;
   }
 
   /** Whether this grant, as the policy file has it now, covers the touch at this time: app, word, route, revocation, end, quiet hours, drafts. */
@@ -578,34 +572,32 @@ export class GrantBook {
     return grant.quiet === undefined || !inQuiet(grant.quiet, at.getHours() * 60 + at.getMinutes());
   }
 
-  /** A use taken back: the touch wasn't made after all (§19.4: a use is counted when the touch is made). */
-  async release(use: { name: string; stamp: string; date: string }): Promise<void> {
-    await this.withLock(async (hold) => {
-      const state = await this.readState();
-      if (state === null) return;
-      const uses = state.uses;
-      const mineUses = usesOf(uses, use.name);
-      const list = mineUses?.[use.date];
-      const at = list?.indexOf(use.stamp) ?? -1;
-      if (list === undefined || at < 0) return;
-      list.splice(at, 1);
-      if (list.length === 0 && mineUses !== undefined) delete mineUses[use.date];
-      // A holder that lost the lock gives nothing back: the use stays counted, the safe side.
-      await this.writeState(uses, state.generation, hold).catch(() => undefined);
-    });
+  /** The absolute path of a slot a use names, or null when it isn't a slot of that grant (never a path outside the uses folder). */
+  private slotPath(slot: string, name: string): string | null {
+    const parts = slot.split("/");
+    const [grant, folder, file] = parts;
+    if (parts.length !== 3 || grant !== name || !safeGrantName(name) || folder === undefined || file === undefined) return null;
+    if (!/^\d{4}-\d{2}-\d{2}(T\d{2})?$/.test(folder) || !/^h?\d+$/.test(file)) return null;
+    return join(this.usesRoot, grant, folder, file);
   }
 
-  /** Counts as the state file has them: today's, and the last hour's (a rolling 60 minutes). */
-  private counts(uses: Uses, grant: Grant, at: Date): { today: number; hour: number } {
-    const mine = usesOf(uses, grant.name) ?? {};
-    const today = (mine[localDate(at)] ?? []).length;
-    const since = at.getTime() - 3_600_000;
-    const yesterday = localDate(new Date(at.getTime() - 86_400_000));
-    const recent = [...(mine[yesterday] ?? []), ...(mine[localDate(at)] ?? [])].filter((stamp) => {
-      const ms = Date.parse(stamp);
-      return !Number.isNaN(ms) && ms > since && ms <= at.getTime();
-    });
-    return { today, hour: recent.length };
+  /** A use taken back: the touch wasn't made after all (§19.4: a use is counted when the touch is made). Deletes only this use's own slot files. */
+  async release(use: GrantUseRef): Promise<void> {
+    await this.dropSlots(use.name, use.owner, use.slots);
+  }
+
+  /** Deletes the slot files of a use, each only after its content says this owner made it. A file that can't be read or deleted stays: the use stays counted. */
+  private async dropSlots(name: string, owner: string, slots: string[]): Promise<void> {
+    if (owner === "") return;
+    for (const slot of slots) {
+      const path = this.slotPath(slot, name);
+      if (path === null) continue;
+      try {
+        if ((await slotOwner(path)) === owner) await rm(path, { force: true });
+      } catch {
+        // stays counted: the safe side
+      }
+    }
   }
 
   /** The limit that stops a use as words for the note, or null when there is room. */
@@ -615,204 +607,111 @@ export class GrantBook {
     return null;
   }
 
-  /** A string: the limit that stopped it. null: it can't be counted (a broken state file), nothing to say. */
-  private async peek(grant: Grant, at: Date): Promise<{ today: number; stamp: string; date: string } | string | null> {
-    const state = await this.readState();
-    if (state === null) return null;
-    const counts = this.counts(state.uses, grant, at);
-    return this.limit(grant, counts) ?? { today: counts.today + 1, stamp: "", date: localDate(at) };
+  /** A string: the limit that stopped it. null: it can't be counted (an unreadable uses folder), nothing to say. */
+  private async peek(grant: Grant, at: Date): Promise<Claimed | string | null> {
+    const counts = await this.countsAt(grant, at);
+    if (counts === null) return null;
+    return this.limit(grant, counts) ?? { today: counts.today + 1, owner: "", slots: [] };
   }
 
-  /** Takes the lock, reads the file, checks the counts, writes the audit line, records the use, writes the file: one step (§19.4). */
-  private async use(grant: Grant, at: Date, detail: string, touch: GrantTouch, all: Grant[]): Promise<{ today: number; stamp: string; date: string } | string | null> {
-    const audit = this.options.audit;
-    if (audit === null) return null;
-    const app = touch.app;
-    const done = await this.withLock(async (hold) => {
-      const state = await this.readState();
-      // A state file that doesn't parse is left alone; every grant is used up (§19.4).
-      if (state === null) return null;
-      const uses = state.uses;
-      const counts = this.counts(uses, grant, at);
-      const stopped = this.limit(grant, counts);
-      if (stopped !== null) return stopped;
-      const stamp = localIso(at);
-      const date = localDate(at);
-      const count = counts.today + 1;
-      await this.options.beforeCommit?.();
-      // A holder that stalled past the takeover no longer owns the lock: its counts are old, so it records nothing and its touch
-      // asks a person. The audit log says so (§19.4): the line is not a use.
-      const lost = (): null => {
-        audit.write({ kind: "grant", app: app.id ?? app.name, name: grant.name, detail: "lost the lock" });
+  /**
+   * Claims a slot file in `dir` (k = 1..limit, exclusive create, the folder made as needed): the first k nobody has taken. A full
+   * folder answers how many entries it holds; a folder that can't be read or written answers null. Every entry counts, so a garbage
+   * file takes a place: a folder holding more entries than `limit` after the claim gives the claim back.
+   */
+  private async claimSlot(dir: string, prefix: string, limit: number, content: string): Promise<SlotResult> {
+    try {
+      await mkdir(dir, { recursive: true });
+    } catch {
+      return null;
+    }
+    const names = await listDir(dir);
+    if (names === null) return null;
+    if (names.length >= limit) return { full: names.length };
+    const taken = new Set(names);
+    for (let k = 1; k <= limit; k++) {
+      const file = join(dir, `${prefix}${k}`);
+      if (taken.has(`${prefix}${k}`)) continue;
+      await this.options.beforeCreate?.(file);
+      try {
+        await writeFile(file, content, { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        // Taken a moment ago (Windows says EPERM or EBUSY while a delete is under way): the next one.
+        const code = errorCode(error);
+        if (code === "EEXIST" || code === "EPERM" || code === "EBUSY") continue;
         return null;
-      };
-      if (!(await hold.owns())) return lost();
-      // The policy is read again under the lock, and the clock again: a revocation, an end or quiet hours that came in while this use waited win (§19.4).
+      }
+      const after = await listDir(dir);
+      if (after === null) {
+        await rm(file, { force: true }).catch(() => undefined);
+        return null;
+      }
+      if (after.length > limit) {
+        await rm(file, { force: true }).catch(() => undefined);
+        return { full: Math.max(limit, after.length - 1) };
+      }
+      return { file, count: after.length };
+    }
+    return { full: limit };
+  }
+
+  /**
+   * Claims a use: the day and the hour come from a fresh clock, read now; the hour slot is claimed first (when there is a perHour),
+   * then the day slot; a day claim that fails gives the hour slot back. Then the policy and the clock are read again (a revocation, an
+   * end or quiet hours that came in meanwhile win) and the audit line is written; a grant needs its line, so a use whose line can't be
+   * written is given back (§23). A string is the limit that stopped it; null, that it can't be counted.
+   */
+  private async use(grant: Grant, detail: string, touch: GrantTouch): Promise<Claimed | string | null> {
+    const audit = this.options.audit;
+    if (audit === null || !safeGrantName(grant.name)) return null;
+    const at = this.now();
+    const counts = await this.countsAt(grant, at);
+    if (counts === null) return null;
+    const stopped = this.limit(grant, counts);
+    if (stopped !== null) return stopped;
+    const owner = randomBytes(8).toString("hex");
+    const route = grant.route ?? touch.routes[0];
+    const content = `${JSON.stringify({ t: localIso(at), tool: "tapline", owner, ...(route !== undefined ? { route } : {}) })}\n`;
+    const slots: string[] = [];
+    const giveBack = (): Promise<void> => this.dropSlots(grant.name, owner, slots);
+    try {
+      if (grant.perHour !== undefined) {
+        const folder = hourFolder(at);
+        const hour = await this.claimSlot(join(this.usesRoot, grant.name, folder), "h", grant.perHour, content);
+        if (hour === null) return null;
+        if ("full" in hour) return `${hour.full} of ${grant.perHour} this hour`;
+        slots.push(`${grant.name}/${folder}/${basename(hour.file)}`);
+      }
+      const dayFolder = localDate(at);
+      const day = await this.claimSlot(join(this.usesRoot, grant.name, dayFolder), "", grant.perDay, content);
+      if (day === null) {
+        await giveBack();
+        return null;
+      }
+      if ("full" in day) {
+        await giveBack();
+        return `${day.full} of ${grant.perDay} today`;
+      }
+      slots.push(`${grant.name}/${dayFolder}/${basename(day.file)}`);
+      await this.options.afterClaim?.();
       const policy = await this.readPolicy();
       const fresh = policy?.grants.find((g) => g.name === grant.name);
-      if (fresh === undefined || !this.holds(fresh, touch, this.now()) || this.limit(fresh, this.counts(uses, fresh, at)) !== null) return null;
-      // A grant needs its line: when it can't be written, the grant doesn't cover the touch (§23).
-      if (!audit.write({ kind: "grant", app: app.id ?? app.name, name: grant.name, detail: `${detail} (${count} of ${grant.perDay} today)` })) return null;
-      const mine = ensureUses(uses, grant.name);
-      (mine[date] ??= []).push(stamp);
-      this.prune(uses, date, all);
-      try {
-        await this.writeState(uses, state.generation, hold);
-      } catch (error) {
-        return error instanceof LostLockError ? lost() : null;
+      if (fresh === undefined || !this.holds(fresh, touch, this.now())) {
+        await giveBack();
+        return null;
       }
-      return { today: count, stamp, date };
-    });
-    return done ?? null;
-  }
-
-  /** Entries are pruned after the grant's `until` (§19.4). */
-  private prune(uses: Uses, today: string, grants: Grant[]): void {
-    for (const grant of grants) {
-      if (today > grant.until) delete uses[grant.name];
-    }
-  }
-
-  /**
-   * Runs `run` while holding the lock, which is owned by a token (a random id and the process id) only this call knows. The hold
-   * lets `run` ask whether the lock is still its own before it writes; the lock is released only while it still carries the token.
-   */
-  private async withLock<T>(run: (hold: LockHold) => Promise<T>): Promise<T | null> {
-    const token = await this.acquire();
-    if (token === null) return null;
-    // The lock is held only around the read, the check and the count write, never across a touch. A holder that has to hold longer
-    // keeps the lock file's mtime fresh (staleness is judged by mtime), and keeps no handle open on it.
-    const keepFresh = setInterval(() => void this.refresh(token), this.refreshMs);
-    keepFresh.unref();
-    try {
-      return await run({ owns: () => this.owns(token) });
-    } finally {
-      clearInterval(keepFresh);
-      await this.unlock(token);
-    }
-  }
-
-  /** Sets the lock file's mtime to now, only while the lock still carries this token (another holder's lock is never touched). */
-  private async refresh(token: string): Promise<void> {
-    try {
-      if (!(await this.owns(token))) return;
-      const at = new Date(this.lockClock());
-      await utimes(this.lockPath, at, at);
+      if (!audit.write({ kind: "grant", app: appKey(touch.app), name: grant.name, detail: `${detail} (${day.count} of ${grant.perDay} today)` })) {
+        await giveBack();
+        return null;
+      }
+      return { today: day.count, owner, slots };
     } catch {
-      // the lock went away or changed hands: the holder finds out at its next check
-    }
-  }
-
-  /** The lock's content: the owner's token and when it was taken. */
-  private lockText(token: string): string {
-    return `${JSON.stringify({ owner: token, pid: process.pid, t: this.now().toISOString() })}\n`;
-  }
-
-  private async readLock(): Promise<string | null> {
-    try {
-      return await readFile(this.lockPath, "utf8");
-    } catch {
+      await giveBack();
       return null;
     }
   }
 
-  /** Whether the lock file still carries this token. */
-  private async owns(token: string): Promise<boolean> {
-    const text = await this.readLock();
-    return text !== null && lockOwner(text) === token;
-  }
-
-  /** Creates the lock exclusively and returns its owner token, taking over a stale one safely; null when it stays held. */
-  private async acquire(): Promise<string | null> {
-    const token = `${randomBytes(8).toString("hex")}-${process.pid}`;
-    for (let attempt = 0; attempt < LOCK_TRIES; attempt++) {
-      let handle;
-      try {
-        handle = await open(this.lockPath, "wx");
-      } catch (error) {
-        const code = errorCode(error);
-        // Windows says EPERM or EBUSY while a rival's delete of the lock is under way: it is held.
-        if (code !== "EEXIST" && code !== "EPERM" && code !== "EBUSY") return null;
-        const seen = await this.staleLock();
-        // A takeover whose rename fails means someone else is acting on the lock (or, on Windows, has it open): wait briefly, then read it again.
-        if (seen === null || !(await this.takeOver(seen))) await this.sleep(LOCK_WAIT_MS);
-        continue;
-      }
-      try {
-        await handle.writeFile(this.lockText(token), "utf8");
-      } finally {
-        await handle.close();
-      }
-      return token;
-    }
-    return null;
-  }
-
-  /** The content of the lock when it is older than the takeover time, else null. */
-  private async staleLock(): Promise<string | null> {
-    try {
-      const info = await stat(this.lockPath);
-      if (this.lockClock() - info.mtimeMs <= this.staleMs) return null;
-      return await readFile(this.lockPath, "utf8");
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Takes over a stale lock: renames it to a tombstone of its own, and only if the tombstone holds the stale content that was read
-   * does the lock count as removed. A lock that changed hands between the look and the rename is put back, never deleted. The
-   * caller then creates its own lock exclusively.
-   */
-  private async takeOver(seen: string): Promise<boolean> {
-    const tomb = `${this.lockPath}.${randomBytes(6).toString("hex")}.stale`;
-    try {
-      await this.renameFile(this.lockPath, tomb);
-    } catch {
-      return false; // someone else took it over first, its holder released it, or a handle is open on it: the caller waits and reads again
-    }
-    try {
-      const held = await readFile(tomb, "utf8").catch(() => null);
-      if (held !== null && held !== seen) await writeFile(this.lockPath, held, { flag: "wx" }).catch(() => undefined);
-    } finally {
-      await rm(tomb, { force: true }).catch(() => undefined);
-    }
-    return true;
-  }
-
-  /** Removes the lock only while it still holds this token: through a tombstone, so another holder's lock is never unlinked. */
-  private async unlock(token: string): Promise<void> {
-    const tomb = `${this.lockPath}.${randomBytes(6).toString("hex")}.released`;
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.renameFile(this.lockPath, tomb);
-        break;
-      } catch (error) {
-        const code = errorCode(error);
-        // Gone already, or not ours to wait for. EPERM and EBUSY mean someone has it open for a moment: wait, then try again.
-        if ((code !== "EPERM" && code !== "EBUSY") || attempt >= RENAME_TRIES) return;
-        await this.sleep(LOCK_WAIT_MS);
-      }
-    }
-    try {
-      const held = await readFile(tomb, "utf8").catch(() => null);
-      if (held !== null && lockOwner(held) !== token) await writeFile(this.lockPath, held, { flag: "wx" }).catch(() => undefined);
-    } finally {
-      await rm(tomb, { force: true }).catch(() => undefined);
-    }
-  }
-
-  /**
-   * A temporary file and a rename, with retries on Windows (§19.4). Fenced: the writer must still own the lock, and the file's
-   * generation must still be the one it read; the new file carries that generation plus one. Otherwise nothing is written.
-   */
-  private async writeState(uses: Uses, generation: number, hold: LockHold): Promise<void> {
-    if (!(await hold.owns())) throw new LostLockError();
-    const now = await this.readState();
-    if (now === null || now.generation !== generation) throw new LostLockError();
-    await this.writeAtomic(this.statePath, `${JSON.stringify({ version: 1, generation: generation + 1, uses }, null, 2)}\n`);
-  }
-
+  /** A temporary file and a rename, with retries on Windows. */
   private async writeAtomic(path: string, content: string): Promise<void> {
     const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
@@ -824,7 +723,7 @@ export class GrantBook {
         } catch (error) {
           const code = errorCode(error);
           if ((code !== "EPERM" && code !== "EBUSY") || attempt >= RENAME_TRIES) throw error;
-          await this.sleep(LOCK_WAIT_MS);
+          await new Promise<void>((done) => setTimeout(done, RENAME_WAIT_MS));
         }
       }
     } catch (error) {
@@ -833,6 +732,17 @@ export class GrantBook {
     }
   }
 }
+
+/** The `owner` a slot file's content names; undefined when the file can't be read or isn't in the format (it is not provably anyone's own). */
+async function slotOwner(path: string): Promise<string | undefined> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    return typeof parsed === "object" && parsed !== null && typeof (parsed as { owner?: unknown }).owner === "string" ? (parsed as { owner: string }).owner : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 
 /** What the person said yes to in the dialog (§19.6). `days` counts from today, at most 30. */
 export interface GrantSpec {

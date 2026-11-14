@@ -289,11 +289,11 @@ describe("doctor reports refused grants and a broken state file (§19.1, §19.4)
     expect(result?.detail).toBe('grant "shop_pay" is refused: payments and purchases are never grantable ("Pay")');
   });
 
-  it("warns about a state file that doesn't parse", async () => {
+  it("warns about a uses folder that can't be read", async () => {
     const r = rig([GRANT]);
-    writeFileSync(`${r.path}.state.json`, "{ nope");
+    writeFileSync(`${r.path}.uses`, "not a folder");
     const result = await run(r.path);
     expect(result?.status).toBe("warn");
-    expect(result?.detail).toContain("state file doesn't parse");
+    expect(result?.detail).toContain("uses folder can't be read");
   });
 });

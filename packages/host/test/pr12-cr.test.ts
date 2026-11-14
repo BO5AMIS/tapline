@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -34,7 +34,7 @@ function rig(grants: unknown[] = [GRANT]) {
   const clock = { now: NOW };
   const put = (list: unknown[]): void => writeFileSync(path, JSON.stringify({ version: 2, confirm: ["Send", "Post"], block: [], grants: list }));
   put(grants);
-  const options = { policyPath: path, audit, now: () => clock.now, sleep: async (): Promise<void> => undefined };
+  const options = { policyPath: path, audit, now: () => clock.now };
   return { path, audit, clock, put, options, book: new GrantBook(options) };
 }
 
@@ -56,20 +56,20 @@ describe("grants: the app, the lock and inherited names (PR 12 CodeRabbit)", () 
     const r = rig([GRANT]);
     const book = new GrantBook({
       ...r.options,
-      beforeCommit: async () => {
+      afterClaim: async () => {
         r.put([{ ...GRANT, revoked: "2026-11-14" }]);
       },
     });
     expect((await book.decide(touch(), "use", "x")).kind).toBe("ask");
     expect(r.audit.lines).toEqual([]);
-    expect(existsSync(`${r.path}.state.json`)).toBe(false);
+    expect(existsSync(`${r.path}.uses`) ? readdirSync(join(`${r.path}.uses`, "instagram_posting", "2026-11-14")) : []).toEqual([]);
   });
 
   it("a grant that ended while the use waited for the lock doesn't cover (the clock is read again)", async () => {
     const r = rig([{ ...GRANT, until: "2026-11-14" }]);
     const book = new GrantBook({
       ...r.options,
-      beforeCommit: async () => {
+      afterClaim: async () => {
         r.clock.now = new Date(2026, 10, 15, 0, 1, 0);
       },
     });
@@ -84,8 +84,8 @@ describe("grants: the app, the lock and inherited names (PR 12 CodeRabbit)", () 
     expect(Object.keys({})).toEqual([]);
     expect(Object.keys(Object)).toEqual([]);
     expect(Object.keys(Object.prototype.toString)).toEqual([]);
-    const state = JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { uses: Record<string, unknown> };
-    expect(Object.keys(state.uses)).toEqual([name]);
+    const folders = readdirSync(`${r.path}.uses`);
+    expect(folders).toEqual([name]);
     const again = new GrantBook(r.options);
     const second = await again.decide(touch(), "use", "x");
     expect(second.kind).toBe("ask");
@@ -105,7 +105,7 @@ describe("tapline grants: last uses are scoped by app and name (PR 12 CodeRabbit
     writeFileSync(fileA, policy("com.one"));
     writeFileSync(fileB, policy("com.two"));
     await new GrantBook({ policyPath: fileA, audit, now: () => NOW }).decide(touch({ app: { id: "com.one", name: "One" } }), "use", "tap ONE-ACTION");
-    await new GrantBook({ policyPath: fileB, audit, now: () => NOW, sleep: async () => undefined }).decide(touch({ app: { id: "com.two", name: "Two" } }), "use", "tap TWO-ACTION");
+    await new GrantBook({ policyPath: fileB, audit, now: () => NOW }).decide(touch({ app: { id: "com.two", name: "Two" } }), "use", "tap TWO-ACTION");
     const a = await runGrants({ policy: fileA, auditDir, now: () => NOW });
     expect(a.text).toContain("ONE-ACTION");
     expect(a.text).not.toContain("TWO-ACTION");

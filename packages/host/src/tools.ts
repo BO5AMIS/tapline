@@ -1041,8 +1041,9 @@ interface GrantUse {
   /** `2 of 3`: the count including this use. */
   counts: string;
   line: string;
-  stamp: string;
-  date: string;
+  /** Who made the use and its slot files (§19.4): `release` and the re-check before the touch go by them. */
+  owner: string;
+  slots: string[];
 }
 
 /** The app's refusal when an alert it can't answer is open (a stand-in's own buttons are an ordinary screen). */
@@ -5366,7 +5367,7 @@ export class TaplineTools {
       }
       return null;
     }
-    return { name: decision.name, line: decision.line, stamp: decision.stamp, date: decision.date, counts: decision.counts };
+    return { name: decision.name, line: decision.line, owner: decision.owner, slots: decision.slots, counts: decision.counts };
   }
 
   /** A person's OK is used up: one `approval` line of the audit log (§23). */

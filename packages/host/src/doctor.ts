@@ -40,7 +40,7 @@ export interface DoctorDeps {
   now?: () => Date;
 }
 
-/** The grants of a policy file: refused grants and a state file that doesn't parse are warnings (§19.1, §19.4). */
+/** The grants of a policy file: refused grants and a uses folder that can't be read are warnings (§19.1, §19.4). */
 async function checkGrants(file: string, now: (() => Date) | undefined): Promise<CheckResult> {
   const book = new GrantBook({ policyPath: file, audit: null, ...(now !== undefined ? { now } : {}) });
   const report = await book.inspect();
@@ -56,7 +56,7 @@ async function checkGrants(file: string, now: (() => Date) | undefined): Promise
     name: "Grants",
     status: "warn",
     detail: problems.join("; "),
-    fix: report.stateBroken ? `Fix or delete ${file}.state.json (until then every grant counts as used up).` : "A refused grant covers nothing; fix it in the policy file, or remove it.",
+    fix: report.usesBroken ? `Make ${file}.uses a readable folder that holds only slot files, or delete it (until then a grant whose uses can't be read counts as used up).` : "A refused grant covers nothing; fix it in the policy file, or remove it.",
   };
 }
 

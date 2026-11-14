@@ -183,7 +183,7 @@ describe("a grant stands in for a person's OK (§19.3)", () => {
     expect(textOf(real)).toContain('(1 of 1 today)');
   });
 
-  it("the grants' lock is never held across the touch itself (§19.4)", async () => {
+  it("there is no lock file at all, before, during or after the touch (§19.4, 1.14.1)", async () => {
     const r = await setup([GRANT]);
     const lock = `${r.policyPath}.state.lock`;
     const heldDuringPress: boolean[] = [];

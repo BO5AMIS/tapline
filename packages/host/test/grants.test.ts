@@ -1,10 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { rename } from "node:fs/promises";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditLog, type AuditSink } from "../src/auditlog.js";
-import { GrantBook, parseGrants, refusalLine, type GrantTouch } from "../src/grants.js";
+import { GrantBook, parseGrants, refusalLine, safeGrantName, type GrantTouch } from "../src/grants.js";
 import { loadPolicy } from "../src/policy.js";
 
 // AGENT-TOOLS 1.14 §19.1 to §19.4 and §23: grants, their counts and the audit log.
@@ -49,7 +48,7 @@ function rig(grants: unknown[] = [GRANT]): Rig {
   const clock = { now: NOW };
   const put = (list: unknown[], extra: Record<string, unknown> = {}): void => writeFileSync(path, JSON.stringify({ version: 2, confirm: ["Send", "Post"], block: [], grants: list, ...extra }));
   put(grants);
-  const book = new GrantBook({ policyPath: path, audit, now: () => clock.now, sleep: async () => undefined });
+  const book = new GrantBook({ policyPath: path, audit, now: () => clock.now });
   return { dir, path, audit, clock, book, put };
 }
 
@@ -192,7 +191,7 @@ describe("what a grant covers (§19.3)", () => {
     expect(await r.book.decide(touch(), "peek", "x")).toMatchObject({ kind: "covered", counts: "1 of 1" });
     expect(await r.book.decide(touch(), "peek", "x")).toMatchObject({ kind: "covered" });
     expect(r.audit.lines).toEqual([]);
-    expect(existsSync(`${r.path}.state.json`)).toBe(false);
+    expect(existsSync(`${r.path}.uses`)).toBe(false);
   });
 
   it("quiet hours, crossing midnight, don't cover", async () => {
@@ -289,7 +288,7 @@ describe("what a grant covers (§19.3)", () => {
     r.audit.fail = true;
     expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask");
     // and no use was counted
-    expect(existsSync(`${r.path}.state.json`)).toBe(false);
+    expect(slots(r, "2026-11-14")).toEqual([]);
     r.audit.fail = false;
     expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
   });
@@ -303,93 +302,285 @@ describe("what a grant covers (§19.3)", () => {
   });
 });
 
-describe("counts and the state file (§19.4)", () => {
-  it("the state file has the spec's format and counts hold across a new host instance", async () => {
+/** The slot files of a grant's folder, by name. */
+const slots = (r: Rig, folder: string, name = "instagram_posting"): string[] => {
+  const dir = join(`${r.path}.uses`, name, folder);
+  return existsSync(dir) ? readdirSync(dir).sort() : [];
+};
+
+/** A promise and its resolver, for holding a claimer still at a chosen point. */
+const latch = (): { wait: Promise<void>; open: () => void } => {
+  let open: () => void = () => undefined;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+};
+
+describe("counts: slot files (§19.4, 1.14.1)", () => {
+  it("a use is a day slot file <policy>.uses/<grant>/<date>/<k>, with the spec's content, and counts hold across a new host instance", async () => {
     const r = rig([{ ...GRANT, perHour: undefined }]);
     await r.book.decide(touch(), "use", "x");
     await r.book.decide(touch(), "use", "x");
-    const state: unknown = JSON.parse(readFileSync(`${r.path}.state.json`, "utf8"));
-    expect(state).toEqual({ version: 1, generation: 2, uses: { instagram_posting: { "2026-11-14": [expect.stringMatching(/^2026-11-14T09:00:00[+-]\d\d:\d\d$/), expect.stringMatching(/^2026-11-14T09:00:00[+-]\d\d:\d\d$/)] } } });
-    const again = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => r.clock.now, sleep: async () => undefined });
+    expect(slots(r, "2026-11-14")).toEqual(["1", "2"]);
+    const content = JSON.parse(readFileSync(join(`${r.path}.uses`, "instagram_posting", "2026-11-14", "1"), "utf8")) as Record<string, unknown>;
+    expect(content).toEqual({ t: expect.stringMatching(/^2026-11-14T09:00:00[+-]\d\d:\d\d$/), tool: "tapline", owner: expect.stringMatching(/^[0-9a-f]{16}$/), route: "post_update" });
+    expect(existsSync(`${r.path}.state.json`)).toBe(false);
+    expect(existsSync(`${r.path}.state.lock`)).toBe(false);
+    const again = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => r.clock.now });
     expect(await again.decide(touch(), "use", "x")).toMatchObject({ kind: "covered", line: 'Note: allowed by grant "instagram_posting" (3 of 3 today).' });
     expect((await again.decide(touch(), "use", "x")).kind).toBe("ask");
   });
 
-  it("a lock older than 30 s is taken over; a fresh one is waited for", async () => {
-    const r = rig();
-    const lock = `${r.path}.state.lock`;
-    writeFileSync(lock, "999 old");
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lock, old, old);
-    // the lock's age is read against the book's clock, so this one runs on the wall clock
-    const real = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => new Date(), sleep: async () => undefined });
-    r.put([{ ...GRANT, until: localPlus(5), route: undefined, perHour: undefined }]);
-    expect((await real.decide(touch({ routes: [] }), "use", "x")).kind).toBe("covered");
-    expect(existsSync(lock)).toBe(false);
+  it("perHour adds an hour slot <date>T<HH>/h<k>, claimed with the day slot", async () => {
+    const r = rig([{ ...GRANT, perHour: 2 }]);
+    await r.book.decide(touch(), "use", "x");
+    await r.book.decide(touch(), "use", "x");
+    expect(slots(r, "2026-11-14T09")).toEqual(["h1", "h2"]);
+    expect(slots(r, "2026-11-14")).toEqual(["1", "2"]);
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", notes: ['Note: grant "instagram_posting" doesn\'t cover this (2 of 2 this hour); asking a person.'] });
+    expect(slots(r, "2026-11-14")).toEqual(["1", "2"]);
   });
 
-  it("a fresh lock held by someone else means the use waits, then gives up (asks)", async () => {
-    const r = rig();
-    const lock = `${r.path}.state.lock`;
-    writeFileSync(lock, "999 fresh");
-    let slept = 0;
-    const book = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => NOW, sleep: async () => void slept++ });
-    // A lock younger than 30 s of the wall clock is held.
-    utimesSync(lock, new Date(), new Date());
-    expect((await book.decide(touch(), "use", "x")).kind).toBe("ask");
-    expect(slept).toBeGreaterThan(0);
-    expect(existsSync(lock)).toBe(true);
-  });
-
-  it("a state file that doesn't parse is left alone, and every grant is used up", async () => {
-    const r = rig();
-    writeFileSync(`${r.path}.state.json`, "{ broken");
+  it("perHour is the clock hour, not a rolling 60 minutes", async () => {
+    const r = rig([{ ...GRANT, perDay: 5, perHour: 1 }]);
+    r.clock.now = new Date(2026, 10, 14, 9, 59, 0);
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
+    // one minute later, in the next clock hour: a new hour, though not 60 minutes on
+    r.clock.now = new Date(2026, 10, 14, 10, 0, 0);
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
+    // and 59 minutes after the first use is still the same hour as the second
+    r.clock.now = new Date(2026, 10, 14, 10, 58, 0);
     expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask");
-    expect(readFileSync(`${r.path}.state.json`, "utf8")).toBe("{ broken");
-    expect(r.audit.lines).toEqual([]);
-    const report = await r.book.inspect();
-    expect(report.stateBroken).toBe(true);
-    expect(GrantBook.noticeLines(report)[0]).toMatch(/state file doesn't parse/);
-    // a state file of the wrong shape is broken too
-    writeFileSync(`${r.path}.state.json`, JSON.stringify({ version: 2, uses: {} }));
-    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask");
+    expect(slots(r, "2026-11-14T10")).toEqual(["h1"]);
   });
 
-  it("two writers don't lose a count", async () => {
-    const r = rig([{ ...GRANT, perDay: 10, perHour: undefined }]);
-    const other = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => r.clock.now });
-    const mine = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => r.clock.now });
-    const all = await Promise.all([...Array.from({ length: 5 }, () => mine.decide(touch(), "use", "x")), ...Array.from({ length: 5 }, () => other.decide(touch(), "use", "x"))]);
-    expect(all.every((d) => d.kind === "covered")).toBe(true);
-    const state = JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { uses: { instagram_posting: Record<string, string[]> } };
-    expect(state.uses.instagram_posting["2026-11-14"]).toHaveLength(10);
-    // the eleventh is past the limit
-    expect((await mine.decide(touch(), "use", "x")).kind).toBe("ask");
-  });
-
-  it("two writers can't both make the last use of perDay: 1", async () => {
+  it("two concurrent claimers for perDay: 1: exactly one wins", async () => {
     const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
     const other = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => r.clock.now });
     const kinds = (await Promise.all([r.book.decide(touch(), "use", "x"), other.decide(touch(), "use", "x")])).map((d) => d.kind).sort();
     expect(kinds).toEqual(["ask", "covered"]);
+    expect(slots(r, "2026-11-14")).toEqual(["1"]);
   });
 
-  it("entries are pruned after the grant's until", async () => {
+  it("two writers don't lose a count, and the eleventh is past the limit", async () => {
+    const r = rig([{ ...GRANT, perDay: 10, perHour: undefined }]);
+    const other = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => r.clock.now });
+    const all = await Promise.all([...Array.from({ length: 5 }, () => r.book.decide(touch(), "use", "x")), ...Array.from({ length: 5 }, () => other.decide(touch(), "use", "x"))]);
+    expect(all.every((d) => d.kind === "covered")).toBe(true);
+    expect(slots(r, "2026-11-14")).toHaveLength(10);
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask");
+  });
+
+  describe("a claimer that pauses at any point", () => {
+    const pausing = (r: Rig, hook: "beforeCreate" | "afterClaim", only?: (path: string) => boolean): { book: GrantBook; reached: Promise<void>; go: () => void } => {
+      const reached = latch();
+      const gate = latch();
+      const book = new GrantBook({
+        policyPath: r.path,
+        audit: r.audit,
+        now: () => r.clock.now,
+        [hook]: async (path?: string) => {
+          if (only !== undefined && path !== undefined && !only(path)) return;
+          reached.open();
+          await gate.wait;
+        },
+      });
+      return { book, reached: reached.wait, go: gate.open };
+    };
+
+    it("before its create: the other one takes the slot, and the paused one finds it taken (however long it was paused)", async () => {
+      const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
+      const a = pausing(r, "beforeCreate");
+      const pa = a.book.decide(touch(), "use", "a");
+      await a.reached;
+      expect((await r.book.decide(touch(), "use", "b")).kind).toBe("covered");
+      // A wakes a "minute", an hour, a day later: nothing about time matters, the slot file is taken
+      r.clock.now = new Date(2026, 10, 14, 9, 1, 0);
+      a.go();
+      expect((await pa).kind).toBe("ask");
+      expect(slots(r, "2026-11-14")).toEqual(["1"]);
+      expect(r.audit.lines.filter((l) => l["kind"] === "grant")).toHaveLength(1);
+    });
+
+    it("after its create: the other one finds the slot taken and asks", async () => {
+      const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
+      const a = pausing(r, "afterClaim");
+      const pa = a.book.decide(touch(), "use", "a");
+      await a.reached;
+      expect((await r.book.decide(touch(), "use", "b")).kind).toBe("ask");
+      a.go();
+      expect((await pa).kind).toBe("covered");
+      expect(slots(r, "2026-11-14")).toEqual(["1"]);
+      expect(r.audit.lines.filter((l) => l["kind"] === "grant")).toHaveLength(1);
+    });
+
+    it("a paused claimer that is revoked meanwhile gives its slot back and writes no line", async () => {
+      const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
+      const a = pausing(r, "afterClaim");
+      const pa = a.book.decide(touch(), "use", "a");
+      await a.reached;
+      r.put([{ ...GRANT, perDay: 1, perHour: undefined, revoked: "2026-11-14" }]);
+      a.go();
+      expect((await pa).kind).toBe("ask");
+      expect(slots(r, "2026-11-14")).toEqual([]);
+      expect(r.audit.lines).toEqual([]);
+    });
+  });
+
+  it("perHour then perDay: an hour claim followed by a failed day claim deletes its own hour slot", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, perHour: 2 }]);
+    const reached = latch();
+    const gate = latch();
+    const a = new GrantBook({
+      policyPath: r.path,
+      audit: r.audit,
+      now: () => r.clock.now,
+      // A pauses right before it creates its day slot, after its hour slot exists
+      beforeCreate: async (path) => {
+        if (path.includes("T09")) return;
+        reached.open();
+        await gate.wait;
+      },
+    });
+    const pa = a.decide(touch(), "use", "a");
+    await reached.wait;
+    expect(slots(r, "2026-11-14T09")).toEqual(["h1"]);
+    expect((await r.book.decide(touch(), "use", "b")).kind).toBe("covered"); // B takes the day's only slot, and hour slot h2
+    gate.open();
+    expect((await pa).kind).toBe("ask");
+    // A's hour slot (h1) is gone; B's (h2) stays
+    expect(slots(r, "2026-11-14T09")).toEqual(["h2"]);
+    expect(slots(r, "2026-11-14")).toEqual(["1"]);
+  });
+
+  it("midnight: a claim at 23:59:59.9 and another at 00:00:00.1, with the old day's slot taken, each decide against their own day", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, perHour: undefined, until: "2026-11-21" }]);
+    r.clock.now = new Date(2026, 10, 14, 23, 59, 0);
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
+    r.clock.now = new Date(2026, 10, 14, 23, 59, 59, 900);
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask"); // the 14th's one use is taken
+    r.clock.now = new Date(2026, 10, 15, 0, 0, 0, 100);
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered"); // the 15th is a new day
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask");
+    expect(slots(r, "2026-11-14")).toEqual(["1"]);
+    expect(slots(r, "2026-11-15")).toEqual(["1"]);
+  });
+
+  it("a claim reads a fresh clock when it claims: the slot is in the day of the time it records, even when the clock moved on while it decided", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, perHour: undefined, until: "2026-11-21" }]);
+    let ticks = 0;
+    const book = new GrantBook({ policyPath: r.path, audit: r.audit, now: () => new Date(2026, 10, 14, 23, 59, 59, 700 + 100 * ticks++) });
+    expect((await book.decide(touch(), "use", "x")).kind).toBe("covered");
+    for (const day of ["2026-11-14", "2026-11-15"]) {
+      for (const file of slots(r, day)) {
+        const t = (JSON.parse(readFileSync(join(`${r.path}.uses`, "instagram_posting", day, file), "utf8")) as { t: string }).t;
+        expect(t.slice(0, 10)).toBe(day);
+      }
+    }
+    expect(slots(r, "2026-11-14").length + slots(r, "2026-11-15").length).toBe(1);
+  });
+
+  it("a garbage file counts, by its name alone", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
+    mkdirSync(join(`${r.path}.uses`, "instagram_posting", "2026-11-14"), { recursive: true });
+    writeFileSync(join(`${r.path}.uses`, "instagram_posting", "2026-11-14", "garbage"), "\u0000\u0001 not json");
+    expect(await r.book.decide(touch(), "use", "x")).toMatchObject({ kind: "ask", asked: ["limit reached"] });
+    expect(await r.book.decide(touch(), "peek", "x")).toMatchObject({ kind: "ask" });
+    const listing = await r.book.listing();
+    expect(listing.usage.get("instagram_posting")).toEqual({ today: 1, hour: 0 });
+    // a folder in a slot's place counts as well
+    const r2 = rig([{ ...GRANT, perDay: 2, perHour: undefined }]);
+    mkdirSync(join(`${r2.path}.uses`, "instagram_posting", "2026-11-14", "1"), { recursive: true });
+    expect((await r2.book.decide(touch(), "use", "x")).kind).toBe("covered");
+    expect((await r2.book.decide(touch(), "use", "x")).kind).toBe("ask");
+  });
+
+  it("an unreadable uses folder fails closed: nothing is claimed, doctor's report says so", async () => {
+    const r = rig();
+    writeFileSync(`${r.path}.uses`, "a file where the folder should be");
+    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("ask");
+    expect(r.audit.lines).toEqual([]);
+    const report = await r.book.inspect();
+    expect(report.usesBroken).toBe(true);
+    expect(GrantBook.noticeLines(report)[0]).toMatch(/uses folder can't be read/);
+    expect((await r.book.listing()).usage.get("instagram_posting")).toBeNull();
+  });
+
+  it("a use gives back only its own slot files: another owner's file in the same place stays", async () => {
+    const r = rig([{ ...GRANT, perDay: 2, perHour: 2 }]);
+    const mine = await r.book.decide(touch(), "use", "x");
+    if (mine.kind !== "covered") throw new Error("not covered");
+    expect(mine.slots).toEqual(["instagram_posting/2026-11-14T09/h1", "instagram_posting/2026-11-14/1"]);
+    // someone else's content in my day slot (a stalled holder's file, replaced): not mine to delete
+    const day = join(`${r.path}.uses`, "instagram_posting", "2026-11-14", "1");
+    const theirs = JSON.stringify({ t: "x", tool: "tapline", owner: "someone-else" });
+    writeFileSync(day, theirs);
+    await r.book.release(mine);
+    expect(readFileSync(day, "utf8")).toBe(theirs);
+    expect(slots(r, "2026-11-14T09")).toEqual([]); // my own hour slot went
+    // a forged reference with another owner deletes nothing
+    const again = await r.book.decide(touch(), "use", "x");
+    if (again.kind !== "covered") throw new Error("not covered");
+    await r.book.release({ ...again, owner: "not-me" });
+    expect(slots(r, "2026-11-14")).toHaveLength(2);
+    // and the right owner frees the place for another use
+    await r.book.release(again);
+    expect(slots(r, "2026-11-14")).toEqual(["1"]);
+  });
+
+  it("a give-back names slots only inside its own grant's folder: no path leaves the uses folder", async () => {
+    const r = rig();
+    const victim = join(r.dir, "victim");
+    writeFileSync(victim, JSON.stringify({ owner: "me" }));
+    await r.book.release({ name: "instagram_posting", owner: "me", slots: ["instagram_posting/../../victim", "../victim", "instagram_posting/2026-11-14/../../../victim"] });
+    await r.book.release({ name: "..", owner: "me", slots: ["../2026-11-14/1"] });
+    expect(readFileSync(victim, "utf8")).toContain('"me"');
+  });
+
+  it("entries are pruned at start for a grant that has ended, and a revoked grant's uses go at revoke", async () => {
     const r = rig([{ ...GRANT, perHour: undefined }, { ...GRANT, name: "old", words: ["Send"], until: "2026-11-15", perHour: undefined }]);
     await r.book.decide(touch({ element: { text: "Send" } }), "use", "x");
-    r.clock.now = new Date(2026, 10, 16, 9, 0, 0);
     await r.book.decide(touch(), "use", "x");
-    const state = JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { uses: Record<string, unknown> };
-    expect(Object.keys(state.uses)).toEqual(["instagram_posting"]);
+    expect(slots(r, "2026-11-14", "old")).toEqual(["1"]);
+    expect(await r.book.prune()).toEqual([]); // nothing has ended yet
+    r.clock.now = new Date(2026, 10, 16, 9, 0, 0);
+    expect(await r.book.prune()).toEqual(["old"]);
+    expect(readdirSync(`${r.path}.uses`)).toEqual(["instagram_posting"]);
+    expect(slots(r, "2026-11-14")).toEqual(["1"]); // an active grant's earlier days stay until its own end
+    const done = await r.book.revokeAll();
+    expect(done).toEqual({ revoked: ["instagram_posting", "old"], already: [] });
+    expect(existsSync(`${r.path}.uses`) ? readdirSync(`${r.path}.uses`) : []).toEqual([]);
+  });
+
+  it("a grant name that could leave the uses folder is refused at load", () => {
+    const base = { app: "x", words: ["Remove"], until: "2026-11-20" };
+    const names = ["..", ".", "a/b", "a\\b", "../x", "x.", "a b", "C:evil", "a\u0000b"];
+    const { grants, refused } = parseGrants([...names.map((name) => ({ name, ...base })), { name: "fine.name-1_x", ...base }], "2026-11-14", () => []);
+    expect(grants.map((g) => g.name)).toEqual(["fine.name-1_x"]);
+    expect(refused).toHaveLength(names.length);
+    expect(refused.every((x) => /letters, digits/.test(x.reason))).toBe(true);
+    for (const name of ["", " "]) expect(parseGrants([{ name, ...base }], "2026-11-14", () => []).refused[0]?.reason).toMatch(/name is missing/);
+    expect([".", "..", "", "a/b", "x."].map(safeGrantName)).toEqual([false, false, false, false, false]);
+    expect(["a", "__proto__", "a.b-c_d"].map(safeGrantName)).toEqual([true, true, true]);
+  });
+
+  it("the re-check before the touch reads a fresh clock: quiet hours or an end that came while it waited stop it", async () => {
+    const r = rig([{ ...GRANT, perDay: 3, perHour: undefined, quiet: { from: "09:30", to: "10:00" }, until: "2026-11-14" }]);
+    const used = await r.book.decide(touch(), "use", "x");
+    if (used.kind !== "covered") throw new Error("not covered");
+    r.clock.now = new Date(2026, 10, 14, 9, 10, 0);
+    expect(await r.book.stillCovers(touch(), used)).toBe(true);
+    r.clock.now = new Date(2026, 10, 14, 9, 45, 0);
+    expect(await r.book.stillCovers(touch(), used)).toBe(false);
+    r.clock.now = new Date(2026, 10, 15, 0, 0, 1);
+    expect(await r.book.stillCovers(touch(), used)).toBe(false);
+    // and a use whose slot file is gone or isn't its own doesn't hold either
+    r.clock.now = NOW;
+    rmSync(join(`${r.path}.uses`, "instagram_posting", "2026-11-14", "1"));
+    expect(await r.book.stillCovers(touch(), used)).toBe(false);
   });
 });
-
-/** A local date n days from today, for a grant that has to be valid against the wall clock. */
-function localPlus(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 describe("the audit log (§23)", () => {
   it("appends the spec's lines to YYYY-MM.jsonl", () => {
@@ -426,9 +617,9 @@ describe("the audit log (§23)", () => {
     log.open();
     expect(log.write({ kind: "grant", name: "g" })).toBe(false);
     const r = rig();
-    const book = new GrantBook({ policyPath: r.path, audit: log, now: () => NOW, sleep: async () => undefined });
+    const book = new GrantBook({ policyPath: r.path, audit: log, now: () => NOW });
     expect((await book.decide(touch(), "use", "x")).kind).toBe("ask");
-    expect(existsSync(`${r.path}.state.json`)).toBe(false);
+    expect(slots(r, "2026-11-14")).toEqual([]);
   });
 
   it("a covered touch through the real log writes a grant line", async () => {
@@ -436,241 +627,9 @@ describe("the audit log (§23)", () => {
     const dir = join(tmp(), "audit");
     const log = new AuditLog(dir, () => NOW);
     log.open();
-    const book = new GrantBook({ policyPath: r.path, audit: log, now: () => NOW, sleep: async () => undefined });
+    const book = new GrantBook({ policyPath: r.path, audit: log, now: () => NOW });
     expect((await book.decide(touch(), "use", 'tap "Post"')).kind).toBe("covered");
     const line = JSON.parse(readFileSync(join(dir, `${NOW.toISOString().slice(0, 7)}.jsonl`), "utf8").trim()) as Record<string, unknown>;
     expect(line).toMatchObject({ tool: "tapline", kind: "grant", app: "com.instagram.ios", name: "instagram_posting" });
-  });
-});
-
-describe("the lock is owned, and the state file is fenced (PR 12 review)", () => {
-  /** A promise and its resolver, for holding a holder still inside the lock. */
-  const latch = (): { wait: Promise<void>; open: () => void } => {
-    let open: () => void = () => undefined;
-    const wait = new Promise<void>((resolve) => {
-      open = resolve;
-    });
-    return { wait, open };
-  };
-
-  it("a holder that stalls past 30 s and its successor can't both make the one use of perDay: 1, and the old holder leaves the new lock alone", async () => {
-    const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
-    const lock = `${r.path}.state.lock`;
-    const aReached = latch();
-    const aGate = latch();
-    const bReached = latch();
-    const bGate = latch();
-    const common = { policyPath: r.path, audit: r.audit, now: () => r.clock.now, sleep: async () => undefined };
-    // A holds the lock and stalls after it read its counts (0 of 1).
-    const a = new GrantBook({
-      ...common,
-      beforeCommit: async () => {
-        aReached.open();
-        await aGate.wait;
-      },
-    });
-    const pa = a.decide(touch(), "use", "a");
-    await aReached.wait;
-    expect(existsSync(lock)).toBe(true);
-    // B finds A's lock older than 30 s (its lock clock is a minute ahead), takes it over and stalls with its own lock.
-    const b = new GrantBook({
-      ...common,
-      lockClock: () => Date.now() + 60_000,
-      beforeCommit: async () => {
-        bReached.open();
-        await bGate.wait;
-      },
-    });
-    const pb = b.decide(touch(), "use", "b");
-    await bReached.wait;
-    // A resumes: it no longer owns the lock, so it records nothing and its touch asks a person (fails closed).
-    aGate.open();
-    expect((await pa).kind).toBe("ask");
-    // and it did not delete B's lock on its way out
-    expect(existsSync(lock)).toBe(true);
-    expect(readFileSync(lock, "utf8")).toContain('"owner"');
-    bGate.open();
-    expect((await pb).kind).toBe("covered");
-    expect(existsSync(lock)).toBe(false);
-    const state = JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { uses: { instagram_posting: Record<string, string[]> } };
-    expect(state.uses.instagram_posting["2026-11-14"]).toHaveLength(1);
-    // one use is counted; the displaced holder's refusal is its own line, "lost the lock", and counts for nothing
-    expect(r.audit.lines.filter((l) => l["kind"] === "grant" && l["detail"] !== "lost the lock")).toHaveLength(1);
-    expect(r.audit.lines.filter((l) => l["kind"] === "grant" && l["detail"] === "lost the lock")).toEqual([
-      { kind: "grant", app: "com.instagram.ios", name: "instagram_posting", detail: "lost the lock" },
-    ]);
-  });
-
-  it("a lock that holds someone else's token is never removed by a release", async () => {
-    const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
-    const lock = `${r.path}.state.lock`;
-    const reached = latch();
-    const gate = latch();
-    const a = new GrantBook({
-      policyPath: r.path,
-      audit: r.audit,
-      now: () => r.clock.now,
-      sleep: async () => undefined,
-      beforeCommit: async () => {
-        reached.open();
-        await gate.wait;
-      },
-    });
-    const pa = a.decide(touch(), "use", "a");
-    await reached.wait;
-    // the lock is replaced by another holder's (what a takeover leaves)
-    rmSync(lock, { force: true });
-    const other = `${JSON.stringify({ owner: "someone-else-1", pid: 1, t: NOW.toISOString() })}\n`;
-    writeFileSync(lock, other);
-    gate.open();
-    expect((await pa).kind).toBe("ask");
-    expect(readFileSync(lock, "utf8")).toBe(other);
-    expect(existsSync(`${r.path}.state.json`)).toBe(false);
-    expect(r.audit.lines.map((l) => [l["kind"], l["detail"]])).toEqual([["grant", "lost the lock"]]);
-  });
-
-  describe("lock precisions (§19.4, 1.14.1)", () => {
-    const real = (path: string, audit: MemoryAudit, extra: Partial<ConstructorParameters<typeof GrantBook>[0]> = {}): GrantBook =>
-      new GrantBook({ policyPath: path, audit, now: () => NOW, ...extra });
-
-    it("the lock is held only around the read, the check and the count write: gone when decide returns, and no handle is kept open", async () => {
-      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
-      const lock = `${r.path}.state.lock`;
-      let during: boolean | undefined;
-      const book = real(r.path, r.audit, { beforeCommit: async () => void (during = existsSync(lock)) });
-      expect((await book.decide(touch(), "use", "a")).kind).toBe("covered");
-      expect(during).toBe(true);
-      // The touch happens after decide returns: nothing holds the lock then, so another holder gets it at once.
-      expect(existsSync(lock)).toBe(false);
-      expect(readdirSync(r.dir).filter((name) => name.endsWith(".stale") || name.endsWith(".released") || name.endsWith(".tmp"))).toEqual([]);
-    });
-
-    it("a holder that holds on refreshes the lock file's mtime, so a rival never judges it stale and takes it over", async () => {
-      const r = rig([{ ...GRANT, perDay: 1, perHour: undefined }]);
-      const lock = `${r.path}.state.lock`;
-      const seen: number[] = [];
-      // Real time: the holder stalls 300 ms, keeps the lock fresh every 20 ms; the rival calls anything older than 100 ms stale.
-      const holder = real(r.path, r.audit, {
-        refreshMs: 20,
-        staleMs: 100,
-        beforeCommit: async () => {
-          seen.push(statSync(lock).mtimeMs);
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          seen.push(statSync(lock).mtimeMs);
-        },
-      });
-      const rival = real(r.path, r.audit, { staleMs: 100, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
-      const first = holder.decide(touch(), "use", "a");
-      while (seen.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
-      const second = rival.decide(touch(), "use", "b");
-      expect((await first).kind).toBe("covered");
-      expect((await second).kind).toBe("ask");
-      expect(seen[1]).toBeGreaterThan(seen[0] as number);
-      expect(r.audit.lines.some((l) => l["detail"] === "lost the lock")).toBe(false);
-      expect(r.audit.lines.filter((l) => l["kind"] === "grant")).toHaveLength(1);
-    });
-
-    it("a refresh never touches a lock that another holder has put there", async () => {
-      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
-      const lock = `${r.path}.state.lock`;
-      let theirs = 0;
-      let after = -1;
-      const book = real(r.path, r.audit, {
-        refreshMs: 10,
-        beforeCommit: async () => {
-          rmSync(lock, { force: true });
-          writeFileSync(lock, `${JSON.stringify({ owner: "someone-else-1", pid: 1, t: NOW.toISOString() })}\n`);
-          utimesSync(lock, new Date(1_000_000), new Date(1_000_000));
-          theirs = statSync(lock).mtimeMs;
-          await new Promise((resolve) => setTimeout(resolve, 80)); // the refresh timer fires about eight times
-          after = statSync(lock).mtimeMs;
-        },
-      });
-      expect((await book.decide(touch(), "use", "a")).kind).toBe("ask");
-      expect(after).toBe(theirs);
-    });
-
-    it("a takeover whose rename fails (a handle held open on Windows) waits and reads again; it does not spin, and it takes over once the rename works", async () => {
-      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
-      const lock = `${r.path}.state.lock`;
-      writeFileSync(lock, `${JSON.stringify({ owner: "dead-1", pid: 1, t: NOW.toISOString() })}\n`);
-      const old = new Date(Date.now() - 120_000);
-      utimesSync(lock, old, old);
-      let failures = 3;
-      const renames: string[] = [];
-      const sleeps: number[] = [];
-      const book = real(r.path, r.audit, {
-        sleep: async (ms) => void sleeps.push(ms),
-        renameFile: async (from, to) => {
-          renames.push(from);
-          if (from === lock && failures > 0) {
-            failures--;
-            throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
-          }
-          await rename(from, to);
-        },
-      });
-      expect((await book.decide(touch(), "use", "a")).kind).toBe("covered");
-      expect(failures).toBe(0);
-      // every failed rename was followed by a short wait before the lock was read again
-      expect(sleeps.length).toBeGreaterThanOrEqual(3);
-      expect(renames.filter((from) => from === lock).length).toBeGreaterThanOrEqual(4);
-    });
-
-    it("a stale lock that can't be moved at all is left alone: the touch asks a person, and nothing is written", async () => {
-      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
-      const lock = `${r.path}.state.lock`;
-      const theirs = `${JSON.stringify({ owner: "dead-1", pid: 1, t: NOW.toISOString() })}\n`;
-      writeFileSync(lock, theirs);
-      const old = new Date(Date.now() - 120_000);
-      utimesSync(lock, old, old);
-      const book = real(r.path, r.audit, {
-        sleep: async () => undefined,
-        renameFile: async () => {
-          throw Object.assign(new Error("EBUSY: resource busy or locked, rename"), { code: "EBUSY" });
-        },
-      });
-      expect((await book.decide(touch(), "use", "a")).kind).toBe("ask");
-      expect(readFileSync(lock, "utf8")).toBe(theirs);
-      expect(existsSync(`${r.path}.state.json`)).toBe(false);
-      expect(r.audit.lines).toEqual([]);
-    });
-
-    it("a release whose rename is blocked for a moment is retried, and the lock is gone afterwards", async () => {
-      const r = rig([{ ...GRANT, perDay: 3, perHour: undefined }]);
-      const lock = `${r.path}.state.lock`;
-      let blocked = 2;
-      const book = real(r.path, r.audit, {
-        sleep: async () => undefined,
-        renameFile: async (from, to) => {
-          if (from === lock && blocked > 0 && existsSync(`${r.path}.state.json`)) {
-            blocked--;
-            throw Object.assign(new Error("EPERM"), { code: "EPERM" });
-          }
-          await rename(from, to);
-        },
-      });
-      expect((await book.decide(touch(), "use", "a")).kind).toBe("covered");
-      expect(blocked).toBe(0);
-      expect(existsSync(lock)).toBe(false);
-    });
-  });
-
-  it("the state file carries a generation that goes up by one at every write", async () => {
-    const r = rig([{ ...GRANT, perDay: 5, perHour: undefined }]);
-    await r.book.decide(touch(), "use", "x");
-    expect((JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { generation: number }).generation).toBe(1);
-    const used = await r.book.decide(touch(), "use", "x");
-    expect((JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { generation: number }).generation).toBe(2);
-    if (used.kind !== "covered") throw new Error("not covered");
-    await r.book.release(used);
-    expect((JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { generation: number }).generation).toBe(3);
-  });
-
-  it("a state file written by the other tool, with no generation, reads as generation 0", async () => {
-    const r = rig([{ ...GRANT, perDay: 5, perHour: undefined }]);
-    writeFileSync(`${r.path}.state.json`, JSON.stringify({ version: 1, uses: {} }));
-    expect((await r.book.decide(touch(), "use", "x")).kind).toBe("covered");
-    expect((JSON.parse(readFileSync(`${r.path}.state.json`, "utf8")) as { generation: number }).generation).toBe(1);
   });
 });

@@ -75,13 +75,13 @@ export async function runGrants(options: GrantsCommandOptions): Promise<{ text: 
       ].join("; ")}`,
     );
     lines.push(
-      `  today ${counts == null ? "unknown (the state file doesn't parse)" : `${counts.today} of ${grant.perDay}${grant.perHour !== undefined ? `, this hour ${counts.hour} of ${grant.perHour}` : ""}`}`,
+      `  today ${counts == null ? "unknown (its uses folder can't be read)" : `${counts.today} of ${grant.perDay}${grant.perHour !== undefined ? `, this hour ${counts.hour} of ${grant.perHour}` : ""}`}`,
     );
     const last = (used.get(usedKey(grant.app, grant.name)) ?? []).slice(-LAST_USES).reverse();
     lines.push(last.length === 0 ? "  last uses: none" : `  last uses: ${last.map((u) => `${u.t} ${u.detail}`.trim()).join("; ")}`);
   }
   for (const refusal of report.refused) lines.push(refusalLine(refusal).replace(/^Note: /, "Refused: "));
-  if (report.stateBroken) lines.push("The state file doesn't parse: every grant counts as used up, and every touch asks a person.");
+  if (report.usesBroken) lines.push("A uses folder can't be read: that grant counts as used up, and its touch asks a person.");
   return { text: lines.join("\n"), code: 0 };
 }
 

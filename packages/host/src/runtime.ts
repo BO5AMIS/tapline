@@ -242,7 +242,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const audit = new AuditLog(join(configDir(options.env), "audit"));
   audit.open();
   let grants: GrantBook | undefined;
-  if (options.noPolicy !== true && options.policy !== undefined) grants = new GrantBook({ policyPath: options.policy, audit });
+  if (options.noPolicy !== true && options.policy !== undefined) {
+    grants = new GrantBook({ policyPath: options.policy, audit });
+    // Prune at start (§19.4): the uses of a grant that has ended or was revoked.
+    void grants.prune().catch(() => undefined);
+  }
   const toolsOptions: ToolsOptions = {
     maps,
     audit,
