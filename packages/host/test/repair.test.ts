@@ -1,3 +1,4 @@
+import { HOST_VERSION } from "../src/version.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -84,7 +85,7 @@ describe("repair suggest (§26.5)", () => {
     expect(said).toContain('Finding f1 (expect_failed) at step 1 of "bug"');
     const json = said.split("\n").find((line) => line.startsWith("Finding: {")) as string;
     const finding = JSON.parse(json.slice("Finding: ".length)) as Record<string, unknown>;
-    expect(finding).toMatchObject({ id: "f1", kind: "expect_failed", app: APP.id, app_version: "1.5.0", build: "220", tool: "tapline", tool_version: "1.8.0", place: "home", path_from: "home", picture: null, count: 1 });
+    expect(finding).toMatchObject({ id: "f1", kind: "expect_failed", app: APP.id, app_version: "1.5.0", build: "220", tool: "tapline", tool_version: HOST_VERSION, place: "home", path_from: "home", picture: null, count: 1 });
     expect(finding["path"]).toEqual([{ tool: "tap", target: { id: "open-settings" } }]);
   });
 });
@@ -111,7 +112,7 @@ describe("repair apply: the breaks it repairs (§26.1, §26.4)", () => {
     expect(repaired.steps[0]).toMatchObject({ tool: "tap", target: { id: "open-settings" }, expect: { id: "notify-switch" }, repaired: { was: { id: "open-settings-btn" }, score: 0.67 } });
     expect(repaired.steps[1]).toEqual(RENAMED[1]);
     const notes = r.read("rename.repair.md");
-    expect(notes).toContain("# Repairs for rename (2026-11-14, tapline 1.8.0, build 1.5.0 (220))");
+    expect(notes).toContain(`# Repairs for rename (2026-11-14, tapline ${HOST_VERSION}, build 1.5.0 (220))`);
     expect(notes).toContain('1. Step 1 (tap). Was id=open-settings-btn; now id=open-settings (button "Settings", place home).');
     expect(notes).toContain("   - Score 0.67: id_stem 0.67.");
     expect(notes).toContain('   - Accepted: the step\'s expect (id "notify-switch") held, and the whole run passed.');
