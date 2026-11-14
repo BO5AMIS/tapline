@@ -185,6 +185,34 @@ describe("a running host's lease and facts", () => {
     expect(facts.noPolicy).toBe(true);
   });
 
+  it("with --viewer off (no control queue) a run still can't take the phone while another client's action is in flight, and gets it after (PR 12 CodeRabbit)", async () => {
+    const runtime = await start({ viewer: "off" });
+    const OPEN = { ref: "e1", type: "Pressable", role: "button", testID: "open", text: "Open", frame: { x: 20, y: 100, width: 300, height: 44 }, actions: ["press"] };
+    let held: IncomingRequest | undefined;
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "tree") return { ok: true, result: { screen: { width: 430, height: 932 }, elements: [OPEN], route: { names: ["home"] } } };
+      if (req.method === "press") {
+        held = req;
+        return "ignore";
+      }
+      return { ok: true, result: {} };
+    };
+    const { app } = await FakeApp.connect(runtime.port, { token: runtime.config.token, capabilities: ["tree", "press", "logs"] }, handler);
+    try {
+      const asked = async (action: string, client: string): Promise<Record<string, unknown>> =>
+        JSON.parse((await call(runtime, LEASE_TOOL, { action }, client)).answer?.text ?? "{}") as Record<string, unknown>;
+      const tap = call(runtime, "tap", { target: { id: "open" }, look: false }, "agent-2");
+      for (let i = 0; i < 100 && held === undefined; i++) await delay(20);
+      expect(held).toBeDefined();
+      expect(await asked("acquire", "schedule-a")).toEqual({ ok: false, by: "agent" });
+      app.ws.send(JSON.stringify({ type: "response", id: held?.id, ok: true, result: { element: OPEN, settledMs: 10 } }));
+      await tap;
+      expect(await asked("acquire", "schedule-a")).toEqual({ ok: true });
+    } finally {
+      app.ws.terminate();
+    }
+  });
+
   it("acquire, renew and release belong to the client that asks; a second run is refused; another client can't release it", async () => {
     const runtime = await start();
     const asked = async (action: string, client: string): Promise<Record<string, unknown>> =>
