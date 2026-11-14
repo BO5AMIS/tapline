@@ -7357,6 +7357,10 @@ export class TaplineTools {
         // is the answer with no code asked for (§18.11). Paused, then a person's input, then the selected app, then the app's own dry run
         // of these same params (which also refuses a lost connection or an app in the background as the send would).
         const stillHolds = (): void => {
+          // The call's lease and a pinned or timed run's rules first, as the send checks them (§22.3): the awaits since may have outlived them.
+          this.checkLease();
+          const stale = this.runRefusal(this.exploreScope.getStore());
+          if (stale !== null) throw stale;
           const control = this.options.control;
           if (control?.paused() === true && this.exploreScope.getStore()?.restoring !== true) {
             throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");

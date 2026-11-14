@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AuditEntry, AuditSink } from "../src/auditlog.js";
-import { ControlQueue } from "../src/control.js";
+import { ControlQueue, PhoneLease } from "../src/control.js";
 import { callTool } from "../src/dispatch.js";
 import { DONE, DONE_FIELD, Dialogs, type ElicitAnswer, type ElicitClient, type ElicitSchema } from "../src/elicit.js";
 import { createOtpService } from "../src/otpclient.js";
@@ -359,6 +359,58 @@ class DoneClient implements ElicitClient {
 describe("the code is asked for only after the host's own gates (PR T186C findings)", () => {
   const text = `\${otp.${APP}}`;
   const fetches = (daemon: FakeDaemon): number => daemon.requests.filter((r) => r.url === "/otp").length;
+
+  it("a lease that runs out during the last dry run: no code is asked for (PR 15 Codex cycle 3)", async () => {
+    let now = 1000;
+    const lease = new PhoneLease({ now: () => now });
+    const acquired = lease.acquire("review", 1000, false);
+    if (!acquired.ok) throw new Error("no lease");
+    const refusal: TypeRefusal = {};
+    const { tools, daemon, typed, checked } = await setup({}, true, refusal, CAPABILITIES, { lease });
+    refusal.duringDry = () => {
+      if (checked.length === 2) now = 2001;
+    };
+    const answer = await tools.withCall(undefined, () => callTool(tools, "type_text", { target: { id: "code" }, text }), acquired.credential);
+    expect(textOf(answer)).toContain("lease_lost");
+    expect(checked).toHaveLength(2);
+    expect(typed).toHaveLength(0);
+    expect(fetches(daemon)).toBe(0);
+  });
+
+  for (const change of ["person", "background", "disconnect"] as const) {
+    it(`${change} during the last dry run: no code is asked for, nothing is typed`, async () => {
+      const control = new ControlQueue();
+      const refusal: TypeRefusal = {};
+      const { tools, daemon, typed, checked, app } = await setup({}, true, refusal, CAPABILITIES, { control });
+      refusal.duringDry = () => {
+        if (checked.length !== 2) return;
+        if (change === "person") void control.runPerson(async () => undefined);
+        if (change === "background") app()?.send({ type: "event", event: "appState", data: { state: "background" } });
+        if (change === "disconnect") app()?.ws.close();
+      };
+      const answer = await callTool(tools, "type_text", { target: { id: "code" }, text });
+      expect(answer.isError).toBe(true);
+      expect(typed).toHaveLength(0);
+      expect(fetches(daemon)).toBe(0);
+    });
+  }
+
+  it("a person's input during the fetch drops the code: one /otp request, nothing typed, no digits", async () => {
+    const control = new ControlQueue();
+    const { tools, daemon, typed, logDir } = await setup({}, true, {}, CAPABILITIES, { control });
+    let person: Promise<void> | undefined;
+    afterFetch = async () => {
+      afterFetch = undefined;
+      person = control.runPerson(async () => undefined);
+    };
+    const answer = await callTool(tools, "type_text", { target: { id: "code" }, text });
+    await person;
+    expect(answer.isError).toBe(true);
+    expect(fetches(daemon)).toBe(1);
+    expect(typed).toHaveLength(0);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+    expect(everythingIn(logDir)).not.toContain(FAKE_CODE);
+  });
 
   it("a paused queue refuses the type before any code is asked for", async () => {
     const control = new ControlQueue();
