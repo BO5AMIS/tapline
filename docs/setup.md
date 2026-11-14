@@ -142,7 +142,12 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   `tapline bug <bug id>`. Bugs are kept in `~/.tapline/bugs/<app id>/<bug id>/` (`report.md`, `report.html`, `repro.json`,
   `finding.json`; the newest 100 of an app). Exit 0: made or updated; 1: it didn't reproduce; 2: couldn't be made, or refused. A
   screenshot is private and goes into the folder only with `--with-picture`. `from: "now"` and `from: "failure"` need the live
-  session: use the agent's `bug_report` tool, or `tapline call bug_report '{…}'`.
+  session: use the agent's `bug_report` tool, or `tapline call bug_report '{…}'`. `--verify N` and `tapline bug verify <bug id>` run the
+  reproduction check on the phone (a host of its own, as `explore` has; the app must be open on the same Wi-Fi): from a fresh start each
+  time, through the same gate as `explore`, stopping at a step that needs a person, and asking `Value for "typed" (not shown):` for a
+  `${typed}` step (never from a file or a call). `tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes]` opens a
+  GitHub issue with your own `gh` (it asks `Send to GitHub? [y/N]`; `--yes` answers it without a terminal), `--zip <path>` writes a zip; each
+  export is a line of kind `export` in the audit log.
 - `tapline schedule` and `tapline run-schedule` (1.7) run a saved route with no agent, on a time or when a file
   appears. `tapline schedule add <route> --at "09:00 daily" [--with name=value|name=@file] [--name NAME]
   [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as
