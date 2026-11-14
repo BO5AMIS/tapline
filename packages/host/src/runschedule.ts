@@ -291,7 +291,6 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
 
   const lockToken = takeLock(deps, name);
   if (lockToken === null) return skip(SKIP_PREVIOUS);
-  if (newest !== null) writeSeen(deps.configDir, name, newest);
   let host: ScheduleHost | undefined;
   try {
     try {
@@ -318,8 +317,14 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
           sinceMs = deps.now().getTime();
           t0 = deps.clock();
           deps.audit.write({ kind: "schedule", name, detail: "started" });
+          // The file's time is saved only once the route has begun: a skip (the app is closed, the phone is busy) or a failure to connect leaves the file for the next check.
+          if (newest !== null) writeSeen(deps.configDir, name, newest);
         }
-        answer = await host.call(tool, args);
+        try {
+          answer = await host.call(tool, args);
+        } catch (error) {
+          answer = { text: `Error internal: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+        }
         if (!isBusyAnswer(answer)) break;
       }
       const left = deadline - deps.clock();

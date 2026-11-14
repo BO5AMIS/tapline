@@ -341,6 +341,51 @@ describe("a file trigger's check", () => {
     expect(r.host.calls).toHaveLength(1);
   });
 
+  /** Puts the .seen file back one minute and drops a new file in the inbox, so the next check finds it. */
+  const arm = (r: Rig, inbox: string): { seen: string } => {
+    const wall = new Date(r.deps.now().getTime());
+    const seen = join(schedulesDir(r.dir), "daily.seen");
+    writeFileSync(seen, String(wall.getTime() - 60_000));
+    writeFileSync(join(inbox, "photo.jpg"), "x");
+    utimesSync(join(inbox, "photo.jpg"), wall, wall);
+    return { seen };
+  };
+
+  it("a run that skips because the app is closed leaves the file eligible for the next check (PR 12 CodeRabbit)", async () => {
+    const { r, inbox } = fileRig();
+    const { seen } = arm(r, inbox);
+    const before = readFileSync(seen, "utf8");
+    r.host.open = false;
+    const skipped = await runSchedule("daily", { checkTrigger: true }, r.deps);
+    expect(skipped.code).toBe(2);
+    expect(readFileSync(seen, "utf8")).toBe(before);
+    r.host.open = true;
+    const ran = await runSchedule("daily", { checkTrigger: true }, r.deps);
+    expect(ran.code).toBe(0);
+    expect(r.host.calls).toHaveLength(1);
+    expect(readFileSync(seen, "utf8")).not.toBe(before);
+  });
+
+  it("a phone busy for the whole wait leaves the file eligible too", async () => {
+    const { r, inbox } = fileRig();
+    const { seen } = arm(r, inbox);
+    const before = readFileSync(seen, "utf8");
+    r.host.busyFor = (): boolean => true;
+    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(2);
+    expect(readFileSync(seen, "utf8")).toBe(before);
+  });
+
+  it("a host that can't be reached leaves the file eligible too", async () => {
+    const { r, inbox } = fileRig();
+    const { seen } = arm(r, inbox);
+    const before = readFileSync(seen, "utf8");
+    r.deps.connect = async (): Promise<ScheduleHost> => {
+      throw new Error("no host");
+    };
+    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(2);
+    expect(readFileSync(seen, "utf8")).toBe(before);
+  });
+
   it("refuses --check-trigger on a schedule that starts on a time", async () => {
     const r = rig();
     expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(2);
@@ -401,5 +446,22 @@ describe("the run lock is owned (PR 12 review)", () => {
     const r = rig();
     expect((await runSchedule("daily", {}, r.deps)).code).toBe(0);
     expect(readdirSync(schedulesDir(r.dir)).filter((f) => f.includes("daily.lock"))).toEqual([]);
+  });
+});
+
+describe("a call that throws (PR 12 CodeRabbit)", () => {
+  it("a host.call that rejects is a failed run with a report and a closing audit line, and the lock is dropped", async () => {
+    const r = rig({}, {
+      call: async () => {
+        throw new Error("the tool blew up");
+      },
+    });
+    const out = await runSchedule("daily", {}, r.deps);
+    expect(out.code).not.toBe(0);
+    expect(scheduleLines(r)[0]).toBe("started");
+    expect(scheduleLines(r)).toHaveLength(2);
+    expect(scheduleLines(r)[1]).toMatch(/^failed/);
+    expect(r.report()).toMatchObject({ status: "failed" });
+    expect(existsSync(join(schedulesDir(r.dir), "daily.lock"))).toBe(false);
   });
 });
