@@ -62,7 +62,7 @@ export function isWritable(step: PathStep): boolean {
 }
 
 /** The steps after the last one that can't be written down, and whether any were dropped (§29.3). A typed step keeps `${typed}` only. */
-export function writablePath(steps: readonly PathStep[]): { steps: PathStep[]; cut: boolean } {
+export function writablePath(steps: readonly PathStep[]): { steps: PathStep[]; cut: boolean; dropped: number } {
   let last = -1;
   steps.forEach((step, i) => {
     if (!isWritable(step)) last = i;
@@ -72,7 +72,7 @@ export function writablePath(steps: readonly PathStep[]): { steps: PathStep[]; c
     const { text: _text, ...rest } = step;
     return { ...rest, text: TYPED };
   });
-  return { steps: kept, cut: last >= 0 };
+  return { steps: kept, cut: last >= 0, dropped: last + 1 };
 }
 
 /** What the map's road with the same move calls the step's element (its label, else its text), or null (§29.1). */

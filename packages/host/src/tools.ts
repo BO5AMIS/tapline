@@ -1577,6 +1577,8 @@ export class TaplineTools {
   private readonly bugStore: BugStore | null = null;
   /** The finding of the last failed `run` or `replay` of this session, while it is still the last one (§29.3 `from: "failure"`). */
   private lastFailure: Finding | null = null;
+  /** The recorded origin place of each step of a failure's path (null when unknown). */
+  private readonly failureOrigins = new WeakMap<Finding, Array<string | null>>();
 
   constructor(
     private readonly host: TaplineHost,
@@ -3005,8 +3007,10 @@ export class TaplineTools {
   private bugFromFailure(store: BugStore): Built | CallToolResult {
     const failure = this.lastFailure;
     if (failure === null) return fail("Error not_found: there is no failed replay or run in this session to make a bug of (a later run or replay that held clears it).");
-    const { steps, cut } = writablePath(failure.path);
-    const finding: BugFinding = { ...failure, path: steps };
+    const { steps, cut, dropped } = writablePath(failure.path);
+    // When steps were dropped the path starts at the first kept step, so the script starts where that step started: its recorded origin, else unknown.
+    const pathFrom = dropped > 0 ? (this.failureOrigins.get(failure)?.[dropped] ?? null) : failure.path_from;
+    const finding: BugFinding = { ...failure, path: steps, path_from: pathFrom };
     const made = makeBug(this.bugContext(store), {
       finding,
       how: "failure",
@@ -6263,7 +6267,10 @@ export class TaplineTools {
       repro: null,
       count: 1,
     };
-    return redactFinding(finding, (value) => this.replayScrub(value));
+    const safe = redactFinding(finding, (value) => this.replayScrub(value));
+    // The place each step of the path starts from, when the script recorded it: a bug made of a cut path starts at its first kept step's.
+    this.failureOrigins.set(safe, steps.slice(0, brk.index + 1).map((item) => (typeof (item as Record<string, unknown>)["place"] === "string" ? ((item as Record<string, unknown>)["place"] as string) : null)));
+    return safe;
   }
 
   /** `apply` ended: a failure adds its notes (and an expect's finding); a pass with repairs writes the two files and learns the roads (§26.5). */
