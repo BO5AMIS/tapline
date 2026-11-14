@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ingressRedactor, loadAccounts, redactAll, safeEncode, safeHead, variantsOf, vaultStore, wellFormed, type GitProbe } from "../src/accounts.js";
 import { OtpCodes } from "../src/otpclient.js";
 import { REDACTION_FAILED, type TaplineHost } from "../src/server.js";
-import { flushExploreMaps } from "./explore-helpers.js";
+import { flushExploreMaps, input, type ExWorld } from "./explore-helpers.js";
 import { FakeApp, startHost } from "./helpers.js";
 import { repairRig, textOf } from "./repair-helpers.js";
 
@@ -74,15 +74,27 @@ describe("R8: cuts never split a surrogate pair and encodings are total", () => 
     if (loaded.store === null) throw new Error("vault not loaded");
     const store = loaded.store;
     const typed = "a".repeat(199) + EMOJI;
+    // The screen must hold the input, or the step never types (review, cycle 7): keep the world to check what was typed.
+    let world: ExWorld | null = null;
     const r = await repairRig(hosts, apps, dirs, {
       hostOptions: { redact: ingressRedactor(() => store, new OtpCodes()) },
       tools: { accounts: loaded },
+      world: (w) => {
+        world = w;
+        w.screens[w.screen]?.elements.push(input("email-field", "Email"));
+      },
     });
     r.script("emoji", [{ tool: "type_text", target: { id: "email-field" }, text: typed }]);
     const answer = textOf(await r.s.tools.replay({ name: "emoji" }));
+    expect(answer).not.toContain("No input matches");
+    expect(answer).not.toMatch(/Ran 0 of 1/);
+    // the app received the whole text, emoji included
+    expect((world as ExWorld | null)?.typed.some((t) => t.id === "email-field" && t.text === typed)).toBe(true);
     expect(answer).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    // still up and still scrubbing after the run
+    // still up and still scrubbing after the run: the echo is scrubbed, and the host answers another replay
     expect(r.s.host.redactOut(`x ${typed} y`)).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const again = textOf(await r.s.tools.replay({ name: "emoji" }));
+    expect(again).not.toContain("No input matches");
   });
 
   it("lone high and low surrogates in a typed value, a vault value and app text are all handled", () => {
