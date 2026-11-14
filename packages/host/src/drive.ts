@@ -451,7 +451,7 @@ export async function driveTo(svc: DriveServices, args: DriveArgs, rs: RouteServ
     const refused = rs.checkSteps(steps);
     if (refused !== null) return refused;
   }
-  return afterThen(await driveCore(svc, args, rs, steps !== undefined || args.quiet === true), args, rs);
+  return afterThen(svc, await driveCore(svc, args, rs, steps !== undefined || args.quiet === true), args, rs);
 }
 
 /** A drive for a caller that wants no screen on success (a replay going to a route's start). */
@@ -460,12 +460,29 @@ export async function driveQuietly(svc: DriveServices, args: DriveArgs, rs?: Rou
   return core.ok ? { ok: true } : { ok: false, message: core.message };
 }
 
+/**
+ * A stop always carries the screen (§18.4, 1.13.3), whatever `look` says: a failed answer that was built without one gets
+ * the screen as it is now, under its own text.
+ */
+async function withStopScreen(svc: DriveServices, failed: CallToolResult, brief: boolean | undefined): Promise<CallToolResult> {
+  const lines = failed.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+  if (failed.content.some((block) => block.type === "image") || /^Screen \d+x\d+/m.test(lines)) return failed;
+  try {
+    return { ...(await svc.screen(lines, brief)), isError: true };
+  } catch {
+    return failed;
+  }
+}
+
 /** `then`: the steps go on after the arrival, in the same call; the answer follows `run`'s (18.4, 9.3). */
-async function afterThen(core: Core, args: DriveArgs, rs: RouteServices | undefined): Promise<CallToolResult> {
+async function afterThen(svc: DriveServices, core: Core, args: DriveArgs, rs: RouteServices | undefined): Promise<CallToolResult> {
   // A dry run touches nothing, so the steps after it don't run either.
   if (!core.ok || args.then === undefined || rs === undefined || args.dry_run === true) return core.answer;
   const ran = await rs.runSteps(args.then as Step[], args.look !== false);
-  if (ran.isError === true) return appendLines(ran, [...core.notes, `Note: arrived at ${core.arrived} before the steps ran.`]);
+  if (ran.isError === true) {
+    const stopped = args.look === false ? await withStopScreen(svc, ran, args.brief) : ran;
+    return appendLines(stopped, [...core.notes, `Note: arrived at ${core.arrived} before the steps ran.`]);
+  }
   return withLinesBefore(ran, [core.line, ...core.notes]);
 }
 
@@ -1001,13 +1018,17 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
   const outcome = await routeRunner.run(route, args.with ?? {}, ctx, rs.accounts).finally(leave);
   if (outcome.kind === "refused") return startFailure ?? failed(`Error ${outcome.code}: ${outcome.message}`);
   const ran = outcome.answer;
-  if (ran.isError === true) return ran;
+  // The route's own steps ran without a screen when `look` is false or `then` follows: a stop carries one anyway.
+  if (ran.isError === true) return args.look === false || then !== undefined ? withStopScreen(svc, ran, args.brief) : ran;
 
   // The end is checked, never assumed.
   const now = await placeNow(svc.source, svc.map);
   const wanted = route.end;
   if (wanted !== undefined) {
-    const stop = (why: string): CallToolResult => ({ ...withFirstLine(ran, `Error off_route: ${why}`), isError: true });
+    const stop = (why: string): Promise<CallToolResult> => {
+      const stopped: CallToolResult = { ...withFirstLine(ran, `Error off_route: ${why}`), isError: true };
+      return args.look === false || then !== undefined ? withStopScreen(svc, stopped, args.brief) : Promise.resolve(stopped);
+    };
     if (now === null) return stop(`the app's place can't be read, so the end of the route ${route.name} isn't checked.`);
     if (now.place.name !== wanted) {
       return stop(
@@ -1021,7 +1042,7 @@ export async function driveRoute(svc: DriveServices, rs: RouteServices, args: Dr
   const arrived = `${place !== undefined && !svc.eyes ? `${place} ` : ""}by route ${route.name} in ${seconds(svc.clock() - started)} s`;
   const line = `Arrived ${place !== undefined && !svc.eyes ? "at " : ""}${arrived}.`;
   const core: Core = { ok: true, answer: appendLines(withFirstLine(ran, line), startNotes), line, notes: startNotes, arrived };
-  return afterThen(core, args, rs);
+  return afterThen(svc, core, args, rs);
 }
 
 /**
