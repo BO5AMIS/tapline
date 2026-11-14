@@ -329,6 +329,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     journeysDir: join(configDir(options.env), "journeys"),
     // `explore` reports (AGENT-TOOLS 1.15 §25.10): one folder per run, the newest 20 of an app kept
     exploreDir: join(configDir(options.env), "explore"),
+    // Bug reports (AGENT-TOOLS 1.16 §29.2): `<app id>/<bug id>/`, the newest 100 of an app kept
+    bugsDir: join(configDir(options.env), "bugs"),
     exportRunner: realRunner,
     // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
     ...(options.noLog === true ? {} : { logDir: join(configDir(options.env), "log") }),

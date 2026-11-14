@@ -1,7 +1,7 @@
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
@@ -19,7 +19,7 @@ import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
-import { reportFor } from "./report.js";
+import { readLogEntries, reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
@@ -54,13 +54,16 @@ import { Dialogs, askDone, draftCaption, okCaption, plainText, type MomentOutcom
 import type { AuditSink } from "./auditlog.js";
 import { createOtpService, otpReference, type OtpFetch, type OtpService } from "./otpclient.js";
 import { GrantBook, REACH_WORDS, elementNeverGrantable, grantCaption, grantNameBase, neverGrantable, reachesPeople, type GrantDecision, type GrantSpec } from "./grants.js";
-import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { DEFAULT_POLICY, UNREADABLE_LINK, asWords, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { seenOf, type Seen } from "./seen.js";
+import { BugGateError, BugStore, appFolderName, isBugId } from "./bugstore.js";
+import { cutDownLink, type BugFinding } from "./bug.js";
+import { bugAnswer, makeBug, newestRun, observedFinding, readRunFinding, shownPath, writablePath, type BugContext } from "./bugreport.js";
 import { namedTarget } from "./signature.js";
 import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, fixtureRef, isOutcome, type ExploreArgs, type ExploreFill, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
@@ -406,6 +409,28 @@ export const toolShapes = {
     account: z.string().optional().describe("A vault account marked \"explore\": true in the vault file, for the way back after a reset"),
     guide: z.string().optional().describe("Reserved; only \"none\" is offered in this version"),
   },
+  bug_report: {
+    finding: z.string().optional().describe("A finding's id in the report of run (f3): makes a one-page bug report from it"),
+    run: z.string().optional().describe("With finding: an explore report folder, or \"last\" (default): the newest explore report of this app"),
+    from: z.enum(["now", "failure"]).optional().describe("\"failure\": the last failed replay or run of this session; \"now\": what you saw while driving, with note, built from the last touches of the action log"),
+    note: z.string().optional().describe("With from \"now\": what is wrong, one line, at most 300 characters (required)"),
+    expected: z.string().optional().describe("With from \"now\": what should have happened, one line, at most 300 characters"),
+    verify: z.union([z.boolean(), z.number()]).optional().describe("How many reproduction runs, 1 to 10 (true: 3). Not available in this version: only false or 0 is accepted"),
+    reset: z.enum(["own", "app"]).optional().describe("With verify: the reset between runs (not available in this version)"),
+    account: z.string().optional().describe("With verify: a test account for the way back after a reset (not available in this version)"),
+    bug: z.string().optional().describe("A bug id kept earlier (bug_7bc2e91c152d416e): shows it, or with with_picture adds its picture"),
+    with_picture: z.boolean().optional().describe("true: a private picture may go into the bug's folder. Say so only when your user asked"),
+    export: z
+      .object({
+        to: z.enum(["issue", "zip"]),
+        repo: z.string().optional(),
+        confirm: z.boolean().optional(),
+        public: z.boolean().optional(),
+        with_picture: z.boolean().optional(),
+      })
+      .optional()
+      .describe("Export a bug to a GitHub issue or a zip (not available in this version)"),
+  },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
     goal: z.string().min(1).max(300).optional().describe('What the user wants to do, e.g. "log breakfast by scanning its barcode"'),
@@ -694,6 +719,8 @@ export interface ToolsOptions {
   gifMaxBytes?: number;
   /** Where `explore` keeps its report folders (e.g. ~/.tapline/explore): `<app id>/<UTC time>/` (AGENT-TOOLS 1.15 §25.10). Unset: explore answers that it can't keep a report. */
   exploreDir?: string;
+  /** Where `bug_report` keeps its bugs (e.g. ~/.tapline/bugs): `<app id>/<bug id>/` (AGENT-TOOLS 1.16 §29.2). Unset: bug_report answers that it can't keep one. */
+  bugsDir?: string;
   /** Wall-clock time in ms for the times in a finding and a report (tests pass their own). Default: Date.now. */
   wallClock?: () => number;
   /** How long `explore` waits for the app to be in front or connected again (a crash with `continue`, a move that left the app). Default 60 000 ms. */
@@ -1204,7 +1231,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive", explore: "explore",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive", explore: "explore", bugReport: "bug_report",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
@@ -1231,7 +1258,7 @@ const FRAME_TOOLS: ReadonlySet<string> = new Set([
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
   "apps", "open_app", "pair", "look", "inspect", "audit", "ux_check", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
-  "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
+  "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report", "bug_report",
 ]);
 /** A look's picture arguments for the call log: booleans and numbers only; undefined when it gave none. */
 function pictureArgs(input: Record<string, unknown>): { screenshot?: boolean; width?: number; labels?: boolean } | undefined {
@@ -1525,6 +1552,10 @@ export class TaplineTools {
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly otp: OtpService;
+  /** The bug report's folders (AGENT-TOOLS 1.16 §29.2); null when this server keeps none. */
+  private readonly bugStore: BugStore | null = null;
+  /** The finding of the last failed `run` or `replay` of this session, while it is still the last one (§29.3 `from: "failure"`). */
+  private lastFailure: Finding | null = null;
 
   constructor(
     private readonly host: TaplineHost,
@@ -1538,6 +1569,11 @@ export class TaplineTools {
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
+    if (options.bugsDir !== undefined) {
+      this.bugStore = new BugStore(options.bugsDir);
+      // At start an app's bugs beyond the newest 100 are removed (§29.2).
+      this.bugStore.pruneAll();
+    }
     this.otp = options.otp ?? createOtpService();
     this.actionLog?.setBackstop((value) => this.backstop(value));
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
@@ -2615,6 +2651,209 @@ export class TaplineTools {
     return host;
   }
 
+  // -- the bug report (AGENT-TOOLS 1.16 §29)
+
+  /** What a scroll, a swipe or a link did, for the log (§29.3): directions and points; a link cut down to its plain words; never typed text. */
+  private loggedArgs(tool: string, params: unknown): { args?: NonNullable<ActionLogEntry["args"]> } {
+    if (typeof params !== "object" || params === null) return {};
+    const p = params as Record<string, unknown>;
+    const args: NonNullable<ActionLogEntry["args"]> = {};
+    if (tool === "scroll") {
+      if (typeof p["direction"] === "string") args.direction = p["direction"];
+      if (typeof p["to"] === "string") args.to = p["to"];
+    } else if (tool === "swipe") {
+      for (const key of ["x0", "y0", "x1", "y1"] as const) if (typeof p[key] === "number") args[key] = p[key];
+    } else if (tool === "open_url" && typeof p["url"] === "string") args.url = cutDownLink(p["url"]);
+    return Object.keys(args).length > 0 ? { args } : {};
+  }
+
+  /** Redaction at every sink of a bug report: the vault's values, this session's codes and every value typed in the session, in one pass (§29.6). */
+  private bugScrub(text: string): string {
+    return this.host.redactOut(this.scrubSecrets(text));
+  }
+
+  /** The map of an app: the live one when it is the app in front, else the one this server holds. */
+  private bugMap(appId: string): ReturnType<AppMap["data"]> | undefined {
+    const live = this.host.current();
+    if (live !== undefined && (live.app.id ?? live.app.name) === appId) return this.mapOf(live)?.data();
+    return this.options.maps?.forApp({ id: appId, name: appId })?.data();
+  }
+
+  private bugContext(store: BugStore): BugContext {
+    return {
+      store,
+      redact: (text) => this.bugScrub(text),
+      placeKey: (app, place) => (place === null ? null : (this.bugMap(app)?.places[place]?.key ?? null)),
+      roads: (app) => this.bugMap(app)?.roads ?? [],
+      needsPerson: (app, step) => {
+        const target = step.target;
+        if (target === undefined) return false;
+        const subject = target.label ?? target.text ?? (target.id !== undefined ? asWords(target.id) : undefined);
+        if (subject === undefined) return false;
+        const lists = exploreLists(this.policy, { id: app, name: app });
+        return matchWord([...FLOOR_WORDS, ...lists.confirm, ...lists.block], { label: subject }) !== null;
+      },
+    };
+  }
+
+  /** `bug_report` (AGENT-TOOLS 1.16 §29.3): one page for whoever fixes it, from a finding, the last failed check, or what was just seen. */
+  async bugReport(args: Shape<"bug_report"> = {}): Promise<CallToolResult> {
+    const store = this.bugStore;
+    if (store === null) return fail("Error unsupported: this server keeps no bug reports.");
+    const given = [args.finding !== undefined, args.from !== undefined, args.bug !== undefined].filter(Boolean).length;
+    if (given !== 1) return fail("Error bad_params: give exactly one of finding, from and bug.");
+    if (args.run !== undefined && args.finding === undefined) return fail("Error bad_params: run goes with finding.");
+    if ((args.note !== undefined || args.expected !== undefined) && args.from !== "now") return fail('Error bad_params: note and expected go with from: "now".');
+    // The reproduction check (§29.4) and the export (§29.7) are not part of this version: a call that asks for one is refused before anything is made.
+    const verify = args.verify === undefined || args.verify === false || args.verify === 0 ? 0 : args.verify === true ? 3 : args.verify;
+    if (!Number.isInteger(verify) || verify < 0 || verify > 10) return fail("Error bad_params: verify is true, false or a whole number from 0 to 10.");
+    if (verify > 0) return fail("Error unsupported: verify (the reproduction check) isn't available in this version; the bug can be made without it.");
+    if (args.export !== undefined) return fail("Error unsupported: export isn't available in this version.");
+    try {
+      if (args.bug !== undefined) return await this.bugShow(store, args.bug, args.with_picture === true);
+      if (args.finding !== undefined) return await this.bugFromRun(store, args.finding, args.run, args.with_picture === true, args.verify === undefined);
+      return args.from === "failure" ? this.bugFromFailure(store) : await this.bugFromNow(store, args);
+    } catch (error) {
+      if (error instanceof BugGateError) return fail(`Error not_allowed: bug report refused: ${error.message} Nothing was written.`);
+      return fail(`Error internal: the bug report couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private static readonly NO_CHECK = "the reproduction check isn't available in this version";
+
+  /** `{finding, run}`: a finding of an explore report folder (or `"last"`, the newest of the app in front). */
+  private async bugFromRun(store: BugStore, findingId: string, run: string | undefined, withPicture: boolean, byDefault: boolean): Promise<CallToolResult> {
+    const exploreDir = this.options.exploreDir;
+    if (exploreDir === undefined) return fail("Error unsupported: this server keeps no explore reports.");
+    let runDir: string | null;
+    if (run === undefined || run === "last") {
+      const session = this.host.current();
+      if (session === undefined) return this.notConnected();
+      runDir = newestRun(exploreDir, session.app.id ?? session.app.name);
+      if (runDir === null) return fail("Error not_found: no explore report for this app yet; run explore first.");
+    } else {
+      const asked = run.startsWith("~") ? join(homedir(), run.slice(1)) : run;
+      const full = resolve(asked);
+      const roots = [exploreDir, ...(this.options.journeysDir !== undefined ? [this.options.journeysDir] : [])].map((root) => resolve(root));
+      if (!roots.some((root) => full === root || full.startsWith(root + sep))) return fail("Error bad_params: run is an explore report folder of this server, or \"last\".");
+      runDir = full;
+    }
+    const read = readRunFinding(runDir, findingId);
+    if (!read.ok) return fail(`Error ${read.code}: ${read.message}`);
+    const made = makeBug(this.bugContext(store), {
+      finding: read.finding,
+      how: "explore",
+      sourceKey: `${read.run}/${read.finding.id}`,
+      run: read.run,
+      script: read.script,
+      picture: read.picture,
+      withPicture,
+      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : byDefault ? TaplineTools.NO_CHECK : "no check was asked for",
+    });
+    return text(bugAnswer(made, (t) => this.bugScrub(t), { reasonShown: true }));
+  }
+
+  /** `{from: "failure"}`: the last failed `run` or `replay` of this session, while it is still the last one. */
+  private bugFromFailure(store: BugStore): CallToolResult {
+    const failure = this.lastFailure;
+    if (failure === null) return fail("Error not_found: there is no failed replay or run in this session to make a bug of (a later run or replay that held clears it).");
+    const { steps, cut } = writablePath(failure.path);
+    const finding: BugFinding = { ...failure, path: steps };
+    const made = makeBug(this.bugContext(store), {
+      finding,
+      how: "failure",
+      sourceKey: `failure/${failure.when}`,
+      stepsCut: cut,
+      notChecked: TaplineTools.NO_CHECK,
+    });
+    return text(bugAnswer(made, (t) => this.bugScrub(t), { reasonShown: true }));
+  }
+
+  /** `{from: "now", note}`: a finding of the kind `observed`, built from the last touches of the action log (§29.3). */
+  private async bugFromNow(store: BugStore, args: Shape<"bug_report">): Promise<CallToolResult> {
+    const note = args.note?.trim() ?? "";
+    if (note === "") return fail('Error bad_params: from: "now" needs a note (what is wrong, one line).');
+    for (const [name, value] of [["note", note], ["expected", args.expected?.trim() ?? ""]] as const) {
+      if (/[\r\n]/.test(value)) return fail(`Error bad_params: ${name} is one line.`);
+      if ([...value].length > 300) return fail(`Error bad_params: ${name} is at most 300 characters.`);
+    }
+    const logDir = this.options.logDir;
+    if (logDir === undefined) return fail("Error unsupported: the action log is off (--no-log), so there is nothing to make a bug of.");
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const appId = session.app.id ?? session.app.name;
+    const platform = session.device.platform === "ios" ? "iOS" : session.device.platform === "android" ? "Android" : session.device.platform;
+    const wall = this.options.wallClock ?? Date.now;
+    // The place now, saved as a look would save it (§18.1).
+    let place: string | null = null;
+    const map = this.mapOf(session);
+    if (map !== undefined) {
+      const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true }).catch(() => null));
+      if (tree.success) place = map.observe(tree.data).place.name;
+    }
+    let picture: Uint8Array | null = null;
+    if (session.capabilities.includes("screenshot") && !this.noScreenshot.has(session.id) && !this.secureWindow()) {
+      try {
+        picture = Buffer.from((await this.takeShot(session.id, 300, 0.6)).data, "base64");
+      } catch {
+        picture = null;
+      }
+    }
+    const build = session.app.build ?? "";
+    const observed = observedFinding({
+      entries: readLogEntries(logDir, this.startedAt),
+      app: appId,
+      note: this.bugScrub(note),
+      ...(args.expected !== undefined ? { expected: this.bugScrub(args.expected.trim()) } : {}),
+      info: { appVersion: session.app.version ?? "", build: /\((.*)\)\s*$/.exec(build)?.[1] ?? build, device: { model: session.device.model ?? session.device.name ?? "unknown", os: `${platform}${session.device.osVersion !== undefined ? ` ${session.device.osVersion}` : ""}` }, toolVersion: EXPLORE_TOOL_VERSION },
+      when: new Date(wall()),
+      place,
+      logs: formatLogs(this.sessionLogs(session.id).slice(-20)).split("\n").filter((line) => line !== ""),
+      // Any app the user didn't mark as a test app may show personal data: this tool can't know one, so the picture is private (§27.2).
+      picture: picture === null ? null : { file: "findings/f1.jpg", private: true },
+    });
+    if (observed === null) return fail("Error not_found: there is no touch in the action log to make a bug of; drive the app first.");
+    const made = makeBug(this.bugContext(store), {
+      finding: observed.finding,
+      how: "now",
+      sourceKey: `now/${observed.finding.when}`,
+      picture,
+      withPicture: args.with_picture === true,
+      stepsCut: observed.stepsCut,
+      others: observed.others,
+      notChecked: "no check was asked for",
+    });
+    return text(bugAnswer(made, (t) => this.bugScrub(t)));
+  }
+
+  /** `{bug}`: shows a kept bug; with `with_picture` adds its private picture while the explore report still holds it. */
+  private async bugShow(store: BugStore, id: string, withPicture: boolean): Promise<CallToolResult> {
+    if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
+    const session = this.host.current();
+    const found = store.locate(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined) ?? store.locate(id);
+    if (found === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    const { app, stored } = found;
+    let note = "";
+    if (withPicture) {
+      let bytes: Uint8Array | null = null;
+      const source = stored.meta.source;
+      const file = stored.finding.picture?.file;
+      if (source.how === "explore" && source.run !== undefined && file !== undefined && this.options.exploreDir !== undefined && /^findings\/[\w.-]+$/.test(file) && /^\d{8}T\d{6}Z(?:-\d+)?$/.test(source.run)) {
+        try {
+          bytes = readFileSync(join(this.options.exploreDir, appFolderName(app), source.run, file));
+        } catch {
+          bytes = null;
+        }
+      }
+      const done = store.addPicture(app, id, bytes, (t) => this.bugScrub(t));
+      note =
+        done === "added" ? "The picture is in the folder now." : done === "has" ? "The picture is in the folder already." : "The picture can't be added: its file is gone (it is kept only while the explore report holds it).";
+      if (done === "gone") return fail(`Error not_found: ${note}`);
+    }
+    const page = readFileSync(join(stored.dir, "report.md"), "utf8");
+    return text(this.bugScrub([...(note !== "" ? [note] : []), page.trimEnd(), "", `Folder: ${shownPath(stored.dir)}`].join("\n")));
+  }
+
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
   sessionReport(args: Shape<"session_report"> = {}): CallToolResult {
     const dir = this.options.logDir;
@@ -3509,6 +3748,8 @@ export class TaplineTools {
     else this.unlistedActions.delete(session.id);
     const total = steps.length;
     const failed = stop !== null;
+    // The last failed run or replay is what `bug_report {from: "failure"}` makes a bug of, while it is still the last one (§29.3).
+    this.lastFailure = stop !== null ? this.expectFailedFinding(session, steps, stop) : null;
     const head = stop === null
       ? `Ran ${total} of ${total} steps in ${((Date.now() - started) / 1000).toFixed(1)} s.`
       : `Error ${stop.code}: Ran ${ran} of ${total} steps; stopped at step ${stop.index + 1} (${describeRunStep(steps[stop.index] as Step)}): ${stop.message}`;
@@ -4465,6 +4706,7 @@ export class TaplineTools {
       by,
       tool,
       ...loggedTarget(params),
+      ...this.loggedArgs(tool, params),
       // typed text never reaches the log, not even as the field's value (§12)
       ...(element?.success ? { element: formatElement({ ...element.data, ref: "", value: null, placeholder: null }, { actions: false }) } : {}),
       ok: code === undefined,
@@ -5695,9 +5937,17 @@ export class TaplineTools {
 
   /** The §27 finding of an `expect` that failed: a line that reports it and the finding as one JSON line. It is never repaired. */
   private expectFinding(session: SessionInfo, script: SharedScript, steps: Step[], brk: { index: number; code: string; message: string }): string[] {
-    if (brk.code !== "expect_failed") return [];
+    const safe = this.expectFailedFinding(session, steps, brk);
+    if (safe === null) return [];
+    this.lastFailure = safe;
+    return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
+  }
+
+  /** The finding of a step whose `expect` didn't hold (§26.2, §27.1), redacted; null for any other failure. */
+  private expectFailedFinding(session: SessionInfo, steps: Step[], brk: { index: number; code: string; message: string }): Finding | null {
+    if (brk.code !== "expect_failed") return null;
     const step = steps[brk.index];
-    if (step === undefined) return [];
+    if (step === undefined) return null;
     const platform = session.device.platform === "ios" ? "iOS" : session.device.platform === "android" ? "Android" : session.device.platform;
     const build = session.app.build ?? "";
     const place = (step as Record<string, unknown>)["place"];
@@ -5728,8 +5978,7 @@ export class TaplineTools {
       repro: null,
       count: 1,
     };
-    const safe = redactFinding(finding, (value) => this.replayScrub(value));
-    return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
+    return redactFinding(finding, (value) => this.replayScrub(value));
   }
 
   /** `apply` ended: a failure adds its notes (and an expect's finding); a pass with repairs writes the two files and learns the roads (§26.5). */

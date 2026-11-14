@@ -43,6 +43,8 @@ export interface ActionLogEntry {
   grant_asked?: string;
   /** For typing: how many characters, never the text. */
   chars?: number;
+  /** AGENT-TOOLS 1.16 §29.3: what a scroll, a swipe or a link did, so a bug report can write the step (never typed text; a link is cut down to its plain words). */
+  args?: { direction?: string; to?: string; x0?: number; y0?: number; x1?: number; y1?: number; url?: string };
   /** AGENT-TOOLS 1.11 §16.1: `"read"` for a call that isn't an action (look, wait_for, logs, ...). */
   kind?: "read";
   /** One id per host run (an agent's session); with `call` it names a call. */
