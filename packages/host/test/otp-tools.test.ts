@@ -4,10 +4,13 @@ import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AuditEntry, AuditSink } from "../src/auditlog.js";
+import { ControlQueue } from "../src/control.js";
+import { callTool } from "../src/dispatch.js";
+import { DONE, DONE_FIELD, Dialogs, type ElicitAnswer, type ElicitClient, type ElicitSchema } from "../src/elicit.js";
 import { createOtpService } from "../src/otpclient.js";
 import { substituteVariables } from "../src/routes.js";
 import type { TaplineHost } from "../src/server.js";
-import { TaplineTools } from "../src/tools.js";
+import { TaplineTools, type ToolsOptions } from "../src/tools.js";
 import { FAKE_CODE, FAKE_TOKEN, startFakeTapwright, tapwrightHome, type FakeBehavior, type FakeDaemon } from "./fake-tapwright.js";
 import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
 
@@ -17,6 +20,8 @@ const APP = "com.example.demo";
 const CODE_FIELD = { ref: "e7", type: "TextInput", role: "textfield", testID: "code", label: "Code", text: "", value: "", frame: { x: 24, y: 400, width: 354, height: 48 }, actions: ["press", "type"] };
 const SCREEN = { width: 402, height: 874, scale: 3 };
 
+/** Runs right after a code was fetched (a test makes something happen then). */
+let afterFetch: (() => Promise<void>) | undefined;
 const dirs: string[] = [];
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
@@ -27,6 +32,7 @@ function tmp(): string {
   return dir;
 }
 afterEach(async () => {
+  afterFetch = undefined;
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
   await Promise.all(daemons.splice(0).map((d) => d.close()));
@@ -41,11 +47,13 @@ interface TypeRefusal {
   real?: { code: string; message: string };
   /** Runs while the dry run is being answered (to change the app the host has selected, say). */
   duringDry?: () => void;
+  /** Runs while the real type is being answered (to send the app to the background, say). */
+  duringReal?: () => void;
 }
 
 const CAPABILITIES = ["tree", "press", "type", "logs", "dryRun"];
 
-async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refusal: TypeRefusal = {}, capabilities: string[] = CAPABILITIES) {
+async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refusal: TypeRefusal = {}, capabilities: string[] = CAPABILITIES, extra: Partial<ToolsOptions> = {}) {
   const daemon = await startFakeTapwright(behavior);
   if (daemonUp) daemons.push(daemon);
   else await daemon.close();
@@ -55,6 +63,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
   // The host scrubs with the service's own redaction, as the runtime wires it.
   const { host, port } = await startHost({ redact: otp.codes.redact });
   hosts.push(host);
+  let theApp: FakeApp | undefined;
   const typed: Array<Record<string, unknown>> = [];
   const checked: Array<Record<string, unknown>> = [];
   let showCode = false;
@@ -66,6 +75,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
         const params = req.params as Record<string, unknown>;
         (params["dryRun"] === true ? checked : typed).push(params);
         if (params["dryRun"] === true) refusal.duringDry?.();
+        else refusal.duringReal?.();
         const refused = params["dryRun"] === true ? refusal.dry : refusal.real;
         if (refused !== undefined) return { ok: false, error: refused };
         const value = String(params["text"]);
@@ -77,6 +87,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
   };
   const { app } = await FakeApp.connect(port, { capabilities }, handler);
   apps.push(app);
+  theApp = app;
   const audit: AuditEntry[] = [];
   const sink: AuditSink = {
     write(entry) {
@@ -85,8 +96,21 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
     },
   };
   const logDir = tmp();
-  const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, otp, audit: sink, logDir });
-  return { tools, daemon, typed, checked, audit, logDir, host, port, showCodeInTree: () => (showCode = true) };
+  const tools = new TaplineTools(host, {
+    connect: { url: "", name: "Dev PC" },
+    otp: {
+      codes: otp.codes,
+      fetch: async (name: string) => {
+        const got = await otp.fetch(name);
+        await afterFetch?.();
+        return got;
+      },
+    },
+    audit: sink,
+    logDir,
+    ...extra,
+  });
+  return { tools, app: () => theApp, daemon, typed, checked, audit, logDir, host, port, showCodeInTree: () => (showCode = true) };
 }
 
 function everythingIn(dir: string): string {
@@ -298,6 +322,63 @@ describe("the code is asked for only right before typing (AGENT-TOOLS 1.16.2 §1
     expect(daemon.requests.filter((r) => r.url === "/otp")).toHaveLength(1);
     expect(realTypes(typed)).toHaveLength(1);
     expect(textOf(answer)).not.toContain(FAKE_CODE);
+  });
+});
+
+/** A dialog client that answers Done at once, after running `before` (the person brings the app back). */
+class DoneClient implements ElicitClient {
+  shown = 0;
+  constructor(private readonly before: () => void) {}
+  canShowForm(): boolean {
+    return true;
+  }
+  elicit(_message: string, _schema: ElicitSchema, _signal: AbortSignal): Promise<ElicitAnswer> {
+    this.shown += 1;
+    this.before();
+    return Promise.resolve({ action: "accept", content: { [DONE_FIELD]: DONE } });
+  }
+}
+
+describe("the code is asked for only after the host's own gates (PR T186C findings)", () => {
+  const text = `\${otp.${APP}}`;
+  const fetches = (daemon: FakeDaemon): number => daemon.requests.filter((r) => r.url === "/otp").length;
+
+  it("a paused queue refuses the type before any code is asked for", async () => {
+    const control = new ControlQueue();
+    control.setPaused(true);
+    const { tools, daemon, typed, audit } = await setup({}, true, {}, CAPABILITIES, { control });
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/paused/);
+    expect(fetches(daemon)).toBe(0);
+    expect(typed).toHaveLength(0);
+    expect(audit).toHaveLength(0);
+  });
+
+  it("an app sent to the background right after the fetch: the code is dropped, never asked for again, even once the person is done", async () => {
+    let back: () => void = () => undefined;
+    const client = new DoneClient(() => back());
+    const { tools, daemon, typed, app, host, audit } = await setup({}, true, {}, CAPABILITIES, {
+      dialogs: new Dialogs(client, { ttlMs: 2000 }),
+      personWaitMs: 2000,
+      personPollMs: 5,
+      personDoneGraceMs: 60,
+    });
+    back = () => app()?.send({ type: "event", event: "appState", data: { state: "active" } });
+    afterFetch = async () => {
+      afterFetch = undefined;
+      app()?.send({ type: "event", event: "appState", data: { state: "background" } });
+      for (let i = 0; i < 200 && host.current()?.appState?.state !== "background"; i++) await new Promise((r) => setTimeout(r, 5));
+    };
+    const answer = await callTool(tools, "type_text", { target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(fetches(daemon)).toBe(1);
+    expect(typed).toHaveLength(0);
+    // No dialog: nothing could be run again, so a person is not asked to bring the app back for it.
+    expect(client.shown).toBe(0);
+    expect(textOf(answer)).toContain("not run again");
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+    expect(audit).toHaveLength(0);
   });
 });
 
