@@ -768,14 +768,69 @@ const ENTRIES_OF = new WeakMap<AccountStore, Record<string, VaultEntry>>();
  * ORIGINAL text in one pass and the spans are merged leftmost-longest, so a value two stores share a prefix, a suffix or a middle
  * of is never half-scrubbed by the other one. Each value keeps its own entry's placeholder.
  */
-export function combinedRedact(stores: readonly AccountStore[]): (text: string) => string {
+export function combinedRedact(stores: readonly AccountStore[], codes?: { values: readonly string[]; token: string }): (text: string) => string {
   const union: Record<string, VaultEntry> = {};
   stores.forEach((store, i) => {
     const entries = ENTRIES_OF.get(store);
     if (entries === undefined) return;
     for (const [name, entry] of Object.entries(entries)) union[`${i}\u0000${name}`] = entry;
   });
-  return scrubber(union, (key, field) => placeholderOf(key.slice(key.indexOf("\u0000") + 1), field));
+  // The registered one-time codes are sources of the same matcher (section 20.4): a code that overlaps a vault value is matched
+  // against the same original text, so the longer complete match wins and no fragment of either is left.
+  codes?.values.forEach((value, i) => {
+    union[`${CODE_KEY}${i}`] = { kind: "note", values: { text: value } };
+  });
+  return scrubber(union, (key, field) => (codes !== undefined && key.startsWith(CODE_KEY) ? codes.token : placeholderOf(key.slice(key.indexOf("\u0000") + 1), field)));
+}
+
+const CODE_KEY = "otp\u0001";
+
+/** The registered one-time codes, as the one matcher needs them: the codes (the same array until one is added) and their placeholder. */
+export interface CodeSource {
+  values(): readonly string[];
+  readonly token: string;
+  redact(text: string): string;
+}
+
+/** The stores that make a store's values: itself, or (a store that keeps retired values) the current one and the retired ones. */
+const BASES_OF = new WeakMap<AccountStore, () => readonly AccountStore[]>();
+
+/** A store that also scrubs every retired store's values (redaction is cumulative for a session, section 20.3), in one matcher. */
+export function historyStore(current: AccountStore, retired: readonly AccountStore[]): AccountStore {
+  let built = -1;
+  let combined: (text: string) => string = current.redact;
+  const store: AccountStore = {
+    ...current,
+    redact: (text) => {
+      if (built !== retired.length) {
+        combined = retired.length === 0 ? current.redact : combinedRedact([current, ...retired]);
+        built = retired.length;
+      }
+      return combined(text);
+    },
+  };
+  BASES_OF.set(store, () => [current, ...retired]);
+  return store;
+}
+
+const SHARED = new WeakMap<AccountStore, { bases: readonly AccountStore[]; codes: readonly string[]; redact: (text: string) => string }>();
+
+/**
+ * Scrubs a text of every vault value (current and retired) AND every registered one-time code with ONE matcher over the original
+ * text, never one scrubber after another: where a code and a vault value overlap, the longer complete match wins. The matcher is
+ * cached until a code is registered or the vault's stores change.
+ */
+export function redactAll(store: AccountStore | null | undefined, codes: CodeSource, text: string): string {
+  if (store === null || store === undefined) return codes.redact(text);
+  const values = codes.values();
+  if (values.length === 0) return store.redact(text);
+  const bases = BASES_OF.get(store)?.() ?? [store];
+  if (bases.some((base) => ENTRIES_OF.get(base) === undefined)) return codes.redact(store.redact(text));
+  const hit = SHARED.get(store);
+  if (hit !== undefined && hit.codes === values && hit.bases.length === bases.length && hit.bases.every((base, i) => base === bases[i])) return hit.redact(text);
+  const redact = combinedRedact(bases, { values, token: codes.token });
+  SHARED.set(store, { bases: [...bases], codes: values, redact });
+  return redact(text);
 }
 
 function storeOf(entries: Record<string, VaultEntry>): AccountStore {

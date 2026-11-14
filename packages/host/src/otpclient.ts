@@ -352,6 +352,13 @@ export class OtpCodes {
     return true;
   }
 
+  readonly token = OTP_PLACEHOLDER;
+
+  /** The codes so far: the same array until a code is added. */
+  values(): readonly string[] {
+    return this.codes;
+  }
+
   /** Arrow, so it can be handed on as a plain function. */
   readonly redact = (text: string): string => {
     if (this.codes.length === 0) return text;

@@ -22,7 +22,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { mentionsVault, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
+import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -5839,7 +5839,7 @@ export class TaplineTools {
         if (answer.isError !== true) {
           this.options.audit?.write({ kind: "otp", app: session.app.id ?? session.app.name, detail: `from ${otp.source ?? "Tapwright"}` });
         }
-        return { ...answer, content: answer.content.map((part) => (part.type === "text" ? { ...part, text: this.otp.codes.redact(part.text) } : part)) };
+        return { ...answer, content: answer.content.map((part) => (part.type === "text" ? { ...part, text: this.scrubSecrets(part.text) } : part)) };
       });
     }
     if (use === undefined || session === undefined) return typed;
@@ -5930,7 +5930,7 @@ export class TaplineTools {
   /** A vault value or a one-time code typed in this session becomes its placeholder. */
   private scrubSecrets(text: string): string {
     const store = this.options.accounts?.store;
-    return this.otp.codes.redact(store == null ? text : store.redact(text));
+    return redactAll(store, this.otp.codes, text);
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */

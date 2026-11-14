@@ -16,7 +16,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
-import { combinedRedact, loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
+import { historyStore, loadAccounts, redactAll, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
 import { bounded, ScheduleTimeout, VAULT_LOAD_TIMEOUT_MS } from "./runschedule.js";
 import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
@@ -215,23 +215,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const retiredPrints = new Set<string>();
   const withHistory = (load: AccountsLoad): AccountsLoad => {
     if (load.store === null) return load;
-    const current = load.store;
     // One scrubber over the current and every retired value, matched together against the original text (never chained).
-    let built = -1;
-    let combined: (text: string) => string = current.redact;
-    const redact = (text: string): string => {
-      if (built !== retired.length) {
-        combined = retired.length === 0 ? current.redact : combinedRedact([current, ...retired]);
-        built = retired.length;
-      }
-      return combined(text);
-    };
-    return { ...load, store: { ...current, redact } };
+    return { ...load, store: historyStore(load.store, retired) };
   };
   let currentRaw: AccountsLoad | undefined = accounts;
   const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts: accounts === undefined ? undefined : withHistory(accounts) };
   const host = new TaplineHost({
-    redact: (text: string) => otp.codes.redact(live.accounts?.store != null ? live.accounts.store.redact(text) : text),
+    redact: (text: string) => redactAll(live.accounts?.store, otp.codes, text),
     redactsVault: accounts?.store != null,
     token: config.token,
     port: config.port,
