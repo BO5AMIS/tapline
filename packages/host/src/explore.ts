@@ -254,7 +254,8 @@ export class Explorer {
   private readonly notes: string[] = [];
   private readonly resets: ResetEntry[] = [];
   private readonly depthOf = new Map<string, number>();
-  private readonly via = new Map<string, { from: string; step: PathStep }>();
+  /** How the run first reached a place: the hop, and the typing steps that filled the form a submit hop sent (`TYPED`, never the text). */
+  private readonly via = new Map<string, { from: string; step: PathStep; before?: PathStep[] }>();
   private readonly seen = new Set<string>();
   private readonly below = new Set<string>();
   private readonly queue: string[] = [];
@@ -595,7 +596,7 @@ export class Explorer {
     for (const el of tree.elements) {
       if (el.row !== true || el.frame === null || el.frame === undefined) continue;
       const frame = el.frame;
-      const owner = scrolls.filter((s) => s.frame !== null && s.frame !== undefined && contains(s.frame, frame)).sort((a, b) => num(a.frame?.width) * num(a.frame?.height) - num(b.frame?.width) * num(b.frame?.height))[0];
+      const owner = owningScroll(scrolls, frame);
       listOf.set(el, owner !== undefined ? scrollSig(owner) : "list");
     }
     return signaturesOf(named, {
@@ -616,13 +617,23 @@ export class Explorer {
     });
   }
 
-  /** The number of each outermost row, from 1, top to bottom then left to right. Elements inside a row are not numbered. */
+  /** The number of each outermost row in its own list, from 1, top to bottom then left to right. Elements inside a row are not numbered. */
   private rowNumbers(tree: TreeResult): Map<TreeElement, number> {
     const rows = tree.elements.filter((el) => el.row === true && el.frame !== null && el.frame !== undefined && (isTappable(el) || isToggle(el)) && el.disabled !== true);
     // Outermost: not inside another row (of two rows with the same frame the first is the outer one).
     const outer = rows.filter((el, i) => !rows.some((other, j) => j !== i && other.frame !== null && other.frame !== undefined && el.frame !== null && el.frame !== undefined && contains(other.frame, el.frame) && (!contains(el.frame, other.frame) || j < i)));
     outer.sort((a, b) => num(a.frame?.y) - num(b.frame?.y) || num(a.frame?.x) - num(b.frame?.x));
-    return new Map(outer.map((el, i) => [el, i + 1]));
+    // Each list counts its own rows: the rows of a second list are not "beyond the first two" of the first.
+    const scrolls = tree.elements.filter((el) => roleOf(el) === "scroll");
+    const counts = new Map<TreeElement | null, number>();
+    const numbers = new Map<TreeElement, number>();
+    for (const el of outer) {
+      const owner = el.frame !== null && el.frame !== undefined ? (owningScroll(scrolls, el.frame) ?? null) : null;
+      const n = (counts.get(owner) ?? 0) + 1;
+      counts.set(owner, n);
+      numbers.set(el, n);
+    }
+    return numbers;
   }
 
   private plan(place: string, tree: TreeResult): Plan {
@@ -830,7 +841,8 @@ export class Explorer {
     const fresh = !this.depthOf.has(arrived);
     if (fresh) {
       this.depthOf.set(arrived, (this.depthOf.get(place) ?? 0) + 1);
-      this.via.set(arrived, { from: place, step });
+      const typed = this.typedSteps.get(place) ?? [];
+      this.via.set(arrived, { from: place, step, ...(typed.length > 0 ? { before: [...typed] } : {}) });
       if (this.inFocusFrom(place)) this.below.add(arrived);
       this.seen.add(arrived);
       await this.firstVisit(arrived, tree);
@@ -1128,7 +1140,7 @@ export class Explorer {
         if (road === null) return { from: place, steps: [] };
         return { from: this.startPlace, steps: [...road, ...steps] };
       }
-      steps.unshift(hop.step);
+      steps.unshift(...(hop.before ?? []), hop.step);
       at = hop.from;
     }
     return at === this.startPlace ? { from: this.startPlace, steps } : { from: place, steps: [] };
@@ -1293,6 +1305,11 @@ function stepOfRoad(road: MapRoad): PathStep {
   if (t.text !== undefined) return { tool: move.tool, target: { text: t.text } };
   if (t.x !== undefined && t.y !== undefined) return { tool: move.tool, target: { x: t.x, y: t.y } as PathStep["target"] };
   return { tool: move.tool };
+}
+
+/** The smallest scroll view that holds a frame: the list a row belongs to. */
+function owningScroll(scrolls: readonly TreeElement[], frame: NonNullable<TreeElement["frame"]>): TreeElement | undefined {
+  return scrolls.filter((s) => s.frame !== null && s.frame !== undefined && contains(s.frame, frame)).sort((a, b) => num(a.frame?.width) * num(a.frame?.height) - num(b.frame?.width) * num(b.frame?.height))[0];
 }
 
 /** The first line of an error, redacted whole and cut after (a value cut in two would no longer match the redaction). */

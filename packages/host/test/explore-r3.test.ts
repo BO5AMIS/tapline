@@ -131,3 +131,47 @@ describe("R3: a move's log window survives a full buffer", () => {
     expect(JSON.stringify(report)).not.toContain('"seq"');
   });
 });
+
+import { btn, row } from "./explore-helpers.js";
+import type { ExEl } from "./explore-helpers.js";
+
+describe("R3: rows are numbered in their own list", () => {
+  it("the first two rows of a second list are tried too", async () => {
+    const at = (y: number): NonNullable<ExEl["frame"]> => ({ x: 20, y, width: 300, height: 44 });
+    const s = await setupExplore(hosts, apps, dirs, {
+      world: (w) => {
+        w.screens["home"]!.elements = [
+          { id: "list-a", role: "scroll", type: "ScrollView", actions: ["scroll"], frame: { x: 0, y: 0, width: 430, height: 400 } },
+          row("a-1", "Alpha one", { frame: at(10) }),
+          row("a-2", "Alpha two", { frame: at(70) }),
+          { id: "list-b", role: "scroll", type: "ScrollView", actions: ["scroll"], frame: { x: 0, y: 420, width: 430, height: 400 } },
+          row("b-1", "Beta one", { frame: at(430) }),
+          row("b-2", "Beta two", { frame: at(490) }),
+        ];
+        w.screens["home"]!.hidden = [];
+      },
+    });
+    await s.tools.explore({});
+    expect(s.world.pressed).toEqual(expect.arrayContaining(["a-1", "a-2", "b-1", "b-2"]));
+  });
+});
+
+describe("R3: a path through a submitted form keeps the typing", () => {
+  it("a finding on the place a submit leads to carries the typed steps of the form", async () => {
+    const s = await setupExplore(hosts, apps, dirs, {
+      world: (w) => {
+        w.screens["done"] = { route: ["done"], parent: "form", elements: [btn("done-ok", "OK")] };
+        w.goes["form|save-profile"] = "done";
+        w.audit["done"] = [{ type: "contrast", problem: "done is faint", fix: "darken" }];
+      },
+      policy: { version: 2, confirm: [], block: [], explore: { submit: ["save-profile"] } },
+    });
+    await s.tools.explore({ fill: "test-data" });
+    const appDir = joinPath(s.exploreDir, APP.id);
+    const names = readdirSync(appDir).sort();
+    const report = JSON.parse(readFileSync(joinPath(appDir, names[names.length - 1] as string, "report.json"), "utf8")) as { findings: Array<{ got: string; path: Array<Record<string, unknown>> }> };
+    const found = report.findings.find((f) => f.got.includes("done is faint"));
+    expect(found?.path.map((step) => step["tool"])).toEqual(["tap", "type_text", "type_text", "tap"]);
+    expect(found?.path.filter((step) => step["tool"] === "type_text").map((step) => step["text"])).toEqual(["${typed}", "${typed}"]);
+  });
+});
