@@ -218,10 +218,15 @@ async function runSteps(host: CheckHost, bug: CheckBug, steps: PathStep[], optio
     const types = step.tool === "type_text";
     if (types && typed === null) {
       // A value is never in repro.json and never in a call: only a person at a prompt can give one (§29.4).
-      typed = options.typed !== undefined ? await options.typed("typed") : null;
+      // The prompt is inside the deadline too: a person who never answers ends the run as timed out, and a value that comes late is never typed.
+      const answer = options.typed !== undefined ? await within(Promise.resolve(options.typed("typed"))) : null;
+      if (answer === EXPIRED) return { kind: "timed_out" };
+      typed = answer;
       if (typed === null) return { kind: "stopped", why: `step ${i + 1} needs a person (a typed value)` };
       given = true;
     }
+    // Nothing is dispatched once the deadline has passed.
+    if (signal.aborted) return { kind: "timed_out" };
     if (i === steps.length - 1) {
       const key = await within(host.placeKey());
       if (key === EXPIRED) return { kind: "timed_out" };
@@ -243,12 +248,19 @@ async function runSteps(host: CheckHost, bug: CheckBug, steps: PathStep[], optio
     placeBefore = key;
   }
   const lostAtEnd = away();
-  if (lostAtEnd !== null) return lostAtEnd;
+  // An app that is gone after the last step may be the crash itself: its evidence is examined before the run stops (a crash or a way back that went away).
+  const evidence = lostAtEnd === null || bug.finding.kind === "crash" || bug.finding.kind === "dead_end";
+  if (!evidence) return lostAtEnd;
   const placeNow = await within(host.placeKey());
   if (placeNow === EXPIRED) return { kind: "timed_out" };
   const seen = await within(host.since(mark));
   if (seen === EXPIRED) return { kind: "timed_out" };
   const end: RunEnd = { placeBefore, placeNow, last, seen, complete: complete && (last === null || last.kind === "ok") };
+  if (lostAtEnd !== null) {
+    const matched = complete ? await within(sameBug(host, bug, end)) : false;
+    if (matched === EXPIRED) return { kind: "timed_out" };
+    return matched ? { kind: "made", same: true, words: reset.words, given } : (lostAtEnd as RunResult);
+  }
   const same = complete ? await within(sameBug(host, bug, end)) : false;
   if (same === EXPIRED) return { kind: "timed_out" };
   return { kind: "made", same, words: reset.words, given };
