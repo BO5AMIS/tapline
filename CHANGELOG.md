@@ -9,9 +9,10 @@ command line.
 - **`explore` (§25, §27).**
   - A breadth-first search over the screens and actions nobody has driven yet. It saves new places and roads to the map and
     ends back where it started. The same build, start and map explore the same places in the same order.
-  - Every move is an ordinary action with the usual checks and action log. It never touches a button that spends, sends,
-    posts, deletes or signs out, a password, card or security field, a place about the account or privacy, anything in the
-    policy's lists, or anything the app marked. No grant covers it, and it never answers a system alert.
+  - Every move is an ordinary action with the usual checks and action log. It skips a control whose label, text or id
+    words match the floor words (spends, sends, posts, deletes, signs out), a password, card or security field, a place about
+    the account or privacy, the policy's lists, or anything the app marked; it can't tell what a control with a neutral label
+    does, so those need `taplineExploreSkip`. No grant covers it, and it never answers a system alert.
   - `fill: "test-data"` types fake values only into fields the app marks as safe. A toggle it flips is flipped back, and
     a toggle it can't restore stops the run.
   - The report is `report.md` and `report.json` in `~/.tapline/explore/<app id>/<time>/` (the newest 20 are kept), with
@@ -19,11 +20,11 @@ command line.
     slow screen, accessibility or UX problem, or a place that couldn't be reached. Each has its path, a small picture where
     it helps and a script that repeats it. Nothing typed or secret is written; a vault value never appears.
   - `tapline explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue]
-    [--account NAME]`: exit 0 nothing found, 1 findings, 2 couldn't start or was stopped. The MCP tool sends a progress
+    [--account NAME]`: exit 0 nothing found and the run ended normally, 1 findings or a run that ended in trouble (a crash, a toggle that couldn't be restored, no way back, the app closed), 2 couldn't start or a person or a pause stopped it. The MCP tool sends a progress
     note every 10 steps.
 - **Self-repairing tests (§26).**
   - `replay` with `repair: "suggest"` (or `tapline replay <name> --repair suggest`) says how a step that no longer finds its
-    target would be mended, and touches nothing. `apply` makes the repair, runs on, and writes `<name>.repaired.json` and
+    target would be mended without trying any repair; the steps before the break still run, as in an ordinary replay. `apply` makes the repair, runs on, and writes `<name>.repaired.json` and
     `<name>.repair.md` next to the script; the original stays as it is. Every repair is written to the audit log.
   - A repair is made only for a renamed or moved target, a screen in the way, or an element behind a scroll, with at most 3
     candidates tried and 5 repairs per run. A near tie is not repaired.
