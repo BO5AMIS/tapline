@@ -7360,6 +7360,9 @@ export class TaplineTools {
         // is the answer with no code asked for (§18.11). Paused, then a person's input, then the selected app, then the app's own dry run
         // of these same params (which also refuses a lost connection or an app in the background as the send would).
         const stillHolds = (): void => {
+          // A person used the app since the last look: a `{ref}` target may point elsewhere now, as in every other action.
+          const staleRefs = this.staleRef(given);
+          if (staleRefs !== null) throw new TaplineError("stale", answerText(staleRefs).replace(/^Error stale: /, ""));
           // The call's lease and a pinned or timed run's rules first, as the send checks them (§22.3): the awaits since may have outlived them.
           this.checkLease();
           const stale = this.runRefusal(this.exploreScope.getStore());
@@ -7406,7 +7409,12 @@ export class TaplineTools {
       if (first.isError !== true) return first;
       const failure = parseError(answerText(first));
       if (failure === null || !isReflexFailure(failure.code, failure.message)) return first;
-      return (await this.checkReflexes(session)) > 0 ? precheck() : first;
+      // As in `actScoped`: the elements the target means are read before the reflex, and the check is made again only when the target
+      // is still that one element. An index, ref or point target, an ambiguous one and a changed one are not retried: the first failure is the answer.
+      const asked = args.target !== undefined ? { target: toWireTarget(withIndex(args.target, args.index)) } : {};
+      const before = this.mapOf(session)?.data().reflexes.length ? await this.namedCandidates(session, asked) : null;
+      if ((await this.checkReflexes(session)) > 0 && (await this.sameTarget(session, asked, before, failure.message))) return precheck();
+      return first;
     });
     return checking.then((checked) => {
       if (checked.isError === true) return checked;

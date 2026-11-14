@@ -52,6 +52,9 @@ interface TypeRefusal {
   duringReal?: () => void;
   /** A dialog covers the field until its "Not now" button is pressed. */
   dialog?: boolean;
+  /** Pressing "Not now" also leaves a different input with the same label where the field was. */
+  swapOnClose?: boolean;
+  swapped?: boolean;
 }
 
 const DIALOG = [
@@ -80,11 +83,14 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
       case "tree":
         return {
           ok: true,
-          result: { screen: SCREEN, elements: [{ ...CODE_FIELD, value: showCode ? `last code ${FAKE_CODE}` : "" }, ...(refusal.dialog === true ? DIALOG : [])] },
+          result: { screen: SCREEN, elements: [{ ...CODE_FIELD, ...(refusal.swapped === true ? { testID: "other", ref: "e8" } : {}), value: showCode ? `last code ${FAKE_CODE}` : "" }, ...(refusal.dialog === true ? DIALOG : [])] },
         };
       case "press": {
         const params = req.params as Record<string, unknown>;
-        if (params["dryRun"] !== true) refusal.dialog = false;
+        if (params["dryRun"] !== true) {
+          refusal.dialog = false;
+          if (refusal.swapOnClose === true) refusal.swapped = true;
+        }
         return { ok: true, result: { element: DIALOG[1], settledMs: 10 } };
       }
       case "type": {
@@ -526,11 +532,11 @@ describe("the checks are made again inside the queue turn, right before the fetc
   const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   /** Holds the agent queue, starts the call, and returns once its early dry run is done and the real type waits in the queue. */
-  async function queued(extra: { control: ControlQueue }, refusal: TypeRefusal = {}) {
+  async function queued(extra: { control: ControlQueue }, refusal: TypeRefusal = {}, target: { id: string } | { ref: string } = { id: "code" }) {
     const s = await setup({}, true, refusal, CAPABILITIES, extra);
     let release: () => void = () => undefined;
     const held = extra.control.runAgent(() => new Promise<void>((resolve) => (release = resolve)));
-    const call = s.tools.typeText({ target: { id: "code" }, text });
+    const call = s.tools.typeText({ target, text });
     for (let i = 0; i < 200 && s.checked.length < 1; i++) await wait(5);
     await wait(30);
     expect(s.checked.length).toBeGreaterThan(0);
@@ -594,6 +600,56 @@ describe("the checks are made again inside the queue turn, right before the fetc
     expect(s.typed).toHaveLength(0);
     expect(s.audit).toHaveLength(0);
     expect(textOf(answer)).not.toContain(FAKE_CODE);
+  });
+
+  it("a person touched the phone while it waited and the target is a ref: stale, no code is asked for", async () => {
+    const control = new ControlQueue();
+    const s = await queued({ control }, {}, { ref: "e1" });
+    s.app()?.send({ type: "event", event: "touch", data: {} });
+    await wait(40);
+    const answer = await s.finish();
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error stale/);
+    expect(fetches(s.daemon)).toBe(0);
+    expect(s.typed).toHaveLength(0);
+  });
+
+  it("a person touched the phone during the fetch and the target is a ref: the code is dropped, nothing typed, no digits", async () => {
+    const s = await setup();
+    afterFetch = async () => {
+      afterFetch = undefined;
+      s.app()?.send({ type: "event", event: "touch", data: {} });
+      await wait(40);
+    };
+    const answer = await s.tools.typeText({ target: { ref: "e1" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error stale/);
+    expect(fetches(s.daemon)).toBe(1);
+    expect(s.typed).toHaveLength(0);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+  });
+
+  it("a reflex that reveals a different input with the same label: the check is not made again, the first failure is the answer", async () => {
+    const mapsDir = tmp();
+    mkdirSync(join(mapsDir, APP), { recursive: true });
+    const map = {
+      format: "agent-tools-map",
+      version: 1,
+      app: APP,
+      places: {},
+      roads: [],
+      routes: {},
+      reflexes: [{ name: "rate", when: { text: "Rate this app" }, do: { tool: "tap", target: { text: "Not now" } }, max: 2 }],
+    };
+    writeFileSync(join(mapsDir, APP, "map.json"), JSON.stringify(map));
+    const registry = new MapRegistry({ mapsDir });
+    const s = await setup({}, true, { dialog: true, swapOnClose: true }, CAPABILITIES, { maps: registry });
+    const answer = await callTool(s.tools, "type_text", { target: { label: "Code" }, text });
+    await registry.flushAll();
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("covered");
+    expect(fetches(s.daemon)).toBe(0);
+    expect(s.typed).toHaveLength(0);
   });
 
   it("a reflex that closes a dialog over the field gets its turn before the check is made again, then one fetch and one type", async () => {
