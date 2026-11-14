@@ -63,6 +63,8 @@ export interface RepairHost {
   /** The elements a target matches in a list (the matching a touch uses). */
   match(target: Target, elements: TreeElement[]): TreeElement[];
   never: NeverContext;
+  /** The run's redaction (every typed value, the vault's values, one-time codes): applied to every text before it is cut, formatted, written or answered. */
+  redact(text: string): string;
   /** One line of kind `repair` in the audit log; false when it can't be written. */
   audit(detail: string): boolean;
   now(): number;
@@ -136,6 +138,33 @@ const subjectOf = (element: TreeElement): { label?: string; text?: string; testI
   ...(element.testID ? { testID: element.testID } : {}),
 });
 
+/** A target with every text it holds redacted (a typed value becomes its placeholder). */
+const redactedTarget = (host: RepairHost, target: Target): Target => {
+  const out: Record<string, unknown> = { ...target };
+  for (const key of ["id", "label", "text"] as const) {
+    const value = target[key];
+    if (typeof value === "string") out[key] = host.redact(value);
+  }
+  return out as Target;
+};
+
+/** True when redaction would change a text of the target: it shows a value the run typed (or a vault value). A placeholder written there would never match on replay. */
+const showsTyped = (host: RepairHost, target: Target): boolean => (["id", "label", "text"] as const).some((key) => typeof target[key] === "string" && host.redact(target[key] as string) !== target[key]);
+
+/** Why a road move can't be put in: its target shows a value the run typed (a placeholder would never match). */
+const typedMove = (host: RepairHost, move: Step): string | null => {
+  const target = targetOf(move);
+  return target !== null && showsTyped(host, target) ? "its target shows a value typed in this run" : null;
+};
+
+/** An element as it may be described: its texts redacted before they are cut. */
+const redactedElement = (host: RepairHost, element: TreeElement): TreeElement => ({
+  ...element,
+  ...(typeof element.label === "string" ? { label: host.redact(element.label) } : {}),
+  ...(typeof element.text === "string" ? { text: host.redact(element.text) } : {}),
+  ...(typeof element.testID === "string" ? { testID: host.redact(element.testID) } : {}),
+});
+
 /**
  * The candidates of one break, ranked, without touching anything (§26.1, §26.3). `none` says why the step isn't repaired; `tie`
  * that the best two scores are too close to tell apart.
@@ -168,7 +197,7 @@ export async function analyse(host: RepairHost, steps: readonly Step[], at: numb
     const moves = host.way(here, expected);
     if (moves === null || moves.length === 0) return { kind: "none", reason: `the step ran on ${here}, not on ${expected}, and no proven road leads there` };
     for (const move of moves) {
-      const why = neverRepaired(move, host.never);
+      const why = neverRepaired(move, host.never) ?? typedMove(host, move);
       if (why !== null) return { kind: "none", reason: `a road move to ${expected} can't be inserted: ${why}` };
     }
     const shown = moves.map((move) => `${move.tool} ${describeTarget(targetOf(move) ?? {})}`).join(", ");
@@ -231,7 +260,7 @@ async function analyseEnd(host: RepairHost, step: Step): Promise<Analysis> {
   const moves = host.way(here, expected);
   if (moves === null || moves.length === 0) return { kind: "none", reason: `the step ended on ${here}, not on ${expected}, and no proven road leads there` };
   for (const move of moves) {
-    const why = neverRepaired(move, host.never);
+    const why = neverRepaired(move, host.never) ?? typedMove(host, move);
     if (why !== null) return { kind: "none", reason: `a road move to ${expected} can't be inserted: ${why}` };
   }
   const shown = moves.map((move) => `${move.tool} ${describeTarget(targetOf(move) ?? {})}`).join(", ");
@@ -278,7 +307,10 @@ function elementCandidates(
   const pool = tree.elements.filter((element) => {
     if (!canTake(step.tool, element)) return false;
     if (toggleRole !== undefined && !sameToggleRole(element, toggleRole)) return false;
-    if (targetFor(element) === null) return false;
+    const named = targetFor(element);
+    if (named === null) return false;
+    // A target that only names the element by a text the run typed is no repair: a placeholder would never match on replay.
+    if (showsTyped(host, named)) return false;
     if (host.never.policyHit(subjectOf(element)) !== null) return false;
     if (brk.code === "ambiguous") return matching.includes(element);
     if (closest.has(element.ref)) return true;
@@ -305,17 +337,19 @@ function toCandidate(item: Scored, step: Step, target: Target, brk: Break, here:
   // Several elements named the same way: the new target says which (§9.4's `index`).
   const same = host.match(base, tree.elements);
   const newTarget: Target = same.length > 1 ? { ...base, index: Math.max(0, same.indexOf(item.element)) } : base;
-  const shown = describeElement(item.element, false);
-  const cause = brk.code === "ambiguous" ? `${describeTarget(target)} matched more than one element` : `${describeTarget(target)} wasn't found`;
+  const seen = redactedElement(host, item.element);
+  const shown = describeElement(seen, false);
+  const was = redactedTarget(host, target);
+  const cause = brk.code === "ambiguous" ? `${describeTarget(was)} matched more than one element` : `${describeTarget(was)} wasn't found`;
   return {
     kind: "target",
-    summary: `${step.tool} ${describeElement(item.element)}${here !== null ? ` on ${here}` : ""}`,
+    summary: `${step.tool} ${describeElement(seen)}${here !== null ? ` on ${here}` : ""}`,
     score: item.score,
     parts: item.parts,
     newTarget,
     shown,
     ...(here !== null ? { place: here } : {}),
-    why: `${cause}; the closest element that can take a ${step.tool.replace("_", " ")} is ${describeTarget(newTarget)} (${formatParts(item.parts)}).`,
+    why: `${cause}; the closest element that can take a ${step.tool.replace("_", " ")} is ${describeTarget(redactedTarget(host, newTarget))} (${formatParts(item.parts)}).`,
   };
 }
 
@@ -354,8 +388,8 @@ export interface RepairRun {
   notes: string[];
 }
 
-const oneLine = (text: string, max = 120): string => {
-  const line = text.split("\n")[0] ?? "";
+const oneLine = (host: RepairHost, text: string, max = 120): string => {
+  const line = host.redact(text).split("\n")[0] ?? "";
   return line.length > max ? `${line.slice(0, max)}…` : line;
 };
 
@@ -427,19 +461,19 @@ export async function runWithRepair(host: RepairHost, steps: Step[], options: { 
         step: stepNumber,
         tool: step.tool,
         kind: candidate.kind,
-        was: targetOf(step),
+        was: ((old) => (old === null ? null : redactedTarget(host, old)))(targetOf(step)),
         now: candidate.newTarget ?? null,
         inserted: tried.inserted,
         ...(candidate.score !== undefined ? { score: candidate.score } : {}),
         ...(candidate.parts !== undefined ? { parts: candidate.parts } : {}),
         ...(candidate.place !== undefined ? { place: candidate.place } : {}),
-        shown: candidate.kind === "scroll" && tried.ok ? `before it: scroll down ${tried.inserted.length} time${tried.inserted.length === 1 ? "" : "s"}` : candidate.shown,
-        why: candidate.why,
-        accepted: tried.ok ? tried.accepted : "",
+        shown: host.redact(candidate.kind === "scroll" && tried.ok ? `before it: scroll down ${tried.inserted.length} time${tried.inserted.length === 1 ? "" : "s"}` : candidate.shown),
+        why: host.redact(candidate.why),
+        accepted: tried.ok ? host.redact(tried.accepted) : "",
       };
       const phrase = repairPhrase(record);
       if (!tried.ok) {
-        host.audit(`step ${stepNumber}: ${phrase}, rejected (${tried.why})`);
+        host.audit(`step ${stepNumber}: ${phrase}, rejected (${host.redact(tried.why)})`);
         // A rejected trial may have moved the app: back to the place the step started on, or the repair stops (§26.4).
         if (!(await backAtStart(host, startPlace, startScreen))) {
           notes.push(`Note: a repair was tried and rejected, and the app couldn't be taken back to where the step started${startPlace !== null ? ` (${startPlace})` : ""}; the repair stopped.`);
@@ -493,12 +527,13 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
   let was: Target | null = null;
   if (candidate.kind === "target" && candidate.newTarget !== undefined) {
     was = targetOf(original.step);
+    if (was !== null) was = redactedTarget(host, was);
     step = { ...original.step, target: candidate.newTarget } as Step;
   } else if (candidate.kind === "road" && candidate.after === true) {
     // The step ran and ended elsewhere: the moves go after it, and the check is that the app is where the recording ended.
     const moves = candidate.moves ?? [];
     const moved = await host.trial(moves);
-    if (moved.isError === true) return { ok: false, why: oneLine(parseBreak(moved)?.message ?? firstLineOf(moved)), inserted: [] };
+    if (moved.isError === true) return { ok: false, why: oneLine(host, parseBreak(moved)?.message ?? firstLineOf(moved)), inserted: [] };
     const now = await host.place();
     if (candidate.place === undefined || now !== candidate.place) return { ok: false, why: `the app is on ${now ?? "an unknown place"}, not on ${candidate.place ?? "the place the recording ended on"}`, inserted: [] };
     // The same acceptance rule as any repair: the step's expect held (the batch checked it before the route), or the next step's target resolves now.
@@ -517,7 +552,7 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
       const tree = await host.tree();
       if (tree !== null && host.match(target, tree.elements).length > 0) break;
       const scrolled = await host.trial([{ tool: "scroll", direction: "down" } as Step]);
-      if (scrolled.isError === true) return { ok: false, why: oneLine(firstLineOf(scrolled)), inserted: before };
+      if (scrolled.isError === true) return { ok: false, why: oneLine(host, firstLineOf(scrolled)), inserted: before };
       before.push({ tool: "scroll", direction: "down" } as Step);
     }
     const tree = await host.tree();
@@ -526,7 +561,7 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
   }
   const trial = [...(candidate.kind === "road" ? before : []), step];
   const answer = await host.trial(trial);
-  if (answer.isError === true) return { ok: false, why: oneLine(parseBreak(answer)?.message ?? firstLineOf(answer)), inserted: before };
+  if (answer.isError === true) return { ok: false, why: oneLine(host, parseBreak(answer)?.message ?? firstLineOf(answer)), inserted: before };
   const checked = await acceptance(host, original.step, all[at + 1], before);
   if (!checked.ok) return checked;
   const accepted = checked.accepted;

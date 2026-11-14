@@ -4009,7 +4009,7 @@ export class TaplineTools {
   /** Redaction for what the map keeps: the run's typed values inside an explore, always the vault's values and the session's codes. */
   private mapScrub(text: string): string {
     const run = this.exploreScope.getStore()?.run;
-    return run !== undefined ? this.exploreScrub(run, text) : this.scrubSecrets(this.host.redactOut(text));
+    return run !== undefined ? this.exploreScrub(run, text) : this.replayScrub(text);
   }
 
   /** A road with every text checked by `mapScrub`: names that change are dropped; null when the move itself holds such a text. */
@@ -5411,11 +5411,32 @@ export class TaplineTools {
   async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string; gateRepaired?: boolean } = {}): Promise<CallToolResult> {
     // Held before the first await and released in `finally`: explore can't start while a replay waits for its fresh start or its way to the route's start.
     this.rivals += 1;
+    // The outermost replay owns the run's list of typed values (repair's trials and the verification replay add to it, and share it).
+    const owner = this.replayTyped === null;
+    if (owner) this.replayTyped = { values: [], scrub: null };
     try {
       return await this.replayHeld(args, options);
     } finally {
       this.rivals -= 1;
+      if (owner) this.replayTyped = null;
     }
+  }
+
+  /** Every plain text a replay (with its repair trials and the check of a repaired script) has typed, and the scrubber over them. */
+  private replayTyped: { values: string[]; scrub: ((text: string) => string) | null } | null = null;
+
+  /** Registers a text a replay is about to type, before it is sent; the run's redaction knows it from then on. */
+  private registerReplayTyped(value: string): void {
+    const run = this.replayTyped;
+    if (run === null || value === "" || run.values.includes(value)) return;
+    run.values = [...run.values, value];
+    run.scrub = looseScrubber(run.values, TYPED);
+  }
+
+  /** Redaction for everything a repair writes or answers: the replay's typed values, the vault's values and this session's one-time codes. */
+  private replayScrub(text: string): string {
+    const scrub = this.replayTyped?.scrub ?? null;
+    return this.scrubSecrets(this.host.redactOut(scrub === null ? text : scrub(text)));
   }
 
   /** Recordings, replays and journeys in progress (counted from their first line): explore refuses to start while any is held. */
@@ -5522,10 +5543,12 @@ export class TaplineTools {
       repairRun = await runWithRepair(repairHost, steps);
       return repairRun.answer;
     };
+    // Everything a repair answers is redacted whole, before any cut or formatting of the caller's.
+    const redacted = (answer: CallToolResult): CallToolResult => ({ ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: this.replayScrub(block.text) } : block)) });
     const finish = async (answer: CallToolResult): Promise<CallToolResult> => {
       if (repairHost === null) return answer;
-      if (args.repair === "suggest") return this.suggestRepair(repairHost, answer, ranSteps, session, script);
-      return repairRun === null ? answer : this.finishRepair(session, script, scriptPath, repairRun, options.adopt === true, backAtStart);
+      if (args.repair === "suggest") return redacted(await this.suggestRepair(repairHost, answer, ranSteps, session, script));
+      return redacted(repairRun === null ? answer : await this.finishRepair(session, script, scriptPath, repairRun, options.adopt === true, backAtStart));
     };
     if (script.version !== 2) return finish(await run(script.steps));
     // A route starts at a place: after the fresh start the app is driven there (an `off_route` fails the replay), then it runs (18.5).
@@ -5599,7 +5622,8 @@ export class TaplineTools {
         draftsOnly: script.version === 2 && script.draftsOnly === true,
         policyHit: (subject) => matchWord(words(), floorSubject(subject)),
       },
-      audit: (detail) => this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: named, detail: this.host.redactOut(detail) }) ?? false,
+      redact: (value) => this.replayScrub(value),
+      audit: (detail) => this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: named, detail: this.replayScrub(detail) }) ?? false,
       now: () => this.clock(),
     };
   }
@@ -5643,13 +5667,13 @@ export class TaplineTools {
         return { tool, ...kept, text: TYPED };
       }),
       expected: step.expect === undefined ? "the step's expect holds" : `the step's expect holds (${JSON.stringify(step.expect)})`,
-      got: cutText(firstLine(brk.message), LOG_LINE_MAX),
+      got: cutText(firstLine(this.replayScrub(brk.message)), LOG_LINE_MAX),
       picture: null,
       logs: [],
       repro: null,
       count: 1,
     };
-    const safe = redactFinding(finding, (value) => this.scrubSecrets(value));
+    const safe = redactFinding(finding, (value) => this.replayScrub(value));
     return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
   }
 
@@ -5682,7 +5706,7 @@ export class TaplineTools {
     }
     const repaired = this.backstop(repairedScript(original, run.work, { from: basename(scriptPath), at: at.toISOString().replace(/\.\d{3}Z$/, "Z"), build, count: run.repairs.length }));
     const repairedText = `${JSON.stringify(repaired, null, 2)}\n`;
-    const markdown = this.scrubSecrets(repairMarkdown(script.name || stem, { date: at.toISOString().slice(0, 10), version: EXPLORE_TOOL_VERSION, build }, run.repairs));
+    const markdown = this.replayScrub(repairMarkdown(script.name || stem, { date: at.toISOString().slice(0, 10), version: EXPLORE_TOOL_VERSION, build }, run.repairs));
     // The script as it will be written must pass a fresh, ordinary replay (no repair) on this app; nothing is written when it doesn't (§26.4).
     // The emitted file is proven against exactly the pictures it will use: an adopted file keeps the original's folder; a file written beside the
     // original gets its own sidecar, refreshed from the original's folder first (an older one is replaced, never trusted).
@@ -5694,7 +5718,7 @@ export class TaplineTools {
     }
     const refused = await this.verifyEmitted(scriptPath, repairedText, backAtStart, adopt ? scriptPath : repairedPath);
     if (refused !== null) {
-      for (const record of run.repairs) this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: this.host.redactOut(`step ${record.step}: ${repairPhrase(record)}, rejected (the repaired script failed its replay as written)`) });
+      for (const record of run.repairs) this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: this.replayScrub(`step ${record.step}: ${repairPhrase(record)}, rejected (the repaired script failed its replay as written)`) });
       return fail(refused);
     }
     try {
@@ -6702,6 +6726,8 @@ export class TaplineTools {
       return this.dryRun("type_text", "type", { ...plain, text: "", ...(wire.values["kind"] !== undefined ? { kind: wire.values["kind"] } : {}) });
     }
     const use = account !== null && account.ok ? account.use : undefined;
+    // A plain text typed during a replay is registered for redaction before it is sent (a vault, account or code value is covered already).
+    if (wire === undefined && !mentionsVault(args.text)) this.registerReplayTyped(args.text);
     // What the audit line says about the field the value went into (§23): the app's own answer says whether it was secure.
     let secureField: boolean | undefined;
     const typed = this.act(

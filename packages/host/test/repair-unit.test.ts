@@ -238,6 +238,7 @@ function stub(options: { elements: TreeElement[]; valid: Set<string>; place?: st
     back: () => Promise.resolve(true),
     match: (target, elements) => elements.filter((e) => (target.id !== undefined ? e.testID === target.id : target.label !== undefined ? (e.label ?? "").toLowerCase() === target.label.toLowerCase() : false)),
     never: { draftsOnly: options.drafts === true, policyHit: (subject) => (/delete/i.test(`${subject.label ?? ""} ${(subject.testID ?? "").replace(/-/g, " ")}`) ? "Delete" : null) },
+    redact: (text) => text,
     audit: (detail) => {
       if (options.auditOk === false) return false;
       audit.push(detail);
