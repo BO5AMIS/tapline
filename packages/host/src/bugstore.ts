@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
-import { normalizedBases, variantsOf } from "./accounts.js";
+import { decodedBases, normalizedBases, variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
 import type { PlaceKey } from "./mapfile.js";
@@ -72,7 +72,8 @@ function windowHash(text: string, at: number): number {
  */
 function formsOfValue(value: string): string[] {
   const out = new Set<string>(variantsOf(value));
-  for (const base of normalizedBases(value)) {
+  // The value as the redactor decodes it too (a value that itself holds an escape): a text holding the decoded reading holds the value.
+  for (const base of [...normalizedBases(value), ...decodedBases(value)]) {
     out.add(base);
     out.add(htmlEscaped(base));
   }
@@ -86,7 +87,8 @@ interface Held {
 }
 
 function holdText(text: string): Held {
-  const bases = normalizedBases(text);
+  // The raw readings and every decoded stage of the text, each normalized: a fragment written with escapes (`H`, `%48`, `&#72;`) is held as it reads.
+  const bases = decodedBases(text);
   const windows = new Set<number>();
   for (const base of bases) for (let i = 0; i + PIECE <= base.length; i++) windows.add(windowHash(base, i));
   return { bases, windows };

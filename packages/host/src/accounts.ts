@@ -563,6 +563,19 @@ function viewsOf(text: string): View[] {
   return views;
 }
 
+/**
+ * A text as the redactor reads it: every stage of its layered decoding (JSON escapes, percent, HTML entities, direction marks and zero-width
+ * characters dropped, to a fixpoint), each also with a form plus read as a space, and each normalized (as it is, stripped, whitespace collapsed,
+ * both). The text itself is the first stage, so the raw reading is never lost. For a grep gate that looks at windows of a text.
+ */
+export function decodedBases(text: string): string[] {
+  const out = new Set<string>();
+  for (const view of viewsOf(text)) {
+    for (const reading of new Set([view.text, view.text.replace(/\+/g, " ")])) for (const base of normalizedBases(reading)) out.add(base);
+  }
+  return [...out];
+}
+
 /** The view without invisible characters, each whitespace run as one space. */
 function normalizedView(view: View): View {
   const parts: string[] = [];
