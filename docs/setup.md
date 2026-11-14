@@ -132,6 +132,11 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   `tapline doctor --accounts FILE` checks it and prints the names and kinds, never the values.
 - `--maps DIR`: keep each app's map (places, roads, links, routes, reflexes) in `DIR/<app id>/`
   instead of `~/.tapline/maps/<app id>/`. A team can share one folder.
+- `tapline explore` (1.8) searches the app with no agent and writes a report: `tapline explore [--minutes N] [--steps N] [--depth N]
+  [--from PLACE] [--focus PLACE] [--fill test-data] [--continue] [--account NAME]`, with `--policy`, `--accounts` and `--maps` as for
+  the server. Exit 0: nothing found; 1: findings; 2: couldn't start, or a person or a pause stopped it. The app must be open on the phone.
+  `tapline replay <name> --repair suggest|apply [--adopt]` mends a saved test after a rename or a move (`apply` writes
+  `<name>.repaired.json` and `<name>.repair.md`; `--adopt` replaces the original, a person's choice).
 - `tapline schedule` and `tapline run-schedule` (1.7) run a saved route with no agent, on a time or when a file
   appears. `tapline schedule add <route> --at "09:00 daily" [--with name=value|name=@file] [--name NAME]
   [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as

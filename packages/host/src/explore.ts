@@ -1,5 +1,6 @@
 import type { ExploreReport, ResetEntry, RunFolder, SkippedEntry, StopReason } from "./explorereport.js";
 import { isoSeconds } from "./explorereport.js";
+import { HOST_VERSION } from "./version.js";
 import {
   floorVerdict,
   isListedSubmit,
@@ -36,8 +37,8 @@ import { signaturesOf, type NamedElement } from "./signature.js";
 // This file is the search; what it may touch is explorefloor.ts, what it finds is findings.ts, and the host (tools.ts) gives it
 // the moves, which all go through the ordinary action path.
 
-/** The tool version a finding and a report carry (§27.1, §25.10): the explorer ships in 1.8.0. */
-export const EXPLORE_TOOL_VERSION = "1.8.0";
+/** The tool version a finding and a report carry (§27.1, §25.10): the host's own package version (1.8.0 is the first to explore). */
+export const EXPLORE_TOOL_VERSION: string = HOST_VERSION;
 
 export const EXPLORE_DEFAULTS = { minutes: 10, steps: 500, depth: 8, fill: "none" as "none" | "test-data", continue: false };
 export const EXPLORE_LIMITS = { minutes: [1, 60], steps: [1, 5000], depth: [1, 20] } as const;

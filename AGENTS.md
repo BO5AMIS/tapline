@@ -311,6 +311,17 @@ Tapline on. Read its output, then go on with step 6. By hand:
    `Send` touches and ends `Note: sent by a person (in chat).` (no use of the grant is counted); `Don't send` ends
    `Error not_allowed: needs_confirmation: the draft wasn't sent (They declined.). Ask your user what to do.` With no
    dialog the call answers `needs_confirmation` and the live view shows the draft. You can't lift `draftsOnly`.
+22. **Explore and repair** (AGENT-TOOLS 1.15 §25 to §28). `explore` visits the screens and actions nobody has driven yet and saves
+   them to the map; use it to find crashes and dead ends on ground you haven't driven, instead of tapping around yourself
+   (`minutes`, `steps`, `depth`, `from`, `focus`; `fill: "test-data"` types fake values only into fields the app marks). It never
+   touches a button that spends, sends, posts or deletes, a sign-out, a password, card or security field, anything the
+   policy lists, or anything the app marked `taplineExploreSkip`; and no grant covers it. Read the answer: the `Coverage:` and
+   `Findings:` lines, then the report folder it names (`report.md`, `report.json`, a repro script per finding). A finding is a real
+   bug, a refusal, a dead end or a slow screen; repeat its script before you report it. `Stopped:` says why it ended (a crash, a
+   person, the budget). `replay` with `repair: "suggest"` says how a broken step would be mended and touches nothing; `repair: "apply"`
+   writes `<name>.repaired.json` and `<name>.repair.md` and leaves the original alone. A failed `expect`, typed text and a step
+   a policy word covers are never repaired. Adopting the repaired file (`tapline replay <name> --repair apply --adopt`) is a
+   person's choice: don't do it for them.
 
 ## Repeatable runs
 

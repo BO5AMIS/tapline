@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { HOST_VERSION } from "./version.js";
 import { TOOL_META, runTool, type ToolName } from "./dispatch.js";
 import { DIALOG_TTL_MS, Dialogs, type ElicitClient } from "./elicit.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
@@ -77,7 +78,7 @@ function progressOf(extra: ToolExtra): ((line: string, steps: number) => void) |
 
 /** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. `noDialog` is `--no-dialog`. */
 export function createMcpServer(tools: TaplineTools, options: { noDialog?: boolean } = {}): McpServer {
-  const server = new McpServer({ name: "tapline", version: "1.7.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: HOST_VERSION }, { instructions: INSTRUCTIONS });
 
   for (const name of Object.keys(TOOL_META) as ToolName[]) {
     const meta = TOOL_META[name];

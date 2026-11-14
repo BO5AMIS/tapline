@@ -117,7 +117,8 @@ your agent at it.
 | `wait_for` | wait until something appears or is gone, or the network is quiet |
 | `compare_screen` | compare the screen with a saved reference picture: matches or differs (a share that may change, parts to ignore), what changed, where, marked in red; a check in scripts, with the pictures kept next to the script |
 | `filmstrip` | several frames in one image, for animations and loading states |
-| `record`, `replay` | save a test run as a script (shared format, version 2 for routes, version 1 still read) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml]` (exit 0 all held, 1 a step stopped, 2 couldn't start) |
+| `record`, `replay` | save a test run as a script (shared format, version 2 for routes, version 1 still read) and replay it later, without an AI: `tapline replay <name\|file>… [--junit out.xml] [--repair suggest\|apply]` (exit 0 all held, 1 a step stopped, 2 couldn't start). With `--repair`, a step whose target was renamed or moved is matched to its likeliest new element: `suggest` only says what it would change, `apply` writes `<name>.repaired.json` and `<name>.repair.md` next to the script and never changes the original; `--adopt` (command line only, with `apply`) replaces the original after a repaired run passed, and that is a person's choice |
+| `explore` | (1.8) search the app by itself, with no model: it visits the screens and actions nobody has driven yet, saves them to the map and reports what broke (crashes, JS errors, dead ends, slow screens, accessibility and UX problems) as findings. It never touches what spends, sends, deletes or signs out, a password or card field, or anything marked `taplineExploreSkip`. `tapline explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue] [--account NAME]` (exit 0 nothing found, 1 findings, 2 couldn't start or was stopped); each run writes `report.md` and `report.json` to `~/.tapline/explore/<app id>/` |
 | `viewer` | opens the live view in a browser on your computer, with what the agent does marked on it; you can tap, scroll and type there too. The agent never sees its link |
 | `tap`, `long_press` | by `id` (the `testID` prop), label, visible text, ref from the last look, or x/y (`long_press` takes `seconds`, which Tapline ignores) |
 | `type_text` | into an input; replace or append; optionally submit; refused where a person couldn't type |
@@ -311,6 +312,10 @@ order, pair again (or give each agent a fixed `--port`).
   Each run writes `~/.tapline/runs/<name>-<time>.json` (what was done, `Grants used:`, `Vault names used:`, never a value)
   and a `schedule` line in the audit log. Exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start. On other
   systems the schedule is saved but not started: call `tapline run-schedule <name>` from cron or launchd.
+  **Explore and self-repairing tests (1.8).** `tapline explore` runs the search without an agent (see the `explore` row above) and writes
+  each finding with its path and a script that repeats it. `tapline replay <name> --repair suggest|apply`
+  mends a saved test after a rename or a move; a failed `expect`, typed text, a policy word and a person's OK are never repaired. Both are
+  AGENT-TOOLS 1.15 (§25 to §28); `map` shows what the explorer covered.
 - **Action log.** Every action, by the agent or a person, is one JSON line in
   `~/.tapline/log/`. Typed text is logged only as its length. Files are kept for 14 days;
   `--no-log` turns it off.
