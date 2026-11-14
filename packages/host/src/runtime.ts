@@ -16,7 +16,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
-import { loadAccounts, type AccountsLoad, type GitProbe } from "./accounts.js";
+import { loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
 import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
 import { Confirmations } from "./confirm.js";
@@ -198,7 +198,17 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   // One-time codes (AGENT-TOOLS 1.14 §20.4): a code typed in this session is scrubbed from everything the host passes on, as a vault value is.
   const otp = options.otp ?? createOtpService({ env: options.env });
   // The policy and vault the host runs under now: a facts query reloads them from disk (reloadLive below).
-  const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts };
+  // Redaction is cumulative for the session (§20.3): a vault value that was loaded once stays scrubbed until the process ends, even
+  // after a reload replaced it; only the current values can be typed. `retired` holds the stores a reload replaced.
+  const retired: AccountStore[] = [];
+  const retiredPrints = new Set<string>();
+  const withHistory = (load: AccountsLoad): AccountsLoad => {
+    if (load.store === null) return load;
+    const current = load.store;
+    return { ...load, store: { ...current, redact: (text: string) => retired.reduce((t, old) => old.redact(t), current.redact(text)) } };
+  };
+  let currentRaw: AccountsLoad | undefined = accounts;
+  const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts: accounts === undefined ? undefined : withHistory(accounts) };
   const host = new TaplineHost({
     redact: (text: string) => otp.codes.redact(live.accounts?.store != null ? live.accounts.store.redact(text) : text),
     redactsVault: accounts?.store != null,
@@ -353,7 +363,19 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
         nextAccounts = loaded;
       }
       if (nextPolicy !== null) live.policy = nextPolicy;
-      if (nextAccounts !== undefined) live.accounts = nextAccounts;
+      if (nextAccounts !== undefined) {
+        const before = currentRaw;
+        if (before?.store != null && nextAccounts.store !== null) {
+          const oldPrint = before.fingerprint?.(config.token);
+          const newPrint = nextAccounts.fingerprint?.(config.token);
+          if ((oldPrint === undefined || oldPrint !== newPrint) && (oldPrint === undefined || !retiredPrints.has(oldPrint))) {
+            retired.push(before.store);
+            if (oldPrint !== undefined) retiredPrints.add(oldPrint);
+          }
+        }
+        currentRaw = nextAccounts;
+        live.accounts = withHistory(nextAccounts);
+      }
       await maps.reload();
       const mapsHash = hashMapsLoaded(mapsDir, (app) => {
         const map = maps.forApp({ id: app, name: app });
