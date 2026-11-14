@@ -1,4 +1,4 @@
-import { OFFER_PAIR_TIMEOUT_MS, PAIRING_KEY, TaplineAgent, isLocalNetworkHost, type AgentDeps, type DevOffer, type LinkingLike, type OfferSource } from '../src/agent';
+import { HOME_GRACE_MS, OFFER_PAIR_TIMEOUT_MS, PAIRING_KEY, TaplineAgent, isLocalNetworkHost, type AgentDeps, type DevOffer, type LinkingLike, type OfferSource } from '../src/agent';
 import type { WebSocketLike } from '../src/client';
 import { memoryStorage, type TaplineStorage } from '../src/storage';
 
@@ -29,6 +29,8 @@ interface Rig {
   agent: TaplineAgent;
   prompts: string[];
   fetched: Array<{ host: string; port: number }>;
+  /** The wait asked for each offer check, in order. */
+  delays: number[];
   tick: () => Promise<void>;
   answer: { value: boolean };
   /** Fires the pairing bound's timer, if one is set. */
@@ -40,6 +42,7 @@ interface Rig {
 function rig(host: string | null, offers: Record<number, DevOffer>, active = true, metroPort = 8081, storage: TaplineStorage = memoryStorage()): Rig {
   const prompts: string[] = [];
   const fetched: Array<{ host: string; port: number }> = [];
+  const delays: number[] = [];
   const answer = { value: true };
   let pending: (() => void) | null = null;
   let boundPending: (() => void) | null = null;
@@ -56,6 +59,7 @@ function rig(host: string | null, offers: Record<number, DevOffer>, active = tru
         boundPending = fn;
         return 2;
       }
+      delays.push(ms);
       pending = fn;
       return 1;
     },
@@ -90,7 +94,7 @@ function rig(host: string | null, offers: Record<number, DevOffer>, active = tru
     run?.();
     for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
   };
-  return { agent, prompts, fetched, tick, answer, fireBound, hold };
+  return { agent, prompts, fetched, delays, tick, answer, fireBound, hold };
 }
 
 beforeEach(() => {
@@ -272,6 +276,44 @@ test('with no saved home, an offered host that never answers is dropped after th
     const count = MockSocket.instances.length;
     await fireBound();
     expect(MockSocket.instances).toHaveLength(count); // nothing new connects
+  } finally {
+    agent.stop();
+  }
+});
+
+// Found on a real iPhone (2026-11-14): after a reload, a paired app showed "Connect for testing?" again.
+// A reload forgets the codes seen so far, and the first check ran before the saved home had connected.
+test('a reload with a saved pairing gives the home time to connect before the first offer check', async () => {
+  const storage = memoryStorage();
+  await storage.setItem(PAIRING_KEY, JSON.stringify(OLD_HOME));
+  const { agent, delays } = rig('192.168.1.20', OFFER, true, 8081, storage);
+  try {
+    await agent.start();
+    expect(delays[0]).toBe(HOME_GRACE_MS);
+  } finally {
+    agent.stop();
+  }
+});
+
+test('a fresh start with no saved pairing still checks at once', async () => {
+  const { agent, delays } = rig('192.168.1.20', OFFER);
+  try {
+    await agent.start();
+    expect(delays[0]).toBe(0);
+  } finally {
+    agent.stop();
+  }
+});
+
+test('an offer whose code this app already paired with is never offered again, even before the home connects', async () => {
+  const storage = memoryStorage();
+  await storage.setItem(PAIRING_KEY, JSON.stringify({ ...OLD_HOME, code: 'm-4' }));
+  const { agent, prompts, tick } = rig('192.168.1.20', OFFER, true, 8081, storage);
+  try {
+    await agent.start(); // the home is dialled and has not answered yet
+    await tick();
+    expect(prompts).toHaveLength(0);
+    expect(MockSocket.instances).toHaveLength(1);
   } finally {
     agent.stop();
   }
