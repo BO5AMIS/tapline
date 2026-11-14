@@ -1546,7 +1546,7 @@ export class TaplineTools {
 
   /** Runs a measuring call with fast animations normal, then puts them back, and says so in the answer (E8). */
   private async pausingAnimations(run: () => CallToolResult | Promise<CallToolResult>): Promise<CallToolResult> {
-    const { value, paused, failed } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run());
+    const { value, paused, failed } = await withNormalAnimations(this.host, this.host.current()?.id, async () => run(), this.leased);
     return failed ? appendNote(value, ANIMATIONS_NOT_PAUSED_NOTE) : paused ? appendNote(value, ANIMATIONS_PAUSED_NOTE) : value;
   }
 
@@ -1713,6 +1713,9 @@ export class TaplineTools {
     const who = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60) ?? "";
     return lease.run(who, run, this.holdScope.getStore()?.lease);
   }
+
+  /** `sendRequest` as a value, for helpers that send requests of their own (the animation switch). */
+  private readonly leased: TaplineHost["request"] = (...args) => this.sendRequest(...args);
 
   /** Every request to the app goes through the lease check: a run's call whose lease ran out after it was queued sends nothing (§22.3). */
   private sendRequest(...args: Parameters<TaplineHost["request"]>): ReturnType<TaplineHost["request"]> {
@@ -3356,8 +3359,7 @@ export class TaplineTools {
     const treePromise = this.sendRequest("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
-        ? this.host
-            .request("screenshot", { format: "jpg", quality: 0.75, maxWidth: width }, { sessionId: sid })
+        ? this.sendRequest("screenshot", { format: "jpg", quality: 0.75, maxWidth: width }, { sessionId: sid })
             .then((value) => ({ ok: true as const, value }))
             .catch((error: unknown) => ({ ok: false as const, error }))
         : Promise.resolve(undefined);
@@ -4191,7 +4193,7 @@ export class TaplineTools {
    */
   private async checkAgainstReference(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
     // A comparison, from a step's `expect` too, is made with animations normal (the tools that say so add the note).
-    return (await withNormalAnimations(this.host, session.id, () => this.checkAgainstReferenceNow(session, name, options))).value;
+    return (await withNormalAnimations(this.host, session.id, () => this.checkAgainstReferenceNow(session, name, options), this.leased)).value;
   }
 
   private async checkAgainstReferenceNow(session: SessionInfo, name: string, options: ReferenceOptions): Promise<ReferenceCheck> {
@@ -6553,7 +6555,7 @@ export class TaplineTools {
       if (!record.applied) notes.push(`Note: condition ${name} ${value} was not applied: ${record.failure ?? "the app refused"}.`);
     }
     // A user waits for animations: fast ones end here unless the journey's allow keeps them (PLAN-1.6 F4, E8).
-    if (journey.userEyes && !journey.allows(FAST_ANIMATIONS_ALLOWED) && (await endAnimations(this.host, session.id))) {
+    if (journey.userEyes && !journey.allows(FAST_ANIMATIONS_ALLOWED) && (await endAnimations(this.host, session.id, this.leased))) {
       notes.push("Note: animations were turned off for this journey: a user waits for them. allow fast_animations keeps them on.");
     }
     this.journeyRun = journey;
@@ -6649,7 +6651,7 @@ export class TaplineTools {
         if (this.secureWindow()) return undefined;
         try {
           // The picture is taken with fast animations paused, as a user would see the screen (PLAN-1.6 F4, E8).
-          return (await withNormalAnimations(this.host, session.id, () => this.takeShot(session.id, width, quality))).value;
+          return (await withNormalAnimations(this.host, session.id, () => this.takeShot(session.id, width, quality), this.leased)).value;
         } catch {
           return undefined;
         }

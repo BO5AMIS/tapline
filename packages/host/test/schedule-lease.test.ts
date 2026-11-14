@@ -243,6 +243,27 @@ describe("the lease is re-checked right before an action is sent (PR 12 R7 findi
     expect(text).toMatch(/^Error lease_lost:/);
     expect(app.requests.filter((r) => r.method === "press")).toEqual([]);
   });
+
+  it("R10 finding 4: a look under an expired lease sends no screenshot request either (every request goes through the lease check)", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const time = fakeTime();
+    const lease = new PhoneLease({ now: time.now, sleep: time.sleep, giveUpMs: 1000, pollMs: 10 });
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "tree") return { ok: true, result: { screen: { width: 430, height: 932 }, elements: [OPEN], route: { names: ["home"] } } };
+      return { ok: true, result: { mimeType: "image/jpeg", dataBase64: "AAAA", width: 10, height: 10 } };
+    };
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "press", "logs", "screenshot"] }, handler);
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, lease, clientId: () => "schedule-daily", reloadWaitMs: 50 });
+    const got = lease.acquire("schedule-daily", 45_000, false);
+    if (!got.ok) throw new Error("refused");
+    time.advance(60_000); // the lease ran out before the look
+    const answer = await tools.withCall(undefined, () => tools.look({ screenshot: true }), got.credential);
+    expect(answer.isError).toBe(true);
+    expect(answer.content.map((c) => (c.type === "text" ? c.text : "")).join("\n")).toMatch(/^Error lease_lost:/);
+    expect(app.requests.filter((r) => r.method === "screenshot" || r.method === "tree")).toEqual([]);
+  });
 });
 
 describe("a running host's lease and facts", () => {
