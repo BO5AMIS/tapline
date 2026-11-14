@@ -62,7 +62,7 @@ import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type Sh
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { seenOf, type Seen } from "./seen.js";
 import { namedTarget } from "./signature.js";
-import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
+import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, fixtureRef, isOutcome, type ExploreArgs, type ExploreFill, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
@@ -398,7 +398,10 @@ export const toolShapes = {
     depth: z.number().optional().describe("How many places deep from the start it expands, 1 to 20 (default 8); a deeper place is saved, not expanded"),
     from: z.string().optional().describe("A place's name to start at; the tool drives there first (default: where the app is)"),
     focus: z.string().optional().describe("A place's name: it expands only places below it (default: the whole app)"),
-    fill: z.enum(["none", "test-data"]).optional().describe("\"none\" (default) types nothing; \"test-data\" types only into fields the app marks as safe for tests"),
+    fill: z
+      .union([z.enum(["none", "test-data"]), z.string().regex(/^fixture:[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/, 'fill is "none", "test-data" or "fixture:<name>.<field>"')])
+      .optional()
+      .describe("\"none\" (default) types nothing; \"test-data\" types only into fields the app marks as safe for tests; \"fixture:<name>.<field>\" does too, and gives a field marked only by its id the field of a vault fixture marked \"explore\": true"),
     continue: z.boolean().optional().describe("Go on after a crash, when the app can be opened again (default false: stop at the first crash)"),
     account: z.string().optional().describe("A vault account marked \"explore\": true in the vault file, for the way back after a reset"),
     guide: z.string().optional().describe("Reserved; only \"none\" is offered in this version"),
@@ -789,7 +792,7 @@ function isAccountStep(step: ScriptStep): boolean {
  * which kind the field is). The answer says it in the words of AGENT-TOOLS 1.13 §18.6, with the field's ref and
  * never anything the app wrote about its text.
  */
-function kindRefusal(error: unknown, kind: unknown): string | null {
+function kindRefusal(error: unknown, kind: unknown, fixture = false): string | null {
   if (kind !== "secure" && kind !== "plain") return null;
   if (!(error instanceof TaplineError) || error.code !== "bad_params") return null;
   const details = error.details;
@@ -798,6 +801,8 @@ function kindRefusal(error: unknown, kind: unknown): string | null {
   if (typeof secure !== "boolean") return null;
   const ref = /^(e\d+)\b/.exec(error.message)?.[1] ?? "the field";
   const is = secure ? "a password field" : "a text field";
+  // A fixture is plain test data: it goes only into a text field, never a password field (§20.1, v1.16).
+  if (fixture) return `Error bad_params: a fixture goes only into a text field; ${ref} is ${is}.`;
   return kind === "secure"
     ? `Error bad_params: an account's password goes only into a password field; ${ref} is ${is}.`
     : `Error bad_params: an account's username goes only into a text field; ${ref} is ${is}.`;
@@ -2354,6 +2359,17 @@ export class TaplineTools {
     if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
     if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
     if (this.recordingState !== null || this.replayingState || this.rivals > 0) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
+    const fixtureFill = fixtureRef(args.fill ?? "none");
+    if (fixtureFill !== null) {
+      // `fill: "fixture:<name>.<field>"` (§25.2, v1.16): a vault fixture marked `"explore": true` that has the field.
+      const store = this.options.accounts?.store ?? null;
+      if (store === null || store.kindOf(fixtureFill.name) !== "fixture") return refuse(`Error bad_params: no fixture "${fixtureFill.name}" in the vault.`);
+      if (store.exploreMarked?.(fixtureFill.name) !== true) {
+        return refuse(`Error bad_params: fixture "${fixtureFill.name}" isn't marked "explore": true in the vault file, so explore doesn't type it.`);
+      }
+      const resolved = store.resolveEntry(fixtureFill.name, fixtureFill.field, session.app.id ?? session.app.name);
+      if (!resolved.ok) return refuse(`Error bad_params: ${resolved.message}`);
+    }
     if (args.account !== undefined) {
       const store = this.options.accounts?.store ?? null;
       if (store === null || !store.names().includes(args.account)) return refuse(`Error bad_params: no account "${args.account}" in the vault.`);
@@ -2370,7 +2386,7 @@ export class TaplineTools {
     }
     const exploreArgs: ExploreArgs = {
       ...budget,
-      fill: args.fill ?? EXPLORE_DEFAULTS.fill,
+      fill: (args.fill ?? EXPLORE_DEFAULTS.fill) as ExploreFill,
       continue: args.continue ?? EXPLORE_DEFAULTS.continue,
       ...(args.from !== undefined ? { from: args.from } : {}),
       ...(args.focus !== undefined ? { focus: args.focus } : {}),
@@ -2587,7 +2603,11 @@ export class TaplineTools {
         const store = this.options.accounts?.store ?? null;
         if (store === null || store.exploreMarked?.(entry) !== true) return "no";
         const kind = store.kindOf(entry);
-        // Never a password, a card or the phone's passcode (§25.6): an identity, an address, a note, or an account's username.
+        // Never a password, a card or the phone's passcode (§25.6): an identity, an address, a note, an account's username, or a fixture's field (v1.16).
+        if (kind === "fixture") {
+          const app = this.host.current()?.app;
+          return app !== undefined && store.resolveEntry(entry, field, app.id ?? app.name).ok ? "ok" : "no";
+        }
         const allowed = kind === "identity" ? field !== "phone" : kind === "address" || kind === "note" ? true : kind === "account" ? field === "username" : false;
         return allowed ? "ok" : "no";
       },
@@ -4147,7 +4167,7 @@ export class TaplineTools {
     /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
     touch?: NoChangeAction,
     /** What goes only to the app: a test account's value and the kind of field it may go into. Nothing else sees it (§18.6). */
-    wire?: { values: Record<string, unknown>; sessionId: string },
+    wire?: { values: Record<string, unknown>; sessionId: string; /** A fixture's value: its refusal names a fixture. */ fixture?: true },
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -4214,7 +4234,7 @@ export class TaplineTools {
           error instanceof TaplineError ? error.code : "internal",
           error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
         );
-        return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
+        return fail(kindRefusal(error, wire?.values["kind"], wire?.fixture === true) ?? describeError(error));
       }
     }
     const captured = this.exploreScope.getStore();
@@ -6748,7 +6768,7 @@ export class TaplineTools {
     if (args.force === true) params["force"] = true;
     const wire =
       account !== null && account.ok && session !== undefined
-        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id }
+        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id, ...(account.use?.kind === "fixture" ? { fixture: true as const } : {}) }
         : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) {
@@ -6928,13 +6948,15 @@ export class TaplineTools {
     const substituted = substituteAccount(text, loaded.store, named ?? this.runAccount, session.app.id ?? session.app.name);
     if (!substituted.ok) return substituted;
     if (substituted.field === null) return null;
+    const fixture = substituted.use?.kind === "fixture";
     // An older app ignores the kind and would type a password into any field.
-    if ((substituted.field === "password" || substituted.field === "username") && !session.capabilities.includes("typeKind")) {
+    if ((substituted.field === "password" || substituted.field === "username" || fixture) && !session.capabilities.includes("typeKind")) {
       return { ok: false, code: "unsupported", message: "this app's Tapline is too old to type an account's value safely; update react-native-tapline." };
     }
     // Only a password and a username are held to a kind of field (§18.6); the rest of the vault goes where the app lets it.
     const field = substituted.field;
-    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : field === "username" ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
+    // A fixture goes only into a plain text field, never a password field (§20.1, v1.16).
+    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : field === "username" || fixture ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {

@@ -60,7 +60,7 @@ function Screen() {
       </View>
       <TextInput testID="fake" {...mark({ taplineExploreFill: true })} />
       <TextInput testID="vault" {...mark({ taplineExploreFill: 'vault:identity.email' })} />
-      <TextInput testID="fixture" {...mark({ taplineExploreFill: 'fixture:address' })} />
+      <TextInput testID="fixture" {...mark({ taplineExploreFill: 'fixture:trip_data.destination' })} />
       <Wrapper {...mark({ taplineExploreSkip: true })}>
         <Pressable testID="nested" accessibilityRole="button">
           <Text>Through a component</Text>
@@ -105,7 +105,7 @@ test('taplineExploreFill reaches the input as true, a vault reference or a fixtu
   const byId = await elements();
   expect(byId('fake')?.exploreFill).toBe(true);
   expect(byId('vault')?.exploreFill).toBe('vault:identity.email');
-  expect(byId('fixture')?.exploreFill).toBe('fixture:address');
+  expect(byId('fixture')?.exploreFill).toBe('fixture:trip_data.destination');
   expect(byId('fake')).not.toHaveProperty('exploreSkip');
 });
 

@@ -29,7 +29,7 @@ const MIN_SCRUB = 3;
 
 // -- kinds and fields (§20.1)
 
-export const VAULT_KINDS = ["account", "card", "address", "identity", "note", "phone"] as const;
+export const VAULT_KINDS = ["account", "card", "address", "identity", "note", "phone", "fixture"] as const;
 export type VaultKind = (typeof VAULT_KINDS)[number];
 
 /** The fields each kind has. `phone` is Tapwright's: Tapline holds it and never types it. */
@@ -40,6 +40,8 @@ export const KIND_FIELDS: Record<VaultKind, readonly string[]> = {
   identity: ["name", "phone", "email", "birthday"],
   note: ["text"],
   phone: ["passcode"],
+  // A fixture has any fields (§20.1, v1.16): their names are checked at load, and a reference to one is checked against the entry.
+  fixture: [],
 };
 
 const secret = z.string().min(3, SHORT);
@@ -55,13 +57,30 @@ const entrySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps, explore }),
   z.object({ kind: z.literal("note"), text: secret.optional(), apps, explore }),
   z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps, explore }),
+  // Plain test data with any fields, string values (§20.1, v1.16). It is scrubbed like every vault value.
+  z.object({ kind: z.literal("fixture"), apps, explore }).catchall(plain),
 ]);
 
+/** A fixture's field names are ASCII letters, digits and `_` (§20.1, v1.16), and can't be the entry's own keys. */
+const FIXTURE_FIELD = /^[A-Za-z0-9_]+$/;
+const ENTRY_KEYS: ReadonlySet<string> = new Set(["kind", "apps", "explore"]);
+
 /** Version 2 (§20.1). A top-level `otp` key is Tapwright's and is ignored here. */
-export const vaultFileSchema = z.object({
-  version: z.literal(2),
-  vault: z.record(z.string().regex(ENTRY_NAME, "entry names use ASCII letters, digits and '_'"), entrySchema),
-});
+export const vaultFileSchema = z
+  .object({
+    version: z.literal(2),
+    vault: z.record(z.string().regex(ENTRY_NAME, "entry names use ASCII letters, digits and '_'"), entrySchema),
+  })
+  .superRefine((file, ctx) => {
+    for (const [name, entry] of Object.entries(file.vault)) {
+      if (entry.kind !== "fixture") continue;
+      for (const field of Object.keys(entry)) {
+        if (!ENTRY_KEYS.has(field) && !FIXTURE_FIELD.test(field)) {
+          ctx.addIssue({ code: "custom", path: ["vault", name], message: `a fixture's field names use ASCII letters, digits and '_'` });
+        }
+      }
+    }
+  });
 export type VaultFile = z.infer<typeof vaultFileSchema>;
 
 const accountSchema = z.object({
@@ -991,13 +1010,17 @@ function storeOf(entries: Record<string, VaultEntry>): AccountStore {
       const entry = has(entries, name);
       if (entry === undefined) return { ok: false, code: "not_found", message: `no vault entry "${name}"; ${list("entries")}.` };
       if (entry.kind === "phone") return { ok: false, code: "bad_params", message: PASSCODE_NOTE };
-      if (!KIND_FIELDS[entry.kind].includes(field)) {
+      if (entry.kind !== "fixture" && !KIND_FIELDS[entry.kind].includes(field)) {
         return { ok: false, code: "bad_params", message: `vault entry "${name}" is ${entry.kind === "address" ? "an" : "a"} ${entry.kind}; its fields are ${KIND_FIELDS[entry.kind].join(", ")}.` };
       }
       const wrong = forApp(entry, appId);
       if (wrong !== null) return { ok: false, code: "bad_params", message: `vault entry "${name}" ${wrong}` };
       const value = entry.values[field];
-      if (value === undefined) return { ok: false, code: "bad_params", message: `vault entry "${name}" has no ${field}.` };
+      if (value === undefined) {
+        // A fixture has any fields: the message names the ones it has (never a value).
+        const has = entry.kind === "fixture" ? `; its fields are ${Object.keys(entry.values).join(", ") || "none"}` : "";
+        return { ok: false, code: "bad_params", message: `vault entry "${name}" has no ${field}${has}.` };
+      }
       return { ok: true, value };
     },
   };

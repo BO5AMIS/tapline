@@ -430,7 +430,7 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
         const text = String(params["text"] ?? "");
         // The SDK's field-kind guard: a secure field is not a plain one (a dry run checks it too).
         if (params["kind"] === "plain" && found.el.secure === true) {
-          return { ok: false, error: { code: "bad_params", message: "the field is a secure field, not a plain field", secure: true } };
+          return { ok: false, error: { code: "bad_params", message: "the field is a secure field, not a plain field", secure: true, data: { secure: true } } };
         }
         if (dry) return { ok: true, result: { element: wire(world, found.el, found.index) } };
         world.typed.push({ id: found.el.id, text });

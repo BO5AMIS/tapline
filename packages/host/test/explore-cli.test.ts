@@ -79,7 +79,7 @@ describe("tapline explore: flags", () => {
     });
     expect(exploreArgs({ minutes: "soon" })).toEqual({ error: '--minutes is a number, not "soon"' });
     expect(exploreArgs({ steps: "" })).toEqual({ error: '--steps is a number, not ""' });
-    expect(exploreArgs({ fill: "everything" })).toEqual({ error: '--fill is "none" or "test-data", not "everything"' });
+    expect(exploreArgs({ fill: "everything" })).toEqual({ error: '--fill is "none", "test-data" or "fixture:<name>.<field>", not "everything"' });
     expect(exploreArgs({ from: " " })).toEqual({ error: "--from needs a name" });
   });
 });

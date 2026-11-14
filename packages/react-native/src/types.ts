@@ -84,7 +84,7 @@ export interface TaplineElement {
   fromOthers?: true;
   /** The app marked this element, or a view around it, `taplineExploreSkip` (AGENT-TOOLS 1.15 §25.5); absent otherwise, never `false`. */
   exploreSkip?: true;
-  /** The app marked this input for the explorer to fill: `true`, `"vault:<entry>.<field>"` or `"fixture:<name>"` (§25.6). */
+  /** The app marked this input for the explorer to fill: `true`, `"vault:<entry>.<field>"` or `"fixture:<name>.<field>"` (§25.6, §28.4). */
   exploreFill?: true | `vault:${string}` | `fixture:${string}`;
 }
 

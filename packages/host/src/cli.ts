@@ -124,7 +124,7 @@ Options:
   --stop             For dev: stop serving Metro
   --minutes <n>, --steps <n>, --depth <n>  For explore: the budget (default 10 minutes, 500 steps, 8 places deep)
   --from <place>, --focus <place>  For explore: where it starts, and the place whose subtree it keeps to
-  --fill <none|test-data>  For explore: type nothing (default), or only into fields the app marks as safe for tests
+  --fill <none|test-data|fixture:NAME.FIELD>  For explore: type nothing (default), or only into fields the app marks as safe for tests (a fixture from the vault gives the field marked by its id that value)
   --continue         For explore: go on after a crash, when the app can be opened again
   --account <name>   For explore: a vault account marked "explore": true, for the way back after a reset
   --wait <s>         For replay, run-schedule and explore: how long to wait for the app to connect (default 60)

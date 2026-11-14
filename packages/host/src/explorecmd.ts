@@ -1,3 +1,4 @@
+import { fixtureRef, type ExploreFill } from "./explore.js";
 import type { StopReason } from "./explorereport.js";
 import { createRuntime, type RuntimeOptions } from "./runtime.js";
 import { APP_WAIT_MS, BUSY_POLL_MS, BUSY_WAIT_MS } from "./runschedule.js";
@@ -73,8 +74,8 @@ export function exploreArgs(flags: ExploreFlags): { args: ToolArgs<"explore"> } 
     args[name] = value;
   }
   if (flags.fill !== undefined) {
-    if (flags.fill !== "none" && flags.fill !== "test-data") return { error: `--fill is "none" or "test-data", not "${flags.fill}"` };
-    args.fill = flags.fill;
+    if (flags.fill !== "none" && flags.fill !== "test-data" && fixtureRef(flags.fill) === null) return { error: `--fill is "none", "test-data" or "fixture:<name>.<field>", not "${flags.fill}"` };
+    args.fill = flags.fill as ExploreFill;
   }
   for (const name of ["from", "focus", "account"] as const) {
     const raw = flags[name];
