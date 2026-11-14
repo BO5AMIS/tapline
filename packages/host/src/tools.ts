@@ -11,6 +11,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
+import type { MapRoad } from "./mapfile.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNameFromRoute, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, logLevelOf, offScreenLine, roleOf } from "./format.js";
@@ -3998,6 +3999,26 @@ export class TaplineTools {
     }
   }
 
+  /** Redaction for what the map keeps: the run's typed values inside an explore, always the vault's values and the session's codes. */
+  private mapScrub(text: string): string {
+    const run = this.exploreScope.getStore()?.run;
+    return run !== undefined ? this.exploreScrub(run, text) : this.scrubSecrets(this.host.redactOut(text));
+  }
+
+  /** A road with every text checked by `mapScrub`: names that change are dropped; null when the move itself holds such a text. */
+  private cleanRoad<M extends object>(move: M, names: NonNullable<MapRoad["names"]>): { move: M; names: NonNullable<MapRoad["names"]> } | null {
+    const holds = (value: unknown): boolean => typeof value === "string" && this.mapScrub(value) !== value;
+    const target = (move as { target?: unknown }).target;
+    if (typeof target === "object" && target !== null && Object.values(target).some(holds)) return null;
+    if (holds((move as { url?: unknown }).url)) return null;
+    const kept: NonNullable<MapRoad["names"]> = {};
+    for (const key of ["id", "label", "text"] as const) {
+      const value = names[key];
+      if (value !== undefined && !holds(value)) kept[key] = value;
+    }
+    return { move, names: kept };
+  }
+
   /** Before a move: where the app is. Only for calls that can be roads (§18.2). */
   private roadStart(session: SessionInfo, method: string): { map: AppMap; from: Place | null; typed: boolean } | null {
     if (this.options.maps === undefined || this.replaying || !ROAD_METHODS.has(method)) return null;
@@ -4051,7 +4072,11 @@ export class TaplineTools {
         if (!link.saved) return [link.message];
         move = { ...move, url: link.link };
       }
-      map.recordMove(from, move, classified.names, arrived, Date.now() - (this.actionStartedAt ?? Date.now()), start.typed ? "typed" : undefined);
+      // Nothing a person or a run typed, and no vault value or code, goes into a road: a name that shows one is dropped, and a road that
+      // can only be told by such a text is not saved (it could not be replayed without the secret either).
+      const clean = this.cleanRoad(move, classified.names);
+      if (clean === null) return [];
+      map.recordMove(from, clean.move, clean.names, arrived, Date.now() - (this.actionStartedAt ?? Date.now()), start.typed ? "typed" : undefined);
       return [];
     } catch {
       return [];
@@ -5712,7 +5737,7 @@ export class TaplineTools {
         });
         if (road === undefined) continue;
         const names = record.now.id !== undefined ? { id: record.now.id } : record.now.label !== undefined ? { label: record.now.label } : record.now.text !== undefined ? { text: record.now.text } : null;
-        if (names === null) continue;
+        if (names === null || this.cleanRoad({ target: names }, {}) === null) continue;
         const stored = map.repairRoad(road, { ...road.move, target: names }, names, false);
         if (stored !== null) map.markDriven(stored, stored.ms);
       }

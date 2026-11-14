@@ -1,5 +1,7 @@
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { looseScrubber } from "../src/accounts.js";
 import { TYPED, redactFinding } from "../src/findings.js";
 import type { TaplineHost } from "../src/server.js";
 import type { MapFile } from "../src/mapfile.js";
@@ -78,6 +80,49 @@ describe("R4 item 2: a scroll view marked skip is never scrolled", () => {
     const s = await setup({ world: (w) => void (w.screen = "trips") });
     await s.tools.explore({ fill: "none", steps: 12 });
     expect(s.world.asked).toContain("scroll");
+  });
+});
+
+/** The explore scope as the explorer makes it, with a run that already typed `typed` (so the run-wide scrubber knows it). */
+interface ScopeInternals {
+  exploreScope: { run: <T>(scope: unknown, go: () => Promise<T>) => Promise<T> };
+}
+const inRunThatTyped = <T>(s: ExploreSetup, typed: string[], go: () => Promise<T>): Promise<T> => {
+  const run = { used: 0, steps: 50, minutes: 50, startedAt: s.clock.now, waited0: 0, typed, scrub: looseScrubber(typed, TYPED) };
+  return (s.tools as unknown as ScopeInternals).exploreScope.run({ count: 0, run }, go);
+};
+
+describe("R4 item 4: typed text never reaches a road saved after the typing", () => {
+  const mail = (w: ExWorld, withId: boolean): void => {
+    w.screens["home"]?.elements.push(btn("open-mail", "Open test@example.com", withId ? {} : { id: undefined }));
+    if (!withId) {
+      const el = w.screens["home"]?.elements.at(-1);
+      if (el !== undefined) delete el.id;
+    }
+    w.goes[withId ? "home|open-mail" : "home|Open test@example.com"] = "settings";
+  };
+
+  it("a button labelled with the typed email keeps its id road but not its label or text", async () => {
+    const s = await setup({ world: (w) => mail(w, true) });
+    await inRunThatTyped(s, ["test@example.com"], () => s.tools.look({ screenshot: false }));
+    const out = await inRunThatTyped(s, ["test@example.com"], () => s.tools.tap({ target: { id: "open-mail" } }));
+    expect(out.isError).not.toBe(true);
+    await s.registry.flushAll();
+    expect(readFileSync(join(s.folder, "map.json"), "utf8")).not.toContain("test@example.com");
+    const road = s.file().roads.find((r) => r.to === "settings");
+    expect(road?.move).toEqual({ tool: "tap", target: { id: "open-mail" } });
+    expect(road?.names).toEqual({ id: "open-mail" });
+  });
+
+  it("a road that could only be named by the typed text is not saved", async () => {
+    const s = await setup({ world: (w) => mail(w, false) });
+    await inRunThatTyped(s, ["test@example.com"], () => s.tools.look({ screenshot: false }));
+    const out = await inRunThatTyped(s, ["test@example.com"], () => s.tools.tap({ target: { label: "Open test@example.com" } }));
+    expect(out.isError).not.toBe(true);
+    expect(s.world.screen).toBe("settings");
+    await s.registry.flushAll();
+    expect(readFileSync(join(s.folder, "map.json"), "utf8")).not.toContain("test@example.com");
+    expect(s.file().roads.some((r) => r.to === "settings")).toBe(false);
   });
 });
 
