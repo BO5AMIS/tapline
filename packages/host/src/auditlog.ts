@@ -6,7 +6,7 @@ import { join } from "node:path";
  * `<dir>/YYYY-MM.jsonl`. It is not the action log (§12). It has no off switch, and nothing the model can call reads or deletes it.
  */
 
-export const AUDIT_KINDS = ["grant", "revoke", "vault", "otp", "schedule", "approval"] as const;
+export const AUDIT_KINDS = ["grant", "revoke", "vault", "otp", "schedule", "approval", "repair"] as const;
 export type AuditKind = (typeof AUDIT_KINDS)[number];
 
 export interface AuditEntry {

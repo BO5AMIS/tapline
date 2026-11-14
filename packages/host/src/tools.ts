@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -11,7 +11,7 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
-import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
+import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNameFromRoute, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
 import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, logLevelOf, offScreenLine, roleOf } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
@@ -22,7 +22,7 @@ import { reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
-import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
 import {
   EYES,
@@ -57,10 +57,13 @@ import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, l
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
-import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
+import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { namedTarget } from "./signature.js";
-import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
+import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreSettings, floorSubject, type FloorRules } from "./explorefloor.js";
+import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
+import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
 import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
 import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
@@ -324,6 +327,12 @@ export const toolShapes = {
   replay: {
     name: z.string().optional().describe("A saved script's name; omit name and path to list saved scripts"),
     path: z.string().optional().describe("A script file to replay (the shared agent-tools-script format)"),
+    repair: z
+      .enum(["suggest", "apply"])
+      .optional()
+      .describe(
+        "Self-repair (AGENT-TOOLS 1.15 §26). suggest: replay as usual and, at the first break that may be repaired, rank the candidates without touching any; writes nothing. apply: replay and repair as it goes (a real run); on a full pass it writes <script>.repaired.json and <script>.repair.md beside the original and never overwrites it. A person adopts a repaired script on the command line only.",
+      ),
     look: lookField,
     screenshot: screenshotField,
   },
@@ -716,6 +725,8 @@ interface ScriptStep {
   method: string;
   params: Record<string, unknown>;
   route?: string[];
+  /** The name of the place where the step ran, when the host has a map (AGENT-TOOLS 1.15 §26.6). */
+  place?: string;
   fragile?: boolean;
   /** Typed into a password field: its text wasn't saved (never written to the file). */
   secret?: boolean;
@@ -3070,7 +3081,7 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
       // §9.1: `if` needs exactly one of text, id or label.
       if (given_if !== undefined && (typeof given_if !== "object" || given_if === null || Array.isArray(given_if))) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): if is an object with one of text, id or label (and gone), not ${JSON.stringify(given_if)}.`);
@@ -3392,7 +3403,7 @@ export class TaplineTools {
   }
 
   private runStepNow(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, route: _route, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown };
+    const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
     const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
@@ -4101,6 +4112,7 @@ export class TaplineTools {
       if (typed?.variable !== undefined) this.recording.route?.variables.add(typed.variable);
       if (typed?.account === true) this.recording.route?.variables.add("account");
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
+      if (road !== null && road.from !== null) step.place = road.from.name;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
     }
@@ -5160,7 +5172,8 @@ export class TaplineTools {
     return lines.length === 0 ? "No saved scripts." : ["Saved scripts:", ...lines].join("\n");
   }
 
-  async replay(args: Shape<"replay">, options: { updateReferences?: boolean } = {}): Promise<CallToolResult> {
+  /** `adopt` is a person's choice and only the command line passes it: no tool parameter reaches it (AGENT-TOOLS 1.15 §26.5). */
+  async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean } = {}): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
@@ -5232,10 +5245,220 @@ export class TaplineTools {
         this.replayContext = null;
       }
     };
-    if (script.version !== 2) return execute(script.steps);
+    // Self-repair (§26): `suggest` runs as usual and ranks candidates at the first break; `apply` repairs as it goes.
+    let ranSteps: Step[] = script.steps;
+    let repairRun: RepairRun | null = null;
+    const repairHost = args.repair === undefined ? null : this.repairHost(session, script, scriptPath, execute);
+    const run = async (steps: Step[]): Promise<CallToolResult> => {
+      if (repairHost === null || args.repair !== "apply") {
+        ranSteps = steps;
+        return execute(steps);
+      }
+      repairRun = await runWithRepair(repairHost, steps);
+      return repairRun.answer;
+    };
+    const finish = async (answer: CallToolResult): Promise<CallToolResult> => {
+      if (repairHost === null) return answer;
+      if (args.repair === "suggest") return this.suggestRepair(repairHost, answer, ranSteps, session, script);
+      return repairRun === null ? answer : this.finishRepair(session, script, scriptPath, repairRun, options.adopt === true);
+    };
+    if (script.version !== 2) return finish(await run(script.steps));
     // A route starts at a place: after the fresh start the app is driven there (an `off_route` fails the replay), then it runs (18.5).
-    const outcome = await routeRunner.run(script, {}, this.routeContext(execute, (place) => this.replayDriveTo(place)), accountStore);
-    return outcome.kind === "ran" ? outcome.answer : fail(`Error ${outcome.code}: ${outcome.message}`);
+    const outcome = await routeRunner.run(script, {}, this.routeContext(run, (place) => this.replayDriveTo(place)), accountStore);
+    return outcome.kind === "ran" ? finish(outcome.answer) : fail(`Error ${outcome.code}: ${outcome.message}`);
+  }
+
+  // -- self-repairing tests (AGENT-TOOLS 1.15 §26)
+
+  /** What a repair needs from this host: the checks of any touch run inside `runSteps`, and nothing here writes the map. */
+  private repairHost(session: SessionInfo, script: SharedScript, scriptPath: string, execute: (steps: Step[]) => Promise<CallToolResult>): RepairHost {
+    const live = (): SessionInfo => this.host.current() ?? session;
+    const map = this.mapOf(session);
+    const words = (): string[] => {
+      const lists = listsFor(this.policy, session.app);
+      // The floor of §25.5 is in it whatever the policy file says: a repair never reaches a word that reaches people or money.
+      return [...new Set([...FLOOR_WORDS, ...lists.confirm, ...lists.block, ...exploreSettings(this.policy).skip])];
+    };
+    const named = script.name || basename(scriptPath, ".json");
+    return {
+      script: named,
+      runSteps: execute,
+      tree: async () => {
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: live().id }).catch(() => null));
+        return tree.success ? tree.data : null;
+      },
+      place: async () => (map === undefined ? null : placeSeen(this.placeSource(live()), map)),
+      placeName: (route) => placeNameFromRoute(route),
+      way: (from, to) => {
+        if (map === undefined) return null;
+        const start = map.data().places[from];
+        if (start === undefined || map.data().places[to] === undefined) return null;
+        const plan = planWay(map, { name: from, key: start.key, link: null }, { name: to, link: null }, { by: "taps", tapsOnly: true });
+        if ("error" in plan || !plan.proven || plan.moves.length === 0) return null;
+        const steps: Step[] = [];
+        for (const move of plan.moves) {
+          const road = move.road;
+          const target = road.move.target;
+          if (move.viaLink || move.route !== undefined || !["tap", "long_press", "toggle"].includes(road.move.tool) || target === undefined) return null;
+          if (target.x !== undefined || target.y !== undefined) return null;
+          const by = target.id !== undefined ? { id: target.id } : target.label !== undefined ? { label: target.label } : target.text !== undefined ? { text: target.text } : null;
+          if (by === null) return null;
+          steps.push({ tool: road.move.tool, target: by, place: road.from } as Step);
+        }
+        return steps;
+      },
+      returnTo: async (place) => (await this.replayDriveTo(place)).ok,
+      back: async () => (await execute([{ tool: "back" } as Step])).isError !== true,
+      match: (target, elements) => candidatesFor(wireTarget(target), elements),
+      never: {
+        draftsOnly: script.version === 2 && script.draftsOnly === true,
+        policyHit: (subject) => matchWord(words(), floorSubject(subject)),
+      },
+      audit: (detail) => this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: named, detail: this.host.redactOut(detail) }) ?? false,
+      now: () => this.clock(),
+    };
+  }
+
+  /** `suggest`: after the usual failure text, the candidates of the first break, ranked, with nothing touched (§26.5). */
+  private async suggestRepair(host: RepairHost, answer: CallToolResult, steps: Step[], session: SessionInfo, script: SharedScript): Promise<CallToolResult> {
+    const brk = parseBreak(answer);
+    if (brk === null) return answer;
+    const analysis = await analyse(host, steps, brk.index, brk);
+    const lines = [...suggestionText(analysis), ...this.expectFinding(session, script, steps, brk)];
+    const [top, ...rest] = answer.content;
+    return top !== undefined && top.type === "text" ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...lines].join("\n") }, ...rest] } : answer;
+  }
+
+  /** The §27 finding of an `expect` that failed: a line that reports it and the finding as one JSON line. It is never repaired. */
+  private expectFinding(session: SessionInfo, script: SharedScript, steps: Step[], brk: { index: number; code: string; message: string }): string[] {
+    if (brk.code !== "expect_failed") return [];
+    const step = steps[brk.index];
+    if (step === undefined) return [];
+    const platform = session.device.platform === "ios" ? "iOS" : session.device.platform === "android" ? "Android" : session.device.platform;
+    const build = session.app.build ?? "";
+    const place = (step as Record<string, unknown>)["place"];
+    const wall = this.options.wallClock ?? Date.now;
+    const finding: Finding = {
+      id: "f1",
+      kind: "expect_failed",
+      app: session.app.id ?? session.app.name,
+      app_version: session.app.version ?? "",
+      build: /\((.*)\)\s*$/.exec(build)?.[1] ?? build,
+      tool: "tapline",
+      tool_version: EXPLORE_TOOL_VERSION,
+      when: new Date(wall()).toISOString(),
+      device: { model: session.device.model ?? session.device.name ?? "unknown", os: `${platform}${session.device.osVersion !== undefined ? ` ${session.device.osVersion}` : ""}` },
+      place: typeof place === "string" ? place : null,
+      path_from: typeof place === "string" ? place : null,
+      path: steps.slice(0, brk.index + 1).map((item): PathStep => {
+        const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+        // A typed value is never kept (§27.1).
+        if (tool !== "type_text") return { tool, ...rest };
+        const { text: _text, ...kept } = rest as Record<string, unknown>;
+        return { tool, ...kept, text: TYPED };
+      }),
+      expected: step.expect === undefined ? "the step's expect holds" : `the step's expect holds (${JSON.stringify(step.expect)})`,
+      got: cutText(firstLine(brk.message), LOG_LINE_MAX),
+      picture: null,
+      logs: [],
+      repro: null,
+      count: 1,
+    };
+    const safe = redactFinding(finding, (value) => this.scrubSecrets(value));
+    return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
+  }
+
+  /** `apply` ended: a failure adds its notes (and an expect's finding); a pass with repairs writes the two files and learns the roads (§26.5). */
+  private async finishRepair(session: SessionInfo, script: SharedScript, scriptPath: string, run: RepairRun, adopt: boolean): Promise<CallToolResult> {
+    const withLines = (answer: CallToolResult, lines: string[]): CallToolResult => {
+      const [top, ...rest] = answer.content;
+      return lines.length === 0 || top === undefined || top.type !== "text" ? answer : { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...lines].join("\n") }, ...rest] };
+    };
+    if (!run.ok) {
+      const steps = run.work.map((item) => item.step);
+      const finding = run.failure === undefined ? [] : this.expectFinding(session, script, steps, { index: run.failure.step - 1, code: run.failure.code, message: run.failure.message });
+      return withLines(run.answer, [...run.notes, ...finding]);
+    }
+    if (run.repairs.length === 0) return run.answer;
+    const dir = dirname(scriptPath);
+    const stem = basename(scriptPath).replace(/\.json$/i, "");
+    const repairedPath = join(dir, `${stem}.repaired.json`);
+    const notesPath = join(dir, `${stem}.repair.md`);
+    const origPath = join(dir, `${stem}.orig.json`);
+    const wall = this.options.wallClock ?? Date.now;
+    const at = new Date(wall());
+    const build = this.mapOf(session)?.currentBuild() ?? session.app.build ?? "";
+    let original: Record<string, unknown>;
+    try {
+      const raw: unknown = JSON.parse(readFileSync(scriptPath, "utf8"));
+      original = sharedScriptSchema.safeParse(raw).success ? (raw as Record<string, unknown>) : (script as unknown as Record<string, unknown>);
+    } catch {
+      original = script as unknown as Record<string, unknown>;
+    }
+    const repaired = this.backstop(repairedScript(original, run.work, { from: basename(scriptPath), at: at.toISOString().replace(/\.\d{3}Z$/, "Z"), build, count: run.repairs.length }));
+    const repairedText = `${JSON.stringify(repaired, null, 2)}\n`;
+    const markdown = this.scrubSecrets(repairMarkdown(script.name || stem, { date: at.toISOString().slice(0, 10), version: EXPLORE_TOOL_VERSION, build }, run.repairs));
+    try {
+      writeFileSync(repairedPath, repairedText, { mode: 0o600 });
+      writeFileSync(notesPath, markdown, { mode: 0o600 });
+    } catch (error) {
+      return fail(`Error internal: the run passed, but the repaired script couldn't be written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.learnRepairs(session, run.repairs);
+    const count = run.repairs.length;
+    const total = run.work.filter((item) => item.origin !== null).length;
+    const phrases = run.repairs.map((record) => (record.kind === "target" ? `step ${record.step} ${repairPhrase(record)}` : `step ${record.step} inserted ${record.shown}`));
+    let adopted = false;
+    const extra: string[] = [];
+    if (adopt) {
+      const logged = this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: "adopted" }) ?? false;
+      if (!logged) extra.push("Note: the audit log couldn't be written, so the script was not adopted.");
+      else {
+        try {
+          // The first original is never lost: the copy is made only when there is none yet.
+          if (!existsSync(origPath)) copyFileSync(scriptPath, origPath);
+          const temporary = join(dir, `${stem}.json.${process.pid}.tmp`);
+          writeFileSync(temporary, repairedText, { mode: 0o600 });
+          renameSync(temporary, scriptPath);
+          rmSync(repairedPath, { force: true });
+          adopted = true;
+        } catch (error) {
+          extra.push(`Note: couldn't adopt the repaired script: ${error instanceof Error ? error.message : String(error)}. The original is unchanged.`);
+        }
+      }
+    }
+    const head = `Ran ${total} of ${total} steps in ${run.seconds.toFixed(1)} s, with ${count} repair${count === 1 ? "" : "s"} (${adopted ? "adopted" : "not adopted"}).`;
+    const files = adopted
+      ? `Adopted: ${stem}.json now holds the repaired script; the original is kept as ${stem}.orig.json. Wrote ${stem}.repair.md.`
+      : `Wrote ${stem}.repaired.json and ${stem}.repair.md. The original is unchanged.`;
+    return text([head, `Repaired: ${phrases.join("; ")}.`, files, ...extra].join("\n"));
+  }
+
+  /** A passing `apply` updates the road that has a repaired move: its `move` and `names` take the new target, proven for the build (§26.5). Nothing else of the map. */
+  private learnRepairs(session: SessionInfo, repairs: RepairRun["repairs"]): void {
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return;
+      for (const record of repairs) {
+        if (record.kind !== "target" || record.was === null || record.now === null || record.now.index !== undefined) continue;
+        const was = record.was;
+        const road = map.data().roads.find((candidate) => {
+          const target = candidate.move.target;
+          if (candidate.move.tool !== record.tool || target === undefined) return false;
+          if (record.place !== undefined && candidate.from !== record.place) return false;
+          if (was.id !== undefined) return target.id === was.id;
+          if (was.label !== undefined) return target.label === was.label;
+          return was.text !== undefined && target.text === was.text;
+        });
+        if (road === undefined) continue;
+        const names = record.now.id !== undefined ? { id: record.now.id } : record.now.label !== undefined ? { label: record.now.label } : record.now.text !== undefined ? { text: record.now.text } : null;
+        if (names === null) continue;
+        const stored = map.repairRoad(road, { ...road.move, target: names }, names, false);
+        if (stored !== null) map.markDriven(stored, stored.ms);
+      }
+    } catch {
+      // the map is a help; a repair that passed stands without it
+    }
   }
 
   /** Where a saved route of that name is, in the current app's map folder; null when there is none. */
