@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Version 1.14.2 (2026-11-14) closes gaps the second builds of §19 and §22 showed: a lock on every change to the policy file (§19.5), grant names that differ only in case are one name (§19.1), a claim that crosses an hour or a day (§19.4), a run lock published whole, and a way out of a stuck lock (§22.3). Both leads agree on it. Version 1.15 (2026-11-14) adds the explorer and self-repairing tests (§25 to §28): `explore`, a search the tool runs with no model, which fills in the map and never crosses a skip floor both tools share; the repair of saved scripts, with one acceptance rule, suggest, apply and a person's adopt; one shape for findings; and the explored record of the map. Both leads agree on it. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Version 1.14.2 (2026-11-14) closes gaps the second builds of §19 and §22 showed: a lock on every change to the policy file (§19.5), grant names that differ only in case are one name (§19.1), a claim that crosses an hour or a day (§19.4), a run lock published whole, and a way out of a stuck lock (§22.3). Both leads agree on it. Version 1.15 (2026-11-14) adds the explorer and self-repairing tests (§25 to §28): `explore`, a search the tool runs with no model, which fills in the map and never crosses a skip floor both tools share; the repair of saved scripts, with one acceptance rule, suggest, apply and a person's adopt; one shape for findings; and the explored record of the map. Both leads agree on it. Version 1.16 (2026-11-14) adds the one-page bug report (§29): `bug_report` makes one page, `report.md` and `report.html`, from a finding of §27 or from the last steps of a session, checks that it reproduces, gives it a signature so that one bug seen again is one bug, keeps everything private out of it, and exports it to a GitHub issue or a `.zip`; the audit log gains the kind `export`. Three small shared things go with it: the format of the lock's `started` (§22.3), the `seen` field of a recorded step, which the repair score compares (§9.4, §26.3), and `fixture`, a vault kind of plain test data that `fill` can type (§20.1, §25.6). Both leads agree on it. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -649,6 +649,21 @@ A script is a saved batch:
   tool that knows routes (Tapline) checks it after the step and its expectation: a step that ends on another
   screen stops the replay with `expect_failed: … it ended on Tabs › Trips; the recording ended on Tabs ›
   Explore`. Tools without routes ignore it; it is never passed to the step's own call.
+- (v1.16) A step that targets an element may carry `seen`: the element's facts when it was recorded, so that a repair
+  (§26.3) can compare them with a candidate's: `"seen": {"role": "button", "bucket": "c2r3", "component":
+  "SaveButton", "id_stem": "save"}`.
+  - `role` is the element's role (§3.3). `bucket` is its centre on a grid of 3 columns and 3 rows over the screen, `c1` to
+    `c3` by `r1` to `r3`, counted from 1 at the top left (`c2r3` is the middle column, the bottom row). It is left out for
+    an element inside a scroll view. This grid is not the 4 by 8 grid of §25.3, and the two are never mixed.
+  - `component` is the component's name: Tapline reads it from the React tree, Tapwright from the accessibility class. It
+    is left out when unknown.
+  - `id_stem` is the element's `id`, lower-cased, with trailing digits and trailing words from `btn`, `button`, `link`,
+    `tab`, `row`, `item`, `cell`, `switch`, `toggle`, `field` and `input` removed again and again, with their separators:
+    `save-button` gives `save`, `trip-row-1` gives `trip`. It is the whole id when nothing would be left, and it is left
+    out when the element has no id.
+  - **It never holds text:** no label, no text, no value, so a script file gains no private content. `record` writes it. A
+    script recorded before 1.16 has none. A tool that doesn't know the key ignores it, and a replay never passes it to a
+    step's call, as for `route`.
 - A script may begin with steps that bring the app to a known state (`app_command` for sign-in, sample
   data or a reset, where the tool has it) instead of relying on `fresh`: Tapline's reload keeps the app's
   storage.
@@ -1744,7 +1759,7 @@ A mismatch of the app, the word or the route is not noted: that grant simply isn
 - Each touch under a grant reads the file again (its modification time), so a revocation by either tool, or by hand, is
   seen at the very next touch, also in the other tool's running route.
 - (1.14.2) **The policy edit lock.** Every change to the policy file (a grant created or renewed, `draftsOnly` lifted,
-  `--revoke-all`) is made under `<policy file>.edit.lock`, taken like the run lock (§22.3): published whole, never
+  `--revoke-all`) is made under `<policy file>.edit.lock`, taken like the run lock (§22.3, its `started` too, v1.16): published whole, never
   displaced while its holder lives. Under the lock the file is read again, the change is applied to that content, and it
   is written with a temporary file and a rename. A change that can't get the lock within a few seconds writes nothing.
 
@@ -1794,6 +1809,7 @@ agent can enter personal data by name without ever seeing it. Both tools read th
   "me":        {"kind": "identity", "name": "…", "phone": "…", "email": "…", "birthday": "…"},
   "visa":      {"kind": "card",     "number": "…", "expiry": "…", "cvc": "…"},
   "reply_sig": {"kind": "note",     "text": "…"},
+  "trip_data": {"kind": "fixture",  "destination": "Lisbon", "party_size": "2"},
   "phone":     {"kind": "phone",    "passcode": "…"}}}
 ```
 - The file is the one `--accounts FILE` names (§18.6). A version 1 file (`{"version": 1, "accounts": {...}}`) still loads;
@@ -1801,6 +1817,14 @@ agent can enter personal data by name without ever seeing it. Both tools read th
 - **Kinds and their fields:** `account` (username, password), `card` (number, expiry, cvc), `address` (street, city,
   postcode, country), `identity` (name, phone, email, birthday), `note` (text), and `phone` (passcode; Tapwright only,
   §18.6). An entry's name is ASCII letters, digits and `_`.
+- (v1.16) **`fixture`** is plain test data: `{"kind": "fixture", "<field>": "<plain test data>", …}`, with any fields, their
+  names ASCII letters, digits and `_`, and string values.
+  - It is typed by reference like any entry (`${vault.trip_data.destination}`), and by the explorer as `fill:
+    "fixture:<name>.<field>"` or by the SDK prop value `fixture:<name>.<field>` (§25.6, §28.4).
+  - **It is plain data, and it is treated as a value:** it is never written in plain text into a script, a report, a
+    finding, the map or any other sink. It goes through §20.3 and shows as its placeholder (`<trip_data's destination>`).
+  - A fixture is never typed into a password or a card field. A tool that doesn't know the kind treats the entry as
+    unusable.
 - **References:** `${vault.<name>.<field>}`, as the whole text of a step, as with `${account.…}` (§18.6; its rule holds
   here: `"text": "hi ${vault.home.street}"` is `bad_params`). `${account.<field>}` stays, and means the entry named by
   the call's `account` (`drive`, `run`, a route); `"account": "tester2"` works for `account` entries only.
@@ -1979,6 +2003,14 @@ One file per schedule, `~/.<tool>/schedules/<name>.json` (`~/.tapwright/schedule
   dropped with `skipped: the previous run is still going`.
   - (1.14.1) **The run lock** answers "is a run of this schedule still going". The lock file is `{"owner", "pid",
     "started"}`; `started` is the process start time when the OS gives it, so a reused pid isn't mistaken for the holder.
+  - (v1.16) **The format of `started`** (the same in the `.takeover` file and in the policy edit lock, §19.5): the holder's
+    process start time as an integer, in milliseconds since 1970-01-01 UTC, rounded down.
+    - Windows: the creation time from `GetProcessTimes`. macOS and Linux: the process start time from the OS, read with
+      the locale fixed (`LC_ALL=C`) and converted to UTC.
+    - A reader compares whole seconds: `floor(started / 1000)` against the live process's start time, floored to the
+      second the same way. This is the "start time differs" of **Stale** below.
+    - If `started` isn't an integer (an older tool's text), the reader can't prove a reused pid. It treats the holder as
+      alive while that pid runs, and a person clears the lock with `unlock`.
   - **Acquire** by publishing the lock whole (below).
   - **Stale** only when its pid no longer runs on this computer, or its start time differs.
   - **Takeover** goes through `<lock>.takeover`, published whole, as the lock is. Under it, read the lock again; if it
@@ -2027,6 +2059,11 @@ and not the accessibility `audit` (§10).
     (§26.7). `name` is the script, and `detail` says `step 4: tap id=login-btn to id=login-button (score 0.93), accepted`,
     `…, rejected (<why>)` or `adopted`. It is not a permission; it is logged because a repair changes what a saved
     script touches.
+  - `export` (1.16): a bug report sent out of the tool's folders, to a GitHub issue or as a `.zip` (§29.7), one line each,
+    a refused export too. `name` is `bug_report`, and `detail` says `issue example-org/wayfare-qa: bug_7bc2e91c152d416e,
+    picture not sent` or `zip <path>: <bug id>, refused (redaction check)`: the target and the bug id, never content. It is
+    not a permission; it is logged because an export leaves what the tool keeps. When the line can't be written,
+    nothing is sent (as for a grant).
 - **A grant needs its line.** When the line can't be written, the grant doesn't cover the touch, and it asks a person.
   The audit log has no off switch; `--no-log` turns off the action log only.
 - `tapwright audit-log` and `tapline audit-log` are for the person: commands, not MCP tools, so the model can neither
@@ -2095,7 +2132,7 @@ All arguments are optional.
 | `depth` | how many places deep from the start place it expands; a deeper place is saved but not expanded | 8; 1 to 20 |
 | `from` | a place's name to start at; the tool drives there first (§18.4) | where the app is |
 | `focus` | a place's name; it expands only places below it (§25.4) | the whole app |
-| `fill` | `"none"` or `"test-data"` (§25.6) | `"none"` |
+| `fill` | `"none"`, `"test-data"` or `"fixture:<name>.<field>"` (§25.6) | `"none"` |
 | `continue` | go on after a crash (§25.9) | `false` |
 | `account` | a vault account marked `"explore": true`, for the way back after a reset (§25.8) | none |
 | `guide` | reserved (§25.1) | `"none"` |
@@ -2202,14 +2239,17 @@ union of:
 
 ### 25.6 Typing and `fill` (v1.15)
 
-- **It never types,** except with `fill: "test-data"`. It never passes `submit: true` to `type_text`. It never types a
+- **It never types,** except with `fill: "test-data"` or `"fixture:…"`. It never passes `submit: true` to `type_text`. It never types a
   password or a card, with any `fill`.
-- With `fill: "test-data"` it types only these, and only into a **field the app marks as safe for tests:**
+- With `fill: "test-data"` or `"fixture:…"` it types only these, and only into a **field the app marks as safe for tests:**
   - **Vault entries** the user marked `"explore": true` in the vault file (§20.1): an `identity`, an `address`, a `note`,
     or an `account`'s `username`. Never a `password`, a `card` or the `phone` entry. They are typed by reference
     (§20.1; the audit log's `vault` line, §23, and the field rules of §20.1 hold). A tool that doesn't know the key
     treats the entry as unmarked.
-  - **Fixtures an app command offers** for testing (§16.3 lists `app_command`'s names).
+  - **Fixtures** (v1.16): vault entries of the kind `fixture` (§20.1) that the user marked `"explore": true`, typed by
+    reference like the entries above. With `fill: "fixture:<name>.<field>"`, a field marked only by the id marker below
+    gets that fixture field instead of a fake value; a field's own SDK prop (§28.4) wins on that field. A fixture field
+    is never typed into a secure field.
   - **Fake values,** only these two: `Test`, and `test@example.com` for a field whose id or label has `email` in it.
 - **A field is marked safe** when its `id` (the `testID`) ends in `-test-safe`, which both tools can read. An id marker
   names no vault entry or fixture, so such a field gets a fake value. Tapline also reads an SDK prop that can name an
@@ -2407,6 +2447,11 @@ number from 0 to 1:
 - `position`: 1 for the same position bucket, 0.5 for a neighbouring bucket (including diagonals), else 0.
 - `component`: 1 for the same component name, else 0. Tapline reads the name from the React tree; Tapwright reads the
   accessibility class. Left out when either side doesn't have one.
+- (v1.16) **A step's `seen`** (§9.4) gives the old facts when the step has one: its `role` for `role`, its `id_stem` for
+  `id_stem` (compared with the candidate's own id reduced to its stem the same way), its `bucket` for `position` and its
+  `component` for `component`. For `position` the candidate's bucket is taken on the same 3 by 3 grid, from its centre;
+  neighbours, diagonals included, score 0.5 as above. A fact that `seen` lacks falls back to where the part took it before,
+  and without `seen` all four parts are as in 1.15. `words` never comes from `seen`, which holds no text.
 
 **The score** is the weighted mean of the parts that exist on both sides: the sum of weight times part, over the sum of
 the weights of those parts. Weights are positive and each tool chooses its own. A tool lists its weights in its own
@@ -2502,6 +2547,8 @@ Beside the script `sign_in.json`, in the same folder:
 - **Steps carry `place`** (1.15): `record` saves on each step the name of the place where it ran, when the tool has a
   map. A script recorded before 1.15 has none, and the `route` of the step before is used where the tool has routes
   (§26.1).
+- **Steps carry `seen`** (v1.16, §9.4) when the tool recorded it. A repaired step carries the `seen` of the element that
+  was accepted, since its target changed.
 
 ### 26.7 The audit log, and what repair is not (v1.15)
 
@@ -2648,7 +2695,7 @@ The shared text above is what both tools must match. These are the parts only on
   branch, and says so, and a person has to answer.
 - **Two SDK props:** `taplineExploreSkip` on any element (the explorer never touches it: `why: "app_mark"`), and
   `taplineExploreFill` on an input: `true` (a fake value), `"vault:<entry>.<field>"` (a vault entry marked
-  `"explore": true`) or `"fixture:<name>"` (a fixture the app lists with `app_command`). The id marker `-test-safe` of
+  `"explore": true`) or `"fixture:<name>.<field>"` (a vault `fixture` entry marked `"explore": true`, §20.1). The id marker `-test-safe` of
   §25.6 works too.
 - **The component part** of the score (§26.3) is read from the React tree.
 
@@ -2664,3 +2711,375 @@ The shared text above is what both tools must match. These are the parts only on
 - **Places** are `place_<n>` until a person names them (§25.12).
 - **The component part** of the score is read from the accessibility class.
 - **Tests:** the scope test (§25.13), with a system share sheet and a permission prompt in the red-team screens.
+
+## 29. The bug report (v1.16)
+
+A finding (§27) is what a tool found. A bug report is what a person hands to whoever fixes it: one page, readable in a
+minute, that says what went wrong, how to see it, whether it reproduces and where in the app it is, and holds nothing
+private. `bug_report` builds it from one finding, a reproduction check and what the tool knows about where in the code
+it happened. Everything here is shared, except §29.8.
+
+### 29.1 The page (v1.16)
+
+One page in two files, `report.md` and `report.html`, with the same content and at most about 80 lines of Markdown.
+The sections, in this order (a fixer reproduces first, so the steps come before where):
+1. **Title:** the kind, the place and the short `got`: `Crash on trips_id: TypeError … 'trip.days.map'`. The kind
+   words are `Crash`, `JS error`, `Dead end`, `Refused touch`, `Slow screen`, `Accessibility`, `Usability`,
+   `Unreachable place`, `Check failed` (`expect_failed`) and `Observed` (§29.3). The place is its name, or `an unnamed
+   screen` when the finding has none. A `got` over 80 characters keeps its first 45 and its last 30, with ` … ` between.
+2. **What happened:** one line, `Expected: … Got: …`, from `expected` and `got`.
+3. **How to see it:** the steps of `path` from `path_from`, numbered, written for a person (rules below). It starts
+   `Start on <place>.` At most 15 steps are shown, the last 15; `The first 4 steps are in repro.json.` says the rest.
+4. **Reproduced:** `3 of 3 runs`, or `2 of 3 runs (flaky)`, or `0 of 3 runs: not reproduced`, or `not checked` with the
+   reason (§29.4).
+5. **Environment:** app id, version and build, device model and OS, tool and version, when, the reset the check used,
+   and where the finding came from.
+6. **Where:**
+   - the place and its route (Tapline) or its key's signature (both tools);
+   - for a crash or a JS error, the top 8 frames with the app's own marked `*`;
+   - the component stack (Tapline);
+   - the source file and line (Tapline, development builds);
+   - the native frames (Tapwright);
+   - a system sheet that was in front, by its kind only (Tapwright, §29.8).
+7. **Logs:** at most 20 lines, redacted, the ones nearest the moment of the finding, each cut at 300 characters (§27.1).
+8. **Picture:** the file, only when it isn't private or a person asked (§27.2, §29.2). Otherwise one line saying that a
+   picture exists, that it is private, and how to include it.
+9. **Seen before:** the first and last time, the count and the builds (§29.5).
+
+**Writing a step.** Each step is one line. The name of an element is the `names` of the map's road that has the same
+move (§18.2), else the target as it stands in `path`. Names, like all text, go through §29.6.
+- `tap`: `Tap "Trips" (id trips-tab)`; with no name, `Tap id trip-row-1`. `long_press`: `Press and hold …`. `toggle`:
+  `Switch "Notifications" (id notify-switch)`.
+- A row with no id, `{"row": true, "index": 1}`: `Tap the 1st row of the list.` Never the row's text (§18.1).
+- `type_text`: `Type something in "Email"`. The value is never shown, whatever it was (`${typed}`, §27.1).
+- `scroll`: `Scroll down`; `to: "end"`: `Scroll to the end`. `swipe`: `Swipe up`, `down`, `left` or `right`, by the larger
+  of its two moves. `back`: `Go back`. `open_url`: `Open the link <cut-down link>` (§18.2).
+- A step whose target has a policy word (§11.1, §25.5) ends `(needs a person)`.
+- Any other tool: `Run <tool> <name>` with the arguments left out.
+
+**An example,** the page of the finding in §27.1 after a check of 3 runs (the picture is private, so it isn't there):
+````
+# Crash on trips_id: TypeError … 'trip.days.map'
+
+## What happened
+Expected: the screen opens and the app stays open. Got: the app crashed: TypeError: undefined is not an object (evaluating 'trip.days.map')
+
+## How to see it
+Start on home.
+1. Tap "Trips" (id trips-tab)
+2. Tap id trip-row-1
+
+## Reproduced
+3 of 3 runs. Script: repro.json (a version 2 script of §18.5).
+
+## Environment
+- App: com.example.wayfare 1.5.0 (220)
+- Device: iPhone16,1, iOS 19.1
+- Tool: tapline 1.8.0, found 2026-11-14 09:21:07 UTC (explore, finding f3)
+- Reset before each run: reload only, data kept
+
+## Where
+- Place: trips_id (route trips › [id], tab trips)
+- Frames: *TripDetail.tsx:48 renderDays, …
+- Components: TripDetail, TripScreen, Stack
+- Source: app/trips/[id].tsx line 48
+
+## Logs
+```
+09:21:07.440 error TypeError: undefined is not an object (evaluating 'trip.days.map')
+```
+
+## Picture
+A picture exists and is private. To include it: bug_report {"bug": "bug_7bc2e91c152d416e", "with_picture": true}
+
+## Seen before
+2 times; first 2026-11-12, last 2026-11-14; builds 1.5.0 (219), 1.5.0 (220).
+````
+- **`report.html`** is the same page as one file: inline style, no script, no request to anywhere, every text escaped.
+  A picture, when there is one, is linked by its file name.
+- **Quoted text** from other people (§21.1) is a quote marked `(from others)`, as in the element line, never part of a
+  sentence the page speaks itself.
+
+### 29.2 The folder and its files (v1.16)
+
+`~/.<tool>/bugs/<app id>/<bug id>/` (`~/.tapline/bugs/`, `~/.tapwright/bugs/`). The bug id is `bug_` and the signature
+(§29.5): `bug_7bc2e91c152d416e`. It holds:
+- `report.md` and `report.html` (§29.1);
+- `repro.json`: the finding's script (§27.1, §9.4 version 2), with `start`, the steps and `typed` in its `variables`.
+  It holds no value;
+- `finding.json`: the §27 finding as it was at the first sighting, plus one key, `bug`, that this section adds:
+```json
+{"id": "f3", "kind": "crash", "app": "com.example.wayfare", "…": "…",
+ "bug": {"id": "bug_7bc2e91c152d416e", "signature": "7bc2e91c152d416e",
+         "place_key": {"route": ["trips", "[id]"], "tab": "trips"},
+         "source": {"how": "explore", "run": "20261114T091500Z", "finding": "f3"},
+         "seen": {"first": "2026-11-12T10:02:44.120Z", "last": "2026-11-14T09:21:07.512Z", "count": 2,
+                  "builds": ["1.5.0 (219)", "1.5.0 (220)"], "sources": ["20261112T095900Z/f3", "20261114T091500Z/f3"]},
+         "reproduced": {"n": 3, "of": 3, "build": "1.5.0 (220)", "when": "2026-11-14T11:20:02.014Z",
+                        "reset": "reload only, data kept"},
+         "picture_included": false}}
+```
+  `reproduced` is `{"checked": false, "why": "no phone connected"}` when there was no check. `place_key` is the place's
+  key from the map at that time (§18.1), or `null`. `how` is `explore`, `failure`, `journey` or `now` (§29.3). A tool
+  that doesn't know `bug` ignores it (§27.1);
+- `picture.jpg`: only when allowed. A picture that isn't private is copied in. A private one is copied in only when the
+  call that made or updated the bug said `with_picture: true` (the agent says its user asked, as for `confirm` in
+  §17.5), and only while its source file still exists. `picture_included` says which.
+
+**Retention.** The newest 100 bugs of an app (by `seen.last`) are kept; the others are removed, with their `.zip`
+(§29.7), at start and after each bug is made. A bug just made or updated is never the one removed.
+
+### 29.3 Making one (v1.16)
+
+```json
+{"finding": "f3", "run": "last", "verify": 3}
+{"from": "now", "note": "the total is wrong after the second coupon", "expected": "the total drops by 10%"}
+{"from": "failure"}
+{"bug": "bug_7bc2e91c152d416e", "with_picture": true}
+{"bug": "bug_7bc2e91c152d416e", "export": {"to": "issue", "repo": "example-org/wayfare-qa", "confirm": true}}
+```
+| Argument | Meaning |
+|---|---|
+| `finding` | a finding's id in the report of `run` (`f3`) |
+| `run` | an explore report folder (§25.10) or `"last"`; default `"last"`: the newest explore report of this app. A journey's report folder (§17.5) is also valid, when it holds its findings as `findings.json` in §27's shape; otherwise `bad_params` |
+| `from` | `"now"` or `"failure"`, below |
+| `note`, `expected` | with `from: "now"`; one line each, at most 300 characters (`bad_params` above that). `note` is required |
+| `verify` | how many reproduction runs (§29.4): 1 to 10, or `true` for 3, or `false` or 0 for none. Default 3 with `finding` and `from: "failure"`; none with `from: "now"` |
+| `reset` | `"own"` (default) or `"app"` (§29.4) |
+| `account` | as in §25.2, for the way back after a reset |
+| `bug` | a bug id kept earlier, to add its picture, check it again or export it |
+| `with_picture` | `true`: a private picture may go into the folder (§29.2) |
+| `export` | §29.7 |
+
+Exactly one of `finding`, `from` and `bug` is given, else `bad_params`. The call makes the bug first, then checks it,
+then exports it when asked. A check that can't run never stops the bug from being made: the page says why.
+
+**The answer** is short:
+```
+New bug: Crash on trips_id: TypeError … 'trip.days.map'
+Reproduced: 3 of 3 runs.
+Seen: 1 time, 2026-11-14, build 1.5.0 (220).
+Folder: ~/.tapline/bugs/com.example.wayfare/bug_7bc2e91c152d416e
+```
+The first line is `Known bug (seen 2 times): …` when the signature was there already (§29.5). With `from: "now"` and no `verify`,
+the second line is `Reproduced: not checked.`
+
+**Sources.**
+- **`finding` and `run`.** The finding is read from `report.json` of the run's folder, with its picture and its script.
+  A finding of the kinds of §25.10 and `expect_failed` can be made into a bug.
+- **`from: "failure"`** is a failed `replay` or `run` of this session (`expect_failed`, §26.2) that is still the last
+  one. The finding is made as §25.10 would: `got` is what the screen showed instead, `path` the steps that ran, up to
+  and including the failed one, and the script is the one replayed. When there is none, `not_found`.
+- **A journey's finding** has the kind `dead_end` for a dead end, else `ux`; its `got` is its basis, one line.
+- **`from: "now"`** is for what a person or an agent saw during ordinary driving. It makes a finding of the kind
+  `observed` (a kind only a bug report has) from the live session:
+  - `place` and `place_key` are the current screen's, saved as a `look` would save it (§18.1);
+  - `path` is the last 10 touches at most from the action log (§12): `tap`, `long_press`, `toggle`, `type_text`,
+    `scroll`, `swipe`, `back` and `open_url` that succeeded and weren't dry runs, by the agent or by a person. A typed
+    step is `${typed}`: the log holds only its length. A step is written as a road is (§18.2): by id, else label,
+    else text. A step that has none of the three (a ref or a point) can't be written down, so the path starts after
+    the last one, and the page says `Earlier steps couldn't be written down.`;
+  - `path_from` is the place the first kept step ran on, when the tool knew it then, else the nearest later one; with
+    none known it is `null`, the page says so, and the bug can't be checked;
+  - `got` is the note, `expected` is the `expected` argument or `(not given)`, and `logs` are the app's last 20 log
+    lines of any level; `picture` is the screen now, with `private` as §27.2 says;
+  - it is `not_found` when there is no touch in the log. When the action log is off (`--no-log`), `unsupported`.
+- **The CLI.**
+  - `tapline bug <report folder> <finding id> [--verify N] [--with-picture]` and the same for `tapwright`; it needs no
+    phone unless it verifies;
+  - `tapline bug list [--app ID]`: the bugs kept, newest first, per app, with counts (below);
+  - `tapline bug verify <bug id> [--verify N]` checks a kept bug again;
+  - `tapline bug export <bug id> --to issue --repo owner/name [--public] [--with-picture] [--yes]` and `--to zip`;
+  - `from: "now"` and `from: "failure"` need the live session: use the thin call (§18.10), `tapline call bug_report '{…}'`.
+  - Exit codes: 0 a bug was made or updated and it reproduced or wasn't checked; 1 it was made and didn't reproduce
+    (`0 of N`); 2 it couldn't be made, or a person, a pause or a refusal stopped it.
+```
+$ tapline bug list
+com.example.wayfare
+  bug_7bc2e91c152d416e  Crash on trips_id: TypeError … 'trip.days.map'   seen 2, last 2026-11-14, 3 of 3
+  bug_29146f71e709878d  Observed on place_4: Total shows $12.50 after 2 coupons   seen 1, last 2026-11-14, not checked
+```
+
+### 29.4 The reproduction check (v1.16)
+
+`verify: N` runs the bug's `repro.json` N times (default 3, at most 10) and counts the runs that show the same bug.
+- **A run:** the app is reset (below), the tool drives to `start` (§18.4), and the steps run. A run lasts at most
+  60 seconds. A run is the same bug when what it ends with has the same signature (§29.5): the same kind, the same
+  place key and the same normalized `got`, and for a crash the same exception type and top app symbol.
+  - `expect_failed`: the same `expect` fails at the same step. `a11y` and `ux`: the same first issue, on the same place.
+  - `unreachable` has no steps, so it isn't checked: `Reproduced: not checked (an unreachable place has no steps)`.
+  - `observed`: a note can't be matched, so a run counts when every step ran and the app ended on the same place key.
+    The page then says `3 of 3 runs reached the same screen. A note can't be checked by the tool; look at it.`
+- **The reset** is §25.8's order: the tool's own reset first (`reload`, a relaunch), and with `reset: "app"` also the
+  standard `app_command reset`, which clears the app's data. By default only the own reset is used (`reset: "own"`).
+  When no reset brings the app to a known place, the bug isn't checked: `not checked (no reset reached a known
+  place)`. The page says which reset was used and whether data was kept (`reset: reload only, data kept`), since a bug
+  that needs data may not show without it.
+- **Safety.** Every move goes through the one gate every touch has (§11, §25.1), which checks the actual recipient
+  after resolution and scroll, with the skip floor of §25.5 and no grant (§19). The check **stops at the first step that
+  would need a person**: a policy word, a person's OK, a `${typed}` step. It makes no move of that step, and it opens
+  no dialog. The page says `not checked: step 3 needs a person (a typed value)`, or the policy word. Moves made
+  before the stop are in the action log as any.
+- **`${typed}`.** A value is never in `repro.json` and never in a call. From the command line a person can give the
+  values at a prompt: `tapline bug verify <bug id>` asks `Value for "typed" (not shown):`, types it, and keeps it only for
+  that run. The value never reaches a file; the page says only `a value was given`. The model has no way to give one.
+- **A person goes first** (§6): a person's input waits the check as §25.9 says, `busy` after 30 s of their input,
+  `paused` and `locked` as there. The bug is written first, with `not checked: stopped (busy)`.
+- **Result.** `n of N` is the runs that showed the bug over the runs made. A run that couldn't start isn't made. With
+  `0 < n < N` the page says `flaky`. **`0 of N` marks the bug `not reproduced` and keeps it:** it is never thrown away,
+  never hidden from `list`, and never removed before retention (§29.2).
+- A later check of a known bug replaces `reproduced` and the line on the page, and keeps the first finding.
+
+### 29.5 The signature, and later sightings (v1.16)
+
+The **signature** says that two findings are one bug. It is the first 16 hex digits of the SHA-256 of these parts, in
+UTF-8, joined by `\n`:
+1. the **kind** (`crash`, `js_error`, …);
+2. the **place key**, never the place's name (names differ between machines and maps, §25.12). It is the key of §18.1 as
+   JSON with its keys sorted and no spaces: `{"route":["trips","[id]"],"tab":"trips"}`, with `layer` when there is one,
+   or `{"signature":"c41f9a07d2"}` for a signature key (the signature only, never `parts`). When the key isn't
+   known it is `null`, and then the bug is never merged into another (below);
+3. the **normalized `got`**, from the first line of `got` after §29.6, by these steps in this order:
+   - a UUID becomes `#`;
+   - an ISO date or date and time, and a clock time (`09:21:07`, with its fraction and `Z`), become `#`;
+   - a hex number (`0x7ff…`, or 8 or more hex digits that include a digit) becomes `#`;
+   - every other run of digits, with its decimal part, becomes `#` (so ids such as `trip-42` become `trip-#`);
+   - whitespace is collapsed to single spaces and the ends are cut;
+4. for a **crash** only, two more lines: the **exception type** and the **symbol of the top app frame**.
+   - The type is the text of `crash.reason` before the first `:`, else its first word (`TypeError`, `EXC_BAD_ACCESS`).
+   - The symbol is the function name of the first frame marked `*` (§15.2): from `*TripDetail.tsx:48 renderDays`,
+     `renderDays`; from `3 Wayfare 0x0000000102a4b3c8 -[TripViewController renderDays] + 148`, `-[TripViewController
+     renderDays]`. Addresses, offsets, file names and line numbers are dropped, since they change with every build. A
+     frame with no symbol, an anonymous one, or no app frame gives `unsymbolicated`.
+
+For the crash in §27.1 the input is `crash`, `{"route":["trips","[id]"],"tab":"trips"}`, `the app crashed: TypeError:
+undefined is not an object (evaluating 'trip.days.map')`, `TypeError` and `renderDays`, and the signature is
+`7bc2e91c152d416e`. For an `observed` finding on a signature place with the note `Total shows $12.50 after 2 coupons at
+09:21:07`, the normalized text is `Total shows $# after # coupons at #` and the signature is `29146f71e709878d`. Both tools must give these results; the
+vectors of §29.9 are the check.
+
+**The same signature again** (in a later run, call or build) updates the bug that has it, and makes no new one:
+- `seen.count` grows by the finding's own `count` (§25.10), once for each source (`<run folder>/<finding id>`, kept in
+  `seen.sources`, the newest 50). Making a bug again from the same source counts nothing.
+- `seen.last` is the finding's `when`, and its build is added to `seen.builds`.
+- The first finding, its picture and its script stay. A later sighting rewrites only the lines `Reproduced` and `Seen
+  before` of the page, and `reproduced` only when it was checked.
+- A finding with no place key is never merged. It gets its own folder, `bug_<signature>_2` and on.
+- Two tools don't merge their bugs with each other: their place keys differ (§18.1).
+
+### 29.6 Redaction (v1.16)
+
+§20.3 holds at every sink of the bug report: the page, `report.html`, `repro.json`, `finding.json`, the title, the
+answer, the CLI's output, the issue, the zip, the audit line, the file names.
+- **One single-pass redactor.** The vault's values in every form (§20.3), the one-time codes (§20.4) and the values
+  typed in this session are built into one matcher, longest match first, and the text goes through it once. A value
+  can't be left half-redacted by another's replacement. Fake values the explorer types (`Test`, `test@example.com`,
+  §25.6) are public and aren't redacted.
+- **Before any cut.** Redaction comes before the 80-character title, the 300-character log line, the 20 lines, the
+  15 steps and the signature's text (§29.5).
+- **`finding.json` is redacted when the bug is made,** even though the finding was, since a value added to the vault
+  since then counts.
+- **Paths.** A source file is shown relative to the app's project root. A frame with a path outside it is cut to the
+  file's name. No frame, log line or environment line shows a user's folder or machine name.
+- **Raw crash files.** Tapwright's `.ips` (§15.2) is never copied in: it holds the phone's identifiers. Only the top 8
+  frames are, with addresses and offsets dropped.
+- **Others' text** (§21.1) is quoted as data and marked `(from others)` (§27.2).
+- **The gate** greps every file of the folder for every form of every vault value and every 12-character piece of each
+  (§20.3). It runs when a bug is made, and again at each export (§29.7).
+
+### 29.7 Export (v1.16)
+
+An export leaves the tool's folder. It happens only when the user asked, and `export` is an argument of `bug_report` (or
+the CLI's `bug export`).
+
+**A GitHub issue,** as a journey's export is (§17.5), with the user's own `gh`:
+```json
+{"bug": "bug_7bc2e91c152d416e", "export": {"to": "issue", "repo": "example-org/wayfare-qa", "confirm": true}}
+{"bug": "bug_7bc2e91c152d416e", "export": {"to": "issue", "repo": "example-org/wayfare", "confirm": true, "public": true,
+ "with_picture": true}}
+```
+- It needs `confirm: true` (the agent says its user asked), else `not_allowed: needs_confirmation`. On the command line a
+  person is asked `Send to GitHub? [y/N]`; without a terminal `--yes` answers it.
+- A public repository is refused unless `public: true` is also given. When the tool can't tell whether the repository is
+  public, it counts as public.
+- The issue's title is the page's title and its body is `report.md`. `repro.json`, and a picture when one is allowed, are
+  committed to the repository's `qa-reports` branch under `.tapline/bugs/<bug id>/` (`.tapwright/bugs/…`) and linked
+  from the body, as journeys do. The answer says what was written where.
+- **A private picture** goes only when the export itself has `with_picture: true` and the picture is in the folder
+  (§29.2). A picture that isn't private goes always.
+- Never the logs in their raw form: only what the page holds.
+
+**A `.zip`:** `{"export": {"to": "zip"}}` writes `<bug id>.zip` next to the bug's folder, with the folder in it as it is.
+It needs no `confirm` and makes no network call. A private picture is left out unless the export has `with_picture:
+true`. The zip's entries carry no user name, no path of the machine and a fixed time.
+
+**Every export re-greps every file it sends** (§29.6), for every form of every value and every 12-character piece, and
+**refuses when anything is found:** `Error not_allowed: export refused: a vault value was found in report.md.` The
+answer names the file and never the value. Nothing is sent, and the refusal is itself logged.
+
+**The audit line** (§23, kind `export`): one line for each export, a refused one too. `detail` holds the target and the
+bug id, never content:
+```
+{"t": "2026-11-14T11:20:41.207Z", "tool": "tapline", "kind": "export", "app": "com.example.wayfare", "name": "bug_report",
+ "detail": "issue example-org/wayfare-qa: bug_7bc2e91c152d416e, picture not sent"}
+{"t": "2026-11-14T11:22:03.511Z", "tool": "tapline", "kind": "export", "app": "com.example.wayfare", "name": "bug_report",
+ "detail": "zip ~/.tapline/bugs/com.example.wayfare/bug_7bc2e91c152d416e.zip: bug_7bc2e91c152d416e, refused (redaction check)"}
+```
+A line that can't be written means nothing is sent, as §23 says for a grant. A public repository's line ends
+`(public)`.
+
+### 29.8 What each tool adds (v1.16)
+
+The shared text above is what both tools must match. These parts are only one tool's.
+
+**Tapline**
+- The **component stack** (`component_stack`, §27.1) in Where, and the **source file and line** of the top app frame of
+  a crash or a JS error, or from `inspect` for a finding about one element, in a development build. A `source` key
+  of `finding.json`'s `bug`: `{"file": "app/trips/[id].tsx", "line": 48}`. The text of the line is never copied
+  (it can hold a secret).
+- **JS crash frames,** mapped to the app's files in a development build (§15.2).
+- **Reset by reload** (a development build). A release build has no reload: it is checked only with `reset: "app"` and the
+  app's `app_command reset`, else `not checked (no reset reached a known place)`.
+- **A system sheet or alert** can't be answered from Tapline (§28.4). A check that meets one stops (it needs a person).
+
+**Tapwright**
+- **Native crash logs** (its `crash`, §15.2): the exception type and the top 8 frames, symbolicated where the report is.
+  The `.ips` file isn't kept (§29.6).
+- **System dialogs on the path.** When a system sheet or prompt was in front at the moment, `finding.json` has `system`:
+  its kind only, one of `share sheet`, `permission prompt`, `system alert`, `purchase sheet` or `other`, and the page's
+  Where says `A system sheet was in front: share sheet.` Never its content. A picture with a system sheet in front is
+  always private. The explorer never answers such a sheet "allow" (§25.7), and a check doesn't either.
+- **Reset by relaunch** with `open_app`, which keeps data (§25.8).
+- Places are `place_<n>` until named (§25.12), so titles in Where use the key, never a title.
+
+### 29.9 To test (v1.16)
+
+In each tool, on Wayfare, on the real phone. The bugs are planted and listed in the app's test notes.
+- **Five planted bugs:** a crash, a JS error, an `expect_failed`, a dead end and an unreachable place. Explore (§25),
+  then `bug_report` for each finding.
+  - The four with steps reproduce at least 2 of 3 runs. The unreachable place says `not checked`.
+  - Each page fits (80 lines for these, and 90 for a synthetic worst case: 15 steps, 8 frames, 20 logs), and its steps
+    read correctly to a person who has never seen the app.
+- **A sixth, in a system sheet path (G1):** the app opens the share sheet and then crashes. The report says where, with
+  `A system sheet was in front: share sheet.` (Tapwright), or that the branch stopped at the sheet (Tapline). It holds
+  none of the sheet's content, and the explorer never answers the sheet "allow".
+- **Redaction.** A gate greps every file of each bug, and each zip and issue body, for every form of every vault value and
+  every 12-character piece of each, with a value planted in a note, a log line, a typed step and a frame path. A
+  private picture is never in the folder, the zip or the issue without a person's request: three tests, one for each.
+- **Dedupe.** The same planted bug found in two runs is one bug with `count: 2`; a new build adds to `builds` and not to
+  the bugs; a renamed place (`place_3` to a name) keeps the signature; a changed number in `got` and a changed address in a
+  frame keep it; a changed exception type or symbol makes another bug.
+- **The vectors.** Both tools run the same list and must agree: the two signatures of §29.5, plus at least these:
+  `Total shows $12.50 after 2 coupons` gives `Total shows $# after # coupons`; `Order 7b9e3c1a-0d52-4f10-9a77-1c2b3d4e5f60
+  failed at 2026-11-14T09:21:07Z` gives `Order # failed at #`; `trip-42 not found (0x7ffee3a1c8d0)` gives `trip-# not
+  found (#)`; a frame `*TripDetail.tsx:48 renderDays` and a frame `3 Wayfare 0x0000000102a4b3c8 -[TripViewController
+  renderDays] + 148` give the symbols of §29.5; an anonymous frame gives `unsymbolicated`.
+- **`from: "now"`.** The path is the last 10 touches at most, redacted; the page says `Reproduced: not checked` without
+  `verify`; with `verify` the runs happen; with no touch in the log it is `not_found`.
+- **The check.** It stops at the first step that needs a person (a `${typed}` step, a policy word) and makes no move of
+  it, with no dialog; it goes through the one gate; a bug planted to fail 1 of 3 is `flaky`; one planted to never fail is
+  `0 of 3`, `not reproduced`, and kept.
+- **Export.** To a test repository: `confirm` is required; a public repository is refused without `public: true`; a
+  value planted into a file of the folder after it was made makes the export refuse, and nothing is sent; a zip is
+  written with the network off; each export, refused ones too, has one `export` line whose `detail` holds no content; and
+  with the audit log unwritable nothing is sent.
