@@ -3063,8 +3063,10 @@ export class TaplineTools {
   private async bugExport(store: BugStore, id: string, target: BugExportTarget): Promise<CallToolResult> {
     if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
     const session = this.host.current();
-    const found = store.locate(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined) ?? store.locate(id);
-    if (found === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    const looked = store.lookup(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined, true);
+    if (looked === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return fail(`Error ambiguous: ${looked.ambiguous}`);
+    const found = looked.found;
     try {
       const done = await exportBug({ store, redact: (t) => this.bugScrub(t), gateValues: () => this.bugGateValues(), audit: this.options.audit, run: this.options.exportRunner }, found.app, id, target);
       return done.ok ? text(this.bugScrub(done.lines.join("\n"))) : fail(`Error ${done.code}: ${this.bugScrub(done.message)}`);
@@ -3077,8 +3079,10 @@ export class TaplineTools {
   private async bugShow(store: BugStore, id: string, withPicture: boolean, runs: number, args: Shape<"bug_report">): Promise<CallToolResult> {
     if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
     const session = this.host.current();
-    const found = store.locate(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined) ?? store.locate(id);
-    if (found === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    const looked = store.lookup(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined, true);
+    if (looked === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return fail(`Error ambiguous: ${looked.ambiguous}`);
+    const found = looked.found;
     const { app, stored } = found;
     let note = "";
     if (withPicture) {
@@ -6227,7 +6231,8 @@ export class TaplineTools {
       when: new Date(wall()).toISOString(),
       device: { model: session.device.model ?? session.device.name ?? "unknown", os: `${platform}${session.device.osVersion !== undefined ? ` ${session.device.osVersion}` : ""}` },
       place: typeof place === "string" ? place : null,
-      path_from: typeof place === "string" ? place : null,
+      // The path starts at the first step; its place, when the script recorded it, else unknown (never the failed step's).
+      path_from: typeof (steps[0] as Record<string, unknown> | undefined)?.["place"] === "string" ? ((steps[0] as Record<string, unknown>)["place"] as string) : null,
       path: steps.slice(0, brk.index + 1).map((item): PathStep => {
         const { tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
         // A typed value is never kept (§27.1).
@@ -7470,7 +7475,7 @@ export class TaplineTools {
     // Only a password and a username are held to a kind of field (§18.6); the rest of the vault goes where the app lets it.
     const field = substituted.field;
     // A fixture goes only into a plain text field, never a password field (§20.1, v1.16).
-    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : field === "username" || fixture ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
+    return { ok: true, value: substituted.text, kind: fixture ? "plain" : field === "password" ? "secure" : field === "username" ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {
