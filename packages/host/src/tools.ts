@@ -57,6 +57,7 @@ import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type Ux
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { namedTarget } from "./signature.js";
 import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -733,10 +734,9 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
       ? elementSchema.safeParse((result as { element: unknown }).element)
       : null;
   if (element?.success) {
-    const { testID, label, text: shown } = element.data;
-    if (typeof testID === "string" && testID !== "") copy["target"] = { testID };
-    else if (typeof label === "string" && label !== "") copy["target"] = { label };
-    else if (typeof shown === "string" && shown !== "") copy["target"] = { text: shown };
+    // The same choice the explorer's action signature makes (§25.3): id, else label, else text.
+    const named = namedTarget(element.data);
+    if (named !== null) copy["target"] = named;
   }
   const kept = copy["target"];
   const fragile = typeof kept === "object" && kept !== null && "ref" in kept;
