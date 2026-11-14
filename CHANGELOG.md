@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.0, "the Explorer Update" (unreleased)
+## 1.8.0, "the Explorer Update" (2026-11-14)
 
 Tapline can now search an app by itself and mend its own saved tests, as AGENT-TOOLS 1.15 (agreed with Tapwright, sha256
 19dbc8b3) defines them. The search needs no model: an agent pays for one call, and CI can run the same thing from the
