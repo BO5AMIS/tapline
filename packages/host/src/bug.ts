@@ -154,7 +154,12 @@ export const oneLine = (text: string): string => text.replace(/[\r\n\u2028\u2029
 
 /** A path in a frame or a log line is cut to its file name: no user folder, no machine name (§29.6). */
 export function stripPaths(text: string): string {
-  return text.replace(/(?<![\w:/.\\-])(?:[A-Za-z]:)?(?:[\\/][^\s\\/:'"()]+){2,}/g, (path) => path.split(/[\\/]/).pop() ?? path);
+  // A complete path under a user folder (`C:\...`, `/Users/...`, `/home/...`) may hold spaces in its folder names (`Jane Doe`): in quotes (any file name),
+  // or bare (every folder up to the last separator), it is cut to the file name, so what follows it (`:48 renderDays`) stays.
+  const rooted = "(?:[A-Za-z]:[\\\\/]|/(?:Users|home)/)";
+  const quoted = new RegExp(`(["'])${rooted}[^"'\\r\\n]*[\\\\/]([^"'\\r\\n\\\\/]+)\\1`, "g");
+  const bare = new RegExp(`(?<![\\w:/.\\\\-])${rooted}(?:[^\\\\/:"'()<>|\\r\\n]+[\\\\/])+([^\\\\/\\s:"'()<>|]+)`, "g");
+  return text.replace(quoted, (_all, quote: string, name: string) => `${quote}${name}${quote}`).replace(bare, (_all, name: string) => name).replace(/(?<![\w:/.\\-])(?:[A-Za-z]:)?(?:[\\/][^\s\\/:'"()]+){2,}/g, (path) => path.split(/[\\/]/).pop() ?? path);
 }
 
 /** A title's `got`: the first line, and over 80 characters its first 45 and its last 30 with ` … ` between (§29.1). */
