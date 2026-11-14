@@ -7,7 +7,7 @@ import { loadAccounts, type GitProbe } from "./accounts.js";
 import { loadPolicy } from "./policy.js";
 import type { VaultDeps } from "./vault.js";
 import { callTool, isToolName } from "./dispatch.js";
-import { isBusyAnswer, type CallAnswer, type ScheduleHost } from "./runschedule.js";
+import { bounded, isBusyAnswer, ScheduleTimeout, type CallAnswer, type ScheduleHost } from "./runschedule.js";
 import type { ProcResult, SchedRunner, Schedule, TaskEntry } from "./schedule.js";
 import { canonicalPath, createRuntime, HOST_FACTS_TOOL, LEASE_TOOL, LEASE_TTL_MS, type HostFacts } from "./runtime.js";
 import { runThinCall, type ThinCallIO } from "./thincall.js";
@@ -155,7 +155,21 @@ export async function factsMismatch(schedule: Schedule, facts: HostFacts | null,
 const LEASE_RENEW_MS = 15_000;
 
 /** A lease call that hasn't answered by then is cut off (a renewal that can't succeed before the lease runs out stops the run). */
-const LEASE_CALL_TIMEOUT_MS = 10_000;
+export const LEASE_CALL_TIMEOUT_MS = 10_000;
+
+/** Looking for a running host (the first scan of the ports) and each later check that the app is connected. */
+export const DISCOVERY_TIMEOUT_MS = 30_000;
+/** The running host's facts (its policy, accounts and maps, reloaded when asked). */
+export const FACTS_TIMEOUT_MS = 30_000;
+/** Loading the schedule's vault to compare it with the host's (a vault that asks something of the system can stall). */
+export const VAULT_LOAD_TIMEOUT_MS = 30_000;
+/** Starting a host of its own (the runtime and its listener). */
+export const OWN_HOST_SETUP_TIMEOUT_MS = 30_000;
+/**
+ * One route call (a `replay` or a `drive`): a saved route is minutes at most; one that hasn't ended in 30 minutes is cut off, the run
+ * fails with `timeout`, and the lease is given back.
+ */
+export const ROUTE_CALL_TIMEOUT_MS = 30 * 60_000;
 
 /** What a run reports when the phone was taken from it mid-run (§22.3: nothing further is run). */
 export const LOST_TEXT = "Error lease_lost: the run lost the phone (the host's lease was not renewed, or the host changed); no further step was run.";
@@ -173,13 +187,14 @@ async function runningHost(
   thin: ThinCaller,
   hasher: FactHasher,
 ): Promise<{ host: ScheduleHost } | { host: null; mismatch: string | null }> {
-  const first = await thin(env, client, "apps", {});
+  // Every wait here is bounded: a host that accepts and never answers fails the run with its reason instead of holding the run lock.
+  const first = await bounded("the search for a running host", DISCOVERY_TIMEOUT_MS, (signal) => thin(env, client, "apps", {}, undefined, signal));
   if (first === null) return { host: null, mismatch: null };
   if (first.port === undefined) return { host: null, mismatch: "the host's port can't be told" };
   const port = first.port;
-  const asked = await thin(env, client, HOST_FACTS_TOOL, {}, { port });
+  const asked = await bounded("the host's facts", FACTS_TIMEOUT_MS, (signal) => thin(env, client, HOST_FACTS_TOOL, {}, { port }, signal));
   const facts = asked === null || asked.isError ? null : asFacts(asked.text);
-  const mismatch = await factsMismatch(schedule, facts, env, hasher);
+  const mismatch = await bounded("loading the vault", VAULT_LOAD_TIMEOUT_MS, () => factsMismatch(schedule, facts, env, hasher));
   if (mismatch !== null || facts === null) return { host: null, mismatch: mismatch ?? "its policy, accounts and maps can't be read" };
   const instance = facts.instance;
   let credential: string | undefined;
@@ -193,13 +208,15 @@ async function runningHost(
     // A renewal gets at most LEASE_CALL_TIMEOUT_MS and never more than what is left of the lease.
     const room = action === "renew" ? Math.min(LEASE_CALL_TIMEOUT_MS, goodUntil - sentAt) : LEASE_CALL_TIMEOUT_MS;
     if (room <= 0) return false;
-    const cut = new AbortController();
-    const timer = setTimeout(() => cut.abort(), room);
     let answer: CallAnswer | null;
+    const sentPin = pinned();
     try {
-      answer = await thin(env, client, LEASE_TOOL, { action, ttl_ms: LEASE_TTL_MS }, pinned(), cut.signal);
-    } finally {
-      clearTimeout(timer);
+      answer = await bounded(`the lease ${action}`, room, (signal) => thin(env, client, LEASE_TOOL, { action, ttl_ms: LEASE_TTL_MS }, sentPin, signal));
+    } catch (error) {
+      // An acquire that never answers fails the run with its reason (the host's lease runs out by itself); a renewal or a release that
+      // doesn't answer is a lost or unconfirmed lease, handled by its caller.
+      if (error instanceof ScheduleTimeout && action === "acquire") throw error;
+      return false;
     }
     if (answer === null || answer.isError) return false;
     try {
@@ -208,7 +225,7 @@ async function runningHost(
       if (action === "acquire" && typeof body.credential === "string" && HEX.test(body.credential)) credential = body.credential;
       if (action === "acquire" && credential === undefined) return false;
       if (action !== "release") {
-        if (cut.signal.aborted || Date.now() >= sentAt + LEASE_TTL_MS) return false; // answered too late to count
+        if (Date.now() >= sentAt + LEASE_TTL_MS) return false; // answered too late to count
         goodUntil = sentAt + LEASE_TTL_MS;
         if (expiry !== undefined) clearTimeout(expiry);
         expiry = setTimeout(() => lose(), LEASE_TTL_MS);
@@ -254,7 +271,7 @@ async function runningHost(
       appOpen: async (waitMs) => {
         const until = Date.now() + waitMs;
         for (;;) {
-          const answer = await thin(env, client, "apps", {}, pinned());
+          const answer = await bounded("asking the host which apps are connected", DISCOVERY_TIMEOUT_MS, (signal) => thin(env, client, "apps", {}, pinned(), signal));
           if (answer !== null && answer.text.startsWith("Connected apps:")) return true;
           if (Date.now() >= until) return false;
           await sleep(1000);
@@ -278,7 +295,16 @@ async function runningHost(
         inflight = mine;
         let answer: CallAnswer;
         try {
-          answer = (await thin(env, client, tool, args, pinned(), mine.signal)) ?? { text: "Error not_connected: the running host went away.", isError: true };
+          // The route's own limit: a call that hasn't ended in ROUTE_CALL_TIMEOUT_MS is cut off, and the run fails with `timeout`.
+          const sentPin = pinned();
+          answer = (await bounded("the route call", ROUTE_CALL_TIMEOUT_MS, (signal) => thin(env, client, tool, args, sentPin, signal), mine.signal)) ?? {
+            text: "Error not_connected: the running host went away.",
+            isError: true,
+          };
+        } catch (error) {
+          if (!(error instanceof ScheduleTimeout)) throw error;
+          stopBeat();
+          answer = { text: `Error timeout: ${error.message}; the call was cut off and the lease is given back.`, isError: true };
         } finally {
           if (inflight === mine) inflight = undefined;
         }
@@ -300,14 +326,16 @@ async function runningHost(
 }
 
 async function ownHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv, closedNote?: string): Promise<ScheduleHost> {
-  const runtime = await createRuntime({
-    env,
-    screenshots: "file",
-    ...(schedule.policy !== null ? { policy: schedule.policy } : {}),
-    ...(schedule.accounts !== null ? { accounts: schedule.accounts } : {}),
-    ...(schedule.maps !== null ? { maps: schedule.maps } : {}),
-    log: () => undefined,
-  });
+  const runtime = await bounded("starting a host of its own", OWN_HOST_SETUP_TIMEOUT_MS, () =>
+    createRuntime({
+      env,
+      screenshots: "file",
+      ...(schedule.policy !== null ? { policy: schedule.policy } : {}),
+      ...(schedule.accounts !== null ? { accounts: schedule.accounts } : {}),
+      ...(schedule.maps !== null ? { maps: schedule.maps } : {}),
+      log: () => undefined,
+    }),
+  );
   const tools = runtime.toolsFor(`schedule-${name}`);
   return {
     via: "its own host",
@@ -320,8 +348,13 @@ async function ownHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv,
     inUse: () => runtime.phoneInUse(),
     call: async (tool, args) => {
       if (!isToolName(tool)) return { text: `Error bad_params: no tool ${tool}.`, isError: true };
-      const result = await tools.withCall(new AbortController().signal, () => callTool(tools, tool, args));
-      return { text: result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"), isError: result.isError === true };
+      try {
+        const result = await bounded("the route call", ROUTE_CALL_TIMEOUT_MS, (signal) => tools.withCall(signal, () => callTool(tools, tool, args)));
+        return { text: result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"), isError: result.isError === true };
+      } catch (error) {
+        if (!(error instanceof ScheduleTimeout)) throw error;
+        return { text: `Error timeout: ${error.message}; the call was cut off.`, isError: true };
+      }
     },
     close: () => runtime.close(),
   };

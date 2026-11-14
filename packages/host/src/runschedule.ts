@@ -19,6 +19,47 @@ export const BUSY_POLL_MS = 5000;
 /** How long a run waits for the app to connect when it starts its own host. */
 export const APP_WAIT_MS = 60_000;
 
+/** How long connecting to a host may take in all (discovery, facts, vault, an own host's setup each have a bound of their own inside it). */
+export const CONNECT_TIMEOUT_MS = 120_000;
+/** How long closing a host (giving the lease back, stopping an own host) may take. */
+export const CLOSE_TIMEOUT_MS = 30_000;
+
+/** A wait in a run that didn't end in time (§22.3): the run fails with `what` named, never waits for ever. */
+export class ScheduleTimeout extends Error {
+  constructor(
+    readonly what: string,
+    readonly ms: number,
+  ) {
+    super(`${what} didn't answer within ${Math.round(ms / 1000)} s`);
+  }
+}
+
+/**
+ * Runs `work` with a time limit. Past it the request's signal is aborted and the wait ends with a ScheduleTimeout, even for work that
+ * ignores the signal (what it does afterwards is dropped). `parent` aborts the same signal (a run that lost its lease cuts its call off).
+ */
+export async function bounded<T>(what: string, ms: number, work: (signal: AbortSignal) => Promise<T>, parent?: AbortSignal): Promise<T> {
+  const cut = new AbortController();
+  const onParent = (): void => cut.abort();
+  if (parent?.aborted === true) cut.abort();
+  else parent?.addEventListener("abort", onParent, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      cut.abort();
+      reject(new ScheduleTimeout(what, ms));
+    }, ms);
+  });
+  const job = work(cut.signal);
+  job.catch(() => undefined); // a job that fails after the time ran out is not an unhandled rejection
+  try {
+    return await Promise.race([job, late]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", onParent);
+  }
+}
+
 export interface CallAnswer {
   text: string;
   isError: boolean;
@@ -237,7 +278,7 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
   let host: ScheduleHost | undefined;
   try {
     try {
-      host = await deps.connect(schedule, name);
+      host = await bounded("connecting to a host", CONNECT_TIMEOUT_MS, () => deps.connect(schedule, name));
     } catch (error) {
       const why = error instanceof Error ? error.message : String(error);
       return finishWith("failed", `couldn't start: ${why}`, `failed at step 0 (start)`, 2);
@@ -288,8 +329,14 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
     // A route that could not start (no such route, a variable with no value) is "couldn't start", as in replay.
     const couldntStart = /^Error (not_found|bad_params|not_connected|internal):/.test(answer.text) && !/Ran \d+ of/.test(answer.text);
     return finishWith("failed", detail, detail, couldntStart ? 2 : 1, extra);
+  } catch (error) {
+    // A wait in the host path that ran out of time (the app's answer, the lease): the run fails with the reason (§22.3).
+    if (error instanceof ScheduleTimeout) return finishWith("failed", `couldn't start: ${error.message}`, "failed at step 0 (timeout)", 2);
+    throw error;
   } finally {
+    // The lock goes first, whatever the host does while closing.
     dropLock(deps, name, lockToken);
-    await host?.close().catch(() => undefined);
+    const opened = host;
+    if (opened !== undefined) await bounded("closing the host", CLOSE_TIMEOUT_MS, () => opened.close()).catch(() => undefined);
   }
 }
