@@ -61,9 +61,16 @@ import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.j
 import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { seenOf, type Seen } from "./seen.js";
-import { BugGateError, BugStore, appFolderName, isBugId } from "./bugstore.js";
-import { cutDownLink, type BugFinding } from "./bug.js";
-import { bugAnswer, makeBug, newestRun, observedFinding, readRunFinding, shownPath, writablePath, type BugContext } from "./bugreport.js";
+import { type BugMade, BugGateError, BugStore, appFolderName, isBugId, type BugCheck } from "./bugstore.js";
+import { bugTitle, cutDownLink, type BugFinding } from "./bug.js";
+import { bugAnswer, makeBug, newestRun, observedFinding, readRunFinding, reproducedAnswer, shownPath, writablePath, type BugContext } from "./bugreport.js";
+
+/** A bug just made, and whether its answer says why it wasn't checked. */
+interface Built {
+  made: BugMade;
+  reasonShown: boolean;
+}
+const isBuilt = (value: Built | CallToolResult): value is Built => "made" in value && "reasonShown" in value && Array.isArray((value as { content?: unknown }).content) === false;
 import { namedTarget } from "./signature.js";
 import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, fixtureRef, isOutcome, type ExploreArgs, type ExploreFill, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
@@ -721,6 +728,8 @@ export interface ToolsOptions {
   exploreDir?: string;
   /** Where `bug_report` keeps its bugs (e.g. ~/.tapline/bugs): `<app id>/<bug id>/` (AGENT-TOOLS 1.16 §29.2). Unset: bug_report answers that it can't keep one. */
   bugsDir?: string;
+  /** The reproduction check (§29.4): a hook for the next piece of work. Unset: a call that asks for a check is refused, and a bug says why it wasn't checked. */
+  bugCheck?: BugCheck;
   /** Wall-clock time in ms for the times in a finding and a report (tests pass their own). Default: Date.now. */
   wallClock?: () => number;
   /** How long `explore` waits for the app to be in front or connected again (a crash with `continue`, a move that left the app). Default 60 000 ms. */
@@ -2707,12 +2716,21 @@ export class TaplineTools {
     // The reproduction check (§29.4) and the export (§29.7) are not part of this version: a call that asks for one is refused before anything is made.
     const verify = args.verify === undefined || args.verify === false || args.verify === 0 ? 0 : args.verify === true ? 3 : args.verify;
     if (!Number.isInteger(verify) || verify < 0 || verify > 10) return fail("Error bad_params: verify is true, false or a whole number from 0 to 10.");
-    if (verify > 0) return fail("Error unsupported: verify (the reproduction check) isn't available in this version; the bug can be made without it.");
+    const check = this.options.bugCheck;
+    if (verify > 0 && check === undefined) return fail("Error unsupported: verify (the reproduction check) isn't available in this version; the bug can be made without it.");
     if (args.export !== undefined) return fail("Error unsupported: export isn't available in this version.");
+    // Without `verify` a bug from a finding or a failure is checked 3 times when a check exists; one from `now` is not checked (§29.3).
+    const runs = args.verify === undefined && args.from !== "now" && args.bug === undefined && check !== undefined ? 3 : verify;
     try {
-      if (args.bug !== undefined) return await this.bugShow(store, args.bug, args.with_picture === true);
-      if (args.finding !== undefined) return await this.bugFromRun(store, args.finding, args.run, args.with_picture === true, args.verify === undefined);
-      return args.from === "failure" ? this.bugFromFailure(store) : await this.bugFromNow(store, args);
+      if (args.bug !== undefined) return await this.bugShow(store, args.bug, args.with_picture === true, runs, args);
+      const built =
+        args.finding !== undefined
+          ? await this.bugFromRun(store, args.finding, args.run, args.with_picture === true, args.verify === undefined)
+          : args.from === "failure"
+            ? this.bugFromFailure(store)
+            : await this.bugFromNow(store, args);
+      if (!isBuilt(built)) return built;
+      return text(bugAnswer(await this.bugChecked(store, built.made, runs, args), (t) => this.bugScrub(t), { reasonShown: built.reasonShown }));
     } catch (error) {
       if (error instanceof BugGateError) return fail(`Error not_allowed: bug report refused: ${error.message} Nothing was written.`);
       return fail(`Error internal: the bug report couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
@@ -2721,8 +2739,18 @@ export class TaplineTools {
 
   private static readonly NO_CHECK = "the reproduction check isn't available in this version";
 
+  /** Runs the reproduction check on a bug just made, when there is one and it was asked for; the page and `finding.json` take its result (§29.4). */
+  private async bugChecked(store: BugStore, made: BugMade, runs: number, args: Shape<"bug_report">): Promise<BugMade> {
+    const check = this.options.bugCheck;
+    if (check === undefined || runs <= 0) return made;
+    const app = made.finding.app;
+    const reproduced = await check({ app, id: made.meta.id, dir: made.dir, finding: made.finding, meta: made.meta }, runs, { reset: args.reset ?? "own", ...(args.account !== undefined ? { account: args.account } : {}) });
+    const meta = store.recordCheck(app, made.meta.id, reproduced, (t) => this.bugScrub(t));
+    return meta === null ? made : { ...made, meta };
+  }
+
   /** `{finding, run}`: a finding of an explore report folder (or `"last"`, the newest of the app in front). */
-  private async bugFromRun(store: BugStore, findingId: string, run: string | undefined, withPicture: boolean, byDefault: boolean): Promise<CallToolResult> {
+  private async bugFromRun(store: BugStore, findingId: string, run: string | undefined, withPicture: boolean, byDefault: boolean): Promise<Built | CallToolResult> {
     const exploreDir = this.options.exploreDir;
     if (exploreDir === undefined) return fail("Error unsupported: this server keeps no explore reports.");
     let runDir: string | null;
@@ -2750,11 +2778,11 @@ export class TaplineTools {
       withPicture,
       notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : byDefault ? TaplineTools.NO_CHECK : "no check was asked for",
     });
-    return text(bugAnswer(made, (t) => this.bugScrub(t), { reasonShown: true }));
+    return { made, reasonShown: true };
   }
 
   /** `{from: "failure"}`: the last failed `run` or `replay` of this session, while it is still the last one. */
-  private bugFromFailure(store: BugStore): CallToolResult {
+  private bugFromFailure(store: BugStore): Built | CallToolResult {
     const failure = this.lastFailure;
     if (failure === null) return fail("Error not_found: there is no failed replay or run in this session to make a bug of (a later run or replay that held clears it).");
     const { steps, cut } = writablePath(failure.path);
@@ -2766,11 +2794,11 @@ export class TaplineTools {
       stepsCut: cut,
       notChecked: TaplineTools.NO_CHECK,
     });
-    return text(bugAnswer(made, (t) => this.bugScrub(t), { reasonShown: true }));
+    return { made, reasonShown: true };
   }
 
   /** `{from: "now", note}`: a finding of the kind `observed`, built from the last touches of the action log (§29.3). */
-  private async bugFromNow(store: BugStore, args: Shape<"bug_report">): Promise<CallToolResult> {
+  private async bugFromNow(store: BugStore, args: Shape<"bug_report">): Promise<Built | CallToolResult> {
     const note = args.note?.trim() ?? "";
     if (note === "") return fail('Error bad_params: from: "now" needs a note (what is wrong, one line).');
     for (const [name, value] of [["note", note], ["expected", args.expected?.trim() ?? ""]] as const) {
@@ -2823,11 +2851,11 @@ export class TaplineTools {
       others: observed.others,
       notChecked: "no check was asked for",
     });
-    return text(bugAnswer(made, (t) => this.bugScrub(t)));
+    return { made, reasonShown: false };
   }
 
   /** `{bug}`: shows a kept bug; with `with_picture` adds its private picture while the explore report still holds it. */
-  private async bugShow(store: BugStore, id: string, withPicture: boolean): Promise<CallToolResult> {
+  private async bugShow(store: BugStore, id: string, withPicture: boolean, runs: number, args: Shape<"bug_report">): Promise<CallToolResult> {
     if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
     const session = this.host.current();
     const found = store.locate(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined) ?? store.locate(id);
@@ -2849,6 +2877,12 @@ export class TaplineTools {
       note =
         done === "added" ? "The picture is in the folder now." : done === "has" ? "The picture is in the folder already." : "The picture can't be added: its file is gone (it is kept only while the explore report holds it).";
       if (done === "gone") return fail(`Error not_found: ${note}`);
+    }
+    // A later check of a kept bug replaces `reproduced` and its line (§29.4).
+    if (runs > 0 && this.options.bugCheck !== undefined) {
+      const made: BugMade = { meta: stored.meta, dir: stored.dir, isNew: false, title: bugTitle(stored.finding), finding: stored.finding };
+      const meta = (await this.bugChecked(store, made, runs, args)).meta;
+      note = `${note}${note === "" ? "" : "\n"}${reproducedAnswer({ meta }, true)}`;
     }
     const page = readFileSync(join(stored.dir, "report.md"), "utf8");
     return text(this.bugScrub([...(note !== "" ? [note] : []), page.trimEnd(), "", `Folder: ${shownPath(stored.dir)}`].join("\n")));

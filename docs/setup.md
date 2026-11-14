@@ -137,6 +137,12 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   the server. Exit 0: nothing found and the run ended normally; 1: findings, or the run ended in trouble (a crash, a toggle that couldn't be restored, no way back, the app closed) even with no findings; 2: couldn't start, or a person or a pause stopped it. The app must be open on the phone.
   `tapline replay <name> --repair suggest|apply [--adopt]` mends a saved test after a rename or a move (`apply` writes
   `<name>.repaired.json` and `<name>.repair.md`; `--adopt` replaces the original, a person's choice).
+- `tapline bug` (1.8.5) makes the one-page bug report with no agent and no phone: `tapline bug <report folder> <finding id>
+  [--with-picture]` from an explore report (with `--accounts`, `--maps` and `--policy` as for the server), `tapline bug list [--app ID]`,
+  `tapline bug <bug id>`. Bugs are kept in `~/.tapline/bugs/<app id>/<bug id>/` (`report.md`, `report.html`, `repro.json`,
+  `finding.json`; the newest 100 of an app). Exit 0: made or updated; 1: it didn't reproduce; 2: couldn't be made, or refused. A
+  screenshot is private and goes into the folder only with `--with-picture`. `from: "now"` and `from: "failure"` need the live
+  session: use the agent's `bug_report` tool, or `tapline call bug_report '{…}'`.
 - `tapline schedule` and `tapline run-schedule` (1.7) run a saved route with no agent, on a time or when a file
   appears. `tapline schedule add <route> --at "09:00 daily" [--with name=value|name=@file] [--name NAME]
   [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as

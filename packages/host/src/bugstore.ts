@@ -81,6 +81,12 @@ export interface BugMade {
   finding: BugFinding;
 }
 
+/**
+ * The reproduction check (§29.4), as a hook: task C gives it. It runs the bug's script `n` times and says how many runs showed the same bug.
+ * With no hook a call that asks for a check is refused (`unsupported`), and a bug made without one says why it wasn't checked.
+ */
+export type BugCheck = (bug: { app: string; id: string; dir: string; finding: BugFinding; meta: BugMeta }, n: number, options: { reset: "own" | "app"; account?: string }) => Promise<BugMeta["reproduced"]>;
+
 export interface BugListEntry {
   app: string;
   id: string;
@@ -275,6 +281,17 @@ export class BugStore {
     if (picture !== null) writeFileSync(join(dir, "picture.jpg"), picture, { mode: 0o600 });
     this.prune(seenNow.app, meta.id);
     return { meta, dir, isNew: false, title: bugTitle(stored), finding: stored };
+  }
+
+  /** A later check replaces `reproduced` and its lines of the page, and keeps the first finding (§29.4). The page is written again from the finding and its `bug` key. */
+  recordCheck(app: string, id: string, reproduced: BugMeta["reproduced"], redact: BugText): BugMeta | null {
+    const stored = this.read(app, id);
+    if (stored === null) return null;
+    const meta: BugMeta = { ...stored.meta, reproduced };
+    const md = bugPageMarkdown({ finding: stored.finding, meta, pictureFile: meta.picture_included ? "picture.jpg" : null });
+    const files = this.finish({ redact }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(stored.dir, name), text, { mode: 0o600 });
+    return meta;
   }
 
   /** Adds a private picture to a kept bug, because a person asked (§29.2). False when there is no bug, it has one already, or the source is gone. */

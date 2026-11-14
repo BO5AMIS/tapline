@@ -324,6 +324,15 @@ Tapline on. Read its output, then go on with step 6. By hand:
    writes `<name>.repaired.json` and `<name>.repair.md` and leaves the original alone. A failed `expect`, typed text and a step
    a policy word covers are never repaired. Adopting the repaired file (`tapline replay <name> --repair apply --adopt`) is a
    person's choice: don't do it for them.
+23. **The bug report** (AGENT-TOOLS 1.16 §29). `bug_report` makes one page for whoever fixes a bug, in `~/.tapline/bugs/<app id>/<bug id>/`
+   (`report.md`, `report.html`, `repro.json`, `finding.json`). Give exactly one of `finding` (a finding's id; `run` is an explore report folder, default
+   `"last"`), `from: "failure"` (the last failed `replay` or `run`), `from: "now"` with a one-line `note` and `expected` (for what you saw while
+   driving: it is built from the last 10 touches at most of the action log, and says `Reproduced: not checked`), or `bug` (an id kept earlier)
+   to show it. The same bug found again, in a later run or build, is one bug with a count, not a new one. Every file is redacted first
+   and checked by a grep gate; a screenshot is private and goes into the folder only with `with_picture: true`, which you say only when your
+   user asked. `verify` and `export` are not available yet, and a journey's finding can't be made into a bug yet. From a terminal:
+   `tapline bug <report folder> <finding id>`, `tapline bug list [--app ID]`, `tapline bug <bug id>` (exit 0 made or updated, 1 it didn't
+   reproduce, 2 it couldn't be made or was refused); `from: "now"` and `from: "failure"` need the live session: `tapline call bug_report '{…}'`.
 
 ## Repeatable runs
 

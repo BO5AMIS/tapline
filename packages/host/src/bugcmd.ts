@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { asWords, matchWord, type PolicyFile } from "./policy.js";
-import { bugAnswer, makeBug, readRunFinding, shownPath, type BugContext } from "./bugreport.js";
-import { BugGateError, BugStore, isBugId } from "./bugstore.js";
+import type { BugMeta } from "./bug.js";
+import { bugAnswer, makeBug, readRunFinding, reproducedAnswer, shownPath, type BugContext } from "./bugreport.js";
+import { BugGateError, BugStore, isBugId, type BugCheck } from "./bugstore.js";
 import { FLOOR_WORDS, exploreLists } from "./explorefloor.js";
 import type { MapFile } from "./mapfile.js";
 
@@ -27,6 +28,8 @@ export interface BugFlags {
 }
 
 export interface BugCliDeps {
+  /** The reproduction check (§29.4): a hook for the next piece of work. Unset: `--verify` and `bug verify` are refused. */
+  check?: BugCheck;
   /** `~/.tapline/bugs`, or a folder of a test. */
   bugsDir: string;
   /** The vault's redaction (the accounts file), else none (§29.6). */
@@ -88,6 +91,12 @@ export function bugListText(store: BugStore, redact: (text: string) => string, a
   return redact(lines.join("\n"));
 }
 
+/** 0: it reproduced or wasn't checked; 1: it didn't reproduce (`0 of N`) (§29.3). */
+function exitOf(meta: BugMeta): number {
+  const r = meta.reproduced;
+  return !("checked" in r) && r.n === 0 ? 1 : 0;
+}
+
 /** Runs `tapline bug`. Everything it needs comes in `deps`, so each case runs without a phone. */
 export async function runBug(positionals: string[], flags: BugFlags, deps: BugCliDeps): Promise<number> {
   const [first, second, third] = positionals;
@@ -104,7 +113,16 @@ export async function runBug(positionals: string[], flags: BugFlags, deps: BugCl
     deps.out(bugListText(store, deps.redact, flags.app));
     return 0;
   }
-  if (first === "verify") return refuse(second === undefined ? BUG_USAGE : NO_VERIFY);
+  if (first === "verify") {
+    if (second === undefined || !isBugId(second)) return refuse(BUG_USAGE);
+    if (deps.check === undefined) return refuse(NO_VERIFY);
+    const found = store.locate(second);
+    if (found === null) return refuse(`no bug ${second}; the bugs kept are in ${shownPath(store.base)}.`);
+    const reproduced = await deps.check({ app: found.app, id: second, dir: found.stored.dir, finding: found.stored.finding, meta: found.stored.meta }, verify > 0 ? verify : 3, { reset: "own" });
+    const meta = store.recordCheck(found.app, second, reproduced, deps.redact) ?? found.stored.meta;
+    deps.out(deps.redact(reproducedAnswer({ meta }, true)));
+    return exitOf(meta);
+  }
   if (first === "export") return refuse(second === undefined ? BUG_USAGE : NO_EXPORT);
   if (isBugId(first) && second === undefined) {
     const found = store.locate(first);
@@ -113,7 +131,7 @@ export async function runBug(positionals: string[], flags: BugFlags, deps: BugCl
     return 0;
   }
   if (second === undefined || third !== undefined) return refuse(BUG_USAGE);
-  if (verify > 0) return refuse(NO_VERIFY);
+  if (verify > 0 && deps.check === undefined) return refuse(NO_VERIFY);
 
   const read = readRunFinding(first, second);
   if (!read.ok) return refuse(`${read.code}: ${read.message}`);
@@ -126,11 +144,15 @@ export async function runBug(positionals: string[], flags: BugFlags, deps: BugCl
       script: read.script,
       picture: read.picture,
       withPicture: flags["with-picture"] === true,
-      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : verify > 0 ? "the reproduction check isn't available in this version" : "no check was asked for",
+      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : "no check was asked for",
     });
-    deps.out(bugAnswer(made, deps.redact, { reasonShown: true }));
-    const r = made.meta.reproduced;
-    return !("checked" in r) && r.n === 0 ? 1 : 0;
+    let meta = made.meta;
+    if (verify > 0 && deps.check !== undefined) {
+      const reproduced = await deps.check({ app: made.finding.app, id: meta.id, dir: made.dir, finding: made.finding, meta }, verify, { reset: "own" });
+      meta = store.recordCheck(made.finding.app, meta.id, reproduced, deps.redact) ?? meta;
+    }
+    deps.out(bugAnswer({ ...made, meta }, deps.redact, { reasonShown: true }));
+    return exitOf(meta);
   } catch (error) {
     if (error instanceof BugGateError) return refuse(`bug report refused: ${error.message} Nothing was written.`);
     return refuse(`the bug report couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
