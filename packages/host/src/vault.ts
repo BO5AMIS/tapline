@@ -105,6 +105,8 @@ function securityQuote(text: string): string {
  */
 const LINE_BUDGET = 3900;
 const MIN_CHUNK = 64;
+/** Chunks that could be read as hex or as text: up to this many are tried in every combination, more only all-raw and all-decoded. */
+const MAX_AMBIGUOUS = 8;
 
 /** A chunked vault that can't be put back together: a chunk is missing or the checksum differs. Never a partial vault. */
 export class VaultIncompleteError extends Error {}
@@ -126,36 +128,60 @@ const chunkAccount = (account: string, index: number): string => `${account}#${i
 
 /** Through the `security` CLI. The data goes in on stdin (`security -i`), so it is never in the process list. */
 export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
-  /** The stored text of one entry, or null when there is none. `security -w` prints data that isn't plain text as hex. */
-  const readText = async (account: string): Promise<string | null> => {
+  /**
+   * The stored text of one entry as `security -w` printed it, and the other reading when it could be hex. `security -w` prints
+   * data that isn't plain text as hex, but plain text made only of hex digits (a chunk such as "41" repeated) looks the same: both
+   * readings are kept, and the caller (the manifest's checksum, or the writer's own piece) says which one is right.
+   */
+  const readBoth = async (account: string): Promise<{ raw: string; decoded: string | null } | null> => {
     const out = await run("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"], "");
     if (out.code !== 0) return null;
     const text = out.stdout.replace(/\r?\n$/, "");
     if (text === "") return null;
-    if (text.startsWith("{") || !/^[0-9a-fA-F]+$/.test(text) || text.length % 2 !== 0) return text;
-    // all hex digits: either data `security` printed as hex, or a plain piece that happens to look like hex. Real hex decodes to UTF-8.
+    if (text.startsWith("{") || !/^[0-9a-fA-F]+$/.test(text) || text.length % 2 !== 0) return { raw: text, decoded: null };
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(text, "hex"));
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(text, "hex"));
+      return { raw: text, decoded: decoded === text ? null : decoded };
     } catch {
-      return text;
+      return { raw: text, decoded: null };
     }
+  };
+  /** The stored text of one entry, or null when there is none (real hex decodes to UTF-8; for a lone item the decoded reading is the one). */
+  const readText = async (account: string): Promise<string | null> => {
+    const both = await readBoth(account);
+    return both === null ? null : (both.decoded ?? both.raw);
   };
   const read = async (account: string): Promise<string | null> => {
     const text = await readText(account);
     const manifest = manifestOf(text);
     if (manifest === null) return text;
     if (manifest.chunks === 0 || manifest.sha256 === null) throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunk list is unreadable)");
-    const parts: Buffer[] = [];
+    const readings: { raw: Buffer; decoded: Buffer | null }[] = [];
     for (let i = 1; i <= manifest.chunks; i++) {
-      const chunk = await readText(chunkAccount(account, i));
+      const chunk = await readBoth(chunkAccount(account, i));
       if (chunk === null) throw new VaultIncompleteError(`the vault in the keychain is incomplete (chunk ${i} of ${manifest.chunks} is missing)`);
-      parts.push(Buffer.from(chunk, "utf8"));
+      readings.push({ raw: Buffer.from(chunk.raw, "utf8"), decoded: chunk.decoded === null ? null : Buffer.from(chunk.decoded, "utf8") });
     }
-    const whole = Buffer.concat(parts);
-    if (createHash("sha256").update(whole).digest("hex") !== manifest.sha256.toLowerCase()) {
-      throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunks don't match their checksum)");
+    const wanted = manifest.sha256.toLowerCase();
+    const matches = (pieces: Buffer[]): Buffer | null => {
+      const whole = Buffer.concat(pieces);
+      return createHash("sha256").update(whole).digest("hex") === wanted ? whole : null;
+    };
+    const ambiguous = readings.flatMap((r, i) => (r.decoded === null ? [] : [i]));
+    // The reading of each ambiguous chunk is whatever makes the checksum come out; the search is bounded.
+    let found: Buffer | null = null;
+    if (ambiguous.length <= MAX_AMBIGUOUS) {
+      for (let mask = 0; mask < 2 ** ambiguous.length && found === null; mask++) {
+        found = matches(readings.map((r, i) => {
+          const at = ambiguous.indexOf(i);
+          return at >= 0 && (mask >> at) & 1 ? (r.decoded as Buffer) : r.raw;
+        }));
+      }
+    } else {
+      found = matches(readings.map((r) => r.raw)) ?? matches(readings.map((r) => r.decoded ?? r.raw));
     }
-    return whole.toString("utf8");
+    if (found === null) throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunks don't match their checksum)");
+    return found.toString("utf8");
   };
   const addLine = (account: string, data: Buffer): string => `add-generic-password -U -s ${securityQuote(KEYCHAIN_SERVICE)} -a ${securityQuote(account)} -X ${data.toString("hex")}`;
   /** Stores one entry. The interactive mode doesn't always set the exit code, so the caller reads back what mattered. */
@@ -190,7 +216,8 @@ export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
       // chunks #1…#n first, then the manifest, then the stale chunks of an earlier, longer vault
       for (const [i, piece] of pieces.entries()) {
         await store(chunkAccount(account, i + 1), piece);
-        if ((await readText(chunkAccount(account, i + 1))) !== piece.toString("utf8")) throw new Error("the keychain didn't keep the entry");
+        const back = await readBoth(chunkAccount(account, i + 1));
+        if (back === null || (back.raw !== piece.toString("utf8") && back.decoded !== piece.toString("utf8"))) throw new Error("the keychain didn't keep the entry");
       }
       await store(account, Buffer.from(JSON.stringify({ chunks: pieces.length, sha256: createHash("sha256").update(data).digest("hex") }), "utf8"));
       if ((await read(account)) !== json) throw new Error("the keychain didn't keep the entry");

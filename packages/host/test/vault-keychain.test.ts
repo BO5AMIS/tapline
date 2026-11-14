@@ -240,3 +240,47 @@ describe("the chunked form of §20.2 (AGENT-TOOLS 1.14.1 item 6)", () => {
     expect((error as VaultOpenError).message).not.toContain("user1@example");
   });
 });
+
+describe("chunks that look like hex (PR 12 Codex cycle 3, finding 5)", () => {
+  const account = "/Users/me/vault.json";
+  const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+
+  it("a printable chunk such as \"41\" repeated is read as the text it is, not as hex", async () => {
+    const fake = fakeSecurity();
+    const text = "41".repeat(60);
+    fake.entries.set(`${account}#1`, Buffer.from(text, "utf8"));
+    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 1, sha256: sha(text) }), "utf8"));
+    expect(await securityKeychain(fake.run).read(account)).toBe(text);
+  });
+
+  it("a write of hex-looking text round-trips through chunks (the read-back check accepts both readings)", async () => {
+    const fake = fakeSecurity();
+    const keychain = securityKeychain(fake.run);
+    const text = "41".repeat(4000);
+    await keychain.write(account, text);
+    expect(await keychain.read(account)).toBe(text);
+  });
+
+  it("a mix of hex-looking and ordinary chunks: the manifest's checksum chooses the reading of each", async () => {
+    const fake = fakeSecurity();
+    const parts = ["41".repeat(30), "plain text, not hex ", "4a4b".repeat(10), "7b7d", "end"];
+    parts.forEach((part, i) => fake.entries.set(`${account}#${i + 1}`, Buffer.from(part, "utf8")));
+    const whole = parts.join("");
+    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: parts.length, sha256: sha(whole) }), "utf8"));
+    expect(await securityKeychain(fake.run).read(account)).toBe(whole);
+  });
+
+  it("more than 8 ambiguous chunks: raw-all and decoded-all are tried, and nothing else", async () => {
+    const fake = fakeSecurity();
+    const parts = Array.from({ length: 12 }, () => "41".repeat(8));
+    parts.forEach((part, i) => fake.entries.set(`${account}#${i + 1}`, Buffer.from(part, "utf8")));
+    const raw = parts.join("");
+    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 12, sha256: sha(raw) }), "utf8"));
+    expect(await securityKeychain(fake.run).read(account)).toBe(raw);
+    // a mixed truth (one chunk really was hex of text, the rest plain) is out of reach with 12 ambiguous chunks: fail closed, in words
+    const mixed = parts.map((p, i) => (i === 3 ? "A".repeat(8) : p)).join("");
+    expect(mixed).not.toBe(raw);
+    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 12, sha256: sha(mixed) }), "utf8"));
+    await expect(securityKeychain(fake.run).read(account)).rejects.toThrow(/incomplete/);
+  });
+});
