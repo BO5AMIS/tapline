@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -250,6 +250,137 @@ describe("the folder (§29.2)", () => {
     ]);
     expect(rows[0]).toMatchObject({ count: 1, reproduced: "not checked" });
     expect(store.list("com.example.other")).toHaveLength(1);
+  });
+
+  it("an app id with a hashed folder is listed, looked up and pruned like any other (its folder name is never encoded again)", () => {
+    const store = new BugStore(tmp(), 2);
+    const app = "com.example.Demo";
+    const ids: string[] = [];
+    for (let n = 0; n < 3; n++) {
+      const made = makeBug(context(store), args(crash({ app, got: `the app crashed: Error: kind ${n}x${"abc"[n]}`, crash: { reason: `Error${n}: x`, frames: [`*A.tsx:1 f${n}`] }, when: `2026-11-1${n}T09:00:00.000Z` }), { sourceKey: `run${n}/f1` }));
+      ids.push(made.meta.id);
+    }
+    expect(store.appDir(app)).not.toContain(app);
+    // listed with and without the app, newest first; the oldest pruned at the third
+    expect(store.list().map((row) => [row.app, row.id])).toEqual([[app, ids[2]], [app, ids[1]]]);
+    expect(store.list(app).map((row) => row.id)).toEqual([ids[2], ids[1]]);
+    // found without the app
+    expect(store.lookup(ids[2] as string)).toMatchObject({ found: { app } });
+    expect(store.holders(ids[2] as string)).toEqual([app]);
+    // pruneAll reaches its folder too
+    const later = new BugStore(store.base, 1);
+    later.pruneAll();
+    expect(later.list(app).map((row) => row.id)).toEqual([ids[2]]);
+  });
+
+  it("at start, bugs 1.8.5 kept under another folder name move into their own app's folder, bug by bug; zips stay", () => {
+    const base = tmp();
+    const maker = new BugStore(base);
+    const demo = makeBug(context(maker), args(crash({ app: "com.example.Demo" })));
+    const slash = makeBug(context(maker), args(crash({ app: "com.example/a", kind: "slow", got: "3.5 s to settle" })));
+    const plain = makeBug(context(maker), args(crash({ app: "com.example_a", got: "the app crashed: Error: other", crash: { reason: "Error: other", frames: ["*B.tsx:2 g"] } })));
+    // As 1.8.5 kept them: "com.example.Demo" in a folder of that name, and both "com.example/a" and "com.example_a" in "com.example_a"
+    const legacy = (app: string, id: string, folder: string): void => {
+      mkdirSync(join(base, folder), { recursive: true });
+      renameSync(maker.bugDir(app, id), join(base, folder, id));
+    };
+    legacy("com.example.Demo", demo.meta.id, "com.example.Demo");
+    writeFileSync(join(base, "com.example.Demo", `${demo.meta.id}.zip`), "zip");
+    legacy("com.example/a", slash.meta.id, "com.example_a");
+    const before = new BugStore(base);
+    expect(before.list().map((row) => row.app).sort()).toEqual(["com.example_a"]);
+    before.migrateFolders();
+    const after = new BugStore(base);
+    expect(after.list().map((row) => [row.app, row.id]).sort()).toEqual(
+      [["com.example.Demo", demo.meta.id], ["com.example/a", slash.meta.id], ["com.example_a", plain.meta.id]].sort(),
+    );
+    // the zip stays in the 1.8.5 folder, which therefore stays too
+    expect(existsSync(join(after.appDir("com.example.Demo"), `${demo.meta.id}.zip`))).toBe(false);
+    expect(readdirSync(join(base, "com.example.Demo"))).toEqual([`${demo.meta.id}.zip`]);
+    expect(readdirSync(after.appDir("com.example_a"))).toEqual([plain.meta.id]);
+    // again: nothing moves, nothing is lost
+    after.migrateFolders();
+    expect(after.list()).toHaveLength(3);
+  });
+
+  it("a zip beside a moving bug isn't taken along: it may be another app's (PR 15 CodeRabbit)", () => {
+    const base = tmp();
+    const maker = new BugStore(base);
+    // com.example/a and com.example:a shared the 1.8.5 folder com.example_a. The first's bug was pruned there but its zip stayed;
+    // the second's bug of the same id now sits beside that zip.
+    const second = makeBug(context(maker), args(crash({ app: "com.example:a" })));
+    mkdirSync(join(base, "com.example_a"), { recursive: true });
+    renameSync(maker.bugDir("com.example:a", second.meta.id), join(base, "com.example_a", second.meta.id));
+    writeFileSync(join(base, "com.example_a", `${second.meta.id}.zip`), "zip of the first");
+    const store = new BugStore(base);
+    store.migrateFolders();
+    expect(store.list().map((row) => [row.app, row.id])).toEqual([["com.example:a", second.meta.id]]);
+    expect(existsSync(join(store.appDir("com.example:a"), `${second.meta.id}.zip`))).toBe(false);
+    expect(readFileSync(join(base, "com.example_a", `${second.meta.id}.zip`), "utf8")).toBe("zip of the first");
+  });
+
+  it("a zip with no bug beside it is never given to an app, also when two ids shared one 1.8.5 folder (PR 15 CodeRabbit)", () => {
+    const base = tmp();
+    const store = new BugStore(base);
+    // com.example/a and com.example:a both had the 1.8.5 folder com.example_a. The first's bug was pruned and its zip stayed;
+    // the second holds a bug of the same id.
+    const second = makeBug(context(store), args(crash({ app: "com.example:a" })));
+    mkdirSync(join(base, "com.example_a"), { recursive: true });
+    writeFileSync(join(base, "com.example_a", `${second.meta.id}.zip`), "zip of the first");
+    store.migrateFolders();
+    expect(existsSync(join(store.appDir("com.example:a"), `${second.meta.id}.zip`))).toBe(false);
+    expect(readFileSync(join(base, "com.example_a", `${second.meta.id}.zip`), "utf8")).toBe("zip of the first");
+  });
+
+  it("a leftover zip whose own app's bug is gone stays put, even when another app holds the same id (PR 15 CodeRabbit)", () => {
+    const base = tmp();
+    const store = new BugStore(base);
+    // App B holds the bug; app A's zip of the same id was left in A's 1.8.5 folder and A's bug was pruned since.
+    const beta = makeBug(context(store), args(crash({ app: "com.example.Beta" })));
+    mkdirSync(join(base, "com.example.Alpha"), { recursive: true });
+    writeFileSync(join(base, "com.example.Alpha", `${beta.meta.id}.zip`), "zip of alpha");
+    store.migrateFolders();
+    expect(existsSync(join(store.appDir("com.example.Beta"), `${beta.meta.id}.zip`))).toBe(false);
+    expect(readFileSync(join(base, "com.example.Alpha", `${beta.meta.id}.zip`), "utf8")).toBe("zip of alpha");
+  });
+
+  it("a finding whose picture isn't null or {file, private} is unreadable (PR 15 CodeRabbit)", () => {
+    const store = new BugStore(tmp());
+    const made = makeBug(context(store), args(crash()));
+    const file = join(store.bugDir("com.example.wayfare", made.meta.id), "finding.json");
+    const record = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    for (const picture of [undefined, "x", { file: "picture.jpg" }, { private: true }]) {
+      const copy = { ...record };
+      if (picture === undefined) delete copy["picture"];
+      else copy["picture"] = picture;
+      writeFileSync(file, JSON.stringify(copy));
+      expect(store.read("com.example.wayfare", made.meta.id)).toBeNull();
+    }
+  });
+
+  it("a malformed record is unreadable, never a throw: read, list, lookup and pruneAll go on (PR 15 Codex cycle 4)", () => {
+    const store = new BugStore(tmp());
+    const made = makeBug(context(store), args(crash()));
+    const id = "bug_0123456789abcdef";
+    for (const body of ['{"bug":{}}', '{"bug":{"id":"bug_0123456789abcdef"},"app":"com.example.wayfare"}', '{"bug":null,"app":"com.example.wayfare"}', "[]"]) {
+      const dir = join(store.appDir("com.example.wayfare"), id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "finding.json"), body);
+      expect(store.read("com.example.wayfare", id)).toBeNull();
+      expect(store.list().map((row) => row.id)).toEqual([made.meta.id]);
+      expect(store.lookup(id)).toBeNull();
+      expect(() => store.pruneAll()).not.toThrow();
+    }
+  });
+
+  it("a bug in a folder that isn't its app's own (a 1.8.5 folder, or a planted one) is not listed or found", () => {
+    const store = new BugStore(tmp());
+    const made = makeBug(context(store), args(crash({ app: "com.example.Demo" })));
+    // the same bug copied to the folder 1.8.5 used for that id, and to another app's folder
+    cpSync(store.bugDir("com.example.Demo", made.meta.id), join(store.base, "com.example.Demo", made.meta.id), { recursive: true });
+    cpSync(store.bugDir("com.example.Demo", made.meta.id), join(store.appDir("com.example.wayfare"), made.meta.id), { recursive: true });
+    expect(store.list().map((row) => row.app)).toEqual(["com.example.Demo"]);
+    expect(store.holders(made.meta.id)).toEqual(["com.example.Demo"]);
   });
 });
 

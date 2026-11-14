@@ -144,10 +144,11 @@ whole text `${vault.<name>.<field>}` (`${vault.home.street}`, `${vault.me.email}
 secure field. A card's field (`${vault.visa.number}`) needs a person's OK every time, in the dialog or the live
 view, and no grant covers it: ask your user, never look for another way. Use only entries from that file.
 
-**A one-time code.** `type_text` with the whole text `${otp.<app>}` (the connected app's own id, such as
-`${otp.com.example.demo}`) types the sign-in code that just reached the phone, in a `run`, `drive` or route step too. It
-needs Tapwright 1.7's daemon running with that app's code setting turned on; Tapline never reads notifications
-itself. The code is valid once, within 2 minutes after the app showed a code field, and is never shown (answers read
+**A one-time code.** `type_text` with the whole text `${otp.<app>}` (the connected app's own id, its bundle id unless
+the app names another, such as `${otp.com.example.demo}`) types the sign-in code that just reached the phone, in a
+`run`, `drive` or route step too. It needs Tapwright 1.7's daemon running with that app's code setting turned on;
+Tapline never reads notifications itself, and asks for the code only after the step's checks pass. The code is valid
+once, while the code field shows, when it is at most 2 minutes old, and is never shown (answers read
 `<one-time code>`). With no code the step fails (`not_found`); don't retry in a loop, ask your user.
 
 **Speed.** `tapline call <tool> '<json>'` is one call to a running `tapline host`, for when no MCP

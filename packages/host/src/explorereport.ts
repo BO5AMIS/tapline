@@ -1,7 +1,8 @@
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FINDING_KINDS, redactFinding, type Finding } from "./findings.js";
 import type { SkipWhy } from "./mapfile.js";
+import { appFolderName } from "./appfolder.js";
 
 // The report of `explore` (AGENT-TOOLS 1.15 §25.10): one folder per run, `report.json`, `report.md`, a picture per finding in
 // `findings/` and a script per finding in `repro/`. The newest 20 folders of an app are kept.
@@ -86,10 +87,52 @@ export function stoppedWords(reason: StopReason, detail?: string): string {
   }
 }
 
-/** A folder name for an app id: the id's own characters when they are plain, else `_`. */
-const appFolder = (appId: string): string => appId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_") || "unknown";
+/** A folder name for an app id: the same one the bug store reads a run from (appfolder.ts). */
+const appFolder = appFolderName;
 
 const RUN_FOLDER = /^\d{8}T\d{6}Z(?:-\d+)?$/;
+
+/**
+ * At start: a run kept in a folder that isn't its own app's (1.8.5 named the folder of an id with capitals or other characters
+ * differently) moves into its app's folder, run by run, from the app its own `report.json` names, and never over a run already
+ * there. A run that can't be read or moved stays where it is.
+ */
+export function migrateExploreFolders(base: string): void {
+  let folders: string[];
+  try {
+    folders = readdirSync(base, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return;
+  }
+  for (const folder of folders) {
+    let runs: string[];
+    try {
+      runs = readdirSync(join(base, folder), { withFileTypes: true }).filter((e) => e.isDirectory() && RUN_FOLDER.test(e.name)).map((e) => e.name);
+    } catch {
+      continue;
+    }
+    for (const run of runs) {
+      try {
+        const report: unknown = JSON.parse(readFileSync(join(base, folder, run, "report.json"), "utf8"));
+        const app = typeof report === "object" && report !== null ? (report as { app?: unknown }).app : undefined;
+        if (typeof app !== "string" || app === "") continue;
+        const target = appFolder(app);
+        if (target === folder) continue;
+        const dest = join(base, target, run);
+        if (existsSync(dest)) continue;
+        mkdirSync(join(base, target), { recursive: true, mode: 0o700 });
+        renameSync(join(base, folder, run), dest);
+      } catch {
+        // a run that can't be read or moved stays
+      }
+    }
+    try {
+      if (readdirSync(join(base, folder)).length === 0) rmdirSync(join(base, folder));
+    } catch {
+      // a folder that can't be removed stays
+    }
+  }
+}
 
 export interface RunFolder {
   dir: string;

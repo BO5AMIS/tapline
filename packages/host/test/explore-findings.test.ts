@@ -5,12 +5,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadAccounts, type GitProbe } from "../src/accounts.js";
 import { FINDING_KINDS, FindingBook, cutText, reproScript, type Finding } from "../src/findings.js";
-import { RUNS_KEPT, openRunFolder, reportMarkdown, type ExploreReport } from "../src/explorereport.js";
+import { RUNS_KEPT, migrateExploreFolders, openRunFolder, reportMarkdown, type ExploreReport } from "../src/explorereport.js";
 import { crashFacts } from "../src/explore.js";
 import type { TaplineHost } from "../src/server.js";
 import { APP } from "./drive-helpers.js";
 import { btn, flushExploreMaps, setupExplore, type ExploreSetup, type ExploreSetupOptions } from "./explore-helpers.js";
 import type { FakeApp } from "./helpers.js";
+import { appFolderName } from "../src/appfolder.js";
 
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
@@ -266,12 +267,35 @@ describe("the report folder (§25.10)", () => {
     expect(openRunFolder(base, "com.example.app", new Date(Date.UTC(2026, 11, 30, 9, 0, 0))).dir).toBe(join(appDir, "20261230T090000Z-2"));
   });
 
+  it("at start, runs 1.8.5 kept under another folder name move into their own app's folder, run by run (1.8.6)", () => {
+    const base = mkdtempSync(join(tmpdir(), "tapline-explore-migrate-"));
+    dirs.push(base);
+    const run = (folder: string, name: string, app: string | null): void => {
+      mkdirSync(join(base, folder, name), { recursive: true });
+      writeFileSync(join(base, folder, name, "report.json"), app === null ? "not json" : JSON.stringify({ app }));
+    };
+    run("com.example.Demo", "20261114T090000Z", "com.example.Demo");
+    run("com.example_a", "20261114T090000Z", "com.example/a");
+    run("com.example_a", "20261114T100000Z", "com.example_a");
+    run("com.example_a", "20261114T110000Z", null);
+    migrateExploreFolders(base);
+    expect(readdirSync(join(base, appFolderName("com.example.Demo")))).toEqual(["20261114T090000Z"]);
+    expect(existsSync(join(base, "com.example.Demo"))).toBe(false);
+    expect(readdirSync(join(base, appFolderName("com.example/a")))).toEqual(["20261114T090000Z"]);
+    // its own run stays, and one that can't be read stays where it is
+    expect(readdirSync(join(base, "com.example_a")).sort()).toEqual(["20261114T100000Z", "20261114T110000Z"]);
+    migrateExploreFolders(base);
+    expect(readdirSync(join(base, "com.example_a")).sort()).toEqual(["20261114T100000Z", "20261114T110000Z"]);
+  });
+
   it("names an app id that is not a plain folder name safely", () => {
     const base = mkdtempSync(join(tmpdir(), "tapline-explore-name-"));
     dirs.push(base);
     const folder = openRunFolder(base, "../evil/app", new Date(Date.UTC(2026, 10, 14, 9, 0, 0)));
     expect(folder.dir.startsWith(base)).toBe(true);
-    expect(readdirSync(base)).toEqual(["__evil_app"]);
+    // Not a plain name: `_`, the cleaned id and a hash of it, so no other id can share the folder (1.16.2 §29.7).
+    expect(readdirSync(base)).toEqual([appFolderName("../evil/app")]);
+    expect(readdirSync(base)[0]).toMatch(/^_evil_app-[0-9a-f]{16}$/);
     writeFileSync(join(folder.dir, "x"), "");
   });
 

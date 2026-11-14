@@ -272,9 +272,10 @@ Tapline on. Read its output, then go on with step 6. By hand:
    commit a credential, and never put one in a call.** If a call refuses (`no account "x"`, `isn't
    for this app`), ask the user; don't look for the file.
    **A one-time code** is typed the same way: `type_text` with the whole text `${otp.<app>}` (the connected app's own
-   id), also in `run`, `drive` and routes. Tapline's host asks Tapwright's daemon for it over loopback (it needs Tapwright
-   1.7's daemon running, with that app's code setting turned on; Tapline never reads notifications). It is valid once, within
-   2 minutes after the app showed a code field, and is never shown (`<one-time code>`). No code means the step fails
+   id, its bundle id unless the app names another in `startTapline`), also in `run`, `drive` and routes. Tapline's host
+   asks Tapwright's daemon for it over loopback, only after the step's checks pass (it needs Tapwright 1.7's daemon
+   running, with that app's code setting turned on; Tapline never reads notifications). It is valid once, while the code
+   field shows, when it is at most 2 minutes old, and is never shown (`<one-time code>`). No code means the step fails
    (`not_found`); ask the user, don't loop. Each use is an `otp` line in the audit log.
 18. **Reflexes.** A reflex is a rule in the map that closes a known interruption by itself: `map
    {"reflex": {"name": "rate", "when": {"text": "Rate this app"}, "do": {"tool": "tap", "target":

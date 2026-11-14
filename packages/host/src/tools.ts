@@ -79,7 +79,7 @@ import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, crash
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
-import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
+import { answerLines, migrateExploreFolders, openRunFolder, writeExploreReport } from "./explorereport.js";
 import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -1080,6 +1080,24 @@ export function describeError(error: unknown): string {
   return `Error internal: ${error instanceof Error ? error.message : String(error)}`;
 }
 
+/** Turns a request's params into what goes on the wire, right before the send (a one-time code is fetched there). */
+type LateParams = (params: unknown) => Promise<unknown>;
+
+/** What `typeTextWith` is given for a one-time code: the session it was prepared for, and the late fetch (none on a dry run). */
+interface OtpTyping {
+  value: string;
+  source: string | undefined;
+  sessionId: string;
+  late?: OtpLate;
+}
+
+/** A one-time code to be typed (§20.4): fetched by `fetch` at the last moment, at most once per call; `asked` says it was. */
+interface OtpLate {
+  /** `given` is the request's params as they stand at the last moment: the checks are made again on them first. */
+  fetch: (given: Record<string, unknown>) => Promise<string>;
+  asked: boolean;
+}
+
 /** Ends a guarded call inside the agent's turn with the policy's answer (nothing was touched). */
 class PolicyStop extends Error {
   constructor(readonly answer: CallToolResult) {
@@ -1592,8 +1610,11 @@ export class TaplineTools {
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
+    // At start, runs and bugs that 1.8.5 kept under another folder name for their app move into their app's folder (1.8.6).
+    if (options.exploreDir !== undefined) migrateExploreFolders(options.exploreDir);
     if (options.bugsDir !== undefined) {
       this.bugStore = new BugStore(options.bugsDir);
+      this.bugStore.migrateFolders();
       // At start an app's bugs beyond the newest 100 are removed (§29.2).
       this.bugStore.pruneAll();
     }
@@ -1856,6 +1877,15 @@ export class TaplineTools {
 
   /** Every request to the app goes through the lease check: a run's call whose lease ran out after it was queued sends nothing (§22.3). */
   private sendRequest(...args: Parameters<TaplineHost["request"]>): ReturnType<TaplineHost["request"]> {
+    return this.sendWith(args, undefined);
+  }
+
+  /**
+   * `sendRequest`, with a late step: `late` turns the params into what goes on the wire, after every gate (lease, run pin, the explore
+   * floor, budget and typing rules) has passed and immediately before the send. A one-time code is fetched there, so a request a gate
+   * refuses never asks for one (§18.11).
+   */
+  private sendWith(args: Parameters<TaplineHost["request"]>, late: LateParams | undefined): ReturnType<TaplineHost["request"]> {
     try {
       this.checkLease();
     } catch (error) {
@@ -1868,8 +1898,17 @@ export class TaplineTools {
     if (refused !== null) return Promise.reject(refused);
     const [method, params, options] = args;
     const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
-    if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) return this.host.request(...args);
-    return this.exploreSend(scope, args);
+    if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) {
+      if (late === undefined) return this.host.request(...args);
+      return late(params).then((filled) => {
+        // The fetch awaited: the lease and the run's pin are checked again immediately before the send.
+        this.checkLease();
+        const stale = this.runRefusal(scope);
+        if (stale !== null) throw stale;
+        return this.host.request(method, filled, options);
+      });
+    }
+    return this.exploreSend(scope, args, late);
   }
 
   /** Why a request of a pinned or timed run must not go out now (another app is in front, or the deadline passed), or null. Checked again right before a send that follows awaited checks. */
@@ -1883,7 +1922,7 @@ export class TaplineTools {
   }
 
   /** The explore gate: the budget, then the typing rules; counts the request it lets through. */
-  private async exploreSend(scope: ExploreScope, args: Parameters<TaplineHost["request"]>): Promise<unknown> {
+  private async exploreSend(scope: ExploreScope, args: Parameters<TaplineHost["request"]>, late?: LateParams): Promise<unknown> {
     const [method, rawParams, options] = args;
     const run = scope.run;
     // The flip back of a toggle is one move with the flip (§25.7): the budget never splits them.
@@ -1898,7 +1937,10 @@ export class TaplineTools {
       if (method !== "type") throw new TaplineError("not_allowed", "explore types only through its own fill, never inside a drive (explore skip: policy).");
       params = await this.exploreTyping(scope, rawParams, options?.sessionId);
     }
+    // Every gate passed: only now is a late value (a one-time code) fetched.
+    if (late !== undefined) params = await late(params);
     // The touch floor and the typing rules awaited requests of their own: the pin and the deadline are checked again immediately before the send.
+    this.checkLease();
     const refused = this.runRefusal(scope);
     if (refused !== null) throw refused;
     run.used += 1;
@@ -3172,7 +3214,7 @@ export class TaplineTools {
     return this.grantNotes.run(grantLines, () =>
       this.noteScope.run(true, () =>
         this.reflexScope.run(reflexes, () => {
-          const result = this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive));
+          const result = this.otpCall.run({ asked: false, dropped: false }, () => this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive)));
           const finish = (answer: CallToolResult): CallToolResult =>
             this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes);
           // The first answer of a session with grants says which grant is refused, and whether the state file is broken (§19.1, §19.4).
@@ -3338,6 +3380,13 @@ export class TaplineTools {
   private readonly personScope = new AsyncLocalStorage<Set<string>>();
 
   /**
+   * One-time codes in this outer call (§18.11): `asked` once a code was asked for; `dropped` once a code was asked for and its
+   * type then failed. After a drop nothing in the call runs again (not a needs-a-person retry of a single call, not a batch
+   * resumed at the failed step, not a reflex's), because a code a call received and could not type is never asked for twice.
+   */
+  private readonly otpCall = new AsyncLocalStorage<{ asked: boolean; dropped: boolean }>();
+
+  /**
    * AGENT-TOOLS 1.13 §11.5: a call that ended because only a person can go on (the app isn't there, an alert, an app that
    * stopped answering) tells the person in the host's dialog and waits. When the moment clears, the call runs again, so it
    * checks the screen afresh; nothing was done, as the call failed before it began. Without a dialog: today's answer, with a Note.
@@ -3369,6 +3418,11 @@ export class TaplineTools {
     for (let round = 0; round < 4; round++) {
       const moment = await this.momentOf(answer, notAnsweringBefore);
       if (moment === null) return answer;
+      // A one-time code was asked for in this call and dropped: running it again (or resuming a batch at that step) would ask
+      // again, so the failure is the answer (§18.11).
+      if (this.otpCall.getStore()?.dropped === true) {
+        return appendNote(answer, "A one-time code was already asked for and dropped, so the call was not run again. Repeat the step to ask for a new code.");
+      }
       const dialogs = this.dialogs;
       const asked = this.personScope.getStore();
       if (dialogs === undefined || !dialogs.available()) return this.withMomentNote(answer, moment.what);
@@ -4702,7 +4756,7 @@ export class TaplineTools {
     /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
     touch?: NoChangeAction,
     /** What goes only to the app: a test account's value and the kind of field it may go into. Nothing else sees it (§18.6). */
-    wire?: { values: Record<string, unknown>; sessionId: string; /** A fixture's value: its refusal names a fixture. */ fixture?: true },
+    wire?: { values: Record<string, unknown>; sessionId: string; /** A fixture's value: its refusal names a fixture. */ fixture?: true; /** A one-time code, fetched after every gate and right before the send. */ otp?: OtpLate },
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -4743,7 +4797,16 @@ export class TaplineTools {
           const delivery = this.deliveryScope.getStore();
           if (delivery !== undefined) delivery.sent = true;
           try {
-            return await this.sendRequest(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+            const options = { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) };
+            const otp = wire?.otp;
+            if (otp === undefined) return await this.sendRequest(method, sent, options);
+            return await this.sendWith(
+              [method, sent, options],
+              async (given) => {
+                const base: Record<string, unknown> = typeof given === "object" && given !== null ? { ...given } : {};
+                return { ...base, text: await otp.fetch(base) };
+              },
+            );
           } catch (error) {
             if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
             throw error;
@@ -4754,7 +4817,8 @@ export class TaplineTools {
         break;
       } catch (error) {
         const failure = error instanceof PolicyStop ? parseError(answerText(error.answer)) : error instanceof TaplineError ? { code: error.code, message: error.message } : null;
-        if (!reflexTried && failure !== null && isReflexFailure(failure.code, failure.message)) {
+        // A reflex runs the step again, which would ask for a one-time code again: never after one was asked for (§18.11).
+        if (!reflexTried && wire?.otp?.asked !== true && failure !== null && isReflexFailure(failure.code, failure.message)) {
           reflexTried = true;
           const before = this.mapOf(session)?.data().reflexes.length ? await this.namedCandidates(session, params) : null;
           if ((await this.checkReflexes(session)) > 0 && (await this.sameTarget(session, params, before, failure.message))) continue;
@@ -7283,11 +7347,85 @@ export class TaplineTools {
     const app = session.app.id ?? session.app.name;
     // A dry run checks the field and asks for nothing: no code is fetched, and none is spent.
     if (args.dry_run === true) return this.typeTextWith(args, { value: "", source: undefined, sessionId: session.id });
-    return this.otp.fetch(app).then((got: OtpFetch) =>
-      got.ok
-        ? this.typeTextWith(args, { value: got.code, source: got.source, sessionId: session.id })
-        : fail(`Error ${got.reason === "none" ? "not_found" : "unsupported"}: ${got.message}`),
-    );
+    // The code is fetched by the request itself, after the queue's turn, the pause and a person's input, the explorer's gates and the
+    // lease (all of `act`), immediately before the `type` goes on the wire (§18.11). One try: a code that can't be typed now is
+    // dropped, never asked for again, whatever retries (a person's moment, a reflex) run around the call.
+    const call = this.otpCall.getStore();
+    const typing: OtpTyping = { value: "", source: undefined, sessionId: session.id };
+    const late: OtpLate = {
+      asked: false,
+      fetch: async (given): Promise<string> => {
+        if (late.asked) throw new TaplineError("not_allowed", "a one-time code was already asked for in this call and is not asked for again.");
+        // The queue turn may have waited a long time since the checks before it: they are made again here, in the turn, and a refusal
+        // is the answer with no code asked for (§18.11). Paused, then a person's input, then the selected app, then the app's own dry run
+        // of these same params (which also refuses a lost connection or an app in the background as the send would).
+        const stillHolds = (): void => {
+          // A person used the app since the last look: a `{ref}` target may point elsewhere now, as in every other action.
+          const staleRefs = this.staleRef(given);
+          if (staleRefs !== null) throw new TaplineError("stale", answerText(staleRefs).replace(/^Error stale: /, ""));
+          // The call's lease and a pinned or timed run's rules first, as the send checks them (§22.3): the awaits since may have outlived them.
+          this.checkLease();
+          const stale = this.runRefusal(this.exploreScope.getStore());
+          if (stale !== null) throw stale;
+          const control = this.options.control;
+          if (control?.paused() === true && this.exploreScope.getStore()?.restoring !== true) {
+            throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");
+          }
+          if (control?.personRecent() === true) throw new TaplineError("busy", "A person is using the app in the live viewer. Try again when they stop, or ask them.");
+          if (this.host.current()?.id !== session.id) {
+            throw new TaplineError("not_connected", "the app changed while the step waited its turn; no one-time code was asked for, and nothing was typed.");
+          }
+          // The same refusals the send would give: the app's link is gone, or iOS paused the app.
+          const live = this.host.sessions().find((s) => s.id === session.id);
+          if (live === undefined) throw new TaplineError("not_connected", `No connected session "${session.id}"; no one-time code is typed.`);
+          if (live.appState?.state === "background") {
+            throw new TaplineError("in_background", `${live.app.name} is in the background (the user switched apps or locked the phone, so iOS paused it). Ask the user to open the app again; it carries on by itself.`);
+          }
+        };
+        stillHolds();
+        await this.sendRequest("type", { ...given, text: "", dryRun: true }, { sessionId: session.id });
+        stillHolds();
+        late.asked = true;
+        if (call !== undefined) call.asked = true;
+        const got: OtpFetch = await this.otp.fetch(app);
+        if (!got.ok) throw new TaplineError(got.reason === "none" ? "not_found" : "unsupported", got.message);
+        // The fetch took time: a pause, a person's input, another app or the background since is a refusal now, and the code is dropped
+        // (the caller marks the call dropped: asked and not typed).
+        stillHolds();
+        typing.source = got.source;
+        return got.code;
+      },
+    };
+    typing.late = late;
+    // The same step as a dry run first (target found, reachable, not behind an alert, the field's kind). A refusal is the answer,
+    // nothing fetched. An app without dry runs can't be checked ahead, so no code is asked for it.
+    if (!session.capabilities.includes("dryRun")) {
+      return Promise.resolve(fail(`Error unsupported: this version of the app's Tapline SDK can't check a step before it runs, so no one-time code is asked for it (a code is asked for only after the step's checks pass). Update react-native-tapline in the app.`));
+    }
+    const precheck = (): Promise<CallToolResult> => this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id });
+    // A failure a reflex can close (a dialog over the field) gets the recovery the real type would have had: the reflex runs, and the
+    // precheck is made once more. A code is asked for only after a precheck passes.
+    const checking = precheck().then(async (first) => {
+      if (first.isError !== true) return first;
+      const failure = parseError(answerText(first));
+      if (failure === null || !isReflexFailure(failure.code, failure.message)) return first;
+      // As in `actScoped`: the elements the target means are read before the reflex, and the check is made again only when the target
+      // is still that one element. An index, ref or point target, an ambiguous one and a changed one are not retried: the first failure is the answer.
+      const asked = args.target !== undefined ? { target: toWireTarget(withIndex(args.target, args.index)) } : {};
+      const before = this.mapOf(session)?.data().reflexes.length ? await this.namedCandidates(session, asked) : null;
+      if ((await this.checkReflexes(session)) > 0 && (await this.sameTarget(session, asked, before, failure.message))) return precheck();
+      return first;
+    });
+    return checking.then((checked) => {
+      if (checked.isError === true) return checked;
+      // Another app selected while the step was checked: its code would be fetched for a type that can't happen.
+      if (this.host.current()?.id !== session.id) return fail("Error not_connected: the app changed while the step was checked; no one-time code was asked for, and nothing was typed.");
+      return this.typeTextWith(args, typing).then((typed) => {
+        // Asked for and not typed: the code is dropped, and nothing in this call runs the step again.
+        if (typed.isError === true && late.asked && call !== undefined) call.dropped = true;
+        return typed;
+      });
+    });
   }
 
   /** Why `${otp.<app>}` can't be typed for the connected app, or null: the id must be the connected app's own. */
@@ -7302,7 +7440,7 @@ export class TaplineTools {
     return named === null ? null : this.otpRefusal(named, session);
   }
 
-  private typeTextWith(args: Shape<"type_text">, otp: { value: string; source: string | undefined; sessionId: string } | undefined): Promise<CallToolResult> {
+  private typeTextWith(args: Shape<"type_text">, otp: OtpTyping | undefined): Promise<CallToolResult> {
     const hiddenField = this.hiddenTarget(args.target);
     if (hiddenField !== null) return Promise.resolve(hiddenField);
     const badAs = this.asRefusal(args.as, args.text, args.account);
@@ -7326,7 +7464,12 @@ export class TaplineTools {
     if (args.force === true) params["force"] = true;
     const wire =
       account !== null && account.ok && session !== undefined
-        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id, ...(account.use?.kind === "fixture" ? { fixture: true as const } : {}) }
+        ? {
+            values: { text: account.value, kind: account.kind },
+            sessionId: otp?.sessionId ?? session.id,
+            ...(account.use?.kind === "fixture" ? { fixture: true as const } : {}),
+            ...(otp?.late !== undefined ? { otp: otp.late } : {}),
+          }
         : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) {

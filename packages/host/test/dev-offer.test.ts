@@ -38,6 +38,24 @@ describe("the development offer", () => {
     expect((await offer(port)).status).toBe(404);
   });
 
+  it("an offer taken once stays closed: a second take of its code is refused, and a token reconnect (a reload) does not reopen it", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    host.openDevOffer("Dev PC");
+    const code = String((await offer(port)).body["code"]);
+    const first = await FakeApp.connect(port, { token: undefined, pairCode: code });
+    apps.push(first.app);
+    expect((await offer(port)).status).toBe(404);
+    const again = await FakeApp.open(port);
+    apps.push(again);
+    again.send(FakeApp.hello({ token: undefined, pairCode: code }));
+    expect((await again.closed).reason).toMatch(/pairing code invalid/);
+    first.app.ws.terminate();
+    const reload = await FakeApp.connect(port, {});
+    apps.push(reload.app);
+    expect((await offer(port)).status).toBe(404);
+  });
+
   it("lapses after its time", async () => {
     const { host, port } = await startHost();
     hosts.push(host);

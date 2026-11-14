@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
+import { appFolderName } from "./appfolder.js";
 import { decodedBases, normalizedBases, variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
@@ -15,10 +16,26 @@ export const BUGS_KEPT = 100;
 /** The sources `seen.sources` keeps (§29.5). */
 export const SOURCES_KEPT = 50;
 
-/** A folder name for an app id, as the explore reports use. */
-export const appFolderName = (appId: string): string => appId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_") || "unknown";
+/** A folder name for an app id, as the explore reports use: one folder per id (AGENT-TOOLS 1.16.2 §29.7, appfolder.ts). */
+export { appFolderName };
 
 const BUG_ID = /^bug_[0-9a-f]{16}(?:_\d+)?$/;
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((v) => typeof v === "string");
+
+/** What the store reads of a kept record: the finding's app and kind, and the bug's id, signature, sightings and check. */
+function storedShape(bug: unknown, finding: Record<string, unknown>, id: string): bug is BugMeta {
+  if (typeof finding["app"] !== "string" || finding["app"] === "" || typeof finding["kind"] !== "string") return false;
+  // The picture is null or `{file, private}`: a later sighting reads `picture.private` (§29.5).
+  const picture = finding["picture"];
+  if (picture !== null && !(isObject(picture) && typeof picture["file"] === "string" && typeof picture["private"] === "boolean")) return false;
+  if (!isObject(bug) || bug["id"] !== id || typeof bug["signature"] !== "string") return false;
+  const seen = bug["seen"];
+  if (!isObject(seen) || typeof seen["first"] !== "string" || typeof seen["last"] !== "string" || typeof seen["count"] !== "number") return false;
+  if (!isStrings(seen["builds"]) || !isStrings(seen["sources"])) return false;
+  return isObject(bug["reproduced"]) && isObject(bug["source"]);
+}
 export const isBugId = (text: string): boolean => BUG_ID.test(text);
 
 /** A file of a bug folder holds a vault value, a code or a typed value: nothing is written (§29.6). */
@@ -214,12 +231,26 @@ export class BugStore {
 
   /** The bug's folder and what it holds, or null. */
   read(app: string, id: string): Stored | null {
+    return this.readIn(appFolderName(app), id);
+  }
+
+  /**
+   * A bug read from an app folder by its folder name, as listed (never encoded again: a hashed name isn't an app id). It counts only
+   * when the folder is its own app's: a bug in another folder (one 1.8.5 made for that id, or a copy) is neither listed nor found.
+   */
+  private readIn(folder: string, id: string): Stored | null {
+    const stored = this.readAt(join(this.base, folder, id), id);
+    return stored !== null && appFolderName(stored.finding.app) === folder ? stored : null;
+  }
+
+  private readAt(dir: string, id: string): Stored | null {
     if (!isBugId(id)) return null;
-    const dir = this.bugDir(app, id);
     try {
       const parsed: unknown = JSON.parse(readContainedText(dir, join(dir, "finding.json")));
       if (typeof parsed !== "object" || parsed === null || !("bug" in parsed)) return null;
-      const { bug, ...finding } = parsed as { bug: BugMeta } & Record<string, unknown>;
+      const { bug, ...finding } = parsed as { bug: unknown } & Record<string, unknown>;
+      // A record without what the store reads (its app, its id, its sightings) is unreadable, never a throw (PR 15 Codex cycle 4).
+      if (!storedShape(bug, finding, id)) return null;
       return { finding: finding as unknown as BugFinding, meta: bug, dir };
     } catch {
       return null;
@@ -265,7 +296,7 @@ export class BugStore {
     if (!isBugId(id)) return [];
     const all: Array<{ app: string; stored: Stored }> = [];
     for (const name of this.appFolders()) {
-      const stored = this.read(name, id);
+      const stored = this.readIn(name, id);
       if (stored !== null) all.push({ app: stored.finding.app, stored });
     }
     return all;
@@ -279,9 +310,10 @@ export class BugStore {
     }
   }
 
-  private bugIds(app: string): string[] {
+  /** The bug ids in an app folder, by its folder name. */
+  private bugIdsIn(folder: string): string[] {
     try {
-      return readdirSync(this.appDir(app), { withFileTypes: true }).filter((e) => e.isDirectory() && BUG_ID.test(e.name)).map((e) => e.name);
+      return readdirSync(join(this.base, folder), { withFileTypes: true }).filter((e) => e.isDirectory() && BUG_ID.test(e.name)).map((e) => e.name);
     } catch {
       return [];
     }
@@ -291,8 +323,8 @@ export class BugStore {
   list(app?: string): BugListEntry[] {
     const out: BugListEntry[] = [];
     for (const folder of app !== undefined ? [appFolderName(app)] : this.appFolders()) {
-      for (const id of this.bugIds(folder)) {
-        const stored = this.read(folder, id);
+      for (const id of this.bugIdsIn(folder)) {
+        const stored = this.readIn(folder, id);
         if (stored === null) continue;
         out.push({ app: stored.finding.app, id, title: bugTitle(stored.finding), count: stored.meta.seen.count, last: stored.meta.seen.last, reproduced: reproducedWords(stored.meta.reproduced) });
       }
@@ -302,25 +334,63 @@ export class BugStore {
 
   /** Removes an app's oldest bugs beyond the newest `kept`, with their zips; `keep` is never removed (§29.2). */
   prune(app: string, keep?: string): void {
+    this.pruneIn(appFolderName(app), keep);
+  }
+
+  /** `prune` by the app folder's name, as listed (never encoded again). Only the folder's own bugs count and go. */
+  private pruneIn(folder: string, keep?: string): void {
     try {
-      const rows = this.bugIds(app).flatMap((id) => {
-        const stored = this.read(app, id);
+      const rows = this.bugIdsIn(folder).flatMap((id) => {
+        const stored = this.readIn(folder, id);
         return stored === null ? [] : [{ id, last: stored.meta.seen.last }];
       });
       rows.sort((a, b) => (a.last < b.last ? 1 : a.last > b.last ? -1 : a.id.localeCompare(b.id)));
       for (const row of rows.slice(this.kept)) {
         if (row.id === keep) continue;
-        rmSync(this.bugDir(app, row.id), { recursive: true, force: true });
-        rmSync(join(this.appDir(app), `${row.id}.zip`), { force: true });
+        rmSync(join(this.base, folder, row.id), { recursive: true, force: true });
+        rmSync(join(this.base, folder, `${row.id}.zip`), { force: true });
       }
     } catch {
       // a folder that can't be removed stays
     }
   }
 
+  /**
+   * At start, before anything is listed or pruned: a bug kept in a folder that isn't its own app's (1.8.5 named the folder of an id
+   * with capitals or other characters differently) moves into its app's folder. Bug by bug, from what its own `finding.json` says,
+   * and never over a bug already there; one that can't move stays where it is. Zips stay where they are.
+   */
+  migrateFolders(): void {
+    for (const folder of this.appFolders()) {
+      for (const id of this.bugIdsIn(folder)) {
+        try {
+          const stored = this.readAt(join(this.base, folder, id), id);
+          if (stored === null) continue;
+          const target = appFolderName(stored.finding.app);
+          if (target === folder) continue;
+          const dest = join(this.base, target, id);
+          if (existsSync(dest)) continue;
+          mkdirSync(join(this.base, target), { recursive: true, mode: 0o700 });
+          // Only the bug moves. A zip is never moved: nothing outside it proves whose it is (two ids could share a 1.8.5 folder, and a
+          // pruned bug's zip could stay beside another app's bug of the same id). It stays where it is; an export makes a new one.
+          renameSync(join(this.base, folder, id), dest);
+        } catch {
+          // a bug that can't move stays, and isn't listed from the wrong folder
+        }
+      }
+    }
+    for (const folder of this.appFolders()) {
+      try {
+        if (readdirSync(join(this.base, folder)).length === 0) rmdirSync(join(this.base, folder));
+      } catch {
+        // a folder that can't be removed stays
+      }
+    }
+  }
+
   /** At start: every app's bugs beyond the newest kept are removed (§29.2). */
   pruneAll(): void {
-    for (const folder of this.appFolders()) this.prune(folder);
+    for (const folder of this.appFolders()) this.pruneIn(folder);
   }
 
   /** The folder for a new bug, and whether it is the folder of a bug with this signature. */

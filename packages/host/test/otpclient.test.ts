@@ -1,6 +1,6 @@
 import { connect, createServer, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createOtpService, fetchOtp, noCodeMessage, otpReference, proofFor, OtpCodes, type OtpDeps } from "../src/otpclient.js";
+import { createOtpService, fetchOtp, noCodeMessage, otpReference, proofFor, OtpCodes, OTP_TIMEOUT_MS, type OtpDeps } from "../src/otpclient.js";
 import { FAKE_CODE, FAKE_TOKEN, startFakeTapwright, tapwrightHome, type FakeDaemon } from "./fake-tapwright.js";
 
 // AGENT-TOOLS 1.14 §18.11, §20.4: the one-time code client against a fake Tapwright daemon (a real loopback server). Every token is made up.
@@ -146,6 +146,12 @@ describe("a daemon that doesn't prove itself", () => {
     const got = await fetchOtp(APP, { ...deps, timeoutMs: 150 });
     expect(got).toMatchObject({ ok: false, reason: "timeout" });
     expect(daemon.everything()).not.toContain(FAKE_TOKEN);
+  });
+
+  it("the default limit outlasts the daemon's wait for a banner to clear (up to 8 s) plus the proof", () => {
+    // Joint phone check 2026-11-14: /otp waits out a notification banner before it reads the screen, up to 8 s;
+    // a 5 s limit gave up first ("didn't answer in time") while the daemon was still answering.
+    expect(OTP_TIMEOUT_MS).toBeGreaterThanOrEqual(8_000 + 3_000);
   });
 
   it("something that isn't HTTP on the port gets no token", async () => {

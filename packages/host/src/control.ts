@@ -28,6 +28,8 @@ export class ControlQueue {
   private readonly sleep: (ms: number) => Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private lastPersonAt = Number.NEGATIVE_INFINITY;
+  /** A person's inputs queued or running and not yet finished. */
+  private personPending = 0;
   /** Whose action is running now, if any. */
   private running: Driver = null;
   /** The driver listeners last heard about. */
@@ -55,6 +57,14 @@ export class ControlQueue {
     return this.isPaused;
   }
 
+  /**
+   * True while a person's input is recent or still waiting to run (they go first): an agent action already in its turn checks this again
+   * before a step it can't take back. A queued input counts however long it has waited.
+   */
+  personRecent(): boolean {
+    return this.personPending > 0 || this.now() - this.lastPersonAt < this.idleMs;
+  }
+
   /** The time agent actions have waited for a person so far (it only grows). */
   waitedMs(): number {
     return this.waitedTotal;
@@ -77,7 +87,11 @@ export class ControlQueue {
   /** A person's input: runs as soon as the queue is free, and keeps the agent waiting a moment after. */
   runPerson<T>(fn: () => Promise<T>): Promise<T> {
     this.lastPersonAt = this.now();
-    return this.serial(async () => {
+    this.personPending += 1;
+    const done = (): void => {
+      this.personPending -= 1;
+    };
+    const queued = this.serial(async () => {
       this.lastPersonAt = this.now();
       this.running = "person";
       this.report();
@@ -96,6 +110,9 @@ export class ControlQueue {
         this.idleTimer.unref?.();
       }
     });
+    // Pending from the moment it was queued until it has run (or failed): the idle time counts only after that.
+    void queued.then(done, done);
+    return queued;
   }
 
   /**

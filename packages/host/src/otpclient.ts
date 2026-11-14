@@ -37,6 +37,13 @@ export function otpReference(text: string): string | null {
   return OTP_WHOLE.exec(text)?.[1] ?? null;
 }
 
+/**
+ * How long the whole exchange (proof, then /otp) may take. At /otp Tapwright's daemon reads the screen once, and first
+ * waits out a notification banner for up to 8 s (iOS reports its home screen in front while one shows), so the limit
+ * leaves room for that wait and the proof.
+ */
+export const OTP_TIMEOUT_MS = 12_000;
+
 export interface OtpDeps {
   /** Tapwright's folder. Default: `TAPWRIGHT_HOME` of `env`, else `~/.tapwright`. */
   home?: string;
@@ -46,7 +53,7 @@ export interface OtpDeps {
   now?: () => number;
   /** The challenge's random bytes. */
   random?: (size: number) => Buffer;
-  /** Gives the whole exchange this long (ms). Default 5000. */
+  /** Gives the whole exchange this long (ms). Default OTP_TIMEOUT_MS. */
   timeoutMs?: number;
   /** How long to wait after the proof for a daemon that closes the connection at once (ms). Default 15. */
   settleMs?: number;
@@ -321,7 +328,7 @@ export async function fetchOtp(app: string, deps: OtpDeps = {}): Promise<OtpFetc
         aborted = true;
         wire?.socket.destroy();
         resolve(timedOut());
-      }, deps.timeoutMs ?? 5000);
+      }, deps.timeoutMs ?? OTP_TIMEOUT_MS);
     });
     return await Promise.race([run(), limit]);
   } catch {

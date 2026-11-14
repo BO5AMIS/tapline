@@ -128,6 +128,13 @@ function readPairing(raw: string | null): Pairing | null {
 export const OFFER_PAIR_TIMEOUT_MS = 15_000;
 
 /**
+ * After a JavaScript start with a saved pairing, how long the first offer check waits for that home to connect.
+ * A reload forgets everything in memory, so without it an app that is paired would be asked to connect again while
+ * its home is still being dialled.
+ */
+export const HOME_GRACE_MS = 5000;
+
+/**
  * The in-app side of pairing: connects to the remembered computer, and handles pairing and
  * forget links (asking the user before connecting anywhere new). Work runs one step at a time.
  */
@@ -182,7 +189,9 @@ export class TaplineAgent {
     const server = offers.devServer();
     if (server === null || !isLocalNetworkHost(server.host)) return;
     this.offerStarted = Date.now();
-    this.scheduleOffer(offers, server, 0);
+    // A pairing's own code is an offer this app took already: never ask about it again (a reload forgets seenCodes).
+    if (this.pairing?.code !== undefined) this.seenCodes.add(this.pairing.code);
+    this.scheduleOffer(offers, server, this.pairing !== null ? HOME_GRACE_MS : 0);
   }
 
   private scheduleOffer(offers: OfferSource, host: { host: string; port: number }, ms: number): void {

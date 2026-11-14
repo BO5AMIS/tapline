@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.8.6 (2026-11-14)
+
+Fixes from the first joint one-time code check on a real phone with Tapwright 1.7, as AGENT-TOOLS 1.16.2 (agreed with
+Tapwright, sha256 ef8e7b63) now states them.
+
+- **One-time codes (§18.11, §20.4).**
+  - Tapline asks Tapwright's daemon for a code only after the step's checks pass. The host's own gates come first (a
+    paused session, a person's input, the explorer's budget and typing rules, the lease), then the step runs in the app
+    as a dry run, and only then is the code fetched, by the `type` request itself, right before it is sent. A refusal
+    (`paused`, `behind_alert`, `not_found`, `covered` and the rest) is the answer, with no code asked for. Before, a code
+    could be fetched, and spent, for a type that was then refused.
+  - A code that can't be typed after it arrived is dropped, never asked for again: a call whose code was dropped isn't
+    run again for a person's moment (a single call or a `run` resumed at that step), and no reflex retries it.
+  - Another app selected while the step is checked: no code is asked for (`not_connected`).
+  - The checks are made again in the queue's turn right before the fetch and again before the send: the lease, the run's
+    rules, the pause, a person's input (one that waits in the queue counts however long it waits), the app still selected,
+    connected and in front, and a fresh dry run. A failed check a reflex can clear gets the reflex, then one more check.
+- **Bug store.** A kept bug whose `finding.json` is malformed is skipped as unreadable instead of failing a lookup or list.
+  - An app whose SDK can't dry-run a step gets no code (`unsupported`).
+  - The whole exchange with the daemon may take 12 s (was 5 s). Tapwright's daemon waits up to 8 s for a notification
+    banner over the app to go before it reads the app, and a 5 s limit gave up first.
+  - `<app>` in `${otp.<app>}` is the app's bundle id, as the SDK already reports it unless the app names another id in
+    `startTapline`. The docs say so now.
+- **No second "Connect for testing?" after a reload.** A development build that was paired from an open offer asked to
+  connect again after a JavaScript reload while it was still paired. The app now counts its own pairing's offer as
+  taken, and gives a saved pairing 5 s to reconnect before it looks for an offer. A stale pairing still takes a fresh
+  offer.
+- **Bug export (§29.7).** A bug exported to a GitHub issue is written under `.tapline/bugs/<app id>/<bug id>/` on the
+  `qa-reports` branch (was `.tapline/bugs/<bug id>/`). Two apps can hold the same bug id; exported to one repository
+  they no longer share a folder.
+- **One folder per app id.** A lowercase app id that is already a plain folder name keeps its folder under
+  `~/.tapline/bugs/` and `~/.tapline/explore/`, as in 1.8.5. Any other id now gets `_`, a cleaned lowercase part and a
+  hash of the id. Two ids that cleaned to the same name (`com.example/a`, `com.example_a`), or that differ only in case
+  (`com.example.Demo`, `com.example.demo`, one folder on Windows and macOS), no longer share one.
+  - Bugs and explore runs that 1.8.5 kept for such an id move into their app's folder when the host starts: each bug by
+    the app its own `finding.json` names, and each run by the app its own `report.json` names, so a 1.8.5 folder that
+    held two ids' bugs is split between them. Nothing moves over a bug or run already there; one that can't be read or
+    moved stays where it was, and isn't listed from the wrong folder.
+  - A bug's `.zip` from 1.8.5 stays in the old folder, because nothing outside it proves which app it belongs to. Export
+    the bug again (`--zip`) to make a new one next to it.
+- **Shared spec.** `docs/AGENT-TOOLS.md` is 1.16.2.
+- **Known limits.** The reload fix and the dry-run-first order have run in tests only; the joint check on the phone ran
+  with the 12 s limit and passed.
+
 ## 1.8.5, "the Bug Report" (2026-11-14)
 
 The one-page bug report, as AGENT-TOOLS 1.16.1 (agreed with Tapwright, sha256 88ce071f) defines it, plus three items
