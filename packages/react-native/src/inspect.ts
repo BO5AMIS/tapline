@@ -165,6 +165,8 @@ interface Collected {
   modals: Fiber[];
   /** The open modals that sit inside text marked as from others: what is shown inside one carries the marker too. */
   markedModals: Set<Fiber>;
+  /** The explore marks (skip, fill) in force at an open modal: what is shown inside it carries them too. */
+  modalMarks: Map<Fiber, ExploreMarks>;
   /** Set while a modal is open: the topmost modal's host, and the whole tree walked with it (the screen behind included). */
   behind?: { sheet: Fiber; nodes: HostNode[] };
 }
@@ -250,6 +252,7 @@ function walk(
       if (MODAL_HOSTS.has(hostType)) {
         out.modals.push(fiber);
         if (others) out.markedModals.add(fiber);
+        if (marks) out.modalMarks.set(fiber, marks);
       }
       const isText = TEXT_HOSTS.has(hostType);
       const row = inRow || owners.some(isListItemOwner);
@@ -290,16 +293,16 @@ function walk(
 }
 
 function collect(roots: FiberRootLike[]): Collected {
-  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
+  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set(), modalMarks: new Map() };
   for (const root of roots) walk(root.current.child, -1, [], false, out, []);
   // iOS hides what is behind a modal from accessibility, so a person (and Tapwright, which reads
   // that tree) sees only the topmost modal: list only that, no screen behind it and no tab bar.
   const top = out.modals[out.modals.length - 1];
   if (!top) return out;
-  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
+  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set(), modalMarks: new Map() };
   // The marker a wrapper outside the modal gave it is kept on what the modal shows.
-  walk(top.child, -1, [], false, only, [], undefined, false, out.markedModals.has(top));
-  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, markedModals: out.markedModals, behind: { sheet: top, nodes: out.nodes } };
+  walk(top.child, -1, [], false, only, [], undefined, false, out.markedModals.has(top), out.modalMarks.get(top));
+  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, markedModals: out.markedModals, modalMarks: out.modalMarks, behind: { sheet: top, nodes: out.nodes } };
 }
 
 /** What the place is made of, without describing any element (cheap enough for every commit); null without React roots. */

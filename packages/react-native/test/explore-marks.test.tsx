@@ -114,3 +114,47 @@ test('a fill value that is not true, vault: or fixture: is ignored', async () =>
   expect(byId('badmark')).toBeDefined();
   expect(byId('badmark')).not.toHaveProperty('exploreFill');
 });
+
+test('the marks of a wrapper outside an open modal stay on what the modal shows', async () => {
+  await unmountAll();
+  await mount(
+    <View>
+      <Wrapper {...mark({ taplineExploreSkip: true })}>
+        {React.createElement(
+          'RCTModalHostView',
+          { visible: true },
+          <View>
+            <Pressable testID="in-modal" accessibilityRole="button">
+              <Text>Inside the modal</Text>
+            </Pressable>
+          </View>,
+        )}
+      </Wrapper>
+      <Wrapper {...mark({ taplineExploreFill: true })}>
+        {React.createElement('RCTModalHostView', { visible: true }, <TextInput testID="modal-input" />)}
+      </Wrapper>
+    </View>,
+  );
+  useFrames({ 'in-modal': frame(0, 0, 300, 40), 'modal-input': frame(0, 50, 300, 40) });
+  const result = await tree({});
+  const byId = (id: string) => result.elements.find((e) => e.testID === id);
+  // Only the topmost modal is listed: the second one, with the fill mark.
+  expect(byId('modal-input')?.exploreFill).toBe(true);
+  await unmountAll();
+  await mount(
+    <Wrapper {...mark({ taplineExploreSkip: true })}>
+      {React.createElement(
+        'RCTModalHostView',
+        { visible: true },
+        <View>
+          <Pressable testID="in-modal" accessibilityRole="button">
+            <Text>Inside the modal</Text>
+          </Pressable>
+        </View>,
+      )}
+    </Wrapper>,
+  );
+  useFrames({ 'in-modal': frame(0, 0, 300, 40) });
+  const only = await tree({});
+  expect(only.elements.find((e) => e.testID === 'in-modal')?.exploreSkip).toBe(true);
+});
