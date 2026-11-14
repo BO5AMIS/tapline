@@ -29,6 +29,8 @@ export interface PidLockDeps {
   link?: (existing: string, path: string) => void;
   /** For tests: runs in the no-hard-link fallback, after the exclusive create and before the content is written. */
   afterCreate?: (path: string) => void;
+  /** For tests: runs in an unlock after a file was judged stuck and before it is removed (a new holder may get in between). */
+  beforeRemove?: (path: string) => void;
 }
 
 /** What a lock file holds: the owner token, the process id and the process's start time (null when it can't be told). */
@@ -206,6 +208,9 @@ export function takePidLock(deps: PidLockDeps, path: string): string | null {
   const token = `${randomBytes(8).toString("hex")}-${deps.pid}`;
   const mine = `${JSON.stringify({ owner: token, pid: deps.pid, started: deps.startOf?.(deps.pid) ?? null })}\n`;
   for (let attempt = 0; attempt < 6; attempt++) {
+    // Acquisition honours `.takeover`: while a takeover or an unlock holds it (a live holder), nobody creates the lock.
+    const gate = readText(takeoverPath);
+    if (gate !== null && typeof parseHolder(gate).pid === "number" && !isLeftover(deps, gate)) return null;
     const first = publishNew(deps, path, mine);
     if (first === "published") return token;
     if (first === "error") return null;
@@ -266,18 +271,33 @@ export function holdsPidLock(path: string, token: string): boolean {
 export type StuckState = { state: "stuck"; why: "empty" | "unreadable" | "dead"; pid?: number };
 export type PidLockState = { state: "absent" } | { state: "live"; pid: number } | StuckState;
 
-/** Looks at the lock at `path` without changing it. */
-export function inspectPidLock(deps: PidLockDeps, path: string): PidLockState {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (error) {
-    return codeOf(error) === "ENOENT" ? { state: "absent" } : { state: "stuck", why: "unreadable" };
-  }
+/** Judges the exact bytes of a lock file (a snapshot): the holder is looked at in THIS text, never in a later read of the file. */
+function judgeText(deps: PidLockDeps, text: string): Exclude<PidLockState, { state: "absent" }> {
   if (text.trim() === "") return { state: "stuck", why: "empty" };
   const holder = parseHolder(text);
   if (typeof holder.pid !== "number" || !Number.isInteger(holder.pid) || typeof holder.owner !== "string") return { state: "stuck", why: "unreadable" };
   return holderIsDead(deps, holder) ? { state: "stuck", why: "dead", pid: holder.pid } : { state: "live", pid: holder.pid };
+}
+
+/** What reading a file gave: its exact text, nothing there, or something that can't be read as text. */
+type Snapshot = { kind: "absent" } | { kind: "unreadable" } | { kind: "text"; text: string };
+
+function snapshotOf(path: string): Snapshot {
+  try {
+    return { kind: "text", text: readFileSync(path, "utf8") };
+  } catch (error) {
+    return codeOf(error) === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+  }
+}
+
+function judgeSnapshot(deps: PidLockDeps, snap: Snapshot): PidLockState {
+  if (snap.kind === "absent") return { state: "absent" };
+  return snap.kind === "unreadable" ? { state: "stuck", why: "unreadable" } : judgeText(deps, snap.text);
+}
+
+/** Looks at the lock at `path` without changing it. */
+export function inspectPidLock(deps: PidLockDeps, path: string): PidLockState {
+  return judgeSnapshot(deps, snapshotOf(path));
 }
 
 /** The words for a stuck lock's cause. */
@@ -299,32 +319,90 @@ export interface UnlockResult {
 }
 
 /**
+ * Removes the file at `path` that was judged stuck from `snap`, only if it still is what was judged: it is moved to a name of its
+ * own, and what was moved is compared with the snapshot (an unreadable snapshot is judged again on what was moved). A file that
+ * turns out to be another, live holder's is linked back and never deleted. Answers `removed`, `live` (with the pid of the holder
+ * put back) or `failed`.
+ */
+function removeJudged(deps: PidLockDeps, path: string, snap: Snapshot): "removed" | { live: number } | "failed" {
+  if (snap.kind === "absent") return "removed";
+  const tomb = tombstone(path);
+  try {
+    renameSync(path, tomb);
+  } catch {
+    return "failed";
+  }
+  const moved = snapshotOf(tomb);
+  const same = snap.kind === "text" ? moved.kind === "text" && moved.text === snap.text : judgeSnapshot(deps, moved).state !== "live";
+  if (same) {
+    try {
+      rmSync(tomb, { force: true });
+      return "removed";
+    } catch {
+      // can't be deleted (a folder, say): it is put back where it was
+    }
+  }
+  const state = judgeSnapshot(deps, moved);
+  const live = state.state === "live" ? { live: state.pid } : "failed";
+  if (moved.kind !== "text") {
+    try {
+      renameSync(tomb, path);
+    } catch {
+      // the name was taken meanwhile: what was moved stays under its tombstone for a person to look at
+    }
+    return live;
+  }
+  // Link it back (published whole); a live holder is never unlinked. If the name was taken meanwhile, the tombstone stays for a person.
+  if (publishNew(deps, path, moved.text) === "published") rmSync(tomb, { force: true });
+  return live;
+}
+
+/**
  * Removes the lock at `path` and its `.takeover`, but only when no holder is proven alive: an empty or unreadable file, or one whose
- * holder is dead (its process is gone, or has another start time). A live holder in either file refuses and removes nothing. A file
- * is removed only if it still holds what was judged (a lock that changed hands in between is put back).
+ * holder is dead (its process is gone, or has another start time). A live holder in either file refuses and removes nothing.
+ *
+ * It runs under the lock's own `.takeover` (published whole, as a takeover is), so it never overlaps a takeover, and acquisition
+ * honours `.takeover` too. Under it the exact bytes of the lock are read once, THAT snapshot's holder is judged, and the file is
+ * removed only if it still holds exactly those bytes (moved to a tombstone and compared; a different file is linked back).
+ * A `.takeover` that is itself stuck is cleared the same way first.
  */
 export function unlockPidLock(deps: PidLockDeps, path: string): UnlockResult {
-  const judged: Array<{ path: string; text: string | null; stuck: StuckState }> = [];
-  for (const file of [path, `${path}.takeover`]) {
-    const state = inspectPidLock(deps, file);
-    if (state.state === "live") return { status: "live", pid: state.pid, removed: [], path: file };
-    if (state.state === "stuck") judged.push({ path: file, text: readText(file), stuck: state });
-  }
-  if (judged.length === 0) return { status: "none", removed: [] };
+  const takeoverPath = `${path}.takeover`;
+  const mine = `${JSON.stringify({ owner: `${randomBytes(8).toString("hex")}-${deps.pid}`, pid: deps.pid, started: deps.startOf?.(deps.pid) ?? null })}\n`;
   const removed: Array<{ path: string; why: string }> = [];
-  for (const item of judged) {
-    if (item.text === null) {
-      // Unreadable: the content can't be compared, so a plain delete.
-      try {
-        unlinkSync(item.path);
-        removed.push({ path: item.path, why: stuckWords(item.stuck) });
-      } catch {
-        return { status: "failed", removed, path: item.path };
-      }
-      continue;
+  const failed = (file: string): UnlockResult => ({ status: "failed", removed, path: file });
+  let held = false;
+  for (let attempt = 0; attempt < 6 && !held; attempt++) {
+    const got = publishNew(deps, takeoverPath, mine);
+    if (got === "published") {
+      held = true;
+      break;
     }
-    if (removeIfUnchanged(deps, item.path, item.text)) removed.push({ path: item.path, why: stuckWords(item.stuck) });
-    else return { status: "failed", removed, path: item.path };
+    if (got === "error") return failed(takeoverPath);
+    const snap = snapshotOf(takeoverPath);
+    const state = judgeSnapshot(deps, snap);
+    if (state.state === "live") return { status: "live", pid: state.pid, removed, path: takeoverPath };
+    if (state.state === "absent") continue;
+    deps.beforeRemove?.(takeoverPath);
+    const outcome = removeJudged(deps, takeoverPath, snap);
+    if (outcome === "removed") removed.push({ path: takeoverPath, why: stuckWords(state) });
+    else if (outcome === "failed") return failed(takeoverPath);
+    else return { status: "live", pid: outcome.live, removed, path: takeoverPath };
   }
-  return { status: "removed", removed };
+  if (!held) return failed(takeoverPath);
+  try {
+    const snap = snapshotOf(path);
+    const state = judgeSnapshot(deps, snap);
+    if (state.state === "live") return { status: "live", pid: state.pid, removed, path };
+    if (state.state === "absent") return removed.length === 0 ? { status: "none", removed } : { status: "removed", removed };
+    deps.beforeRemove?.(path);
+    const outcome = removeJudged(deps, path, snap);
+    if (outcome === "removed") removed.push({ path, why: stuckWords(state) });
+    else if (outcome === "failed") return failed(path);
+    else return { status: "live", pid: outcome.live, removed, path };
+    return { status: "removed", removed };
+  } finally {
+    // only our own .takeover is released
+    if (readText(takeoverPath) === mine) removeIfUnchanged(deps, takeoverPath, mine);
+  }
 }
