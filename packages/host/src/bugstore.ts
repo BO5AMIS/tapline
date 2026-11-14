@@ -22,8 +22,11 @@ export const isBugId = (text: string): boolean => BUG_ID.test(text);
 
 /** A file of a bug folder holds a vault value, a code or a typed value: nothing is written (§29.6). */
 export class BugGateError extends Error {
-  constructor(readonly file: string) {
-    super(`a vault value was found in ${file}.`);
+  constructor(
+    readonly file: string,
+    why?: string,
+  ) {
+    super(why ?? `a vault value was found in ${file}.`);
     this.name = "BugGateError";
   }
 }
@@ -47,16 +50,39 @@ export type GateValues = readonly string[] | (() => readonly string[]);
 
 /** The width of the pieces the gate looks for (§29.6, §20.3). */
 const PIECE = 12;
-/** A value longer than this is looked for by its first and last characters of this length (a typed paste can be any size). */
-const PIECE_SOURCE_MAX = 2000;
+/** A value longer than this is cut into overlapping chunks of this length (a typed paste can be any size); no part of it is left out. */
+const CHUNK = 4000;
 
 const htmlEscaped = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+/** The parts of a value: itself, or overlapping chunks that share PIECE - 1 characters, so every 12-character window lies in a chunk. */
+function chunksOf(value: string): string[] {
+  const chars = [...value];
+  if (chars.length <= CHUNK) return [value];
+  const out: string[] = [];
+  for (let at = 0; ; at += CHUNK - (PIECE - 1)) {
+    out.push(chars.slice(at, at + CHUNK).join(""));
+    if (at + CHUNK >= chars.length) break;
+  }
+  return out;
+}
+
+/** A 53-bit hash of the PIECE characters at `at`. A clash can only make the gate refuse a file, never let one through. */
+function windowHash(text: string, at: number): number {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = at; i < at + PIECE; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = (Math.imul(h2 + c, 0x85ebca6b) ^ (h2 >>> 13)) >>> 0;
+  }
+  return h1 * 0x200000 + (h2 & 0x1fffff);
+}
+
 /** Every form of a value that a file could hold: itself, its encodings and its escaped markup. */
 function formsOfValue(value: string): string[] {
-  const base = [...value].length > PIECE_SOURCE_MAX ? [value.slice(0, PIECE_SOURCE_MAX), value.slice(-PIECE_SOURCE_MAX)] : [value];
   const out = new Set<string>();
-  for (const part of base) {
+  for (const part of chunksOf(value)) {
     for (const form of variantsOf(part)) out.add(form);
     out.add(part);
     out.add(htmlEscaped(part));
@@ -70,20 +96,18 @@ function formsOfValue(value: string): string[] {
  */
 function probeOf(values: readonly string[]): (text: string) => boolean {
   const whole = new Set<string>();
-  const long: string[] = [];
+  const hashes = new Set<number>();
   for (const value of values) {
     if ([...value].length < 3) continue;
     for (const form of formsOfValue(value)) {
-      whole.add(form);
-      if (form.length >= PIECE) long.push(form);
+      // A form of 12 or more characters is found by its pieces (the whole of it is among them); a shorter one only whole.
+      if (form.length < PIECE) whole.add(form);
+      for (let i = 0; i + PIECE <= form.length; i++) hashes.add(windowHash(form, i));
     }
   }
   return (text) => {
     for (const form of whole) if (text.includes(form)) return true;
-    if (text.length < PIECE || long.length === 0) return false;
-    const pieces = new Set<string>();
-    for (let i = 0; i + PIECE <= text.length; i++) pieces.add(text.slice(i, i + PIECE));
-    for (const form of long) for (let i = 0; i + PIECE <= form.length; i++) if (pieces.has(form.slice(i, i + PIECE))) return true;
+    for (let i = 0; i + PIECE <= text.length; i++) if (hashes.has(windowHash(text, i))) return true;
     return false;
   };
 }
@@ -419,8 +443,14 @@ export class BugStore {
 
   /** The texts of a bug's folder that an update keeps unchanged. */
   private retained(dir: string): Record<string, string> {
-    const script = readOrEmpty(join(dir, "repro.json"));
-    return script === "" ? {} : { "repro.json": script };
+    const path = join(dir, "repro.json");
+    if (!existsSync(path)) return {};
+    try {
+      return { "repro.json": readFileSync(path, "utf8") };
+    } catch {
+      // A script that exists and can't be read can't be checked, so the update is refused (never taken for an empty one).
+      throw new BugGateError("repro.json", "repro.json can't be read, so it can't be checked.");
+    }
   }
 
   exists(app: string, id: string): boolean {
