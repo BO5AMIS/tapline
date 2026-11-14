@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { readContainedText } from "./safefile.js";
 import { variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
@@ -202,7 +203,7 @@ export class BugStore {
     if (!isBugId(id)) return null;
     const dir = this.bugDir(app, id);
     try {
-      const parsed: unknown = JSON.parse(readFileSync(join(dir, "finding.json"), "utf8"));
+      const parsed: unknown = JSON.parse(readContainedText(dir, join(dir, "finding.json")));
       if (typeof parsed !== "object" || parsed === null || !("bug" in parsed)) return null;
       const { bug, ...finding } = parsed as { bug: BugMeta } & Record<string, unknown>;
       return { finding: finding as unknown as BugFinding, meta: bug, dir };
@@ -446,7 +447,7 @@ export class BugStore {
     const path = join(dir, "repro.json");
     if (!existsSync(path)) return {};
     try {
-      return { "repro.json": readFileSync(path, "utf8") };
+      return { "repro.json": readContainedText(dir, path) };
     } catch {
       // A script that exists and can't be read can't be checked, so the update is refused (never taken for an empty one).
       throw new BugGateError("repro.json", "repro.json can't be read, so it can't be checked.");
@@ -465,7 +466,7 @@ export function pictureRecord(bytes: Uint8Array, isPrivate: boolean, consent: bo
 
 function readOrEmpty(path: string): string {
   try {
-    return readFileSync(path, "utf8");
+    return readContainedText(dirname(path), path);
   } catch {
     return "";
   }

@@ -1,10 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BugFinding } from "../src/bug.js";
 import { makeBug, type BugContext, type MakeArgs } from "../src/bugreport.js";
 import { BugGateError, BugStore } from "../src/bugstore.js";
+import { AuditLog } from "../src/auditlog.js";
+import { exportBug } from "../src/bugexport.js";
+import { readContained } from "../src/safefile.js";
 
 // PR 14, Codex cycle 2 and CodeRabbit (R3). Every value is made up.
 
@@ -76,5 +79,37 @@ describe("R3-retained: a script that can't be read", () => {
     expect(meta).not.toBeNull();
     expect(readFileSync(join(made.dir, "finding.json"), "utf8")).toContain('"n": 1');
     void writeFileSync;
+  });
+});
+
+describe("R3-contained: reads inside a folder stay inside it", () => {
+  it("readContained reads a real file, refuses a link or a junction out of the folder, and a file that is a folder", () => {
+    const root = tmp("tapline-r3-root-");
+    const outside = tmp("tapline-r3-out-");
+    writeFileSync(join(root, "own.txt"), "mine");
+    writeFileSync(join(outside, "theirs.txt"), "theirs");
+    expect(readContained(root, join(root, "own.txt")).toString()).toBe("mine");
+    mkdirSync(join(root, "sub"));
+    expect(() => readContained(root, join(root, "sub"))).toThrow();
+    symlinkSync(outside, join(root, "link"), "junction");
+    expect(() => readContained(root, join(root, "link", "theirs.txt"))).toThrow(/outside/);
+    expect(() => readContained(root, join(root, "missing.txt"))).toThrow();
+  });
+
+  it("a bug folder's picture that is a link out of the folder is never exported", async () => {
+    const store = new BugStore(tmp("tapline-r3-store-"));
+    const made = makeBug(context(store), args(crash()));
+    const outside = tmp("tapline-r3-out-");
+    const target = join(outside, "other.jpg");
+    writeFileSync(target, new Uint8Array([0xff, 0xd8, 0x07, 0xff, 0xd9]));
+    try {
+      symlinkSync(target, join(made.dir, "picture.jpg"), "file");
+    } catch {
+      return; // a file link needs a privilege on Windows
+    }
+    const out = join(tmp("tapline-r3-zip-"), "x.zip");
+    const done = await exportBug({ store, redact: (t) => t, audit: new AuditLog(tmp("tapline-r3-audit-")), run: undefined, anyPath: true }, "com.example.wayfare", made.meta.id, { to: "zip", path: out, with_picture: true });
+    expect(done.ok).toBe(true);
+    expect(readFileSync(out).includes(Buffer.from([0xff, 0xd8, 0x07, 0xff, 0xd9]))).toBe(false);
   });
 });

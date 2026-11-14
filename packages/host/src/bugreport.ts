@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { ActionLogEntry } from "./actionlog.js";
 import { SYSTEM_SHEETS, stripPaths, type BugFinding, type BugHow } from "./bug.js";
+import { readContained } from "./safefile.js";
 import { appFolderName, type BugMade, type BugStore, type BugText, type GateValues } from "./bugstore.js";
 import { FINDING_KINDS, LOG_LINES_MAX, LOG_LINE_MAX, TYPED, cutText, redactFinding, reproScript, type Finding, type PathStep } from "./findings.js";
 import type { MapRoad, PlaceKey } from "./mapfile.js";
@@ -185,17 +186,8 @@ const inside = (root: string, path: string): boolean => {
   return full === base || full.startsWith(base + sep);
 };
 
-/** Whether the file's real place (links followed) is inside the folder's real place; a file that isn't there is not. */
-const insideReal = (root: string, path: string): boolean => {
-  try {
-    return inside(realpathSync(root), realpathSync(path));
-  } catch {
-    return false;
-  }
-};
-
-function readJson(path: string): unknown {
-  return JSON.parse(readFileSync(path, "utf8")) as unknown;
+function readJson(root: string, path: string): unknown {
+  return JSON.parse(readContained(root, path).toString("utf8")) as unknown;
 }
 
 /** Reads one finding, its script and its picture from an explore report folder (§25.10). A file the report names stays inside the folder. */
@@ -207,7 +199,7 @@ export function readRunFinding(runDir: string, findingId: string): RunRead {
   }
   let report: unknown;
   try {
-    report = readJson(reportPath);
+    report = readJson(runDir, reportPath);
   } catch {
     return { ok: false, code: "bad_params", message: `${shownPath(reportPath)} can't be read.` };
   }
@@ -222,18 +214,18 @@ export function readRunFinding(runDir: string, findingId: string): RunRead {
   const finding = found as unknown as BugFinding;
   let script: Record<string, unknown> | null = null;
   const repro = typeof found["repro"] === "string" ? found["repro"] : null;
-  if (repro !== null && /^repro\/[\w.-]+$/.test(repro) && inside(runDir, join(runDir, repro)) && insideReal(runDir, join(runDir, repro))) {
+  if (repro !== null && /^repro\/[\w.-]+$/.test(repro) && inside(runDir, join(runDir, repro))) {
     try {
-      const parsed = readJson(join(runDir, repro));
+      const parsed = readJson(runDir, join(runDir, repro));
       if (typeof parsed === "object" && parsed !== null) script = parsed as Record<string, unknown>;
     } catch {
       script = null;
     }
   }
   let picture: Uint8Array | null = null;
-  if (finding.picture !== null && typeof finding.picture === "object" && /^findings\/[\w.-]+$/.test(finding.picture.file) && inside(runDir, join(runDir, finding.picture.file)) && insideReal(runDir, join(runDir, finding.picture.file))) {
+  if (finding.picture !== null && typeof finding.picture === "object" && /^findings\/[\w.-]+$/.test(finding.picture.file) && inside(runDir, join(runDir, finding.picture.file))) {
     try {
-      picture = readFileSync(join(runDir, finding.picture.file));
+      picture = readContained(runDir, join(runDir, finding.picture.file));
     } catch {
       picture = null;
     }

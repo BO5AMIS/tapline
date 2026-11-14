@@ -61,6 +61,7 @@ import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.j
 import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { seenOf, type Seen } from "./seen.js";
+import { readContained, readContainedText } from "./safefile.js";
 import { type BugMade, BugGateError, BugStore, appFolderName, isBugId, type BugCheck, type BugCheckOptions } from "./bugstore.js";
 import { CHECK_TOOLS, RUN_LIMIT_MS, VERIFY_DEFAULT, runCheck, stepsProblem, type CheckHost, type StepResult } from "./bugcheck.js";
 import { bugTitle, cutDownLink, type BugFinding, type BugMeta } from "./bug.js";
@@ -2799,7 +2800,7 @@ export class TaplineTools {
     if (map === undefined) return not("this app reports no id of its own, so it has no map");
     let script: { start: string | null; steps: PathStep[] };
     try {
-      const parsed: unknown = JSON.parse(readFileSync(join(bug.dir, "repro.json"), "utf8"));
+      const parsed: unknown = JSON.parse(readContainedText(bug.dir, join(bug.dir, "repro.json")));
       const o = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
       script = { start: typeof o["start"] === "string" ? o["start"] : null, steps: Array.isArray(o["steps"]) ? (o["steps"] as PathStep[]) : [] };
     } catch {
@@ -3105,7 +3106,8 @@ export class TaplineTools {
       const file = stored.finding.picture?.file;
       if (source.how === "explore" && source.run !== undefined && file !== undefined && this.options.exploreDir !== undefined && /^findings\/[\w.-]+$/.test(file) && /^\d{8}T\d{6}Z(?:-\d+)?$/.test(source.run)) {
         try {
-          bytes = readFileSync(join(this.options.exploreDir, appFolderName(app), source.run, file));
+          const runFolder = join(this.options.exploreDir, appFolderName(app), source.run);
+          bytes = readContained(runFolder, join(runFolder, file));
         } catch {
           bytes = null;
         }
@@ -3121,7 +3123,7 @@ export class TaplineTools {
       const meta = (await this.bugChecked(store, made, runs, args)).meta;
       note = `${note}${note === "" ? "" : "\n"}${reproducedAnswer({ meta }, true)}`;
     }
-    const page = readFileSync(join(stored.dir, "report.md"), "utf8");
+    const page = readContainedText(stored.dir, join(stored.dir, "report.md"));
     return text(this.bugScrub([...(note !== "" ? [note] : []), page.trimEnd(), "", `Folder: ${shownPath(stored.dir)}`].join("\n")));
   }
 

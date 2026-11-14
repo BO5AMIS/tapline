@@ -1,3 +1,4 @@
+import { readContained, readContainedText } from "./safefile.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -131,7 +132,7 @@ function parcelOf(dir: string, record: BugMeta["picture_file"], withPicture: boo
   const files: Record<string, string> = {};
   for (const name of names) {
     try {
-      files[name] = readFileSync(join(dir, name), "utf8");
+      files[name] = readContainedText(dir, join(dir, name));
     } catch {
       // a file that isn't there isn't sent
     }
@@ -139,7 +140,13 @@ function parcelOf(dir: string, record: BugMeta["picture_file"], withPicture: boo
   const has = existsSync(join(dir, "picture.jpg"));
   if (!has) return { files, picture: null, withheld: false };
   // The privacy of the picture is the record of these exact bytes: bytes that have no record, or don't match it, count as private (§29.2).
-  const bytes = readFileSync(join(dir, "picture.jpg"));
+  let bytes: Buffer;
+  try {
+    bytes = readContained(dir, join(dir, "picture.jpg"));
+  } catch {
+    // a picture that lies outside the folder (a link), or can't be read, is not sent
+    return { files, picture: null, withheld: false };
+  }
   const verified = record !== undefined && record.sha256 === createHash("sha256").update(bytes).digest("hex");
   const privatePicture = verified ? record.private : true;
   const send = !privatePicture || withPicture;

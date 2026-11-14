@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -60,6 +60,28 @@ async function makeJsBug(r: Rig): Promise<string> {
   const answer = textOf(await r.s.tools.bugReport({ finding: f, verify: false }));
   return /bug_[0-9a-f]{16}(?:_\d+)?/.exec(answer)?.[0] as string;
 }
+
+describe("R3-link: a run's findings folder that links outside gives no picture, now or later", () => {
+  it("with_picture on a kept bug reads nothing through the link, and a zip export holds no such bytes", async () => {
+    const r = await rig();
+    await r.s.tools.explore({});
+    const appDir = join(r.s.exploreDir, APP.id);
+    const run = join(appDir, readdirSync(appDir).sort().at(-1) as string);
+    const report = JSON.parse(readFileSync(join(run, "report.json"), "utf8")) as { findings: Array<{ id: string; kind: string }> };
+    const f = report.findings.find((x) => x.kind === "js_error")?.id as string;
+    const outside = tmp("tapline-r3t-outside-");
+    renameSync(join(run, "findings"), join(outside, "findings"));
+    symlinkSync(join(outside, "findings"), join(run, "findings"), "junction");
+    const first = textOf(await r.s.tools.bugReport({ finding: f, verify: false }));
+    const id = /bug_[0-9a-f]{16}(?:_\d+)?/.exec(first)?.[0] as string;
+    const dir = join(r.bugsDir, APP.id, id);
+    expect(existsSync(join(dir, "picture.jpg"))).toBe(false);
+    const later = textOf(await r.s.tools.bugReport({ bug: id, with_picture: true }));
+    expect(later).toContain("can't be added");
+    expect(existsSync(join(dir, "picture.jpg"))).toBe(false);
+    expect(readdirSync(dir)).not.toContain("picture.jpg");
+  });
+});
 
 describe("R3-pin: the check never sends to another app", () => {
   it("another app made current while the commands answer is pending gets no reset", async () => {
