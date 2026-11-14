@@ -1,4 +1,4 @@
-import { redactContent } from "./accounts.js";
+import { redactWhole } from "./accounts.js";
 
 // Findings (AGENT-TOOLS 1.15 §27): one shape for what a test or an explore found, whichever tool found it.
 
@@ -50,11 +50,11 @@ export const firstLine = (text: string): string => text.split("\n")[0] ?? "";
 
 /**
  * Every text of a finding goes through the redaction of §20.3 first (`got`, `expected`, `path`, `logs`, `crash`, `component_stack`),
- * and is cut only after that. `${…}` pieces (the typed placeholder) are syntax and stay.
+ * and is cut only after that. Each text is redacted WHOLE; only a value that is exactly the typed placeholder (which the tool wrote) is kept.
  */
 export function redactFinding<T>(value: T, redact: (text: string) => string): T {
   // A finding's texts are app content, not validated syntax: only the typed placeholder is kept, any other `${…}` is checked like any text.
-  return redactContent(value, redact, (piece) => piece === TYPED) as T;
+  return redactWhole(value, redact, (text) => text === TYPED) as T;
 }
 
 /** What a finding is before it has its id: the rest of the shape, as the engine knows it. */

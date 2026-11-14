@@ -986,6 +986,19 @@ export function redactContent(value: unknown, redact: (text: string) => string, 
   return value;
 }
 
+/**
+ * Like `redactContent`, but every string reaches the redactor WHOLE: a secret that crosses a `${…}`-shaped span is still matched.
+ * A string is kept untouched only when `keep` says the tool itself generated it (the whole value, never a shape inside text).
+ */
+export function redactWhole(value: unknown, redact: (text: string) => string, keep: (text: string) => boolean): unknown {
+  if (typeof value === "string") return keep(value) ? value : redact(value);
+  if (Array.isArray(value)) return value.map((item) => redactWhole(item, redact, keep));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactWhole(item, redact, keep)]));
+  }
+  return value;
+}
+
 const isPlaceholder = (): boolean => true;
 
 /** Keys whose values are the tool's own words (a tool or method name, a time, a format), never a typed or shown value. */
