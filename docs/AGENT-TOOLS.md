@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Version 1.14.2 (2026-11-14) closes gaps the second builds of §19 and §22 showed: a lock on every change to the policy file (§19.5), grant names that differ only in case are one name (§19.1), a claim that crosses an hour or a day (§19.4), a run lock published whole, and a way out of a stuck lock (§22.3). Both leads agree on it. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -1638,7 +1638,9 @@ Grants live in the policy file (§11.1), which becomes version 2. A version 1 fi
              "route": "post_update", "perDay": 3, "perHour": 1, "until": "2026-11-21",
              "quiet": {"from": "22:00", "to": "07:00"}, "draftsOnly": false}]}
 ```
-- `name`, `app`, `words` and `until` are required. `name` is unique in the file.
+- `name`, `app`, `words` and `until` are required. `name` is unique in the file. (1.14.2) Two grant names that are equal
+  ignoring ASCII case are one name: the later one in the file is refused, whether either is active or revoked. A grant's
+  uses folder is its ASCII-lower-cased name (§19.4).
 - `app`: the bundle id (Tapwright) or the app's id (Tapline) the grant covers.
 - `words`: policy words (§11.1) it covers.
 - `route`: optional. The grant covers only touches made while that saved route runs (a `drive` of it, a `replay`, a
@@ -1702,8 +1704,9 @@ A mismatch of the app, the word or the route is not noted: that grant simply isn
 
 - A use is counted just before the touch is made. (1.14.1) The use claims its slot first (below); a use proven not
   delivered gives its slot back.
-- (1.14.1) **Uses are slot files next to the policy file, not per tool:** `<policy file>.uses/<grant name>/<YYYY-MM-DD>/<k>`
-  for the day, and `<policy file>.uses/<grant name>/<YYYY-MM-DDTHH>/h<k>` for the hour. Both tools then share the counts
+- (1.14.1) **Uses are slot files next to the policy file, not per tool:**
+  `<policy file>.uses/<grant name, lower-cased>/<YYYY-MM-DD>/<k>` for the day, and
+  `<policy file>.uses/<grant name, lower-cased>/<YYYY-MM-DDTHH>/h<k>` for the hour. Both tools then share the counts
   exactly when they share the policy file, and never otherwise. The day and the hour are local time, as for quiet hours and
   `until`. `perHour` is the clock hour.
 - **A use claims a slot.**
@@ -1713,6 +1716,8 @@ A mismatch of the app, the word or the route is not noted: that grant simply isn
   - Each claim creates the file with an exclusive create (`O_CREAT|O_EXCL`, `wx`). The first k that creates is the use.
   - If every slot exists, the grant doesn't cover the touch.
   - If the day claim fails, delete your own hour slot.
+  - (1.14.2) After a claim the clock is read again: a slot in an earlier day or hour than now is deleted and claimed again
+    in the current one. The check right before the touch does the same.
 - **Folders** are created "exist ok", because two claimers may create the same folder at once. Only the slot file needs
   the exclusive create.
 - **Reuse.** A claim always tries k from 1, so a slot freed by a give-back is reused. The count is the number of slot
@@ -1738,6 +1743,10 @@ A mismatch of the app, the word or the route is not noted: that grant simply isn
   creates a new grant (§19.6).
 - Each touch under a grant reads the file again (its modification time), so a revocation by either tool, or by hand, is
   seen at the very next touch, also in the other tool's running route.
+- (1.14.2) **The policy edit lock.** Every change to the policy file (a grant created or renewed, `draftsOnly` lifted,
+  `--revoke-all`) is made under `<policy file>.edit.lock`, taken like the run lock (§22.3): published whole, never
+  displaced while its holder lives. Under the lock the file is read again, the change is applied to that content, and it
+  is written with a temporary file and a rename. A change that can't get the lock within a few seconds writes nothing.
 
 ### 19.6 Creating, renewing and lifting
 
@@ -1970,12 +1979,19 @@ One file per schedule, `~/.<tool>/schedules/<name>.json` (`~/.tapwright/schedule
   dropped with `skipped: the previous run is still going`.
   - (1.14.1) **The run lock** answers "is a run of this schedule still going". The lock file is `{"owner", "pid",
     "started"}`; `started` is the process start time when the OS gives it, so a reused pid isn't mistaken for the holder.
-  - **Acquire** with an exclusive create.
+  - **Acquire** by publishing the lock whole (below).
   - **Stale** only when its pid no longer runs on this computer, or its start time differs.
-  - **Takeover** goes through `<lock>.takeover`, created with an exclusive create. Under it, read the lock again; if it
+  - **Takeover** goes through `<lock>.takeover`, published whole, as the lock is. Under it, read the lock again; if it
     is unchanged and the holder is dead, unlink it and create your own; then remove `.takeover`.
   - **A live holder is never displaced, however long it runs.** The run gives `skipped: the previous run is still going`.
   - **Release** only if the content is still yours.
+  - (1.14.2) **A lock is published whole:** the full JSON is written to a temporary file and hard-linked to the lock's
+    name. Where links aren't available, it is created exclusively and written in place. A lock that is empty or can't be
+    read is never taken over: only a holder proven dead is. There is no age rule. The `.takeover` file and the policy
+    edit lock (§19.5) are published the same way.
+  - (1.14.2) **A way out.** `doctor` names a lock that is stuck (empty, unreadable, or held by a process that is gone)
+    with its path. A person removes it with `<tool> schedule unlock <name>` or `<tool> grants unlock`, which refuse while
+    a live holder is proven.
 - **The phone is locked** (Tapwright): the run unlocks only with `phone.passcode` from the user's file (§18.6; Tapwright
   1.7). Without it: `skipped: the phone is locked`.
 - **Tapline** can't open its app. A run starts only while the app is open, or after Tapwright opens it (§18.11);

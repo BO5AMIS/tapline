@@ -3,7 +3,7 @@
 ## 1.7.0, "the Control Update" (unreleased)
 
 Standing permissions, personal data by name, safety for text written by strangers, scheduled runs, and a record of
-all of it, as AGENT-TOOLS 1.14.1 (agreed with Tapwright, sha256 6bc2d5bb) defines them. Tapline works inside the user's own
+all of it, as AGENT-TOOLS 1.14.2 (agreed with Tapwright, sha256 3faca1e4) defines them. Tapline works inside the user's own
 app; the whole phone (system apps, notifications, unattended running) is Tapwright's.
 
 - **Grants (§19).**
@@ -17,6 +17,8 @@ app; the whole phone (system apps, notifications, unattended running) is Tapwrig
   - Some touches can never be granted: payments, account deletion, cards, and the block list.
   - After a person's "Allow once" in the chat dialog, the host may offer a grant. Only the person's answer creates it.
   - The live view's Pause stops every grant, and `tapline grants --revoke-all` revokes them all.
+  - Every change to the policy file is made under an edit lock that no one can take from a living holder. The file is
+    read again under the lock, so a grant created during a revoke can't undo it.
   - `tapline grants` lists the grants, and session reports gain a `Grants:` line.
 - **The vault (§20).**
   - The test-accounts file grows into a vault: accounts, cards, addresses, identities and notes, typed by name with
@@ -40,6 +42,8 @@ app; the whole phone (system apps, notifications, unattended running) is Tapwrig
     reason, when the phone is in use, the app isn't open, or a run is still going.
   - A run reuses a running `tapline host` only when that host's policy, accounts and maps match the schedule's, by
     content. It stays pinned to that host instance, and holds the phone with a lease that other agents can't spoof.
+  - Locks are published whole and taken over only from a holder proven dead. `tapline doctor` names a stuck lock, and
+    `tapline schedule unlock <name>` and `tapline grants unlock` remove one when no living holder is proven.
 - **The audit log (§23).** Grant uses, revocations, approvals, vault and code uses, and scheduled runs are recorded in
   `~/.tapline/audit/`, and kept 90 days. Read them with `tapline audit-log`.
 - **Also from AGENT-TOOLS 1.13.3:**
