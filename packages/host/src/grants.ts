@@ -189,8 +189,42 @@ export function parseGrants(raw: unknown, today: string, block: (app: string) =>
  * `generation` is the fence (PR 12 review): it goes up by one at every write, and a writer that finds it changed since it read
  * the file, or that no longer owns the lock, writes nothing. A file without it (the other tool's) reads as generation 0.
  */
-const stateSchema = z.object({ version: z.literal(1), generation: z.number().int().min(0).optional(), uses: z.record(z.string(), z.record(z.string(), z.array(z.string()))) });
+/** The uses of a state file, copied entry by entry as own properties (a schema's record would drop a grant named `__proto__`); null when the shape is wrong. */
+function parseUses(value: unknown): Uses | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const uses: Uses = {};
+  for (const [name, days] of Object.entries(value)) {
+    if (typeof days !== "object" || days === null || Array.isArray(days)) return null;
+    const mine = ensureUses(uses, name);
+    for (const [date, stamps] of Object.entries(days)) {
+      if (!Array.isArray(stamps) || !stamps.every((stamp) => typeof stamp === "string")) return null;
+      Object.defineProperty(mine, date, { value: [...stamps], enumerable: true, writable: true, configurable: true });
+    }
+  }
+  return uses;
+}
 type Uses = Record<string, Record<string, string[]>>;
+
+const hasOwn = (object: object, key: string): boolean => Object.prototype.hasOwnProperty.call(object, key);
+
+/** A grant's own entry in the uses: a name like `constructor` or `__proto__` is never read through the prototype chain. */
+/** The one key a grant scope is compared with: the app's id, or its name when it has none (the Grant.app contract). */
+function appKey(app: { id?: string; name: string }): string {
+  return app.id ?? app.name;
+}
+
+function usesOf(uses: Uses, name: string): Record<string, string[]> | undefined {
+  return hasOwn(uses, name) ? uses[name] : undefined;
+}
+
+/** The grant's entry, created as an own property (plain assignment is not safe for `__proto__`). */
+function ensureUses(uses: Uses, name: string): Record<string, string[]> {
+  const found = usesOf(uses, name);
+  if (found !== undefined) return found;
+  const created: Record<string, string[]> = {};
+  Object.defineProperty(uses, name, { value: created, enumerable: true, writable: true, configurable: true });
+  return created;
+}
 interface State {
   uses: Uses;
   generation: number;
@@ -322,8 +356,12 @@ export class GrantBook {
       return errorCode(error) === "ENOENT" ? { uses: {}, generation: 0 } : null;
     }
     try {
-      const parsed = stateSchema.safeParse(JSON.parse(text));
-      return parsed.success ? { uses: parsed.data.uses, generation: parsed.data.generation ?? 0 } : null;
+      const file: unknown = JSON.parse(text);
+      if (typeof file !== "object" || file === null || Array.isArray(file)) return null;
+      const { version, generation, uses } = file as { version?: unknown; generation?: unknown; uses?: unknown };
+      if (version !== 1 || (generation !== undefined && !(typeof generation === "number" && Number.isInteger(generation) && generation >= 0))) return null;
+      const parsed = parseUses(uses);
+      return parsed === null ? null : { uses: parsed, generation: typeof generation === "number" ? generation : 0 };
     } catch {
       return null;
     }
@@ -479,7 +517,7 @@ export class GrantBook {
     const notes: string[] = [];
     const asked: string[] = [];
     for (const grant of policy.grants) {
-      if (grant.app !== touch.app.id && grant.app !== touch.app.name) continue;
+      if (grant.app !== appKey(touch.app)) continue;
       if (matchWord(grant.words, touch.element) === null) continue;
       if (grant.route !== undefined && !touch.routes.includes(grant.route)) continue;
       const name = JSON.stringify(grant.name);
@@ -500,7 +538,7 @@ export class GrantBook {
         continue;
       }
       // A draftsOnly grant only looks: its touch stops at a draft, and a draft a person sends counts no use (§19.3, §21.3).
-      const counted = mode === "use" && !grant.draftsOnly ? await this.use(grant, at, detail, touch.app, policy.grants) : await this.peek(grant, at);
+      const counted = mode === "use" && !grant.draftsOnly ? await this.use(grant, at, detail, touch, policy.grants) : await this.peek(grant, at);
       if (counted === null) continue;
       if (typeof counted === "string") {
         notes.push(doesnt(counted));
@@ -525,14 +563,19 @@ export class GrantBook {
     const grant = policy.grants.find((g) => g.name === use.name);
     if (grant === undefined) return false;
     const at = this.now();
-    const minutes = at.getHours() * 60 + at.getMinutes();
-    if (grant.app !== touch.app.id && grant.app !== touch.app.name) return false;
+    if (!this.holds(grant, touch, at)) return false;
+    const state = await this.readState();
+    return (state !== null && usesOf(state.uses, use.name)?.[use.date]?.includes(use.stamp)) === true;
+  }
+
+  /** Whether this grant, as the policy file has it now, covers the touch at this time: app, word, route, revocation, end, quiet hours, drafts. */
+  private holds(grant: Grant, touch: GrantTouch, at: Date): boolean {
+    if (grant.app !== appKey(touch.app)) return false;
+    if (matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], touch.element) !== null) return false;
     if (matchWord(grant.words, touch.element) === null) return false;
     if (grant.route !== undefined && !touch.routes.includes(grant.route)) return false;
     if (grant.revoked !== undefined || grant.draftsOnly || localDate(at) > grant.until) return false;
-    if (grant.quiet !== undefined && inQuiet(grant.quiet, minutes)) return false;
-    const state = await this.readState();
-    return state?.uses[use.name]?.[use.date]?.includes(use.stamp) === true;
+    return grant.quiet === undefined || !inQuiet(grant.quiet, at.getHours() * 60 + at.getMinutes());
   }
 
   /** A use taken back: the touch wasn't made after all (§19.4: a use is counted when the touch is made). */
@@ -541,11 +584,12 @@ export class GrantBook {
       const state = await this.readState();
       if (state === null) return;
       const uses = state.uses;
-      const list = uses[use.name]?.[use.date];
+      const mineUses = usesOf(uses, use.name);
+      const list = mineUses?.[use.date];
       const at = list?.indexOf(use.stamp) ?? -1;
       if (list === undefined || at < 0) return;
       list.splice(at, 1);
-      if (list.length === 0 && uses[use.name] !== undefined) delete uses[use.name]?.[use.date];
+      if (list.length === 0 && mineUses !== undefined) delete mineUses[use.date];
       // A holder that lost the lock gives nothing back: the use stays counted, the safe side.
       await this.writeState(uses, state.generation, hold).catch(() => undefined);
     });
@@ -553,7 +597,7 @@ export class GrantBook {
 
   /** Counts as the state file has them: today's, and the last hour's (a rolling 60 minutes). */
   private counts(uses: Uses, grant: Grant, at: Date): { today: number; hour: number } {
-    const mine = uses[grant.name] ?? {};
+    const mine = usesOf(uses, grant.name) ?? {};
     const today = (mine[localDate(at)] ?? []).length;
     const since = at.getTime() - 3_600_000;
     const yesterday = localDate(new Date(at.getTime() - 86_400_000));
@@ -580,9 +624,10 @@ export class GrantBook {
   }
 
   /** Takes the lock, reads the file, checks the counts, writes the audit line, records the use, writes the file: one step (§19.4). */
-  private async use(grant: Grant, at: Date, detail: string, app: { id?: string; name: string }, all: Grant[]): Promise<{ today: number; stamp: string; date: string } | string | null> {
+  private async use(grant: Grant, at: Date, detail: string, touch: GrantTouch, all: Grant[]): Promise<{ today: number; stamp: string; date: string } | string | null> {
     const audit = this.options.audit;
     if (audit === null) return null;
+    const app = touch.app;
     const done = await this.withLock(async (hold) => {
       const state = await this.readState();
       // A state file that doesn't parse is left alone; every grant is used up (§19.4).
@@ -602,9 +647,13 @@ export class GrantBook {
         return null;
       };
       if (!(await hold.owns())) return lost();
+      // The policy is read again under the lock, and the clock again: a revocation, an end or quiet hours that came in while this use waited win (§19.4).
+      const policy = await this.readPolicy();
+      const fresh = policy?.grants.find((g) => g.name === grant.name);
+      if (fresh === undefined || !this.holds(fresh, touch, this.now()) || this.limit(fresh, this.counts(uses, fresh, at)) !== null) return null;
       // A grant needs its line: when it can't be written, the grant doesn't cover the touch (§23).
       if (!audit.write({ kind: "grant", app: app.id ?? app.name, name: grant.name, detail: `${detail} (${count} of ${grant.perDay} today)` })) return null;
-      const mine = (uses[grant.name] ??= {});
+      const mine = ensureUses(uses, grant.name);
       (mine[date] ??= []).push(stamp);
       this.prune(uses, date, all);
       try {
