@@ -1864,15 +1864,22 @@ export class TaplineTools {
     // Inside an explore run every request that is not a read is held to the run's rules, whoever sent it: the explorer's own move,
     // a saved route's step, a drive leg, a recovery or a reset (§25.5). Nothing can reach the app around this one gate.
     const scope = this.exploreScope.getStore();
-    if (scope?.run.pin !== undefined) {
-      const now = this.host.current();
-      if (now === undefined || identityOf(now) !== scope.run.pin) return Promise.reject(new TaplineError("not_connected", "the app the check runs on is no longer the one in front, so nothing more is sent."));
-    }
-    if (scope?.run.signal?.aborted === true) return Promise.reject(new TaplineError("timeout", "the check ran out of time, so nothing more is sent."));
+    const refused = this.runRefusal(scope);
+    if (refused !== null) return Promise.reject(refused);
     const [method, params, options] = args;
     const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
     if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) return this.host.request(...args);
     return this.exploreSend(scope, args);
+  }
+
+  /** Why a request of a pinned or timed run must not go out now (another app is in front, or the deadline passed), or null. Checked again right before a send that follows awaited checks. */
+  private runRefusal(scope: ExploreScope | undefined): TaplineError | null {
+    if (scope?.run.pin !== undefined) {
+      const now = this.host.current();
+      if (now === undefined || identityOf(now) !== scope.run.pin) return new TaplineError("not_connected", "the app the check runs on is no longer the one in front, so nothing more is sent.");
+    }
+    if (scope?.run.signal?.aborted === true) return new TaplineError("timeout", "the check ran out of time, so nothing more is sent.");
+    return null;
   }
 
   /** The explore gate: the budget, then the typing rules; counts the request it lets through. */
@@ -1891,6 +1898,9 @@ export class TaplineTools {
       if (method !== "type") throw new TaplineError("not_allowed", "explore types only through its own fill, never inside a drive (explore skip: policy).");
       params = await this.exploreTyping(scope, rawParams, options?.sessionId);
     }
+    // The touch floor and the typing rules awaited requests of their own: the pin and the deadline are checked again immediately before the send.
+    const refused = this.runRefusal(scope);
+    if (refused !== null) throw refused;
     run.used += 1;
     return this.host.request(method, params, options);
   }

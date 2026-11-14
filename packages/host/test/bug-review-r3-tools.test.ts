@@ -100,3 +100,29 @@ describe("R3-pin: the check never sends to another app", () => {
     expect(r.s.world.resets).toBe(0);
   });
 });
+
+interface GateSpy {
+  exploreTouchGate: (inner: string, method: string, rawParams: unknown, sessionId: string | undefined) => Promise<void>;
+}
+
+describe("R4-final-pin: the pin is checked again right before the touch is sent", () => {
+  it("another app made current while the floor's answer is pending gets no touch, and the first app gets none either", async () => {
+    const r = await rig();
+    const id = await makeJsBug(r);
+    const spy = r.s.tools as unknown as GateSpy;
+    const original = spy.exploreTouchGate.bind(r.s.tools);
+    let switched = false;
+    spy.exploreTouchGate = async (inner, method, rawParams, sessionId) => {
+      await original(inner, method, rawParams, sessionId); // the floor's tree answer has come back and passed
+      if (inner === "press" && !switched) {
+        switched = true;
+        const other = await FakeApp.connect(r.s.port, { app: { name: "Other", id: "com.example.other", version: "2.0.0", build: "9" }, capabilities: ["tree", "press", "logs", "dryRun", "place", "places"] }, () => ({ ok: true, result: {} }));
+        apps.push(other.app);
+      }
+    };
+    r.s.world.pressed.length = 0;
+    await r.s.tools.bugReport({ bug: id, verify: 1 });
+    expect(switched).toBe(true);
+    expect(r.s.world.pressed).not.toContain("open-form");
+  });
+});
