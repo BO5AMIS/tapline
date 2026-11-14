@@ -167,8 +167,10 @@ async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCl
   if (first === "verify") {
     if (second === undefined || !isBugId(second)) return refuse(BUG_USAGE);
     if (deps.check === undefined) return refuse(NO_VERIFY);
-    const found = store.locate(second);
-    if (found === null) return refuse(`no bug ${second}; the bugs kept are in ${shownPath(store.base)}.`);
+    const looked = store.lookup(second, flags.app);
+    if (looked === null) return refuse(`no bug ${second}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return refuse(looked.ambiguous);
+    const found = looked.found;
     const reproduced = await deps.check({ app: found.app, id: second, dir: found.stored.dir, finding: found.stored.finding, meta: found.stored.meta }, verify > 0 ? verify : 3, checkOptions);
     const meta = store.recordCheck(found.app, second, reproduced, deps.redact, deps.gateValues) ?? found.stored.meta;
     deps.out(deps.redact(reproducedAnswer({ meta }, true)));
@@ -179,8 +181,10 @@ async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCl
     return exportCommand(second, flags, deps, store, refuse);
   }
   if (isBugId(first) && second === undefined) {
-    const found = store.locate(first);
-    if (found === null) return refuse(`no bug ${first}; the bugs kept are in ${shownPath(store.base)}.`);
+    const looked = store.lookup(first, flags.app);
+    if (looked === null) return refuse(`no bug ${first}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return refuse(looked.ambiguous);
+    const found = looked.found;
     deps.out(deps.redact([readFileSync(join(found.stored.dir, "report.md"), "utf8").trimEnd(), "", `Folder: ${shownPath(found.stored.dir)}`].join("\n")));
     return 0;
   }
@@ -216,8 +220,10 @@ async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCl
 /** `tapline bug export <bug id> --issue owner/name | --zip <path>` (§29.7): the person is asked `Send to GitHub? [y/N]`; with no terminal `--yes` answers. */
 async function exportCommand(id: string, flags: BugFlags, deps: BugCliDeps, store: BugStore, refuse: (message: string) => number): Promise<number> {
   if ((flags.issue === undefined) === (flags.zip === undefined)) return refuse("give exactly one of --issue owner/name and --zip <path>.\n" + BUG_USAGE);
-  const found = store.locate(id);
-  if (found === null) return refuse(`no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+  const looked = store.lookup(id, flags.app);
+  if (looked === null) return refuse(`no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+  if ("ambiguous" in looked) return refuse(looked.ambiguous);
+  const found = looked.found;
   const withPicture = flags["with-picture"] === true;
   let target: BugExportTarget;
   if (flags.issue !== undefined) {

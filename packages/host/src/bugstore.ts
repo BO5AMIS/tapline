@@ -187,15 +187,49 @@ export class BugStore {
     }
   }
 
-  /** The app a kept bug id belongs to (the id is searched in every app's folder). */
+  /**
+   * The app a kept bug id belongs to. With `app`, that app's bug. Without, the id is searched in every app's folder, and an id that two apps hold is
+   * never taken from the first: it answers null (`holders` says which apps).
+   */
   locate(id: string, app?: string): { app: string; stored: Stored } | null {
     if (!isBugId(id)) return null;
-    const apps = app !== undefined ? [app] : this.appFolders();
-    for (const name of apps) {
-      const stored = this.read(name, id);
-      if (stored !== null) return { app: stored.finding.app, stored };
+    if (app !== undefined) {
+      const stored = this.read(app, id);
+      return stored === null ? null : { app: stored.finding.app, stored };
+    }
+    const all = this.found(id);
+    return all.length === 1 ? (all[0] as { app: string; stored: Stored }) : null;
+  }
+
+  /**
+   * `locate` with the reason when it finds nothing: no such bug, or an id that several apps hold (the person names the app). `app` is the app asked for;
+   * with `prefer` it is only the first choice (the app in front), and any other app's bug is taken when it is the only one.
+   */
+  lookup(id: string, app?: string, prefer = false): { found: { app: string; stored: Stored } } | { ambiguous: string } | null {
+    const own = app !== undefined ? this.locate(id, app) : null;
+    if (own !== null) return { found: own };
+    if (app === undefined || prefer) {
+      const any = this.locate(id);
+      if (any !== null) return { found: any };
+      const holders = this.holders(id);
+      if (holders.length > 1) return { ambiguous: `bug ${id} is kept for ${holders.length} apps (${holders.join(", ")}); say which one (--app <app id>, or open that app).` };
     }
     return null;
+  }
+
+  /** The apps that hold a bug with this id (two apps can: the id doesn't hold the app). */
+  holders(id: string): string[] {
+    return this.found(id).map((f) => f.app);
+  }
+
+  private found(id: string): Array<{ app: string; stored: Stored }> {
+    if (!isBugId(id)) return [];
+    const all: Array<{ app: string; stored: Stored }> = [];
+    for (const name of this.appFolders()) {
+      const stored = this.read(name, id);
+      if (stored !== null) all.push({ app: stored.finding.app, stored });
+    }
+    return all;
   }
 
   private appFolders(): string[] {
@@ -335,7 +369,7 @@ export class BugStore {
     }
     // finding.json is redacted again when the bug is touched: a value added to the vault since counts (§29.6).
     const first = redactFinding(stored, input.redact);
-    const files = this.finish(input, md, { "finding.json": `${JSON.stringify({ ...first, bug: meta }, null, 2)}\n` });
+    const files = this.finish(input, md, { "finding.json": `${JSON.stringify({ ...first, bug: meta }, null, 2)}\n` }, this.retained(dir));
     for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text, { mode: 0o600 });
     if (picture !== null) writeFileSync(join(dir, "picture.jpg"), picture, { mode: 0o600 });
     this.prune(seenNow.app, meta.id);
@@ -348,7 +382,7 @@ export class BugStore {
     if (stored === null) return null;
     const meta: BugMeta = { ...stored.meta, reproduced };
     const md = bugPageMarkdown({ finding: stored.finding, meta, pictureFile: meta.picture_included ? "picture.jpg" : null });
-    const files = this.finish({ redact, ...(gateValues !== undefined ? { gateValues } : {}) }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
+    const files = this.finish({ redact, ...(gateValues !== undefined ? { gateValues } : {}) }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` }, this.retained(stored.dir));
     for (const [name, text] of Object.entries(files)) writeFileSync(join(stored.dir, name), text, { mode: 0o600 });
     return meta;
   }
@@ -362,7 +396,7 @@ export class BugStore {
     // The bytes are the first finding's own (the explore report's file); a person asked for them, so the record says so.
     const meta: BugMeta = { ...stored.meta, picture_included: true, picture_file: pictureRecord(bytes, stored.finding.picture.private, true) };
     const md = replaceSection(readOrEmpty(join(stored.dir, "report.md")), "Picture", pictureLines(stored.finding, meta, "picture.jpg"));
-    const files = this.finish({ redact, ...(gateValues !== undefined ? { gateValues } : {}) }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
+    const files = this.finish({ redact, ...(gateValues !== undefined ? { gateValues } : {}) }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` }, this.retained(stored.dir));
     for (const [name, text] of Object.entries(files)) writeFileSync(join(stored.dir, name), text, { mode: 0o600 });
     writeFileSync(join(stored.dir, "picture.jpg"), bytes, { mode: 0o600 });
     return "added";
@@ -372,13 +406,21 @@ export class BugStore {
    * The gate (§29.6): every text of the folder as it will be written. A page the redactor would still change is redacted once more; any text that
    * still fails refuses, and nothing is written. `report.html` is made from the page that passed.
    */
-  private finish(input: Pick<BugMakeInput, "redact" | "gateValues">, md: string, others: Record<string, string>): Record<string, string> {
+  private finish(input: Pick<BugMakeInput, "redact" | "gateValues">, md: string, others: Record<string, string>, retained: Record<string, string> = {}): Record<string, string> {
     let page = md;
     if (gateFiles({ "report.md": page }, input.redact, input.gateValues) !== null) page = input.redact(page);
     const files: Record<string, string> = { "report.md": page, "report.html": bugPageHtml(page), ...others };
-    const failed = gateFiles(files, input.redact, input.gateValues);
+    // A text of the folder that this write keeps as it is (the script) is checked too: a value that reached the vault since the bug was made can't
+    // stay in a folder that is being updated. The script isn't rewritten, so the update is refused and nothing is written.
+    const failed = gateFiles({ ...files, ...retained }, input.redact, input.gateValues);
     if (failed !== null) throw new BugGateError(failed);
     return files;
+  }
+
+  /** The texts of a bug's folder that an update keeps unchanged. */
+  private retained(dir: string): Record<string, string> {
+    const script = readOrEmpty(join(dir, "repro.json"));
+    return script === "" ? {} : { "repro.json": script };
   }
 
   exists(app: string, id: string): boolean {
