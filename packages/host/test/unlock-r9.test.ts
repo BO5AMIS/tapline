@@ -6,7 +6,7 @@ import { AuditLog, readAuditLines } from "../src/auditlog.js";
 import { formatDoctor, runDoctor, type DoctorDeps } from "../src/doctor.js";
 import { grantKey, parseGrants, policyEditLockPath, usesFolder } from "../src/grants.js";
 import type { PidLockDeps } from "../src/pidlock.js";
-import { grantsUnlock, scheduleLockPath, scheduleUnlock } from "../src/unlockcmd.js";
+import { grantsUnlock, quote, scheduleLockPath, scheduleUnlock } from "../src/unlockcmd.js";
 
 const LIVE = 4242;
 const DEAD = 999_999;
@@ -176,7 +176,7 @@ describe("tapline doctor and stuck locks", () => {
     expect(await locks()).toBeUndefined();
     const result = await locks({ policyFile: policy });
     expect(result?.detail).toContain(policyEditLockPath(policy));
-    expect(result?.fix).toBe(`tapline grants unlock --policy ${policy}`);
+    expect(result?.fix).toBe(`tapline grants unlock --policy ${quote(policy)}`); // quoted when the path has e.g. ~ (CI: RUNNER~1)
   });
 });
 
@@ -193,5 +193,13 @@ describe("grant-name aliases (ASCII case only)", () => {
   it("the uses folder is the ASCII-lower-cased name", () => {
     expect(usesFolder("Mixed_Case-1.x")).toBe("mixed_case-1.x");
     expect(grantKey("A_b")).toBe("a_b");
+  });
+});
+
+describe("the command line a person pastes", () => {
+  it("quotes a path with ~ or a space, and leaves a plain one alone", () => {
+    expect(quote("C:\Users\RUNNER~1\Temp\policy.json")).toBe('"C:\Users\RUNNER~1\Temp\policy.json"');
+    expect(quote("C:\My Files\policy.json")).toBe('"C:\My Files\policy.json"');
+    expect(quote("/tmp/policy.json")).toBe("/tmp/policy.json");
   });
 });

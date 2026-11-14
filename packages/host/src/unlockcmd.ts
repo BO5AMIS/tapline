@@ -65,7 +65,7 @@ export interface StuckLock {
   command: string;
 }
 
-const quote = (text: string): string => (/^[\w./\\:@=+-]+$/.test(text) ? text : `"${text.replace(/"/g, '\\"')}"`);
+export const quote = (text: string): string => (/^[\w./\\:@=+-]+$/.test(text) ? text : `"${text.replace(/"/g, '\\"')}"`);
 
 /** Every stuck lock doctor can see: the schedule run locks always, the policy edit lock when a policy file is given. */
 export function findStuckLocks(options: { configDir: string; policyFile?: string; deps: PidLockDeps }): StuckLock[] {
