@@ -121,6 +121,10 @@ export const elementSchema = z.object({
   row: z.boolean().nullish(),
   /** Text the app marked as written by other people (AGENT-TOOLS 1.14 §21.1). Absent: nothing is claimed either way. */
   fromOthers: z.boolean().nullish(),
+  /** The app marked it never to be touched by the explorer (`taplineExploreSkip`, AGENT-TOOLS 1.15 §28.4). Read when the SDK sends it. */
+  exploreSkip: z.boolean().nullish(),
+  /** An input the app marks as safe for tests (`taplineExploreFill`, §28.4): `true`, `"vault:<entry>.<field>"` or `"fixture:<name>"`. */
+  exploreFill: z.union([z.boolean(), z.string()]).nullish(),
 });
 export type TreeElement = z.infer<typeof elementSchema>;
 

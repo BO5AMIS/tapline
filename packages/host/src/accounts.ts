@@ -45,14 +45,16 @@ export const KIND_FIELDS: Record<VaultKind, readonly string[]> = {
 const secret = z.string().min(3, SHORT);
 const plain = z.string().min(1);
 const apps = z.array(z.string().min(1)).optional();
+/** `"explore": true` marks an entry the explorer may type or sign in with (AGENT-TOOLS 1.15 §25.6). Never a password, a card or a phone. */
+const explore = z.boolean().optional();
 
 const entrySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("account"), username: secret.optional(), password: secret.optional(), apps }),
-  z.object({ kind: z.literal("card"), number: secret.optional(), expiry: secret.optional(), cvc: secret.optional(), apps }),
-  z.object({ kind: z.literal("address"), street: plain.optional(), city: plain.optional(), postcode: plain.optional(), country: plain.optional(), apps }),
-  z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps }),
-  z.object({ kind: z.literal("note"), text: secret.optional(), apps }),
-  z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps }),
+  z.object({ kind: z.literal("account"), username: secret.optional(), password: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("card"), number: secret.optional(), expiry: secret.optional(), cvc: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("address"), street: plain.optional(), city: plain.optional(), postcode: plain.optional(), country: plain.optional(), apps, explore }),
+  z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("note"), text: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps, explore }),
 ]);
 
 /** Version 2 (§20.1). A top-level `otp` key is Tapwright's and is ignored here. */
@@ -68,6 +70,7 @@ const accountSchema = z.object({
   /** Tapwright's: the phone's passcode. Tapline loads it without complaint and never types it. */
   passcode: z.string().min(1).optional(),
   apps,
+  explore,
 });
 
 /** Version 1 (§18.6). */
@@ -82,6 +85,8 @@ export interface VaultEntry {
   kind: VaultKind;
   values: Record<string, string>;
   apps?: string[];
+  /** Marked `"explore": true` in the file (§25.6): `explore` may type its safe fields and sign in with it. */
+  explore?: true;
 }
 
 /** Where `value=` and the other answers name a value: `<home's street>`. */
@@ -98,6 +103,8 @@ export interface AccountStore {
   names(): string[];
   /** What kind an entry is. */
   kindOf(name: string): VaultKind | undefined;
+  /** Whether the entry is marked `"explore": true` (§25.6). A store that does not know the mark treats every entry as unmarked. */
+  exploreMarked?(name: string): boolean;
   /** One value of an account, for an app (`${account.<field>}`: the call's `account` names the entry, and it is an `account`). */
   resolve(name: string, field: string, appId: string): AccountResolved;
   /** One value of any entry, for an app (`${vault.<name>.<field>}`). */
@@ -741,15 +748,15 @@ function normalizedEntries(file: AccountsFile | VaultFile): Record<string, Vault
         if (value !== undefined) values[field] = value;
       }
       const onlyPasscode = values["passcode"] !== undefined && values["username"] === undefined && values["password"] === undefined;
-      out[name] = { kind: onlyPasscode ? "phone" : "account", values, ...(account.apps !== undefined ? { apps: account.apps } : {}) };
+      out[name] = { kind: onlyPasscode ? "phone" : "account", values, ...(account.apps !== undefined ? { apps: account.apps } : {}), ...(account.explore === true ? { explore: true as const } : {}) };
     }
     return out;
   }
   for (const [name, entry] of Object.entries(file.vault)) {
-    const { kind, apps: appList, ...fields } = entry;
+    const { kind, apps: appList, explore: marked, ...fields } = entry;
     const values: Record<string, string> = {};
     for (const [field, value] of Object.entries(fields)) if (typeof value === "string") values[field] = value;
-    out[name] = { kind, values, ...(appList !== undefined ? { apps: appList } : {}) };
+    out[name] = { kind, values, ...(appList !== undefined ? { apps: appList } : {}), ...(marked === true ? { explore: true as const } : {}) };
   }
   return out;
 }
@@ -842,6 +849,7 @@ function storeOf(entries: Record<string, VaultEntry>): AccountStore {
   const store: AccountStore = {
     names: () => [...names],
     kindOf: (name) => has(entries, name)?.kind,
+    exploreMarked: (name) => has(entries, name)?.explore === true,
     redact: scrub,
     resolve(name, field, appId) {
       const entry = has(entries, name);
