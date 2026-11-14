@@ -318,6 +318,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
 
   /** Every call through `/api` is a thin call: the log says so, and the report flags a run of them (§16.1). */
   function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal, leaseCredential?: string): Promise<CallToolResult> {
+    // A credential that is not the standing holder's (expired included) is a run that lost the phone: refused, even when no one holds the lease now.
+    try {
+      lease.assertCurrent(leaseCredential);
+    } catch (error) {
+      if (!(error instanceof TaplineError)) throw error;
+      return Promise.resolve({ content: [{ type: "text", text: describeError(error) }], isError: true });
+    }
     // A thin call never uses the MCP server's tools: those hold its dialog and the OKs given for its calls.
     const tools = toolsFor(clientId ?? ANONYMOUS_CLIENT);
     // Calls that share a tools object run one after another: they share its per-call state (a run's account).

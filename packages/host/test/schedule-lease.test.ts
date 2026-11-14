@@ -69,8 +69,35 @@ describe("PhoneLease", () => {
     const lease = new PhoneLease({ now: time.now, sleep: time.sleep, giveUpMs: 30_000 });
     const credential = take(lease, "schedule-daily", 120_000);
     await expect(lease.run("schedule-daily", async () => "ran")).rejects.toMatchObject({ code: "busy" });
-    await expect(lease.run("schedule-daily", async () => "ran", "00".repeat(32))).rejects.toMatchObject({ code: "busy" });
+    // a credential that is not the holder's is refused outright (R7 finding 5), not queued
+    await expect(lease.run("schedule-daily", async () => "ran", "00".repeat(32))).rejects.toMatchObject({ code: "lease_lost" });
     await expect(lease.run("schedule-daily", async () => "ran", credential)).resolves.toBe("ran");
+  });
+
+  it("an expired credential is refused with lease_lost even when no one holds the lease now (PR 12 R7 finding 5)", async () => {
+    const time = fakeTime();
+    const lease = new PhoneLease({ now: time.now, sleep: time.sleep, giveUpMs: 30_000 });
+    const credential = take(lease, "schedule-daily", 10_000);
+    time.advance(10_001);
+    expect(lease.heldBy()).toBeNull();
+    let ran = false;
+    await expect(
+      lease.run(
+        "schedule-daily",
+        async () => {
+          ran = true;
+        },
+        credential,
+      ),
+    ).rejects.toMatchObject({ code: "lease_lost" });
+    expect(ran).toBe(false);
+    expect(() => lease.assertCurrent(credential)).toThrowError(expect.objectContaining({ code: "lease_lost" }));
+    // no credential at all is an ordinary call and runs when no one holds the lease
+    await expect(lease.run("other", async () => "ran")).resolves.toBe("ran");
+    // a released credential is lost too
+    const second = take(lease, "schedule-daily");
+    lease.release(second);
+    await expect(lease.run("schedule-daily", async () => "ran", second)).rejects.toMatchObject({ code: "lease_lost" });
   });
 
   it("the credential is 32 random bytes in hex, new each time, and acquiring again under the same label doesn't renew it", () => {
@@ -178,6 +205,42 @@ describe("the lease through the tools", () => {
     const answer = await waiting;
     expect(answer.isError).not.toBe(true);
     expect(r.presses()).toEqual(["press"]);
+  });
+});
+
+describe("the lease is re-checked right before an action is sent (PR 12 R7 finding 5)", () => {
+  const hosts: TaplineHost[] = [];
+  const apps: FakeApp[] = [];
+  afterEach(async () => {
+    for (const app of apps.splice(0)) app.ws.terminate();
+    await Promise.all(hosts.splice(0).map((h) => h.close()));
+  });
+  const frame = { x: 20, y: 100, width: 300, height: 44 };
+  const OPEN = { ref: "e1", type: "Pressable", role: "button", testID: "open", text: "Open", frame, actions: ["press"] };
+
+  it("a lease that expires after the queue but before the press is sent: nothing is sent, the answer is lease_lost", async () => {
+    const { host, port } = await startHost();
+    hosts.push(host);
+    const time = fakeTime();
+    const lease = new PhoneLease({ now: time.now, sleep: time.sleep, giveUpMs: 1000, pollMs: 10 });
+    const handler = (req: IncomingRequest): Reply => {
+      if (req.method === "tree") {
+        // the renewal stalls: the lease runs out while the tap is being prepared
+        time.advance(60_000);
+        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: [OPEN], route: { names: ["home"] } } };
+      }
+      return { ok: true, result: { element: OPEN, settledMs: 10 } };
+    };
+    const { app } = await FakeApp.connect(port, { capabilities: ["tree", "press", "logs"] }, handler);
+    apps.push(app);
+    const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, lease, clientId: () => "schedule-daily", reloadWaitMs: 50 });
+    const got = lease.acquire("schedule-daily", 45_000, false);
+    if (!got.ok) throw new Error("refused");
+    const answer = await tools.withCall(undefined, () => tools.tap({ target: { id: "open" }, look: false }), got.credential);
+    expect(answer.isError).toBe(true);
+    const text = answer.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+    expect(text).toMatch(/^Error lease_lost:/);
+    expect(app.requests.filter((r) => r.method === "press")).toEqual([]);
   });
 });
 
@@ -318,6 +381,19 @@ describe("a running host's lease and facts", () => {
     expect((await call(runtime, LEASE_TOOL, { action: "acquire" }, "x", runtime.config.token, { "x-tapline-instance": "ab".repeat(16) })).answer?.text).toMatch(/^Error wrong_host:/);
     expect((await call(runtime, "apps", {}, "x", runtime.config.token, { "x-tapline-instance": facts.instance })).answer?.isError).not.toBe(true);
     expect((await call(runtime, "apps", {}, "x")).answer?.isError).not.toBe(true);
+  });
+
+  it("a call that carries an expired credential answers lease_lost over /api, with nothing held now", async () => {
+    let at = 0;
+    const runtime = await start({ clock: () => at });
+    const credential = String((await lease(runtime, "acquire", "schedule-a"))["credential"]);
+    at += 10 * 60_000;
+    for (const tool of ["apps", "reload", "tap"]) {
+      const answer = await call(runtime, tool, {}, "schedule-a", runtime.config.token, { "x-tapline-lease": credential });
+      expect(answer.answer?.text, tool).toMatch(/^Error lease_lost:/);
+    }
+    // without a credential the same call is an ordinary one
+    expect((await call(runtime, "apps", {}, "schedule-a")).answer?.text ?? "").not.toMatch(/lease_lost/);
   });
 
   describe("every mutating tool is behind the lease", () => {

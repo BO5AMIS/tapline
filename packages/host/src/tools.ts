@@ -1447,10 +1447,29 @@ export class TaplineTools {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly otp: OtpService;
 
+  private readonly host: TaplineHost;
+
   constructor(
-    private readonly host: TaplineHost,
+    host: TaplineHost,
     private readonly options: ToolsOptions,
   ) {
+    // Every request to the app goes through the lease check: a run's call whose lease ran out after it was queued sends nothing (§22.3).
+    this.host = new Proxy(host, {
+      get: (target, prop) => {
+        if (prop === "request") {
+          return (...rest: Parameters<TaplineHost["request"]>): ReturnType<TaplineHost["request"]> => {
+            try {
+              this.checkLease();
+            } catch (error) {
+              return Promise.reject(error);
+            }
+            return target.request(...rest);
+          };
+        }
+        const value: unknown = Reflect.get(target, prop, target);
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.clock = options.clock ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -1710,6 +1729,11 @@ export class TaplineTools {
     if (lease === undefined) return run();
     const who = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60) ?? "";
     return lease.run(who, run, this.holdScope.getStore()?.lease);
+  }
+
+  /** Throws `lease_lost` when this call carries a lease credential that is not the standing holder's (right before something is sent). */
+  checkLease(): void {
+    this.options.lease?.assertCurrent(this.holdScope.getStore()?.lease);
   }
 
   /** The MCP server gives the dialog once it can ask its client (the client's capabilities are known after initialize). */

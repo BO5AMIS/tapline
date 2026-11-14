@@ -124,6 +124,9 @@ export function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: 
 /** Every reach of the control lease and the facts goes through this. */
 const LEASE_RENEW_MS = 15_000;
 
+/** A lease call that hasn't answered by then is cut off (a renewal that can't succeed before the lease runs out stops the run). */
+const LEASE_CALL_TIMEOUT_MS = 10_000;
+
 /** What a run reports when the phone was taken from it mid-run (§22.3: nothing further is run). */
 export const LOST_TEXT = "Error lease_lost: the run lost the phone (the host's lease was not renewed, or the host changed); no further step was run.";
 
@@ -151,14 +154,37 @@ async function runningHost(
   const instance = facts.instance;
   let credential: string | undefined;
   const pinned = (): ThinPin => ({ port, instance, ...(credential !== undefined ? { lease: credential } : {}) });
+  // When the host's lease runs out at the latest, by this computer's clock counted from when the last acquire or renewal was SENT
+  // (the host's own term began after that, so this is never later than the host's).
+  let goodUntil = 0;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
   const lease = async (action: "acquire" | "renew" | "release"): Promise<boolean> => {
-    const answer = await thin(env, client, LEASE_TOOL, { action, ttl_ms: LEASE_TTL_MS }, pinned());
+    const sentAt = Date.now();
+    // A renewal gets at most LEASE_CALL_TIMEOUT_MS and never more than what is left of the lease.
+    const room = action === "renew" ? Math.min(LEASE_CALL_TIMEOUT_MS, goodUntil - sentAt) : LEASE_CALL_TIMEOUT_MS;
+    if (room <= 0) return false;
+    const cut = new AbortController();
+    const timer = setTimeout(() => cut.abort(), room);
+    let answer: CallAnswer | null;
+    try {
+      answer = await thin(env, client, LEASE_TOOL, { action, ttl_ms: LEASE_TTL_MS }, pinned(), cut.signal);
+    } finally {
+      clearTimeout(timer);
+    }
     if (answer === null || answer.isError) return false;
     try {
       const body = JSON.parse(answer.text) as { ok?: unknown; credential?: unknown };
       if (body.ok !== true) return false;
       if (action === "acquire" && typeof body.credential === "string" && HEX.test(body.credential)) credential = body.credential;
-      return action !== "acquire" || credential !== undefined;
+      if (action === "acquire" && credential === undefined) return false;
+      if (action !== "release") {
+        if (cut.signal.aborted || Date.now() >= sentAt + LEASE_TTL_MS) return false; // answered too late to count
+        goodUntil = sentAt + LEASE_TTL_MS;
+        if (expiry !== undefined) clearTimeout(expiry);
+        expiry = setTimeout(() => lose(), LEASE_TTL_MS);
+        expiry.unref();
+      }
+      return true;
     } catch {
       return false;
     }
@@ -170,6 +196,8 @@ async function runningHost(
   const stopBeat = (): void => {
     if (beat !== undefined) clearInterval(beat);
     beat = undefined;
+    if (expiry !== undefined) clearTimeout(expiry);
+    expiry = undefined;
   };
   const drop = async (): Promise<void> => {
     stopBeat();
@@ -213,6 +241,8 @@ async function runningHost(
         return !held;
       },
       call: async (tool, args) => {
+        // The lease is checked right before the call goes out: one whose term has run out sends nothing.
+        if (held && !lost && Date.now() >= goodUntil) lose();
         if (lost) return { text: LOST_TEXT, isError: true };
         const mine = new AbortController();
         inflight = mine;

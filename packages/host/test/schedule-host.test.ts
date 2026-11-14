@@ -126,6 +126,8 @@ interface Thin {
   swap(): void;
   /** Renewals and every lease call that follows are refused, as when the host dropped the lease. */
   failRenewals(): void;
+  /** Renewals never answer until the caller aborts them. */
+  hangRenewals(): void;
   /** The next call of a tool waits until the caller aborts it (a long replay). */
   hang(tool: string): void;
 }
@@ -136,6 +138,7 @@ function fakeRunning(facts: HostFacts | string | null | "no host", opts: { lease
   let held = false;
   let instance = typeof facts === "object" && facts !== null ? facts.instance : INSTANCE;
   let renewalsFail = false;
+  let hangRenew = false;
   const hanging = new Set<string>();
   const PORT = 7213;
   const call: ThinCaller = async (_env, client, tool, args, pin, signal) => {
@@ -157,6 +160,13 @@ function fakeRunning(facts: HostFacts | string | null | "no host", opts: { lease
         held = false;
         return { text: JSON.stringify({ ok: was }), isError: false, port: PORT };
       }
+      if (hangRenew) {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted === true) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return null;
+      }
       return { text: JSON.stringify({ ok: held && !renewalsFail && pin?.lease === CREDENTIAL }), isError: false, port: PORT };
     }
     if (hanging.delete(tool)) {
@@ -173,6 +183,7 @@ function fakeRunning(facts: HostFacts | string | null | "no host", opts: { lease
     seen,
     swap: () => void (instance = "ffffffffffffffffffffffffffffffff"),
     failRenewals: () => void (renewalsFail = true),
+    hangRenewals: () => void (hangRenew = true),
     hang: (tool) => void hanging.add(tool),
   };
 }
@@ -490,6 +501,46 @@ describe("a lost lease stops the run (PR 12 CodeRabbit)", () => {
       expect(answer).toEqual({ text: LOST_TEXT, isError: true });
       const sent = thin.seen.length;
       expect(await host.call("replay", { name: "again" })).toEqual({ text: LOST_TEXT, isError: true });
+      expect(thin.seen.length).toBe(sent);
+      await host.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a renewal that never answers is cut off at its bound and stops the run before the lease runs out (PR 12 R7 finding 5)", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = world();
+      const thin = fakeRunning(factsOf(w));
+      const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: fakeOwn().own });
+      expect(await host.inUse()).toBe(false);
+      thin.hang("replay");
+      thin.hangRenewals();
+      const running = host.call("replay", { name: "post_update" });
+      // the first renewal goes out at 15 s and gets 10 s; the lease (45 s) is not yet out when the run stops
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await running).toEqual({ text: LOST_TEXT, isError: true });
+      const sent = thin.seen.length;
+      expect(await host.call("replay", { name: "again" })).toEqual({ text: LOST_TEXT, isError: true });
+      expect(thin.seen.length).toBe(sent);
+      await host.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a call that would go out after the lease's own term has run out is not sent", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = world();
+      const thin = fakeRunning(factsOf(w));
+      const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: fakeOwn().own });
+      expect(await host.inUse()).toBe(false);
+      // a stalled event loop: no renewal ran, the clock moved past the term
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      const sent = thin.seen.length;
+      expect(await host.call("replay", { name: "post_update" })).toEqual({ text: LOST_TEXT, isError: true });
       expect(thin.seen.length).toBe(sent);
       await host.close();
     } finally {

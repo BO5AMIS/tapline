@@ -185,6 +185,15 @@ export class PhoneLease {
   }
 
   /**
+   * A call that supplies a credential must hold the lease right now: one that is not the current holder's, an expired one included,
+   * is refused with `lease_lost`, also when no one holds the lease. No credential is no check (an ordinary client's call).
+   */
+  assertCurrent(credential: string | undefined): void {
+    if (credential === undefined || this.holds(credential)) return;
+    throw new TaplineError("lease_lost", "the run no longer holds the phone (its lease expired, was released or belongs to another run); nothing was sent.");
+  }
+
+  /**
    * Takes the lease for `owner`, or says why not: another run holds it, another agent's action is running, or a person is
    * driving (`personActive`, from the control queue). The answer carries the lease credential (32 random bytes, hex): the
    * holder presents it on every later call, and a label alone never counts as the holder. Asking again with the credential renews.
@@ -219,8 +228,12 @@ export class PhoneLease {
 
   /** An agent action by `who`: waits while someone else's lease stands (the holder's own credential goes straight through), `busy` after `giveUpMs`. */
   async run<T>(who: string, fn: () => Promise<T>, credential?: string): Promise<T> {
+    // A credential that isn't the standing holder's (expired, released, never issued) is never an ordinary call: the run lost the phone.
+    this.assertCurrent(credential);
     const started = this.now();
     for (;;) {
+      // a lease that changed hands while this call waited
+      if (credential !== undefined) this.assertCurrent(credential);
       if (this.heldBy() === null || this.holds(credential)) break;
       if (this.now() - started >= this.giveUpMs) {
         throw new TaplineError("busy", "A scheduled run is using the phone. Try again when it has finished, or ask your user.");
