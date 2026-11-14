@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.8.6 (2026-11-14)
+
+Fixes from the first joint one-time code check on a real phone with Tapwright 1.7, as AGENT-TOOLS 1.16.2 (agreed with
+Tapwright, sha256 ef8e7b63) now states them.
+
+- **One-time codes (§18.11, §20.4).**
+  - Tapline asks Tapwright's daemon for a code only after the step's checks pass: the step runs as a dry run first, and
+    a refusal (`behind_alert`, `not_found`, `covered` and the rest) is the answer, with no code asked for. Before, a code
+    could be fetched, and spent, for a type that was then refused.
+  - A code that can't be typed after it arrived is dropped, never asked for again.
+  - An app whose SDK can't dry-run a step gets no code (`unsupported`).
+  - The whole exchange with the daemon may take 12 s (was 5 s). Tapwright's daemon waits up to 8 s for a notification
+    banner over the app to go before it reads the app, and a 5 s limit gave up first.
+  - `<app>` in `${otp.<app>}` is the app's bundle id, as the SDK already reports it unless the app names another id in
+    `startTapline`. The docs say so now.
+- **No second "Connect for testing?" after a reload.** A development build that was paired from an open offer asked to
+  connect again after a JavaScript reload while it was still paired. The app now counts its own pairing's offer as
+  taken, and gives a saved pairing 5 s to reconnect before it looks for an offer. A stale pairing still takes a fresh
+  offer.
+- **Bug export (§29.7).** A bug exported to a GitHub issue is written under `.tapline/bugs/<app id>/<bug id>/` on the
+  `qa-reports` branch (was `.tapline/bugs/<bug id>/`). Two apps can hold the same bug id; exported to one repository
+  they no longer share a folder.
+- **Shared spec.** `docs/AGENT-TOOLS.md` is 1.16.2.
+- **Known limits.** The reload fix and the dry-run-first order have run in tests only; the joint check on the phone ran
+  with the 12 s limit and passed.
+
 ## 1.8.5, "the Bug Report" (2026-11-14)
 
 The one-page bug report, as AGENT-TOOLS 1.16.1 (agreed with Tapwright, sha256 88ce071f) defines it, plus three items
