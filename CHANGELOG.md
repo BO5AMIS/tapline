@@ -40,6 +40,11 @@ command line.
   - Repair scores only the id stem and the words, because a saved script keeps only the target (no role, position or
     component of the old element), so a rename like `Skip` to `Not now` is not repaired.
   - A `fixture:<name>` mark is read but not typed yet.
+  - During an explore, nothing types but the explorer's own `fill`. A reset that needs to sign back in is refused, and
+    that branch ends with its reason.
+  - A toggle step is repaired only where an explore has recorded the toggle's role. Maps explored before 1.8 need a new
+    explore first.
+  - A successful `apply` runs the script twice: once to repair it, and once as written before anything is saved.
   - `explore` can't be scheduled, and it does not answer a system alert or reopen the app after a crash: a person does.
   - Nothing here has run on a real phone yet; the tests use a fake app and a fake host.
   - The host reads its own version from its package.json, so findings and reports carry it.
