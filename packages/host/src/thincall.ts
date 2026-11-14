@@ -2,7 +2,9 @@
 // It imports only node: modules, so it starts in a few milliseconds; a test checks that.
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { request } from "node:http";
+import { Agent, request } from "node:http";
+import type { Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -68,15 +70,43 @@ interface Reply {
   body: string;
 }
 
-/** A POST that failed: `sent` is false only when the connection was refused, so the call can't have run. */
+/** What the one-connection agent says when something asks it for a second connection. */
+const NO_RECONNECT = "ETAPLINE_NO_RECONNECT";
+
+/**
+ * The one connection a call has (AGENT-TOOLS 1.14 §18.10): an HTTP/1.1 keep-alive agent that opens ONE socket and refuses to open
+ * another. The probe and the POST both go through it, so the token goes only to the connection that proved the host, and a
+ * connection that is gone is never replaced by a new one that something else may have taken the port for.
+ */
+class OneConnection extends Agent {
+  private opened = false;
+  constructor() {
+    super({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+  }
+  override createConnection(options: Parameters<Agent["createConnection"]>[0], callback?: Parameters<Agent["createConnection"]>[1]): Duplex | null | undefined {
+    if (this.opened) {
+      const error: NodeJS.ErrnoException = new Error("a second connection is never opened");
+      error.code = NO_RECONNECT;
+      callback?.(error, undefined as unknown as Duplex);
+      return undefined;
+    }
+    this.opened = true;
+    return super.createConnection(options, callback);
+  }
+}
+
+/** A POST that failed: `sent` is false only when nothing went out (refused, or the proven connection was gone and not replaced), so the call can't have run. */
 class PostError extends Error {
-  constructor(readonly sent: boolean) {
+  constructor(
+    readonly sent: boolean,
+    readonly connectionGone = false,
+  ) {
     super("the request failed");
   }
 }
 
 /** One POST; rejects with a PostError. The token goes in the header and nowhere else. */
-function post(address: string, port: number, tool: string, body: string, token: string, client: string, pin?: ThinCallIO["pin"], signal?: AbortSignal): Promise<Reply> {
+function post(link: OneConnection, proven: Socket, address: string, port: number, tool: string, body: string, token: string, client: string, pin?: ThinCallIO["pin"], signal?: AbortSignal): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = request(
       {
@@ -84,7 +114,7 @@ function post(address: string, port: number, tool: string, body: string, token: 
         port,
         path: `/api/${encodeURIComponent(tool)}`,
         method: "POST",
-        agent: false,
+        agent: link,
         headers: {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(body),
@@ -101,7 +131,18 @@ function post(address: string, port: number, tool: string, body: string, token: 
         res.on("error", () => reject(new PostError(true)));
       },
     );
-    req.on("error", (error: NodeJS.ErrnoException) => reject(new PostError(error.code !== "ECONNREFUSED")));
+    req.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === NO_RECONNECT) reject(new PostError(false, true));
+      else reject(new PostError(error.code !== "ECONNREFUSED"));
+    });
+    // Only the socket that proved the host may carry the token.
+    req.on("socket", (socket) => {
+      if (socket !== proven) {
+        const error: NodeJS.ErrnoException = new Error("not the connection that proved the host");
+        error.code = NO_RECONNECT;
+        req.destroy(error);
+      }
+    });
     if (signal !== undefined) {
       if (signal.aborted) req.destroy();
       else signal.addEventListener("abort", () => req.destroy(), { once: true });
@@ -131,37 +172,55 @@ function provesToken(header: string | string[] | undefined, token: string, chall
   return given.length === wanted.length && timingSafeEqual(given, wanted);
 }
 
+/** What a probe found, and for a Tapline host the very connection it proved itself on. */
+interface Probed {
+  who: Probe;
+  /** The proven connection, only for `who === "host"`. */
+  socket: Socket | null;
+  /** The host said it will close the connection after this answer (or speaks HTTP/1.0): nothing may be sent on it. */
+  closing: boolean;
+}
+
 /**
  * Asks a port who it is with a GET (no token, no side effect), bounded by PROBE_MS: a process that accepts and never
  * answers can't hang the search. The GET carries a fresh random challenge; a Tapline host answers 405 "POST only" with
- * an HMAC of it keyed by the token, which only a holder of the token can make. A port that doesn't prove it (another
- * program that borrowed the port) never sees the token. One inside an MCP server answers 404 with its own text. The
- * real call that follows waits without a limit, since it may be held for a person's OK.
+ * an HMAC of it keyed by the token and by the address and port of the connection, which only a holder of the token can make;
+ * it is checked here in constant time against this very socket's remote address and port. A port that doesn't prove it
+ * (another program that borrowed the port) never sees the token. One inside an MCP server answers 404 with its own text.
+ * The probe runs on `link`'s one connection and a proven host keeps it open: the POST that follows uses that same socket.
+ * The real call waits without a limit, since it may be held for a person's OK.
  */
-function probe(address: string, port: number, token: string): Promise<Probe> {
+function probe(address: string, port: number, token: string, link: OneConnection): Promise<Probed> {
   const challenge = randomBytes(16).toString("hex");
   return new Promise((resolve) => {
     let done = false;
-    const finish = (result: Probe): void => {
+    const finish = (result: Probed): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      req.destroy();
+      if (result.who !== "host") req.destroy();
       resolve(result);
     };
-    const req = request({ host: address, port, path: "/api/", method: "GET", agent: false, headers: { "x-tapline-challenge": challenge } }, (res) => {
+    const none: Probed = { who: "none", socket: null, closing: false };
+    const req = request({ host: address, port, path: "/api/", method: "GET", agent: link, headers: { "x-tapline-challenge": challenge } }, (res) => {
       const chunks: Buffer[] = [];
+      // The agent lets go of the socket when the answer ends: take it, and what it is connected to, now.
+      const socket = res.socket;
+      const remoteAddress = socket.remoteAddress ?? "";
+      const remotePort = socket.remotePort ?? 0;
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf8");
-        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge, res.socket.remoteAddress ?? "", res.socket.remotePort ?? 0)) finish("host");
-        else if (res.statusCode === 404 && text.includes("MCP server")) finish("mcp");
-        else finish("none");
+        if (res.statusCode === 405 && text.startsWith("POST only") && provesToken(res.headers["x-tapline-proof"], token, challenge, remoteAddress, remotePort)) {
+          const closing = res.httpVersion !== "1.1" || /\bclose\b/i.test(String(res.headers["connection"] ?? ""));
+          finish({ who: "host", socket, closing });
+        } else if (res.statusCode === 404 && text.includes("MCP server")) finish({ who: "mcp", socket: null, closing: false });
+        else finish(none);
       });
-      res.on("error", () => finish("none"));
+      res.on("error", () => finish(none));
     });
-    const timer = setTimeout(() => finish("none"), PROBE_MS);
-    req.on("error", () => finish("none"));
+    const timer = setTimeout(() => finish(none), PROBE_MS);
+    req.on("error", () => finish(none));
     req.end();
   });
 }
@@ -297,50 +356,68 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
   const endpoints = ports.flatMap((port) => addresses.map((concrete) => ({ address: concrete, port })));
   let mcpHostSeen = false;
   let tokenRefused = false;
+  let connectionClosed = false;
   for (const { address, port } of endpoints) {
-    const who = await probe(address, port, token);
-    if (who === "mcp") {
-      mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls
-      continue;
-    }
-    if (who === "none") continue; // nothing here, or not a Tapline host
-    let reply: Reply;
+    const link = new OneConnection();
     try {
-      reply = await post(address, port, tool, body, token, client, io.pin, io.signal);
-    } catch (error) {
-      if (error instanceof PostError && !error.sent) continue; // nothing listens there
-      return unknownOutcome(io);
-    }
-    if (reply.status === 200) {
-      io.onHost?.(port);
-      let answer: Answer | null = null;
-      try {
-        answer = asAnswer(JSON.parse(reply.body));
-      } catch {
-        answer = null;
+      const found = await probe(address, port, token, link);
+      if (found.who === "mcp") {
+        mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls
+        continue;
       }
-      if (answer === null) return unknownOutcome(io); // the host ran it, and the answer can't be read
-      return finish(answer, values.json === true, home, io);
+      if (found.who === "none" || found.socket === null) continue; // nothing here, or not a Tapline host
+      // A host that closes after the proof gets nothing: the token never goes to a second connection. Two turns of the loop let a close
+      // that arrived with the answer show.
+      await new Promise<void>((next) => setImmediate(next));
+      await new Promise<void>((next) => setImmediate(next));
+      if (found.closing || found.socket.destroyed || !found.socket.writable || found.socket.readyState !== "open") {
+        connectionClosed = true;
+        continue;
+      }
+      let reply: Reply;
+      try {
+        reply = await post(link, found.socket, address, port, tool, body, token, client, io.pin, io.signal);
+      } catch (error) {
+        if (error instanceof PostError && !error.sent) {
+          if (error.connectionGone) connectionClosed = true;
+          continue; // nothing listens there, or the proven connection is gone and was not replaced
+        }
+        return unknownOutcome(io);
+      }
+      if (reply.status === 200) {
+        io.onHost?.(port);
+        let answer: Answer | null = null;
+        try {
+          answer = asAnswer(JSON.parse(reply.body));
+        } catch {
+          answer = null;
+        }
+        if (answer === null) return unknownOutcome(io); // the host ran it, and the answer can't be read
+        return finish(answer, values.json === true, home, io);
+      }
+      if (reply.status === 401) {
+        tokenRefused = true;
+        continue;
+      }
+      if (reply.status === 404 && reply.body.startsWith("Unknown tool")) {
+        io.err(`Error bad_params: ${reply.body.trim()}\n`);
+        return 2;
+      }
+      if (reply.status === 404) {
+        mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls
+        continue;
+      }
+      if (reply.status === 400) {
+        io.err(`Error bad_params: ${reply.body.trim()}\n`);
+        return 2;
+      }
+      if (reply.status >= 500) return unknownOutcome(io);
+    } finally {
+      link.destroy();
     }
-    if (reply.status === 401) {
-      tokenRefused = true;
-      continue;
-    }
-    if (reply.status === 404 && reply.body.startsWith("Unknown tool")) {
-      io.err(`Error bad_params: ${reply.body.trim()}\n`);
-      return 2;
-    }
-    if (reply.status === 404) {
-      mcpHostSeen = true; // a host inside an agent's MCP server: it doesn't take thin calls
-      continue;
-    }
-    if (reply.status === 400) {
-      io.err(`Error bad_params: ${reply.body.trim()}\n`);
-      return 2;
-    }
-    if (reply.status >= 500) return unknownOutcome(io);
   }
   io.err(noHost);
+  if (connectionClosed) io.err("A host proved itself but closed the connection before the call; nothing was sent, and the token is never sent on a new connection. Restart it with this Tapline version.\n");
   if (tokenRefused) io.err("A host answered but refused this computer's token.\n");
   else if (mcpHostSeen) io.err("The host inside an agent's MCP server doesn't take thin calls.\n");
   return 3;
