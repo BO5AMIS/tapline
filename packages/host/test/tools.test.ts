@@ -72,6 +72,14 @@ const defaultHandler = (req: IncomingRequest): Reply => {
   }
 };
 
+/** The steps without their `seen` (1.16): a step's facts have their own tests; these ones are about the rest of the step. */
+function withoutSeen<T>(steps: T[] | undefined): unknown[] | undefined {
+  return steps?.map((step) => {
+    const { seen: _seen, ...rest } = step as Record<string, unknown>;
+    return rest;
+  });
+}
+
 describe("target validation", () => {
   it("accepts exactly one kind of target", () => {
     expect(targetSchema.safeParse({ ref: "e1" }).success).toBe(true);
@@ -629,7 +637,7 @@ describe("record and replay", () => {
       expect(stopped).toContain("step 3 targets a ref");
       const script = JSON.parse(readFileSync(join(dir, "checkout.json"), "utf8")) as Record<string, unknown> & { steps: Array<Record<string, unknown>> };
       expect(script).toMatchObject({ format: "agent-tools-script", version: 1, name: "checkout", app: "com.example.demo", fresh: true });
-      expect(script.steps).toEqual([
+      expect(withoutSeen(script.steps)).toEqual([
         { tool: "tap", target: { id: "save" }, route: ["basket"] },
         { tool: "tap", target: { label: "Pay now" }, route: ["basket"] },
         { tool: "type_text", target: { ref: "e4" }, text: "Ann", replace: true, submit: false, route: ["basket"] },
@@ -662,7 +670,7 @@ describe("record and replay", () => {
       await tools.waitFor({ text: "Thanks" });
       await tools.record({ stop: true });
       const script = JSON.parse(readFileSync(join(dir, "checkout.json"), "utf8")) as { steps: Array<Record<string, unknown>> };
-      expect(script.steps).toEqual([{ tool: "tap", target: { id: "save" }, route: ["basket"], expect: { text: "Thanks" } }]);
+      expect(withoutSeen(script.steps)).toEqual([{ tool: "tap", target: { id: "save" }, route: ["basket"], expect: { text: "Thanks" } }]);
       app.requests.length = 0;
       const answer = await tools.replay({ name: "checkout" });
       expect(app.requests.map((r) => r.method).filter((m) => m !== "tree")).toEqual(["reload", "press", "waitFor"]);

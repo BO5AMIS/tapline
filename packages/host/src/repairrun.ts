@@ -32,6 +32,7 @@ import {
   type Target,
 } from "./repair.js";
 import type { Step } from "./run.js";
+import { idStemOf, readSeen, seenBucket, seenOf, type Seen } from "./seen.js";
 
 // Self-repairing tests (AGENT-TOOLS 1.15 §26): the candidates of a break, and the run that tries them with the one acceptance rule.
 
@@ -100,6 +101,8 @@ export interface Candidate {
   score?: number;
   parts?: ReturnType<typeof scoreParts>;
   newTarget?: Target;
+  /** The facts of the accepted element, which the repaired step carries in place of the old step's (§26.6). */
+  newSeen?: Seen | null;
   /** A road's moves, before the step. */
   moves?: Step[];
   /** How the new element reads, and where. */
@@ -219,7 +222,8 @@ export async function analyse(host: RepairHost, steps: readonly Step[], at: numb
   // A toggle is repaired only to the role it had; the role comes from a passing run that recorded it, never from the candidate.
   let toggleRole: string | undefined;
   if (step.tool === "toggle") {
-    const known = host.toggleRole(expected ?? here, target);
+    // The role comes from the explored record, or from the step's own `seen` (§26.3, v1.16); never from the candidate.
+    const known = host.toggleRole(expected ?? here, target) ?? readSeen(step)?.role ?? null;
     if (known === null) return { kind: "none", reason: "the toggle's original role isn't recorded (no passing run saw it at this place), so a toggle is never repaired" };
     toggleRole = known;
   }
@@ -296,13 +300,18 @@ function elementCandidates(
 ): Scored[] {
   const screen = screenOf(tree);
   const roles = new Set(matching.map((element) => element.role ?? ""));
+  // The step's own old facts (§26.3, v1.16); a fact it lacks falls back to where the part took it in 1.15.
+  const seen = readSeen(step);
   const old: OldElement = {
-    ...(target.id !== undefined ? { id: target.id } : {}),
+    ...(seen?.id_stem !== undefined ? { id: seen.id_stem } : target.id !== undefined ? { id: target.id } : {}),
     ...(target.label !== undefined ? { label: target.label } : {}),
     ...(target.text !== undefined ? { text: target.text } : {}),
-    // The old role is known from a recorded run (a toggle), else only when the ambiguous matches agree on one.
-    ...(toggleRole !== undefined ? { role: toggleRole } : brk.code === "ambiguous" && roles.size === 1 && [...roles][0] ? { role: [...roles][0] as string } : {}),
+    // The old role is known from the step's `seen`, or from a recorded run (a toggle), else only when the ambiguous matches agree on one.
+    ...(seen?.role !== undefined ? { role: seen.role } : toggleRole !== undefined ? { role: toggleRole } : brk.code === "ambiguous" && roles.size === 1 && [...roles][0] ? { role: [...roles][0] as string } : {}),
+    ...(seen?.bucket !== undefined ? { bucket: seen.bucket } : {}),
+    ...(seen?.component !== undefined ? { component: seen.component } : {}),
   };
+  const oldIdIsStem = seen?.id_stem !== undefined;
   const closest = new Set(closestRefs(brk.message));
   const pool = tree.elements.filter((element) => {
     if (!canTake(step.tool, element)) return false;
@@ -314,17 +323,20 @@ function elementCandidates(
     if (host.never.policyHit(subjectOf(element)) !== null) return false;
     if (brk.code === "ambiguous") return matching.includes(element);
     if (closest.has(element.ref)) return true;
-    const stem = idStem(old.id, element.testID);
+    // The same role in the same position bucket (§26.2), taken from the step's own `seen` (3 by 3 grid); without `seen` it isn't known.
+    if (seen?.role !== undefined && seen.bucket !== undefined && element.role === seen.role && element.frame && screen && seenBucket(element.frame, screen) === seen.bucket) return true;
+    const stem = idStem(old.id, oldIdIsStem ? idStemOf(element.testID) : element.testID);
     const words = wordsPart(old, element);
     return (stem !== null && stem > 0) || (words !== null && words >= 0.5);
   });
   const scored = pool.map((element): Scored => {
     const parts = scoreParts(old, {
-      id: element.testID,
+      // With `seen`, the id is reduced to its stem and the position is taken on the same 3 by 3 grid (§26.3, v1.16).
+      id: oldIdIsStem ? idStemOf(element.testID) : element.testID,
       label: element.label,
       text: element.text,
       role: element.role,
-      bucket: bucketOf(element, screen),
+      bucket: seen?.bucket !== undefined ? (element.frame && screen ? seenBucket(element.frame, screen) : null) : bucketOf(element, screen),
       component: element.type,
     });
     return { element, parts, score: weightedScore(parts) };
@@ -347,6 +359,7 @@ function toCandidate(item: Scored, step: Step, target: Target, brk: Break, here:
     score: item.score,
     parts: item.parts,
     newTarget,
+    newSeen: seenOf(item.element, tree.elements, screenOf(tree)),
     shown,
     ...(here !== null ? { place: here } : {}),
     why: `${cause}; the closest element that can take a ${step.tool.replace("_", " ")} is ${describeTarget(redactedTarget(host, newTarget))} (${formatParts(item.parts)}).`,
@@ -528,7 +541,9 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
   if (candidate.kind === "target" && candidate.newTarget !== undefined) {
     was = targetOf(original.step);
     if (was !== null) was = redactedTarget(host, was);
-    step = { ...original.step, target: candidate.newTarget } as Step;
+    // The repaired step carries the accepted element's facts: the old ones describe an element that is gone (§26.6).
+    const { seen: _oldSeen, ...rest } = original.step as Step & { seen?: unknown };
+    step = { ...rest, target: candidate.newTarget, ...(candidate.newSeen !== undefined && candidate.newSeen !== null ? { seen: candidate.newSeen } : {}) } as Step;
   } else if (candidate.kind === "road" && candidate.after === true) {
     // The step ran and ended elsewhere: the moves go after it, and the check is that the app is where the recording ended.
     const moves = candidate.moves ?? [];

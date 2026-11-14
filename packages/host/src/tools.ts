@@ -60,6 +60,7 @@ import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
+import { seenOf, type Seen } from "./seen.js";
 import { namedTarget } from "./signature.js";
 import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
@@ -728,6 +729,8 @@ interface ScriptStep {
   route?: string[];
   /** The name of the place where the step ran, when the host has a map (AGENT-TOOLS 1.15 §26.6). */
   place?: string;
+  /** The recorded element's facts (AGENT-TOOLS 1.16 §9.4); never text. */
+  seen?: Seen;
   fragile?: boolean;
   /** Typed into a password field: its text wasn't saved (never written to the file). */
   secret?: boolean;
@@ -3277,7 +3280,7 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
       // §9.1: `if` needs exactly one of text, id or label.
       if (given_if !== undefined && (typeof given_if !== "object" || given_if === null || Array.isArray(given_if))) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): if is an object with one of text, id or label (and gone), not ${JSON.stringify(given_if)}.`);
@@ -3601,7 +3604,7 @@ export class TaplineTools {
   }
 
   private runStepNow(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+    const { tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
     const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
@@ -4160,6 +4163,8 @@ export class TaplineTools {
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
     let result: unknown;
+    // While recording, the screen as it is before the move: a step's `seen` is about the element on that screen (1.16 §9.4).
+    const screenBefore = this.recording !== null && !this.replaying ? await this.screenBeforeStep(params, session.id) : null;
     // Where the app is before the move; the road is saved after it (AGENT-TOOLS 1.13 §18.2).
     const road = this.roadStart(session, method);
     this.observedPlace = undefined;
@@ -4335,10 +4340,34 @@ export class TaplineTools {
       if (typed?.account === true) this.recording.route?.variables.add("account");
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
       if (road !== null && road.from !== null) step.place = road.from.name;
+      const seen = this.seenFor(result, screenBefore);
+      if (seen !== null) step.seen = seen;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
     }
     return response;
+  }
+
+  /**
+   * The screen before a recorded step that targets an element (not a point), for its `seen` (AGENT-TOOLS 1.16 §9.4): one extra read
+   * of the tree, a peek that changes no ref, only while recording. Null when it can't be read; no bucket is written then.
+   */
+  private async screenBeforeStep(params: unknown, sessionId: string): Promise<TreeResult | null> {
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (typeof target !== "object" || target === null || "x" in target) return null;
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId }).catch(() => null));
+    return tree.success ? tree.data : null;
+  }
+
+  /**
+   * The step's `seen`: the role, the 3 by 3 bucket (none inside a scroll view), the component and the id stem of the element the step
+   * acted on, never text. Only for a step that acted on an element; `before` is the screen it was on.
+   */
+  private seenFor(result: unknown, before: TreeResult | null): Seen | null {
+    const element =
+      typeof result === "object" && result !== null && "element" in result ? elementSchema.safeParse((result as { element: unknown }).element) : null;
+    if (!element?.success) return null;
+    return seenOf(element.data, before?.elements ?? null, before?.screen);
   }
 
   /**
@@ -5666,7 +5695,7 @@ export class TaplineTools {
       place: typeof place === "string" ? place : null,
       path_from: typeof place === "string" ? place : null,
       path: steps.slice(0, brk.index + 1).map((item): PathStep => {
-        const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+        const { tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
         // A typed value is never kept (§27.1).
         if (tool !== "type_text") return { tool, ...rest };
         const { text: _text, ...kept } = rest as Record<string, unknown>;
