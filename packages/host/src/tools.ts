@@ -5423,7 +5423,8 @@ export class TaplineTools {
     if (!read.success) return "";
     const inputs = read.data.elements.filter((e) => roleOf(e) === "input" || (e.actions ?? []).includes("type"));
     const last = this.lastTyped;
-    const own = last !== undefined && last.sessionId === session.id ? (inputs.find((e) => e.ref === last.ref) ?? (last.testID !== undefined ? inputs.find((e) => e.testID === last.testID) : undefined)) : undefined;
+    // By id when it has one: a full look renumbers the refs, so a ref may now name another input.
+    const own = last !== undefined && last.sessionId === session.id ? (last.testID !== undefined ? inputs.find((e) => e.testID === last.testID) : inputs.find((e) => e.ref === last.ref)) : undefined;
     const filled = inputs.filter((e) => typeof e.value === "string" && e.value !== "");
     const field = own ?? (filled.length === 1 ? filled[0] : undefined);
     return typeof field?.value === "string" ? this.host.redactOut(field.value) : "";

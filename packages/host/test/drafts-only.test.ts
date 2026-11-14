@@ -56,7 +56,7 @@ const choose = (answer: string): ElicitAnswer => ({ action: "accept", content: {
 
 interface Rig {
   app: FakeApp;
-  state: { reply: string; sent: string[]; secure: boolean };
+  state: { reply: string; sent: string[]; secure: boolean; renumbered: boolean };
   policyPath: string;
   auditDir: string;
   root: string;
@@ -73,13 +73,14 @@ async function setup(options: { vault?: boolean } = {}): Promise<Rig> {
   hosts.push(host);
   const root = mkdtempSync(join(tmpdir(), "tapline-drafts-"));
   dirs.push(root);
-  const state = { reply: "", sent: [] as string[], secure: false };
+  const state = { reply: "", sent: [] as string[], secure: false, renumbered: false };
   const reply = (): Record<string, unknown> => ({ ref: "e1", type: "TextInput", role: "textfield", testID: "reply", label: "Reply", text: "", value: state.reply, frame, actions: ["press", "type", "submit"] });
   const handler = (req: IncomingRequest): Reply => {
     const params = req.params as { target?: { testID?: string }; text?: string; dryRun?: boolean };
     switch (req.method) {
       case "tree":
-        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: [reply(), SEND, DELETE], route: { names: ["thread"] }, place: { route: ["thread"] } } };
+        // After a full look refs restart: another input that holds text now has e1, and the reply field is e2.
+        return { ok: true, result: { screen: { width: 430, height: 932 }, elements: state.renumbered ? [{ ...reply(), testID: "search", label: "Search", value: "pizza near me" }, { ...reply(), ref: "e2" }, SEND, DELETE] : [reply(), SEND, DELETE], route: { names: ["thread"] }, place: { route: ["thread"] } } };
       case "place":
         return { ok: true, result: { route: ["thread"], seenAt: Date.now() } };
       case "type": {
@@ -226,6 +227,17 @@ describe("a draftsOnly grant stops at the draft (§21.3, §19.3)", () => {
     await tools.typeText({ target: { id: "reply" }, text: "first and only", look: false });
     await tools.tap({ target: { id: "send" }, look: false });
     expect(client.asked[0]?.message).toMatch(/\? "first and only"$/);
+  });
+
+  it("the draft follows the field by its id when refs were renumbered, never another input that took its ref (PR 12 CodeRabbit)", async () => {
+    const r = await setup();
+    const client = new ScriptedClient(() => choose("Send"));
+    const tools = r.make({ client, grants: [GRANT] });
+    await tools.typeText({ target: { id: "reply" }, text: "the real reply", look: false });
+    r.state.renumbered = true;
+    await tools.tap({ target: { id: "send" }, look: false });
+    expect(client.asked[0]?.message).toMatch(/\? "the real reply"$/);
+    expect(client.asked[0]?.message).not.toContain("pizza");
   });
 
   it("an empty field is an empty draft, still shown", async () => {
