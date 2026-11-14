@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
@@ -12,7 +13,7 @@ import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, 
 import { briefLines, briefScreen } from "./brief.js";
 import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
-import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine, roleOf } from "./format.js";
+import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, logLevelOf, offScreenLine, roleOf } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -58,6 +59,9 @@ import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
 import { namedTarget } from "./signature.js";
+import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
+import { FLOOR_WORDS, exploreSettings, floorSubject, type FloorRules } from "./explorefloor.js";
+import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
 import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -377,6 +381,17 @@ export const toolShapes = {
     brief: briefField,
     dry_run: dryRunField,
   },
+  explore: {
+    minutes: z.number().optional().describe("Time budget in minutes, 1 to 60 (default 10); time spent waiting for a person does not count"),
+    steps: z.number().optional().describe("Budget of moves, 1 to 5000 (default 500): each touch, scroll, back and reset"),
+    depth: z.number().optional().describe("How many places deep from the start it expands, 1 to 20 (default 8); a deeper place is saved, not expanded"),
+    from: z.string().optional().describe("A place's name to start at; the tool drives there first (default: where the app is)"),
+    focus: z.string().optional().describe("A place's name: it expands only places below it (default: the whole app)"),
+    fill: z.enum(["none", "test-data"]).optional().describe("\"none\" (default) types nothing; \"test-data\" types only into fields the app marks as safe for tests"),
+    continue: z.boolean().optional().describe("Go on after a crash, when the app can be opened again (default false: stop at the first crash)"),
+    account: z.string().optional().describe("A vault account marked \"explore\": true in the vault file, for the way back after a reset"),
+    guide: z.string().optional().describe("Reserved; only \"none\" is offered in this version"),
+  },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
     goal: z.string().min(1).max(300).optional().describe('What the user wants to do, e.g. "log breakfast by scanning its barcode"'),
@@ -663,6 +678,12 @@ export interface ToolsOptions {
   exportRunner?: Runner;
   /** Cap for the journey GIF in bytes (tests lower it; default 3 MB). */
   gifMaxBytes?: number;
+  /** Where `explore` keeps its report folders (e.g. ~/.tapline/explore): `<app id>/<UTC time>/` (AGENT-TOOLS 1.15 §25.10). Unset: explore answers that it can't keep a report. */
+  exploreDir?: string;
+  /** Wall-clock time in ms for the times in a finding and a report (tests pass their own). Default: Date.now. */
+  wallClock?: () => number;
+  /** How long `explore` waits for the app to be in front or connected again (a crash with `continue`, a move that left the app). Default 60 000 ms. */
+  exploreGraceMs?: number;
 }
 
 /**
@@ -1163,7 +1184,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive", explore: "explore",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
@@ -1310,7 +1331,9 @@ export class TaplineTools {
   readonly confirmations: Confirmations;
   private dialogs: Dialogs | undefined;
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
-  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string }>();
+  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string; progress?: (line: string, steps: number) => void }>();
+  /** Set around every move and read `explore` makes (AGENT-TOOLS 1.15 §25.5): the touch check never asks and no grant is looked at; counts the requests it made. */
+  private readonly exploreScope = new AsyncLocalStorage<{ count: number; last?: { method: string; result: unknown } }>();
   /** Read at each use: a host that reloads its policy (a scheduled run asks for its facts) hands every client the new one. */
   private get policy(): PolicyFile {
     return this.options.policy ?? DEFAULT_POLICY;
@@ -1969,6 +1992,8 @@ export class TaplineTools {
    */
   private touchLists(session: SessionInfo): { confirm: string[]; block: string[] } {
     const lists = listsFor(this.policy, session.app);
+    // `explore` (AGENT-TOOLS 1.15 §25.5): the floor is every touch's confirm list, whatever the policy file says (`"confirm": []` and --no-policy don't lower it).
+    if (this.exploreScope.getStore() !== undefined) return { confirm: [...new Set([...FLOOR_WORDS, ...lists.confirm, ...exploreSettings(this.policy).skip])], block: lists.block };
     return this.draftsScope.getStore() === true ? { confirm: [...lists.confirm, ...REACH_WORDS], block: lists.block } : lists;
   }
 
@@ -2081,6 +2106,8 @@ export class TaplineTools {
       return { kind: "error", code, message: error instanceof TaplineError ? error.message : describeError(error) };
     }
     const done = call.pipelined && typeof raw === "object" && raw !== null && "done" in raw ? (raw as { done: unknown }).done : raw;
+    const driven = this.exploreScope.getStore();
+    if (driven !== undefined) driven.count += 1;
     this.noteTouch(method, params, done);
     this.showAction("agent", method, done, params);
     if (granted !== undefined) this.journeyRun?.noteOk(granted);
@@ -2089,6 +2116,259 @@ export class TaplineTools {
     if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
     return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}), ...(sentDraft ? { sent: true as const } : {}) };
+  }
+
+  // -- explore (AGENT-TOOLS 1.15 §25): the search is in explore.ts, what it may touch in explorefloor.ts
+
+  /** `explore`: drives the places nobody has driven, saves them to the map and reports what broke on the way. */
+  async explore(args: Shape<"explore"> = {}): Promise<CallToolResult> {
+    return (await this.exploreRun(args)).answer;
+  }
+
+  /** `explore` with what the command line needs to pick its exit code: the outcome and where the report is. */
+  async exploreRun(args: Shape<"explore"> = {}): Promise<{ answer: CallToolResult; outcome?: ExploreOutcome; reportPath?: string }> {
+    const refuse = (message: string): { answer: CallToolResult } => ({ answer: fail(message) });
+    if (args.guide !== undefined && args.guide !== "none") return refuse("Error unsupported: guide isn't offered yet; explore chooses by itself.");
+    const budget = { minutes: args.minutes ?? EXPLORE_DEFAULTS.minutes, steps: args.steps ?? EXPLORE_DEFAULTS.steps, depth: args.depth ?? EXPLORE_DEFAULTS.depth };
+    for (const name of ["minutes", "steps", "depth"] as const) {
+      const [low, high] = EXPLORE_LIMITS[name];
+      const value = budget[name];
+      const whole = name !== "minutes";
+      if (!Number.isFinite(value) || value < low || value > high || (whole && !Number.isInteger(value))) {
+        return refuse(`Error bad_params: ${name} is ${whole ? "a whole number" : "a number"} from ${low} to ${high}, not ${String(value)}.`);
+      }
+    }
+    const session = this.host.current();
+    if (session === undefined) return { answer: this.notConnected() };
+    if (this.options.maps === undefined) return refuse("Error unsupported: this server keeps no maps.");
+    const map = this.mapOf(session);
+    if (map === undefined) return refuse("Error unsupported: this app reports no id of its own, so it has no map.");
+    if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
+    if (this.journeyRun !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
+    if (this.recordingState !== null || this.replayingState) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
+    if (args.account !== undefined) {
+      const store = this.options.accounts?.store ?? null;
+      if (store === null || !store.names().includes(args.account)) return refuse(`Error bad_params: no account "${args.account}" in the vault.`);
+      if (store.kindOf(args.account) !== "account" || store.exploreMarked?.(args.account) !== true) {
+        return refuse(`Error bad_params: account "${args.account}" isn't marked "explore": true in the vault file, so explore doesn't use it.`);
+      }
+    }
+    const wall = this.options.wallClock ?? Date.now;
+    let folder: ReturnType<typeof openRunFolder>;
+    try {
+      folder = openRunFolder(this.options.exploreDir, session.app.id ?? session.app.name, new Date(wall()));
+    } catch (error) {
+      return refuse(`Error internal: explore couldn't make its report folder: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const exploreArgs: ExploreArgs = {
+      ...budget,
+      fill: args.fill ?? EXPLORE_DEFAULTS.fill,
+      continue: args.continue ?? EXPLORE_DEFAULTS.continue,
+      ...(args.from !== undefined ? { from: args.from } : {}),
+      ...(args.focus !== undefined ? { focus: args.focus } : {}),
+      ...(args.account !== undefined ? { account: args.account } : {}),
+    };
+    const progress = this.holdScope.getStore()?.progress;
+    const explorer = new Explorer(this.exploreHost(session, map, wall, progress), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
+    // Calls inside the call add no crash note or wait of their own: the report says what happened.
+    const result = await this.noteScope.run(true, () => explorer.run());
+    if (!isOutcome(result)) return refuse(result.error);
+    const reportPath = writeExploreReport(folder, result.report, (text) => this.host.redactOut(text), result.detail);
+    const where = reportPath ?? `${folder.dir}`;
+    const shown = where.startsWith(homedir()) ? `~${where.slice(homedir().length)}`.replace(/\\/g, "/") : where;
+    const stopped = result.report.stopped;
+    if (stopped === "paused" || stopped === "busy" || stopped === "locked") {
+      const why = stopped === "paused" ? "The user paused the agent in the live viewer." : stopped === "busy" ? "A person is using the app in the live viewer." : "The phone is locked.";
+      const done = `Done: ${result.report.used.steps} steps, ${result.report.coverage.places} places. Left at: ${result.leftAt ?? "unknown"}. Report: ${shown}`;
+      return { answer: fail(`Error ${stopped}: ${why} ${done}`), outcome: result, ...(reportPath !== null ? { reportPath } : {}) };
+    }
+    const lines = answerLines(result.report, result.findingsLine, shown, result.detail);
+    return { answer: text(lines.join("\n")), outcome: result, ...(reportPath !== null ? { reportPath } : {}) };
+  }
+
+  /** What the explorer needs from this host. Every move is an ordinary action of this tool, inside the explorer's scope (§25.1, §25.5). */
+  private exploreHost(session: SessionInfo, map: AppMap, wall: () => number, progress: ((line: string, steps: number) => void) | undefined): ExploreHost {
+    const identity = identityOf(session);
+    const live = (): SessionInfo | undefined => {
+      const now = this.host.current();
+      return now !== undefined && identityOf(now) === identity ? now : undefined;
+    };
+    const sleepMs = (ms: number): Promise<void> => this.sleep(ms);
+    const within = async <T>(run: () => Promise<T>): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
+      const scope: { count: number; last?: { method: string; result: unknown } } = { count: 0 };
+      const value = await this.exploreScope.run(scope, run);
+      return { value, count: scope.count, last: scope.last };
+    };
+    const refusal = (answer: CallToolResult): { code: string; message: string; text: string } => {
+      const said = answerText(answer);
+      const m = /^Error (\w+):\s*([\s\S]*)$/.exec(said);
+      return { code: m?.[1] ?? "internal", message: m?.[2] ?? said, text: said };
+    };
+    const outcomeOf = (answer: CallToolResult, count: number, last: { method: string; result: unknown } | undefined): MoveOutcome => {
+      if (answer.isError === true) return { ok: false, used: count, ...refusal(answer) };
+      const result = last?.result;
+      const settled = typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
+      const value = typeof result === "object" && result !== null && "value" in result ? (result as { value: unknown }).value : undefined;
+      return { ok: true, used: count, text: answerText(answer), ...(typeof settled === "number" && Number.isFinite(settled) ? { settledMs: settled } : {}), ...(value !== undefined ? { value } : {}) };
+    };
+    const rulesNow = (): FloorRules => {
+      const lists = listsFor(this.policy, session.app);
+      const settings = exploreSettings(this.policy);
+      return { policy: [...lists.confirm, ...lists.block], skip: settings.skip, submit: settings.submit };
+    };
+    const host: ExploreHost = {
+      now: () => this.clock(),
+      waitedMs: () => this.options.control?.waitedMs() ?? 0,
+      wall: () => new Date(wall()),
+      info: () => {
+        const now = live() ?? session;
+        const platform = now.device.platform === "ios" ? "iOS" : now.device.platform === "android" ? "Android" : now.device.platform;
+        const build = now.app.build ?? "";
+        return {
+          app: now.app.id,
+          name: now.app.name,
+          appVersion: now.app.version ?? "",
+          build: /\((.*)\)\s*$/.exec(build)?.[1] ?? build,
+          buildLabel: map.currentBuild(),
+          device: { model: now.device.model ?? now.device.name ?? "unknown", os: `${platform}${now.device.osVersion !== undefined ? ` ${now.device.osVersion}` : ""}` },
+        };
+      },
+      map,
+      known: async () => {
+        const now = live() ?? session;
+        return now.capabilities.includes("places") ? map.ensureKnown(now.id, () => this.sendRequest("places", {}, { sessionId: now.id })) : (map.knownPlaces() ?? { source: "none", places: [] });
+      },
+      tree: async () => {
+        const now = live();
+        if (now === undefined) return null;
+        try {
+          const parsed = treeResultSchema.safeParse(await this.sendRequest("tree", {}, { sessionId: now.id }));
+          if (!parsed.success) return null;
+          // The explorer has just looked: a person's earlier touch no longer makes its refs stale.
+          this.personActed = false;
+          return parsed.data;
+        } catch (error) {
+          if (error instanceof TaplineError) return null;
+          throw error;
+        }
+      },
+      mark: () => {
+        const now = live() ?? session;
+        return { crash: this.host.crashMark(), id: now.id, logCount: this.sessionLogs(now.id).length, ts: this.newestLogTs(now.id) };
+      },
+      since: (raw): Since => {
+        const mark = raw as { crash: number; id: string; logCount: number; ts: number | undefined };
+        const events = this.host.crashEventsAfter(mark.crash, session);
+        const crashed = events.find((event) => event.kind === "crash");
+        const crash = crashed !== undefined && crashed.kind === "crash" ? crashed.crash : null;
+        const all = this.sessionLogs(mark.id);
+        const fresh = all.length >= mark.logCount ? all.slice(mark.logCount) : all.filter((entry) => (entry.ts ?? 0) > (mark.ts ?? 0));
+        return {
+          crash,
+          disconnected: events.some((event) => event.kind === "disconnect"),
+          errors: fresh.filter((entry) => logLevelOf(entry) === "error" && !(crash !== null && entry.fatal === true)),
+        };
+      },
+      move: async (move: ExploreMove): Promise<MoveOutcome> => {
+        const { value, count, last } = await within(() => {
+          switch (move.tool) {
+            case "tap":
+              return this.tap({ target: move.target, look: false });
+            case "toggle":
+              return this.toggle({ target: move.target, ...(move.value !== undefined ? { value: move.value } : {}), look: false });
+            case "scroll":
+              return this.scroll(move.to !== undefined ? { to: move.to, look: false } : { direction: move.direction ?? "down", look: false });
+            case "back":
+              return this.back({ look: false });
+            case "type":
+              return this.typeText({ target: move.target, text: move.text, look: false });
+          }
+        });
+        return outcomeOf(value, count, last);
+      },
+      go: async (place, by, account) => {
+        const { value, count } = await within(() => this.drive({ to: place, by, look: false, ...(account !== undefined ? { account } : {}) }));
+        return { ok: value.isError !== true, used: count, text: answerText(value) };
+      },
+      reload: async () => {
+        const { value, count } = await within(() => this.reload({}));
+        const said = answerText(value);
+        return { ok: value.isError !== true && !/has not reconnected yet/.test(said), used: Math.max(count, 1), text: said };
+      },
+      commands: async () => {
+        const now = live();
+        if (now === undefined) return [];
+        try {
+          const parsed = commandsSchema.safeParse(await this.sendRequest("commands", {}, { sessionId: now.id }));
+          return parsed.success ? parsed.data.commands.map((c) => c.name) : [];
+        } catch {
+          return [];
+        }
+      },
+      runCommand: async (name) => {
+        const { value, count } = await within(() => this.appCommand({ name, look: false }));
+        return { ok: value.isError !== true, used: Math.max(count, 1), text: answerText(value) };
+      },
+      audit: async () => {
+        const now = live();
+        if (now === undefined || !now.capabilities.includes("audit")) return null;
+        try {
+          const parsed = auditResultSchema.safeParse(await this.sendRequest("audit", {}, { sessionId: now.id }));
+          if (!parsed.success || parsed.data.issues.length === 0) return null;
+          return parsed.data.issues.map((issue) => `${issue.type}: ${issue.element ? formatElement({ ...issue.element, ref: "" }, { actions: false }) : "the screen"}: ${issue.problem}. Fix: ${issue.fix}.`);
+        } catch {
+          return null;
+        }
+      },
+      ux: async () => {
+        const now = live();
+        if (now === undefined || !now.capabilities.includes("uxCheck")) return null;
+        try {
+          const parsed = uxResultSchema.safeParse(await this.sendRequest("uxCheck", {}, { sessionId: now.id }));
+          if (!parsed.success || parsed.data.issues.length === 0) return null;
+          return parsed.data.issues.map((issue) => `${issue.kind}: ${issue.element ? formatElement({ ...issue.element, ref: "" }, { actions: false }) : "the screen"}: ${issue.problem}.`);
+        } catch {
+          return null;
+        }
+      },
+      picture: async () => {
+        const now = live();
+        if (now === undefined || !now.capabilities.includes("screenshot") || this.noScreenshot.has(now.id) || this.secureWindow()) return null;
+        try {
+          const shot = await this.takeShot(now.id, 300, 0.6);
+          return Buffer.from(shot.data, "base64");
+        } catch {
+          return null;
+        }
+      },
+      frontState: () => {
+        const now = live();
+        if (now === undefined) return "gone";
+        return now.appState === undefined || now.appState.state === "active" ? "front" : "background";
+      },
+      waitForApp: async (ms) => {
+        for (let waited = 0; ; waited += 200) {
+          const now = live();
+          if (now !== undefined && (now.appState === undefined || now.appState.state === "active")) return true;
+          if (waited >= ms) return false;
+          await sleepMs(Math.min(200, Math.max(1, ms - waited)));
+        }
+      },
+      redact: (text) => this.host.redactOut(text),
+      progress: (line, steps) => progress?.(line, steps),
+      get rules(): FloorRules {
+        return rulesNow();
+      },
+      vaultFill: (entry, field) => {
+        const store = this.options.accounts?.store ?? null;
+        if (store === null || store.exploreMarked?.(entry) !== true) return "no";
+        const kind = store.kindOf(entry);
+        // Never a password, a card or the phone's passcode (§25.6): an identity, an address, a note, or an account's username.
+        const allowed = kind === "identity" ? field !== "phone" : kind === "address" || kind === "note" ? true : kind === "account" ? field === "username" : false;
+        return allowed ? "ok" : "no";
+      },
+    };
+    return host;
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
@@ -3685,6 +3965,11 @@ export class TaplineTools {
         return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
       }
     }
+    const captured = this.exploreScope.getStore();
+    if (captured !== undefined) {
+      captured.count += 1;
+      captured.last = { method, result };
+    }
     const line = describe(result);
     this.noteTouch(method, params, result);
     if (nothingDone?.(result) === true) {
@@ -5145,6 +5430,8 @@ export class TaplineTools {
     known?: KnownElements,
   ): Promise<{ stop: CallToolResult } | { waited: Waited | null }> {
     const dialogs = this.dialogs;
+    // The explorer opens no dialog and no live-view request (§25.5): the check right before the touch stops it.
+    if (this.exploreScope.getStore() !== undefined) return { waited: null };
     if (dialogs === undefined || !dialogs.available() || lists.confirm.length === 0) return { waited: null };
     const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     // A target that can't be checked is answered by the check right before the touch.
@@ -5259,8 +5546,8 @@ export class TaplineTools {
    * Runs a call of the agent with its own wait counter and, when there is one, the request's abort signal, so a
    * wait for a person's OK is counted for this call only and closes when the call is cancelled.
    */
-  withCall<T>(signal: AbortSignal | undefined, run: () => T, leaseCredential?: string): T {
-    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}), ...(leaseCredential !== undefined ? { lease: leaseCredential } : {}) }, run);
+  withCall<T>(signal: AbortSignal | undefined, run: () => T, leaseCredential?: string, progress?: (line: string, steps: number) => void): T {
+    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}), ...(leaseCredential !== undefined ? { lease: leaseCredential } : {}), ...(progress !== undefined ? { progress } : {}) }, run);
   }
 
   /**
@@ -5289,6 +5576,11 @@ export class TaplineTools {
     if (verdict.kind === "blocked") {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
       return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
+    }
+    // `explore` is never asked and no grant stands in for it (§25.5): a touch that needs a person's OK isn't made, and no use is counted.
+    if (verdict.kind === "confirm" && this.exploreScope.getStore() !== undefined) {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return { stop: fail(`Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}); explore never asks, so it skips it.`) };
     }
     // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
     if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
@@ -5526,8 +5818,10 @@ export class TaplineTools {
   ): { kind: "blocked" | "confirm"; element: TreeElement; raw: TreeElement; word: string } | { kind: "none" } {
     // The words are matched on the raw elements, so a label an account value hides is still the word it is. What the
     // verdict carries for showing (`element`, `word`) is scrubbed; `raw` stays inside, for the key and the fingerprint.
+    // For `explore` only (§25.5), an element with no label and no text is matched on its id as words, so `delete-row` counts as `Delete`.
+    const subject = (element: TreeElement): { label?: string | null; text?: string | null } => (this.exploreScope.getStore() !== undefined ? floorSubject(element) : element);
     for (const [i, raw] of resolved.raw.entries()) {
-      const word = matchWord(lists.block, raw);
+      const word = matchWord(lists.block, subject(raw));
       const element = resolved.elements[i];
       if (word !== null && element !== undefined) return { kind: "blocked", element, raw, word: this.host.redactOut(word) };
     }
@@ -5537,7 +5831,7 @@ export class TaplineTools {
       if (raw.role === "link" && raw.label === UNREADABLE_LINK && element !== undefined) return { kind: "confirm", element, raw, word: UNREADABLE_LINK };
     }
     for (const [i, raw] of resolved.raw.entries()) {
-      const word = matchWord(lists.confirm, raw);
+      const word = matchWord(lists.confirm, subject(raw));
       const element = resolved.elements[i];
       if (word !== null && element !== undefined) return { kind: "confirm", element, raw, word: this.host.redactOut(word) };
     }

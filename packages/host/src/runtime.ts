@@ -327,6 +327,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     baselinesDir: join(configDir(options.env), "baselines"),
     // Journey reports (AGENT-TOOLS 1.12 §17.5) and the user's own gh and git for `export`
     journeysDir: join(configDir(options.env), "journeys"),
+    // `explore` reports (AGENT-TOOLS 1.15 §25.10): one folder per run, the newest 20 of an app kept
+    exploreDir: join(configDir(options.env), "explore"),
     exportRunner: realRunner,
     // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
     ...(options.noLog === true ? {} : { logDir: join(configDir(options.env), "log") }),

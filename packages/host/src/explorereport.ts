@@ -198,7 +198,7 @@ function pathText(step: Finding["path"][number]): string {
  * Writes `report.json` and `report.md`. Every text goes through the redaction first (§20.3); the JSON is redacted value by value,
  * so it stays valid JSON. Answers the path of `report.md`, or null when it can't be written (a report that fails never changes the run).
  */
-export function writeReport(folder: RunFolder, report: ExploreReport, redact: (text: string) => string, detail?: string): string | null {
+export function writeExploreReport(folder: RunFolder, report: ExploreReport, redact: (text: string) => string, detail?: string): string | null {
   try {
     const clean = redactFinding(report, redact);
     writeFileSync(join(folder.dir, "report.json"), `${JSON.stringify(clean, null, 2)}\n`);
