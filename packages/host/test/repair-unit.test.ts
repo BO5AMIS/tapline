@@ -210,7 +210,7 @@ interface Stub {
   audit: string[];
 }
 
-function stub(options: { elements: TreeElement[]; valid: Set<string>; place?: string | null; ways?: Record<string, Step[] | null>; drafts?: boolean; auditOk?: boolean; offScreenBelow?: number }): Stub {
+function stub(options: { elements: TreeElement[]; valid: Set<string>; place?: string | null; ways?: Record<string, Step[] | null>; drafts?: boolean; auditOk?: boolean; offScreenBelow?: number; toggleRoles?: Record<string, string> }): Stub {
   const trials: string[][] = [];
   const audit: string[] = [];
   const tree = (): TreeResult => ({ elements: options.elements, screen: { width: 430, height: 932 }, ...(options.offScreenBelow !== undefined ? { offScreen: { above: 0, below: options.offScreenBelow } } : {}) }) as TreeResult;
@@ -220,6 +220,8 @@ function stub(options: { elements: TreeElement[]; valid: Set<string>; place?: st
   });
   const host: RepairHost = {
     script: "stubbed",
+    trial: (steps) => host.runSteps(steps),
+    toggleRole: (place, target) => options.toggleRoles?.[`${place ?? ""}|${target.id ?? ""}`] ?? null,
     runSteps: (steps) => {
       trials.push(steps.map((s) => (s as { target?: { id?: string } }).target?.id ?? s.tool));
       for (const [i, step] of steps.entries()) {

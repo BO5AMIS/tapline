@@ -5,7 +5,7 @@ import { callTool } from "../src/dispatch.js";
 import type { TaplineHost } from "../src/server.js";
 import { btn, flushExploreMaps } from "./explore-helpers.js";
 import type { FakeApp } from "./helpers.js";
-import { APP, mapWith, repairRig, textOf, type RepairRig, type RigOptions } from "./repair-helpers.js";
+import { APP, BUILD, mapWith, repairRig, textOf, type RepairRig, type RigOptions } from "./repair-helpers.js";
 
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
@@ -115,7 +115,8 @@ describe("repair apply: the breaks it repairs (§26.1, §26.4)", () => {
     expect(notes).toContain('1. Step 1 (tap). Was id=open-settings-btn; now id=open-settings (button "Settings", place home).');
     expect(notes).toContain("   - Score 0.67: id_stem 0.67.");
     expect(notes).toContain('   - Accepted: the step\'s expect (id "notify-switch") held, and the whole run passed.');
-    expect(r.s.world.pressed).toEqual(["open-settings", "open-language"]);
+    // The run, then the replay of the repaired script as written.
+    expect(r.s.world.pressed).toEqual(["open-settings", "open-language", "open-settings", "open-language"]);
   });
 
   it("the repaired script replays by itself, and the audit log has one line for the repair", async () => {
@@ -173,7 +174,8 @@ describe("repair apply: the breaks it repairs (§26.1, §26.4)", () => {
       ["tap", "open-language", undefined],
     ]);
     expect(r.lines[0]?.detail).toBe("step 2: tap id=open-language, before it: tap id=continue (welcome to settings), accepted");
-    expect(r.s.world.pressed).toEqual(["open-settings", "continue", "open-language"]);
+    // The run, then the replay of the repaired script as written.
+    expect(r.s.world.pressed).toEqual(["open-settings", "continue", "open-language", "open-settings", "continue", "open-language"]);
   });
 
   it("a new screen after a step: the recording's route says where it ended, and the road is put after it", async () => {
@@ -193,7 +195,8 @@ describe("repair apply: the breaks it repairs (§26.1, §26.4)", () => {
     const answer = textOf(await r.s.tools.replay({ name: "ended", repair: "apply" }));
     expect(answer.split("\n")[0]).toBe("Ran 2 of 2 steps in 0.0 s, with 1 repair (not adopted).");
     expect(answer).toContain("step 1 inserted after it: tap id=continue (welcome to settings)");
-    expect(r.s.world.pressed).toEqual(["open-settings", "continue", "open-language"]);
+    // The run, then the replay of the repaired script as written.
+    expect(r.s.world.pressed).toEqual(["open-settings", "continue", "open-language", "open-settings", "continue", "open-language"]);
   });
 
   it("a row now behind a scroll: scrolls down until it shows, then acts", async () => {
@@ -212,7 +215,8 @@ describe("repair apply: the breaks it repairs (§26.1, §26.4)", () => {
     const repaired = JSON.parse(r.read("scrolled.repaired.json")) as { steps: Array<Record<string, unknown>> };
     expect(repaired.steps.map((step) => step["tool"])).toEqual(["tap", "scroll", "scroll", "tap"]);
     expect(repaired.steps[1]).toMatchObject({ direction: "down", repaired: { inserted: true } });
-    expect(r.s.world.pressed).toEqual(["open-trips", "trip-row-5"]);
+    // The run, then the replay of the repaired script as written.
+    expect(r.s.world.pressed).toEqual(["open-trips", "trip-row-5", "open-trips", "trip-row-5"]);
   });
 
   it("a step with no expect is checked by the target of the next step", async () => {
@@ -273,19 +277,23 @@ describe("repair apply: what it never repairs (§26.2)", () => {
     untouched(r, "goback");
   });
 
-  it("a toggle is repaired only to an element of the same kind", async () => {
-    const same = await rig({ world: (w) => void (w.screen = "settings") });
-    same.script("flip", [{ tool: "toggle", target: { id: "notify-sw" }, expect: { id: "open-language" } }]);
+  it("a toggle is repaired only to an element of the recorded role (the original's role comes from the map)", async () => {
+    const recorded = mapWith({ home: ["home"], settings: ["settings"], language: ["settings", "language"] }, []);
+    const place = recorded.places["settings"];
+    if (place !== undefined) place.explored = { last: "2026-11-12T10:00:00.000Z", actions: [{ sig: "id:notify-sw", result: "same", role: "switch", build: BUILD, last: "2026-11-12T10:00:00.000Z" }], frontier: [] };
+    const same = await rig({ map: recorded, world: (w) => void (w.screen = "settings") });
+    same.script("flip", [{ tool: "toggle", target: { id: "notify-sw" }, expect: { id: "open-language" }, place: "settings" }]);
     const ok = textOf(await same.s.tools.replay({ name: "flip", repair: "apply" }));
     expect(ok).toContain("step 1 toggle id=notify-sw to id=notify-switch");
     const other = await rig({
+      map: recorded,
       world: (w) => {
         w.screen = "settings";
         const settings = w.screens["settings"];
         if (settings !== undefined) settings.elements = [btn("notify-switch", "Notifications"), btn("open-language", "Language")];
       },
     });
-    other.script("flip", [{ tool: "toggle", target: { id: "notify-sw" }, expect: { id: "open-language" } }]);
+    other.script("flip", [{ tool: "toggle", target: { id: "notify-sw" }, expect: { id: "open-language" }, place: "settings" }]);
     const refused = textOf(await other.s.tools.replay({ name: "flip", repair: "apply" }));
     expect(refused).toContain("Repair: none. Nothing on the screen can take the step's toggle");
     expect(other.s.world.pressed).toEqual([]);

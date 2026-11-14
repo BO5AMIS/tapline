@@ -209,7 +209,7 @@ export const SKIP_WHYS: readonly SkipWhy[] = ["policy", "floor", "skip_list", "a
 /** What `markTried` is told. A road names where it arrived; a refusal says how. */
 export type TriedResult =
   | { result: "road"; to: string }
-  | { result: "same" }
+  | { result: "same"; /** A toggle's role, when a flip and its flip back both held. */ role?: string }
   | { result: "refused"; code: string }
   | { result: "crash" }
   | { result: "left" };

@@ -17,7 +17,7 @@ import {
   neverRepaired,
   rankScored,
   repairPhrase,
-  sameToggleKind,
+  sameToggleRole,
   scoreParts,
   screenOf,
   targetFor,
@@ -41,6 +41,13 @@ export interface RepairHost {
   script: string;
   /** Runs steps as one batch the way a replay does, and answers as `run` does. */
   runSteps(steps: Step[]): Promise<CallToolResult>;
+  /**
+   * Runs the steps a repair makes of its own (a trial of a new target, a scroll, a road move put in, the way back): the same batch,
+   * but every touch meets the whole explore floor on the element that really receives it, whatever the policy says (§25.5, §26.4).
+   */
+  trial(steps: Step[]): Promise<CallToolResult>;
+  /** The role a passing run recorded for the toggle at this place (by its target), or null when none did. */
+  toggleRole(place: string | null, target: Target): string | null;
   /** The element list now, read without changing anything; null when it can't be read. */
   tree(): Promise<TreeResult | null>;
   /** The name of the place the app is on, or null when it isn't a known place. */
@@ -137,9 +144,13 @@ export async function analyse(host: RepairHost, steps: readonly Step[], at: numb
   const step = steps[at];
   if (step === undefined) return { kind: "none", reason: "there is no such step" };
   // A step that ran and ended on another place than it was recorded to (`route`): a new screen is in the way after it (§26.1).
-  if (brk.code === "expect_failed" && /^its action ran, but it ended on /.test(brk.message)) return analyseEnd(host, step);
   const never = neverRepaired(step, host.never);
   if (never !== null) return { kind: "none", reason: never };
+  if (brk.code === "expect_failed" && /^its action ran, but it ended on /.test(brk.message)) {
+    // The same acceptance rule as any repair: the step's expect, or the target of the step after it, must be there to check it.
+    if (!hasCheck(steps, at)) return { kind: "none", reason: "the step has no check (an expect, or a target in the step after it), so a repair couldn't be checked" };
+    return analyseEnd(host, step);
+  }
   const offScreen = brk.code === "not_actionable" && /^off_screen\b/.test(brk.message);
   if (brk.code !== "not_found" && brk.code !== "ambiguous" && !offScreen) {
     return { kind: "none", reason: brk.code === "expect_failed" ? "an expect that fails is a finding, never a break to repair" : `a ${brk.code} failure is a finding, not a break to repair` };
@@ -176,6 +187,13 @@ export async function analyse(host: RepairHost, steps: readonly Step[], at: numb
     };
   }
 
+  // A toggle is repaired only to the role it had; the role comes from a passing run that recorded it, never from the candidate.
+  let toggleRole: string | undefined;
+  if (step.tool === "toggle") {
+    const known = host.toggleRole(expected ?? here, target);
+    if (known === null) return { kind: "none", reason: "the toggle's original role isn't recorded (no passing run saw it at this place), so a toggle is never repaired" };
+    toggleRole = known;
+  }
   const matching = host.match(target, tree.elements);
   const list: Candidate[] = [];
   const wantsScroll = offScreen || (brk.code === "not_found" && matching.length === 0 && (tree.offScreen?.below ?? 0) > 0);
@@ -190,7 +208,7 @@ export async function analyse(host: RepairHost, steps: readonly Step[], at: numb
   }
   let tied: Candidate[] | null = null;
   if (!offScreen) {
-    const ranked = elementCandidates(host, step, target, brk, tree, matching, here);
+    const ranked = elementCandidates(host, step, target, brk, tree, matching, toggleRole);
     if (isNearTie(ranked)) tied = ranked.map((item) => toCandidate(item, step, target, brk, here, tree, host));
     else for (const item of ranked) list.push(toCandidate(item, step, target, brk, here, tree, host));
   }
@@ -245,7 +263,7 @@ function elementCandidates(
   brk: Break,
   tree: TreeResult,
   matching: TreeElement[],
-  _here: string | null,
+  toggleRole: string | undefined,
 ): Scored[] {
   const screen = screenOf(tree);
   const roles = new Set(matching.map((element) => element.role ?? ""));
@@ -253,13 +271,13 @@ function elementCandidates(
     ...(target.id !== undefined ? { id: target.id } : {}),
     ...(target.label !== undefined ? { label: target.label } : {}),
     ...(target.text !== undefined ? { text: target.text } : {}),
-    // The old role is known only when the ambiguous matches agree on one.
-    ...(brk.code === "ambiguous" && roles.size === 1 && [...roles][0] ? { role: [...roles][0] as string } : {}),
+    // The old role is known from a recorded run (a toggle), else only when the ambiguous matches agree on one.
+    ...(toggleRole !== undefined ? { role: toggleRole } : brk.code === "ambiguous" && roles.size === 1 && [...roles][0] ? { role: [...roles][0] as string } : {}),
   };
   const closest = new Set(closestRefs(brk.message));
   const pool = tree.elements.filter((element) => {
     if (!canTake(step.tool, element)) return false;
-    if (step.tool === "toggle" && !sameToggleKind(element)) return false;
+    if (toggleRole !== undefined && !sameToggleRole(element, toggleRole)) return false;
     if (targetFor(element) === null) return false;
     if (host.never.policyHit(subjectOf(element)) !== null) return false;
     if (brk.code === "ambiguous") return matching.includes(element);
@@ -320,7 +338,7 @@ interface WorkStep {
   step: Step;
   /** The index in the original steps; null for an inserted step. */
   origin: number | null;
-  repaired?: { was?: Target | null; score?: number; inserted?: true };
+  repaired?: { was?: Target | null; score?: number; inserted?: true; routeMoved?: true };
 }
 
 export interface RepairRun {
@@ -478,13 +496,18 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
   } else if (candidate.kind === "road" && candidate.after === true) {
     // The step ran and ended elsewhere: the moves go after it, and the check is that the app is where the recording ended.
     const moves = candidate.moves ?? [];
-    const moved = await host.runSteps(moves);
+    const moved = await host.trial(moves);
     if (moved.isError === true) return { ok: false, why: oneLine(parseBreak(moved)?.message ?? firstLineOf(moved)), inserted: [] };
     const now = await host.place();
     if (candidate.place === undefined || now !== candidate.place) return { ok: false, why: `the app is on ${now ?? "an unknown place"}, not on ${candidate.place ?? "the place the recording ended on"}`, inserted: [] };
-    const placed: WorkStep[] = moves.map((item) => ({ step: item, origin: null, repaired: { inserted: true } }));
-    work.splice(at + 1, 0, ...placed);
-    return { ok: true, accepted: `the app was on ${candidate.place} where the recording ended, and the whole run passed.`, inserted: moves, next: at + 1 + placed.length };
+    // The same acceptance rule as any repair: the step's expect held (the batch checked it before the route), or the next step's target resolves now.
+    const checked = await acceptance(host, original.step, all[at + 1], moves);
+    if (!checked.ok) return checked;
+    // The recording's route check moves behind the inserted navigation: it says where the script ends up, and it runs there when the script is replayed.
+    const { route, ...bare } = original.step as Step & { route?: unknown };
+    const placed: WorkStep[] = moves.map((item, i) => ({ step: i === moves.length - 1 && route !== undefined ? ({ ...item, route } as Step) : item, origin: null, repaired: { inserted: true } }));
+    work.splice(at, 1, { ...original, step: bare as Step, ...(route !== undefined ? { repaired: { ...original.repaired, routeMoved: true as const } } : {}) }, ...placed);
+    return { ok: true, accepted: `${checked.accepted.replace(/, and the whole run passed\.$/, "")}, the app was on ${candidate.place} where the recording ended, and the whole run passed.`, inserted: moves, next: at + 1 + placed.length };
   } else if (candidate.kind === "road") {
     before = candidate.moves ?? [];
   } else if (candidate.kind === "scroll") {
@@ -492,7 +515,7 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
     for (let i = 0; i < MAX_SCROLLS; i++) {
       const tree = await host.tree();
       if (tree !== null && host.match(target, tree.elements).length > 0) break;
-      const scrolled = await host.runSteps([{ tool: "scroll", direction: "down" } as Step]);
+      const scrolled = await host.trial([{ tool: "scroll", direction: "down" } as Step]);
       if (scrolled.isError === true) return { ok: false, why: oneLine(firstLineOf(scrolled)), inserted: before };
       before.push({ tool: "scroll", direction: "down" } as Step);
     }
@@ -501,20 +524,11 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
     if (found !== 1) return { ok: false, why: found === 0 ? `${describeTarget(target)} didn't show after ${MAX_SCROLLS} scrolls` : `${describeTarget(target)} matched ${found} elements after scrolling`, inserted: before };
   }
   const trial = [...(candidate.kind === "road" ? before : []), step];
-  const answer = await host.runSteps(trial);
+  const answer = await host.trial(trial);
   if (answer.isError === true) return { ok: false, why: oneLine(parseBreak(answer)?.message ?? firstLineOf(answer)), inserted: before };
-  // The step's own check: its expect held (the batch checked it), or the next step's target resolves to exactly one element.
-  let accepted: string;
-  if (original.step.expect !== undefined) {
-    accepted = `the step's expect ${describeExpect(original.step.expect)} held, and the whole run passed.`;
-  } else {
-    const next = nextTargetOf(all[at + 1]);
-    if (next === null) return { ok: false, why: "no check: the step has no expect and no target follows it", inserted: before };
-    const tree = await host.tree();
-    const found = tree === null ? 0 : host.match(next, tree.elements).length;
-    if (found !== 1) return { ok: false, why: `the next step's target ${describeTarget(next)} ${found === 0 ? "isn't on the screen" : `matches ${found} elements`}`, inserted: before };
-    accepted = `the next step's target (${describeTarget(next)}) resolved to one element, and the whole run passed.`;
-  }
+  const checked = await acceptance(host, original.step, all[at + 1], before);
+  if (!checked.ok) return checked;
+  const accepted = checked.accepted;
   const inserted: WorkStep[] = before.map((item) => ({ step: item, origin: null, repaired: { inserted: true } }));
   const changed: WorkStep =
     candidate.kind === "target"
@@ -522,6 +536,17 @@ async function tryCandidate(host: RepairHost, work: WorkStep[], at: number, cand
       : original;
   work.splice(at, 1, ...inserted, changed);
   return { ok: true, accepted, inserted: before, next: at + inserted.length + 1 };
+}
+
+/** The one acceptance rule (§26.4 1): the step's expect held (the batch checked it), or the next step's target resolves to exactly one element. */
+async function acceptance(host: RepairHost, step: Step, following: Step | undefined, inserted: Step[]): Promise<{ ok: true; accepted: string } | { ok: false; why: string; inserted: Step[] }> {
+  if (step.expect !== undefined) return { ok: true, accepted: `the step's expect ${describeExpect(step.expect)} held, and the whole run passed.` };
+  const next = nextTargetOf(following);
+  if (next === null) return { ok: false, why: "no check: the step has no expect and no target follows it", inserted };
+  const tree = await host.tree();
+  const found = tree === null ? 0 : host.match(next, tree.elements).length;
+  if (found !== 1) return { ok: false, why: `the next step's target ${describeTarget(next)} ${found === 0 ? "isn't on the screen" : `matches ${found} elements`}`, inserted };
+  return { ok: true, accepted: `the next step's target (${describeTarget(next)}) resolved to one element, and the whole run passed.` };
 }
 
 function describeExpect(expect: NonNullable<Step["expect"]>): string {

@@ -882,8 +882,10 @@ export class Explorer {
     }
     const found = this.findBySig(here, action.sig);
     const nowValue = found === undefined ? undefined : readToggle(found);
+    // The toggle's role is kept with the result: a repair of a script's toggle needs the role it had (§26.2).
+    const role = roleOf(action.el) ?? undefined;
     if (nowValue === old) {
-      map.markTried(place, action.sig, { result: "same" });
+      map.markTried(place, action.sig, { result: "same", role });
       return true;
     }
     const back = await this.host.move({ tool: "toggle", target: found !== undefined ? this.targetOf(found, action.sig, here, 0) : action.target, value: old });
@@ -891,7 +893,7 @@ export class Explorer {
     const check = await this.read();
     const after = this.findBySig(check, action.sig);
     if (!back.ok || after === undefined || readToggle(after) !== old) throw new Stop("toggle_not_restored", toggleName(action.el));
-    map.markTried(place, action.sig, { result: "same" });
+    map.markTried(place, action.sig, { result: "same", role });
     return true;
   }
 

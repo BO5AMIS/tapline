@@ -5290,7 +5290,7 @@ export class TaplineTools {
   }
 
   /** `adopt` is a person's choice and only the command line passes it: no tool parameter reaches it (AGENT-TOOLS 1.15 §26.5). */
-  async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean } = {}): Promise<CallToolResult> {
+  async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string } = {}): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
@@ -5343,11 +5343,13 @@ export class TaplineTools {
       else if (said.startsWith("Reload requested, but")) notes.push("Note: the app hadn't reconnected after starting fresh when the steps began.");
     }
     const scriptPath = path;
+    // A check of the repaired script borrows the original's picture references and diffs (`sideOf`).
+    const sidePath = options.sideOf ?? path;
     const execute = async (steps: Step[]): Promise<CallToolResult> => {
       this.replaying = true;
       this.replayContext = {
-        referencesDir: this.scriptSideFolder(scriptPath, "references"),
-        diffDir: this.scriptSideFolder(scriptPath, "diff"),
+        referencesDir: this.scriptSideFolder(sidePath, "references"),
+        diffDir: this.scriptSideFolder(sidePath, "diff"),
         update: options.updateReferences === true,
       };
       try {
@@ -5366,6 +5368,16 @@ export class TaplineTools {
     let ranSteps: Step[] = script.steps;
     let repairRun: RepairRun | null = null;
     const repairHost = args.repair === undefined ? null : this.repairHost(session, script, scriptPath, execute);
+    // Where the script starts, for the replay that proves a repaired script as written (a script that doesn't start fresh needs the app back there).
+    const startPlace = repairHost !== null && args.repair === "apply" ? await repairHost.place() : null;
+    const backAtStart = async (): Promise<boolean> => {
+      if (repairHost === null || script.version === 2 || script.fresh !== false) return true;
+      if (startPlace === null) return false;
+      if ((await repairHost.place()) === startPlace) return true;
+      await repairHost.returnTo(startPlace);
+      for (let i = 0; i < 6 && (await repairHost.place()) !== startPlace; i++) await repairHost.back();
+      return (await repairHost.place()) === startPlace;
+    };
     const run = async (steps: Step[]): Promise<CallToolResult> => {
       if (repairHost === null || args.repair !== "apply") {
         ranSteps = steps;
@@ -5377,7 +5389,7 @@ export class TaplineTools {
     const finish = async (answer: CallToolResult): Promise<CallToolResult> => {
       if (repairHost === null) return answer;
       if (args.repair === "suggest") return this.suggestRepair(repairHost, answer, ranSteps, session, script);
-      return repairRun === null ? answer : this.finishRepair(session, script, scriptPath, repairRun, options.adopt === true);
+      return repairRun === null ? answer : this.finishRepair(session, script, scriptPath, repairRun, options.adopt === true, backAtStart);
     };
     if (script.version !== 2) return finish(await run(script.steps));
     // A route starts at a place: after the fresh start the app is driven there (an `off_route` fails the replay), then it runs (18.5).
@@ -5387,19 +5399,39 @@ export class TaplineTools {
 
   // -- self-repairing tests (AGENT-TOOLS 1.15 §26)
 
+  /**
+   * Runs what a repair does of its own in the explore gate's scope with no budget: every touch inside meets the whole floor on the
+   * element that really receives it, a typing request is refused, and nothing asks a person (§25.5). A hit stops that move before
+   * anything is sent, so the candidate that caused it is rejected.
+   */
+  private repairScope<T>(go: () => Promise<T>): Promise<T> {
+    if (this.exploreScope.getStore() !== undefined) return go();
+    const run: ExploreRun = { used: 0, steps: Number.POSITIVE_INFINITY, minutes: Number.POSITIVE_INFINITY, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], scrub: null };
+    return this.exploreScope.run({ count: 0, run }, go);
+  }
+
   /** What a repair needs from this host: the checks of any touch run inside `runSteps`, and nothing here writes the map. */
   private repairHost(session: SessionInfo, script: SharedScript, scriptPath: string, execute: (steps: Step[]) => Promise<CallToolResult>): RepairHost {
     const live = (): SessionInfo => this.host.current() ?? session;
     const map = this.mapOf(session);
     const words = (): string[] => {
-      const lists = listsFor(this.policy, session.app);
-      // The floor of §25.5 is in it whatever the policy file says: a repair never reaches a word that reaches people or money.
+      // The union of the global and the app's lists, as explore reads them: an app's own lists never lower the floor (§25.5).
+      const lists = exploreLists(this.policy, session.app);
       return [...new Set([...FLOOR_WORDS, ...lists.confirm, ...lists.block, ...exploreSettings(this.policy).skip])];
     };
     const named = script.name || basename(scriptPath, ".json");
     return {
       script: named,
       runSteps: execute,
+      // Every move a repair makes of its own meets the whole explore floor on the element that really receives it (§25.5, §26.4).
+      trial: (steps) => this.repairScope(() => execute(steps)),
+      toggleRole: (place, target) => {
+        if (map === undefined || place === null) return null;
+        const sig = target.id !== undefined ? `id:${target.id}` : target.label !== undefined ? `label:${target.label}` : target.text !== undefined ? `text:${target.text}` : null;
+        if (sig === null) return null;
+        const role = map.triedAction(place, target.index !== undefined ? `${sig}#${target.index}` : sig)?.["role"];
+        return typeof role === "string" && role !== "" ? role : null;
+      },
       tree: async () => {
         const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: live().id }).catch(() => null));
         return tree.success ? tree.data : null;
@@ -5424,8 +5456,8 @@ export class TaplineTools {
         }
         return steps;
       },
-      returnTo: async (place) => (await this.replayDriveTo(place)).ok,
-      back: async () => (await execute([{ tool: "back" } as Step])).isError !== true,
+      returnTo: async (place) => this.repairScope(async () => (await this.replayDriveTo(place)).ok),
+      back: async () => (await this.repairScope(() => execute([{ tool: "back" } as Step]))).isError !== true,
       match: (target, elements) => candidatesFor(wireTarget(target), elements),
       never: {
         draftsOnly: script.version === 2 && script.draftsOnly === true,
@@ -5486,7 +5518,7 @@ export class TaplineTools {
   }
 
   /** `apply` ended: a failure adds its notes (and an expect's finding); a pass with repairs writes the two files and learns the roads (§26.5). */
-  private async finishRepair(session: SessionInfo, script: SharedScript, scriptPath: string, run: RepairRun, adopt: boolean): Promise<CallToolResult> {
+  private async finishRepair(session: SessionInfo, script: SharedScript, scriptPath: string, run: RepairRun, adopt: boolean, backAtStart: () => Promise<boolean>): Promise<CallToolResult> {
     const withLines = (answer: CallToolResult, lines: string[]): CallToolResult => {
       const [top, ...rest] = answer.content;
       return lines.length === 0 || top === undefined || top.type !== "text" ? answer : { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...lines].join("\n") }, ...rest] };
@@ -5515,6 +5547,12 @@ export class TaplineTools {
     const repaired = this.backstop(repairedScript(original, run.work, { from: basename(scriptPath), at: at.toISOString().replace(/\.\d{3}Z$/, "Z"), build, count: run.repairs.length }));
     const repairedText = `${JSON.stringify(repaired, null, 2)}\n`;
     const markdown = this.scrubSecrets(repairMarkdown(script.name || stem, { date: at.toISOString().slice(0, 10), version: EXPLORE_TOOL_VERSION, build }, run.repairs));
+    // The script as it will be written must pass a fresh, ordinary replay (no repair) on this app; nothing is written when it doesn't (§26.4).
+    const refused = await this.verifyEmitted(scriptPath, repairedText, backAtStart);
+    if (refused !== null) {
+      for (const record of run.repairs) this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: this.host.redactOut(`step ${record.step}: ${repairPhrase(record)}, rejected (the repaired script failed its replay as written)`) });
+      return fail(refused);
+    }
     try {
       writeFileSync(repairedPath, repairedText, { mode: 0o600 });
       writeFileSync(notesPath, markdown, { mode: 0o600 });
@@ -5549,6 +5587,32 @@ export class TaplineTools {
       ? `Adopted: ${stem}.json now holds the repaired script; the original is kept as ${stem}.orig.json. Wrote ${stem}.repair.md.`
       : `Wrote ${stem}.repaired.json and ${stem}.repair.md. The original is unchanged.`;
     return text([head, `Repaired: ${phrases.join("; ")}.`, files, ...extra].join("\n"));
+  }
+
+  /**
+   * Replays the repaired script exactly as it would be written, as an ordinary replay of its own (repair off), from the start the
+   * original had. Null when it passes; else the failure to answer with. The probe file lives beside the script for a moment only.
+   */
+  private async verifyEmitted(scriptPath: string, text: string, backAtStart: () => Promise<boolean>): Promise<string | null> {
+    const stem = basename(scriptPath).replace(/\.json$/i, "");
+    const probe = join(dirname(scriptPath), `${stem}.repaired.json.${process.pid}.probe.json`);
+    const nothing = "nothing was written";
+    try {
+      writeFileSync(probe, text, { mode: 0o600 });
+    } catch (error) {
+      return `Error internal: the repaired script couldn't be replayed as written (${error instanceof Error ? error.message : String(error)}); ${nothing}.`;
+    }
+    try {
+      if (!(await backAtStart())) return `Error not_connected: the run passed, but the app couldn't be taken back to where the script starts, so the repaired script couldn't be replayed as written; ${nothing}.`;
+      const answer = await this.replay({ path: probe }, { sideOf: scriptPath });
+      if (answer.isError !== true) return null;
+      const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      const [first = "", ...rest] = said.split("\n");
+      const m = /^Error (\w+):\s*(.*)$/.exec(first);
+      return [`Error ${m?.[1] ?? "internal"}: the run passed with its repairs, but the repaired script failed when replayed as written (${m?.[2] ?? first}); ${nothing}.`, ...rest].join("\n");
+    } finally {
+      rmSync(probe, { force: true });
+    }
   }
 
   /** A passing `apply` updates the road that has a repaired move: its `move` and `names` take the new target, proven for the build (§26.5). Nothing else of the map. */

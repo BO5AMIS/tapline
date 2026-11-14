@@ -237,9 +237,13 @@ export function canTake(tool: string, element: TreeElement): boolean {
   }
 }
 
-/** A toggle is repaired only to an element of the same kind: one that toggles. */
-export function sameToggleKind(element: TreeElement): boolean {
-  return (element.actions ?? []).includes("toggle") || TOGGLE_ROLES.has((element.role ?? "").toLowerCase());
+/**
+ * A toggle is repaired only to an element of exactly the role the original had (a switch to a switch, never to a checkbox):
+ * it must take a toggle and its role must equal the recorded one. A candidate with no role never matches.
+ */
+export function sameToggleRole(element: TreeElement, role: string): boolean {
+  const now = (element.role ?? "").toLowerCase();
+  return now !== "" && now === role.toLowerCase() && ((element.actions ?? []).includes("toggle") || TOGGLE_ROLES.has(now));
 }
 
 // -- targets
@@ -424,13 +428,18 @@ export interface RepairRecord {
 /** The repaired script: the original's own object with the repairs applied, plus the `repaired` keys (§26.6). */
 export function repairedScript(
   original: Record<string, unknown>,
-  work: ReadonlyArray<{ origin: number | null; step: Step; repaired?: { was?: Target | null; score?: number; inserted?: true } }>,
+  work: ReadonlyArray<{ origin: number | null; step: Step; repaired?: { was?: Target | null; score?: number; inserted?: true; routeMoved?: true } }>,
   info: { from: string; at: string; build: string; count: number },
 ): Record<string, unknown> {
   const rawSteps = Array.isArray(original["steps"]) ? (original["steps"] as Array<Record<string, unknown>>) : [];
   const steps = work.map((item) => {
     if (item.origin === null) return { ...item.step, repaired: { inserted: true } };
     const raw = rawSteps[item.origin] ?? item.step;
+    // The recording's route check now sits on the last move put after this step.
+    if (item.repaired?.routeMoved === true) {
+      const { route: _route, ...rest } = raw;
+      return rest;
+    }
     if (item.repaired?.was === undefined && item.repaired?.score === undefined) return raw;
     const target = (item.step as Record<string, unknown>)["target"];
     return {

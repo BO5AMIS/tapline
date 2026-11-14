@@ -45,7 +45,7 @@ export function frontierCut(record: ExploredRecord | undefined): boolean {
 
 /** Puts the result of one action into a record (a new entry, or the old one replaced), stamped `now`. */
 export function withTried(record: ExploredRecord | undefined, sig: string, result: TriedResult, build: string, now: string): ExploredRecord {
-  const entry: ExploredAction = { sig, result: result.result, ...("to" in result ? { to: result.to } : {}), ...("code" in result ? { code: result.code } : {}), build, last: now };
+  const entry: ExploredAction = { sig, result: result.result, ...("to" in result ? { to: result.to } : {}), ...("code" in result ? { code: result.code } : {}), ...("role" in result && result.role !== undefined && result.role !== "" ? { role: result.role } : {}), build, last: now };
   return replaceAction(record, entry, now);
 }
 
