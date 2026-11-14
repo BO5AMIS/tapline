@@ -6,6 +6,7 @@ import {
   isListedSubmit,
   isSecretField,
   protectedPlaceWord,
+  screenTitles,
   submitWord,
   type FloorHit,
   type FloorRules,
@@ -225,6 +226,12 @@ function wordIn(message: string): string | undefined {
   return /policy word "([^"]+)"/.exec(message)?.[1] ?? /\(("[^"]+")\)/.exec(message)?.[1]?.replace(/^"|"$/g, "");
 }
 
+/** The reason of a skip the host's check named: `(explore skip: app_mark)`. */
+function whyIn(message: string): SkipWhy | undefined {
+  const why = /explore skip: (floor|policy|skip_list|app_mark|may_submit)\b/.exec(message)?.[1];
+  return why as SkipWhy | undefined;
+}
+
 class Stop extends Error {
   constructor(
     readonly reason: StopReason,
@@ -418,7 +425,6 @@ export class Explorer {
     let returned = false;
     let lastBelow = Number.POSITIVE_INFINITY;
     let typed = false;
-    const protectedWord = protectedPlaceWord(place, this.routeOf(place));
     for (let round = 0; round < MAX_ROUNDS; round++) {
       this.checkBudget();
       const tree = await this.read();
@@ -426,6 +432,8 @@ export class Explorer {
         if (!(await this.ensureAt(place))) return;
         continue;
       }
+      // Read each round: the live title of the screen protects a place whose stored name is generic (§25.5).
+      const protectedWord = protectedPlaceWord(place, this.routeOf(place), screenTitles(tree.elements));
       const plan = this.plan(place, tree);
       map.markSeen(place, [...plan.seen, ...(protectedWord === null ? ["back"] : [])]);
       if (plan.rowsCut) this.note(`rows: first ${ROWS_TRIED} of the list tried (${place})`);
@@ -630,6 +638,12 @@ export class Explorer {
       if (sig === null || sig === undefined) return;
       if (el.disabled === true) return;
       if (isInput(el)) {
+        // The floor applies to inputs too (§25.5): a skip mark (inherited ones included), a policy or skip-list word, a card word.
+        const barred = this.args.fill === "test-data" ? floorVerdict(el, this.host.rules) : null;
+        if (barred !== null) {
+          this.skip(place, sig, barred);
+          return;
+        }
         if (this.args.fill === "test-data" && this.fillFor(el) !== null) {
           inputs.push({ sig, el, target: this.targetOf(el, sig, tree, i), step: this.stepOf(el, sig, tree, "type_text") });
           seen.push(sig);
@@ -743,9 +757,13 @@ export class Explorer {
         case "lease_lost":
           throw new Stop("busy");
         case "not_allowed": {
-          // The check of dry_run said a person's OK is needed, or the touch is blocked: it isn't made (§25.5).
+          // The budget ran out inside one move (a drive or a route): the run ends there, nothing is skipped for it.
+          const budget = /explore budget: (steps|minutes)/.exec(out.message)?.[1];
+          if (budget !== undefined) throw new Stop(budget === "steps" ? "budget_steps" : "budget_minutes");
+          // The check right before the touch said a person's OK is needed, the touch is blocked, or the real recipient is skipped: it isn't made (§25.5).
           const word = wordIn(out.message);
-          if (sig !== null) this.skip(place, sig, { why: "policy", ...(word !== undefined ? { word } : {}) });
+          const why = whyIn(out.message) ?? "policy";
+          if (sig !== null) this.skip(place, sig, { why, ...(word !== undefined ? { word } : {}) });
           return true;
         }
         case "not_actionable": {

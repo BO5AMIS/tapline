@@ -42,6 +42,18 @@ export function exploreSettings(policy: PolicyFile): ExploreSettings {
   return { skip: strings(own["skip"]), submit: strings(own["submit"]) };
 }
 
+/**
+ * The policy's lists as explore reads them (§25.5): the union of the global lists and the app's own, never the app's alone. An app's
+ * lists replace the global ones for an ordinary touch; for the floor they can only add (`"confirm": []` lowers nothing).
+ */
+export function exploreLists(policy: PolicyFile, app: { id?: string; name: string } | undefined): { confirm: string[]; block: string[] } {
+  const own = app === undefined ? undefined : (policy.apps?.[app.id ?? ""] ?? policy.apps?.[app.name]);
+  return {
+    confirm: [...new Set([...(policy.confirm ?? []), ...(own?.confirm ?? [])])],
+    block: [...new Set([...(policy.block ?? []), ...(own?.block ?? [])])],
+  };
+}
+
 /** The words the floor matches, by where they came from. `policy` is the file's `confirm` and `block` for this app. */
 export interface FloorRules {
   policy: string[];
@@ -81,6 +93,20 @@ export function floorVerdict(element: Pick<TreeElement, "label" | "text" | "test
   return null;
 }
 
+/**
+ * The whole floor for the element that really receives a touch (§25.5), checked right before it: the verdict of `floorVerdict`
+ * (floor words, policy, skip list, the app's mark, inherited ones included), then a card or password field, then the submit rule
+ * on a screen that has a text input (§25.7).
+ */
+export function recipientVerdict(element: Pick<TreeElement, "label" | "text" | "testID" | "exploreSkip" | "role" | "placeholder">, rules: FloorRules, screenHasInput: boolean): FloorHit | null {
+  const hit = floorVerdict(element, rules);
+  if (hit !== null) return hit;
+  if (element.role === "input" && isSecretField(element)) return { why: "floor", word: "password" };
+  const word = submitWord(element);
+  if (word !== null && !isListedSubmit(element, rules) && screenHasInput) return { why: "may_submit", word };
+  return null;
+}
+
 /** The submit word an element carries (whole word, ignoring case), or null. */
 export function submitWord(element: Pick<TreeElement, "label" | "text" | "testID">): string | null {
   return matchWord([...SUBMIT_WORDS], floorSubject(element));
@@ -91,9 +117,20 @@ export function isListedSubmit(element: Pick<TreeElement, "testID">, rules: Floo
   return typeof element.testID === "string" && element.testID !== "" && rules.submit.includes(element.testID);
 }
 
-/** The word of a protected place (account, privacy, security) in a place's route and name, or null (§19.2). */
-export function protectedPlaceWord(name: string, route: readonly string[] | undefined): string | null {
-  const pieces = [name, ...(route ?? [])].flatMap((piece) => asWords(piece).toLowerCase().split(/[^a-z0-9]+/));
+/**
+ * The words that title the screen as it is now: the text of its header elements (§25.5). A stored name can be generic, so the live
+ * title protects a place too.
+ */
+export function screenTitles(elements: readonly Pick<TreeElement, "role" | "label" | "text">[]): string[] {
+  return elements.filter((el) => el.role === "header").flatMap((el) => [el.text ?? "", el.label ?? ""]).filter((piece) => piece.trim() !== "");
+}
+
+/**
+ * The word of a protected place (account, privacy, security) in a place's name, its route and the live screen's title, or null
+ * (§19.2). `titles` also carries a name a person gave the place.
+ */
+export function protectedPlaceWord(name: string, route: readonly string[] | undefined, titles: readonly string[] = []): string | null {
+  const pieces = [name, ...(route ?? []), ...titles].flatMap((piece) => asWords(piece).toLowerCase().split(/[^a-z0-9]+/));
   return pieces.find((piece) => PROTECTED_PLACE_WORDS.includes(piece)) ?? null;
 }
 

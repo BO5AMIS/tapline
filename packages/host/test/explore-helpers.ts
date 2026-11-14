@@ -29,6 +29,8 @@ export interface ExEl {
   disabled?: boolean;
   exploreSkip?: boolean;
   exploreFill?: boolean | string;
+  /** A secure text field (`secureTextEntry`): the app refuses a `type` that says `kind: "plain"`, as the SDK does. */
+  secure?: boolean;
 }
 
 export const btn = (id: string, text: string, extra: Partial<ExEl> = {}): ExEl => ({ id, label: text, text, role: "button", type: "Pressable", actions: ["press"], ...extra });
@@ -82,6 +84,8 @@ export interface ExWorld {
   ux: Record<string, Array<{ kind: string; problem: string }>>;
   /** What the app typed into inputs, as it received it. */
   typed: Array<{ id: string | undefined; text: string }>;
+  /** The `kind` and `submit` each real `type` request carried, in order. */
+  typeParams: Array<{ id: string | undefined; kind: unknown; submit: unknown }>;
   /** The ids pressed for real (dry runs apart), in order. */
   pressed: string[];
   /** Milliseconds each request takes on the fake clock. */
@@ -179,6 +183,7 @@ export function wayfare(): ExWorld {
     audit: {},
     ux: {},
     typed: [],
+    typeParams: [],
     pressed: [],
     msPerRequest: 0,
     recipient: {},
@@ -406,7 +411,13 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
         const found = find(world, target);
         if (found === undefined) return { ok: false, error: { code: "not_found", message: "No input matches" } };
         const text = String(params["text"] ?? "");
+        // The SDK's field-kind guard: a secure field is not a plain one (a dry run checks it too).
+        if (params["kind"] === "plain" && found.el.secure === true) {
+          return { ok: false, error: { code: "bad_params", message: "the field is a secure field, not a plain field", secure: true } };
+        }
+        if (dry) return { ok: true, result: { element: wire(world, found.el, found.index) } };
         world.typed.push({ id: found.el.id, text });
+        world.typeParams.push({ id: found.el.id, kind: params["kind"], submit: params["submit"] });
         return { ok: true, result: { element: wire(world, found.el, found.index), value: text, settledMs: 10 } };
       }
       case "waitFor": {

@@ -23,7 +23,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
+import { looseScrubber, mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -61,7 +61,7 @@ import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type Sh
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { namedTarget } from "./signature.js";
 import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
-import { FLOOR_WORDS, exploreSettings, floorSubject, type FloorRules } from "./explorefloor.js";
+import { FLOOR_WORDS, exploreLists, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
 import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
@@ -1293,6 +1293,36 @@ export const GRANT_OFFER_PER_DAY = 3;
 export const GRANT_OFFER_DAYS = 7;
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
+/**
+ * What one explore run holds for every request any of its moves sends (§25.5): the budget counts each one, and every text it types
+ * is known for redaction. Shared by all the moves of the run, so a route, a drive leg, a recovery or a reset cannot step outside it.
+ */
+interface ExploreRun {
+  /** Requests that reached the app and answered, for the steps budget. */
+  used: number;
+  steps: number;
+  minutes: number;
+  startedAt: number;
+  waited0: number;
+  /** Every value the run typed, scrubbed from everything it writes (the same forms and minimum length as a vault value). */
+  typed: string[];
+  /** The scrubber over `typed`; null until a value is added. */
+  scrub: ((text: string) => string) | null;
+}
+
+/** The scope of one move of an explore run. */
+interface ExploreScope {
+  count: number;
+  last?: { method: string; result: unknown };
+  restoring?: boolean;
+  run: ExploreRun;
+  /** This move is the explorer's own `type`, and one typing request may go (explore types nowhere else: no route, no drive leg). */
+  mayType?: boolean;
+}
+
+/** Requests that only read: they cost no step and are never held back by the explore gate. */
+const EXPLORE_READS: ReadonlySet<string> = new Set(["tree", "place", "places", "logs", "commands", "audit", "uxCheck", "screenshot", "overlay", "waitFor", "inspect", "check", "feed", "perfSettle", "perfStart", "perfStop"]);
+
 export class TaplineTools {
   private readonly reloadWaitMs: number;
   /** The action log (§12), when one is configured. */
@@ -1344,7 +1374,7 @@ export class TaplineTools {
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
   private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string; progress?: (line: string, steps: number) => void }>();
   /** Set around every move and read `explore` makes (AGENT-TOOLS 1.15 §25.5): the touch check never asks and no grant is looked at; counts the requests it made. */
-  private readonly exploreScope = new AsyncLocalStorage<{ count: number; last?: { method: string; result: unknown }; restoring?: boolean }>();
+  private readonly exploreScope = new AsyncLocalStorage<ExploreScope>();
   /** Read at each use: a host that reloads its policy (a scheduled run asks for its facts) hands every client the new one. */
   private get policy(): PolicyFile {
     return this.options.policy ?? DEFAULT_POLICY;
@@ -1760,7 +1790,91 @@ export class TaplineTools {
     } catch (error) {
       return Promise.reject(error);
     }
-    return this.host.request(...args);
+    // Inside an explore run every request that is not a read is held to the run's rules, whoever sent it: the explorer's own move,
+    // a saved route's step, a drive leg, a recovery or a reset (§25.5). Nothing can reach the app around this one gate.
+    const scope = this.exploreScope.getStore();
+    const [method, params, options] = args;
+    const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
+    if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) return this.host.request(...args);
+    return this.exploreSend(scope, args);
+  }
+
+  /** The explore gate: the budget, then the typing rules; counts the request it lets through. */
+  private async exploreSend(scope: ExploreScope, args: Parameters<TaplineHost["request"]>): Promise<unknown> {
+    const [method, rawParams, options] = args;
+    const run = scope.run;
+    // The flip back of a toggle is one move with the flip (§25.7): the budget never splits them.
+    const budget = scope.restoring === true ? null : this.exploreBudget(run);
+    if (budget !== null) throw new TaplineError("not_allowed", `explore's ${budget} budget is used up, so nothing more is sent (explore budget: ${budget}).`);
+    // A pipelined move carries the request it makes inside it.
+    const inner = method === "move" && typeof rawParams === "object" && rawParams !== null ? (rawParams as { method?: unknown }).method : method;
+    let params = rawParams;
+    if (inner === "type") {
+      if (method !== "type") throw new TaplineError("not_allowed", "explore types only through its own fill, never inside a drive (explore skip: policy).");
+      params = await this.exploreTyping(scope, rawParams, options?.sessionId);
+    }
+    run.used += 1;
+    return this.host.request(method, params, options);
+  }
+
+  /** `steps` or `minutes` when the run's budget is used up, else null. */
+  private exploreBudget(run: ExploreRun): "steps" | "minutes" | null {
+    if (run.used >= run.steps) return "steps";
+    const waited = (this.options.control?.waitedMs() ?? 0) - run.waited0;
+    if ((this.clock() - run.startedAt - waited) / 60_000 >= run.minutes) return "minutes";
+    return null;
+  }
+
+  /**
+   * The one way explore types (§25.6): the explorer's own `type` move, into a field that is verified plain, never marked skip, never a
+   * password or card field, with no submit. Every other typing (a route's, a drive's) is refused. Returns the request's params with the
+   * plain-field guard added, and registers the text for redaction before it is sent.
+   */
+  private async exploreTyping(scope: ExploreScope, raw: unknown, sessionId: string | undefined): Promise<unknown> {
+    if (scope.mayType !== true) throw new TaplineError("not_allowed", "explore types only through its own fill, never in a route or a drive leg (explore skip: policy).");
+    if (typeof raw !== "object" || raw === null) throw new TaplineError("not_allowed", "explore won't type that (explore skip: policy).");
+    const params: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+    if (params["submit"] === true) throw new TaplineError("not_allowed", "explore never presses return while it types (explore skip: may_submit).");
+    // One typing request per move: no second one goes through.
+    scope.mayType = false;
+    const session = this.host.current();
+    if (session === undefined || (sessionId !== undefined && session.id !== sessionId)) throw new TaplineError("not_connected", "the app changed while explore was about to type; nothing was typed.");
+    // The guard: the SDK refuses a field that isn't plain; the dry run resolves the real field and asks the same, so a secure or unknown field is never typed.
+    const checked = await this.resolveForPolicy(session, "type", { ...params, text: "", kind: "plain" });
+    if (checked.kind === "error") throw new TaplineError("not_allowed", `explore won't type: ${checked.text.replace(/^Error \w+:\s*/, "")} (explore skip: floor).`);
+    const field = checked.raw[0];
+    if (field === undefined) throw new TaplineError("not_allowed", "explore won't type: the field could not be resolved (explore skip: floor).");
+    const hit = recipientVerdict(field, this.exploreRules(session), false) ?? (field.role === "input" ? null : ({ why: "floor", word: "not an input" } satisfies FloorHit));
+    if (hit !== null) throw new TaplineError("not_allowed", `explore won't type into ${this.shortName(this.host.redactOut(field), false)}${hit.word !== undefined ? ` (policy word ${JSON.stringify(hit.word)})` : ""} (explore skip: ${hit.why}).`);
+    const text = typeof params["text"] === "string" ? params["text"] : "";
+    if (text !== "" && !scope.run.typed.includes(text)) {
+      scope.run.typed = [...scope.run.typed, text];
+      scope.run.scrub = looseScrubber(scope.run.typed, TYPED);
+    }
+    return { ...params, kind: "plain" };
+  }
+
+  /** The floor's rules for this app: the union of the global and the app's policy lists, the user's skip list and `submit` ids. */
+  private exploreRules(session: SessionInfo): FloorRules {
+    const lists = exploreLists(this.policy, session.app);
+    const settings = exploreSettings(this.policy);
+    return { policy: [...lists.confirm, ...lists.block], skip: settings.skip, submit: settings.submit };
+  }
+
+  /** Redaction for everything an explore run writes: the vault's values, every text the run typed, and this session's one-time codes. */
+  private exploreScrub(run: ExploreRun, text: string): string {
+    const typed = run.scrub === null ? text : run.scrub(text);
+    return this.scrubSecrets(this.host.redactOut(typed));
+  }
+
+  /** Whether the screen as it is now has a text input (read without changing anything). Unreadable counts as yes: the strict side. */
+  private async screenHasInput(session: SessionInfo): Promise<boolean> {
+    try {
+      const read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true }));
+      return !read.success || read.data.elements.some((el) => roleOf(el) === "input");
+    } catch {
+      return true;
+    }
   }
 
   /** Throws `lease_lost` when this call carries a lease credential that is not the standing holder's (right before something is sent). */
@@ -2004,9 +2118,13 @@ export class TaplineTools {
    * policy file lists, so that every such touch stops at a draft.
    */
   private touchLists(session: SessionInfo): { confirm: string[]; block: string[] } {
+    // `explore` (AGENT-TOOLS 1.15 §25.5): the floor is every touch's confirm list, whatever the policy file says (`"confirm": []`, an
+    // app's own empty lists and --no-policy don't lower it): the union of the built-in words and the global and the app's lists.
+    if (this.exploreScope.getStore() !== undefined) {
+      const union = exploreLists(this.policy, session.app);
+      return { confirm: [...new Set([...FLOOR_WORDS, ...union.confirm, ...exploreSettings(this.policy).skip])], block: union.block };
+    }
     const lists = listsFor(this.policy, session.app);
-    // `explore` (AGENT-TOOLS 1.15 §25.5): the floor is every touch's confirm list, whatever the policy file says (`"confirm": []` and --no-policy don't lower it).
-    if (this.exploreScope.getStore() !== undefined) return { confirm: [...new Set([...FLOOR_WORDS, ...lists.confirm, ...exploreSettings(this.policy).skip])], block: lists.block };
     return this.draftsScope.getStore() === true ? { confirm: [...lists.confirm, ...REACH_WORDS], block: lists.block } : lists;
   }
 
@@ -2186,7 +2304,8 @@ export class TaplineTools {
       ...(args.account !== undefined ? { account: args.account } : {}),
     };
     const progress = this.holdScope.getStore()?.progress;
-    const explorer = new Explorer(this.exploreHost(session, map, wall, progress), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
+    const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], scrub: null };
+    const explorer = new Explorer(this.exploreHost(session, map, wall, progress, run), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
     // Calls inside the call add no crash note or wait of their own: the report says what happened.
     this.exploring = true;
     let result: Awaited<ReturnType<Explorer["run"]>>;
@@ -2196,7 +2315,7 @@ export class TaplineTools {
       this.exploring = false;
     }
     if (!isOutcome(result)) return refuse(result.error);
-    const reportPath = writeExploreReport(folder, result.report, (text) => this.host.redactOut(text), result.detail);
+    const reportPath = writeExploreReport(folder, result.report, (text) => this.exploreScrub(run, text), result.detail);
     const where = reportPath ?? `${folder.dir}`;
     const shown = where.startsWith(homedir()) ? `~${where.slice(homedir().length)}`.replace(/\\/g, "/") : where;
     const stopped = result.report.stopped;
@@ -2210,17 +2329,19 @@ export class TaplineTools {
   }
 
   /** What the explorer needs from this host. Every move is an ordinary action of this tool, inside the explorer's scope (§25.1, §25.5). */
-  private exploreHost(session: SessionInfo, map: AppMap, wall: () => number, progress: ((line: string, steps: number) => void) | undefined): ExploreHost {
+  private exploreHost(session: SessionInfo, map: AppMap, wall: () => number, progress: ((line: string, steps: number) => void) | undefined, run: ExploreRun): ExploreHost {
     const identity = identityOf(session);
     const live = (): SessionInfo | undefined => {
       const now = this.host.current();
       return now !== undefined && identityOf(now) === identity ? now : undefined;
     };
     const sleepMs = (ms: number): Promise<void> => this.sleep(ms);
-    const within = async <T>(run: () => Promise<T>, restoring = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
-      const scope: { count: number; last?: { method: string; result: unknown }; restoring?: boolean } = { count: 0, ...(restoring ? { restoring: true } : {}) };
-      const value = await this.exploreScope.run(scope, run);
-      return { value, count: scope.count, last: scope.last };
+    const within = async <T>(go: () => Promise<T>, restoring = false, mayType = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
+      const scope: ExploreScope = { count: 0, run, ...(restoring ? { restoring: true } : {}), ...(mayType ? { mayType: true } : {}) };
+      const before = run.used;
+      const value = await this.exploreScope.run(scope, go);
+      // The steps a move cost are the requests the gate let through, successful or not: the same count the budget holds.
+      return { value, count: run.used - before, last: scope.last };
     };
     const refusal = (answer: CallToolResult): { code: string; message: string; text: string } => {
       const said = answerText(answer);
@@ -2234,11 +2355,7 @@ export class TaplineTools {
       const value = typeof result === "object" && result !== null && "value" in result ? (result as { value: unknown }).value : undefined;
       return { ok: true, used: count, text: answerText(answer), ...(typeof settled === "number" && Number.isFinite(settled) ? { settledMs: settled } : {}), ...(value !== undefined ? { value } : {}) };
     };
-    const rulesNow = (): FloorRules => {
-      const lists = listsFor(this.policy, session.app);
-      const settings = exploreSettings(this.policy);
-      return { policy: [...lists.confirm, ...lists.block], skip: settings.skip, submit: settings.submit };
-    };
+    const rulesNow = (): FloorRules => this.exploreRules(session);
     const host: ExploreHost = {
       now: () => this.clock(),
       waitedMs: () => this.options.control?.waitedMs() ?? 0,
@@ -2307,7 +2424,7 @@ export class TaplineTools {
             case "type":
               return this.typeText({ target: move.target, text: move.text, look: false });
           }
-        }, restores);
+        }, restores, move.tool === "type");
         return outcomeOf(value, count, last);
       },
       go: async (place, by, account) => {
@@ -2378,7 +2495,7 @@ export class TaplineTools {
           await sleepMs(Math.min(200, Math.max(1, ms - waited)));
         }
       },
-      redact: (text) => this.host.redactOut(text),
+      redact: (text) => this.exploreScrub(run, text),
       progress: (line, steps) => progress?.(line, steps),
       cancelled: () => this.holdScope.getStore()?.signal?.aborted === true,
       get rules(): FloorRules {
@@ -5818,6 +5935,20 @@ export class TaplineTools {
     if (verdict.kind === "confirm" && this.exploreScope.getStore() !== undefined) {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
       return { stop: fail(`Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}); explore never asks, so it skips it.`) };
+    }
+    // The element that really receives the touch (after any scroll, whichever the target named) meets the whole floor (§25.5): the
+    // app's skip marks (inherited ones included), a card or password field and the submit rule, on top of the words above.
+    if (this.exploreScope.getStore() !== undefined) {
+      const rules = this.exploreRules(session);
+      for (const [i, raw] of resolved.raw.entries()) {
+        const needsInput = submitWord(raw) !== null && !isListedSubmit(raw, rules);
+        const hit = recipientVerdict(raw, rules, needsInput ? await this.screenHasInput(session) : false);
+        if (hit === null) continue;
+        const shown = resolved.elements[i] ?? raw;
+        this.showAction("agent", method, { element: shown }, params, "not_allowed", "needs_confirmation");
+        const word = hit.word !== undefined ? ` (policy word ${JSON.stringify(this.host.redactOut(hit.word))})` : "";
+        return { stop: fail(`Error not_allowed: needs_confirmation: ${this.shortName(shown, false)} is skipped by explore${word}: the touch would reach a protected control (explore skip: ${hit.why}).`) };
+      }
     }
     // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
     if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
