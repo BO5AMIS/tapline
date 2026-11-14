@@ -24,7 +24,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
+import { mentionsVault, redactAll, redactContent, substituteAccount, vaultValues, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -1337,6 +1337,10 @@ interface PreUse {
 }
 
 /** What a grant offer asks for: the counts and days of a grant a person may create after allowing a touch (§19.6). */
+/** The scrubber's minimum length: a typed text shorter than this is never registered (it would erase ordinary words). */
+const TYPED_MIN = 3;
+/** The fake texts explore types (§25.6): public, never redacted. */
+const PUBLIC_TYPED: ReadonlySet<string> = new Set(["Test", "test@example.com"]);
 export const GRANT_OFFER_PER_DAY = 3;
 export const GRANT_OFFER_DAYS = 7;
 
@@ -1973,7 +1977,15 @@ export class TaplineTools {
 
   /** Redaction for everything an explore run writes: the vault's values, every text the run typed, and this session's one-time codes. */
   private exploreScrub(run: ExploreRun, text: string): string {
-    return this.host.redactOut(this.scrubSecrets(text, { values: run.typed, token: TYPED }));
+    // One pass over the session's typed texts (the run's are among them, registered as they were typed), never a second scrubber after the first.
+    return this.scrubSecrets(text, this.typedWith(run.typed));
+  }
+
+  /** The session's typed texts and, when it holds one the session doesn't know yet, those too: one source for one pass. The session's own list is returned as it is (the matcher is cached by it). */
+  private typedWith(extra: readonly string[]): TypedSource {
+    const session = this.host.typedSource();
+    const missing = extra.filter((value) => !session.values.includes(value));
+    return missing.length === 0 ? session : { values: [...session.values, ...missing], token: session.token };
   }
 
   /** Whether the screen as it is now has a text input (read without changing anything). Unreadable counts as yes: the strict side. */
@@ -2687,9 +2699,18 @@ export class TaplineTools {
     return Object.keys(args).length > 0 ? { args } : {};
   }
 
-  /** Redaction at every sink of a bug report: the vault's values, this session's codes and every value typed in the session, in one pass (§29.6). */
+  /**
+   * Redaction at every sink of a bug report: the vault's values (current and retired), this session's codes and every value typed in the
+   * session, matched together in ONE pass against the original text, the longest match first (§29.6). Never one scrubber after another: a
+   * typed text that holds a vault value must not be cut by the vault's replacement before its own match is seen.
+   */
   private bugScrub(text: string): string {
-    return this.host.redactOut(this.scrubSecrets(text));
+    return this.scrubSecrets(text, this.host.typedSource());
+  }
+
+  /** Every value the bug report must never hold, from the live stores in memory only (§29.6): the vault's (current, retired, fixtures), the codes, the typed ones. */
+  private bugGateValues(): readonly string[] {
+    return [...vaultValues(this.options.accounts?.store), ...this.otp.codes.values(), ...this.host.typedSource().values];
   }
 
   /** The map of an app: the live one when it is the app in front, else the one this server holds. */
@@ -5962,9 +5983,20 @@ export class TaplineTools {
     run.ingress.add(value);
   }
 
+  /**
+   * Registers a plain text about to be typed with the session's ingress redaction (cumulative until the process ends), so every sink, the bug
+   * report's included, scrubs it. The public fakes of explore (§25.6) and anything under the scrubber's minimum length are left alone.
+   */
+  private registerTyped(value: string): void {
+    this.registerReplayTyped(value);
+    if (value.length < TYPED_MIN || PUBLIC_TYPED.has(value)) return;
+    this.host.typedRun().add(value);
+  }
+
   /** Redaction for everything a repair writes or answers: the replay's typed values, the vault's values and this session's one-time codes. */
   private replayScrub(text: string): string {
-    return this.host.redactOut(this.scrubSecrets(text, this.replayTyped === null ? null : { values: this.replayTyped.values, token: TYPED }));
+    // One pass over the session's typed texts (the replay's are among them, registered before they were sent).
+    return this.scrubSecrets(text, this.typedWith(this.replayTyped?.values ?? []));
   }
 
   /** Recordings, replays and journeys in progress (counted from their first line): explore refuses to start while any is held. */
@@ -7261,8 +7293,9 @@ export class TaplineTools {
       return this.dryRun("type_text", "type", { ...plain, text: "", ...(wire.values["kind"] !== undefined ? { kind: wire.values["kind"] } : {}) });
     }
     const use = account !== null && account.ok ? account.use : undefined;
-    // A plain text typed during a replay is registered for redaction before it is sent (a vault, account or code value is covered already).
-    if (wire === undefined && !mentionsVault(args.text)) this.registerReplayTyped(args.text);
+    // A plain text typed in this session (an agent's call, a run step, a replay, a check) is registered for redaction before it is sent: for the
+    // rest of the session no reply, log line or bug file shows it. A vault, account, one-time code or fixture value is covered already.
+    if (wire === undefined && !mentionsVault(args.text)) this.registerTyped(args.text);
     // What the audit line says about the field the value went into (§23): the app's own answer says whether it was secure.
     let secureField: boolean | undefined;
     const typed = this.act(

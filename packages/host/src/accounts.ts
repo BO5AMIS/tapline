@@ -1043,6 +1043,25 @@ export function redactAll(store: AccountStore | null | undefined, codes: CodeSou
   return redact(text);
 }
 
+/**
+ * Every value a store scrubs (the current vault and each retired one, fixtures included), as plain strings for a gate that greps files for them
+ * (the bug report's, §29.6). Read from the live store in memory, never written anywhere. A field under the scrubbing minimum is left out; a
+ * value with a lone surrogate is given in both readings. A store this module did not make has none to give.
+ */
+export function vaultValues(store: AccountStore | null | undefined): string[] {
+  if (store === null || store === undefined) return [];
+  const out = new Set<string>();
+  for (const base of BASES_OF.get(store)?.() ?? [store]) {
+    for (const entry of Object.values(ENTRIES_OF.get(base) ?? {})) {
+      for (const [field, value] of Object.entries(entry.values)) {
+        if (entry.unredacted?.includes(field) === true) continue;
+        for (const reading of new Set([value, wellFormed(value)])) if (reading.length >= MIN_SCRUB) out.add(reading);
+      }
+    }
+  }
+  return [...out];
+}
+
 /** The host's ingress scrubber: the live store, the session's codes and (given by the host per call) the active run's typed texts. */
 export function ingressRedactor(store: () => AccountStore | null | undefined, codes: CodeSource): (text: string, typed: TypedSource) => string {
   return (text, typed) => redactAll(store(), codes, text, typed);

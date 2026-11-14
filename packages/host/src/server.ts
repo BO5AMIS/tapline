@@ -884,6 +884,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     };
   }
 
+  /** Every plain text typed in this session so far (cumulative), for the sinks that redact in one pass of their own (the bug report, §29.6). */
+  typedSource(): TypedSource {
+    return this.typedNow;
+  }
+
   /** Scrubs a value (text and property names) the way every answer from an app is; for what an `internal` request gave. */
   redactOut<T>(value: T): T {
     const redact = this.ingress;
