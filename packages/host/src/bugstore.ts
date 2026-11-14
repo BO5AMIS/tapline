@@ -357,8 +357,8 @@ export class BugStore {
 
   /**
    * At start, before anything is listed or pruned: a bug kept in a folder that isn't its own app's (1.8.5 named the folder of an id
-   * with capitals or other characters differently) moves, with its zip, into its app's folder. Bug by bug, from what its own
-   * `finding.json` says, and never over a bug already there; one that can't move stays where it is.
+   * with capitals or other characters differently) moves into its app's folder. Bug by bug, from what its own `finding.json` says,
+   * and never over a bug already there; one that can't move stays where it is. Zips stay where they are.
    */
   migrateFolders(): void {
     for (const folder of this.appFolders()) {
@@ -371,18 +371,8 @@ export class BugStore {
           const dest = join(this.base, target, id);
           if (existsSync(dest)) continue;
           mkdirSync(join(this.base, target), { recursive: true, mode: 0o700 });
-          // The zip goes first, while its bug beside it still says whose it is: if the bug's own move then fails, the zip already
-          // waits in the right folder and the bug follows at the next start. A zip that can't move stays where it is; a zip is never
-          // given an owner from anything but the bug it sits beside.
-          const zip = join(this.base, folder, `${id}.zip`);
-          const zipDest = join(this.base, target, `${id}.zip`);
-          if (existsSync(zip) && !existsSync(zipDest)) {
-            try {
-              renameSync(zip, zipDest);
-            } catch {
-              // the zip stays; the bug still moves
-            }
-          }
+          // Only the bug moves. A zip is never moved: nothing outside it proves whose it is (two ids could share a 1.8.5 folder, and a
+          // pruned bug's zip could stay beside another app's bug of the same id). It stays where it is; an export makes a new one.
           renameSync(join(this.base, folder, id), dest);
         } catch {
           // a bug that can't move stays, and isn't listed from the wrong folder

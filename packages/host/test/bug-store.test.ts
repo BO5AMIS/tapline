@@ -273,7 +273,7 @@ describe("the folder (§29.2)", () => {
     expect(later.list(app).map((row) => row.id)).toEqual([ids[2]]);
   });
 
-  it("at start, bugs 1.8.5 kept under another folder name move into their own app's folder, bug by bug, with their zips", () => {
+  it("at start, bugs 1.8.5 kept under another folder name move into their own app's folder, bug by bug; zips stay", () => {
     const base = tmp();
     const maker = new BugStore(base);
     const demo = makeBug(context(maker), args(crash({ app: "com.example.Demo" })));
@@ -294,28 +294,29 @@ describe("the folder (§29.2)", () => {
     expect(after.list().map((row) => [row.app, row.id]).sort()).toEqual(
       [["com.example.Demo", demo.meta.id], ["com.example/a", slash.meta.id], ["com.example_a", plain.meta.id]].sort(),
     );
-    expect(existsSync(join(after.appDir("com.example.Demo"), `${demo.meta.id}.zip`))).toBe(true);
-    expect(existsSync(join(base, "com.example.Demo"))).toBe(false);
+    // the zip stays in the 1.8.5 folder, which therefore stays too
+    expect(existsSync(join(after.appDir("com.example.Demo"), `${demo.meta.id}.zip`))).toBe(false);
+    expect(readdirSync(join(base, "com.example.Demo"))).toEqual([`${demo.meta.id}.zip`]);
     expect(readdirSync(after.appDir("com.example_a"))).toEqual([plain.meta.id]);
     // again: nothing moves, nothing is lost
     after.migrateFolders();
     expect(after.list()).toHaveLength(3);
   });
 
-  it("a zip moves with the bug beside it, first; one whose new folder has a zip already stays (PR 15 CodeRabbit)", () => {
+  it("a zip beside a moving bug isn't taken along: it may be another app's (PR 15 CodeRabbit)", () => {
     const base = tmp();
     const maker = new BugStore(base);
-    const other = makeBug(context(maker), args(crash({ app: "com.example.Other", kind: "slow", got: "3.5 s to settle" })));
-    // as 1.8.5 kept it, with its zip; the new folder already has a zip of that id
-    mkdirSync(join(base, "com.example.Other"), { recursive: true });
-    renameSync(maker.bugDir("com.example.Other", other.meta.id), join(base, "com.example.Other", other.meta.id));
-    writeFileSync(join(base, "com.example.Other", `${other.meta.id}.zip`), "old zip");
-    writeFileSync(join(maker.appDir("com.example.Other"), `${other.meta.id}.zip`), "new zip");
+    // com.example/a and com.example:a shared the 1.8.5 folder com.example_a. The first's bug was pruned there but its zip stayed;
+    // the second's bug of the same id now sits beside that zip.
+    const second = makeBug(context(maker), args(crash({ app: "com.example:a" })));
+    mkdirSync(join(base, "com.example_a"), { recursive: true });
+    renameSync(maker.bugDir("com.example:a", second.meta.id), join(base, "com.example_a", second.meta.id));
+    writeFileSync(join(base, "com.example_a", `${second.meta.id}.zip`), "zip of the first");
     const store = new BugStore(base);
     store.migrateFolders();
-    expect(store.list().map((row) => row.app)).toEqual(["com.example.Other"]);
-    expect(readFileSync(join(store.appDir("com.example.Other"), `${other.meta.id}.zip`), "utf8")).toBe("new zip");
-    expect(readFileSync(join(base, "com.example.Other", `${other.meta.id}.zip`), "utf8")).toBe("old zip");
+    expect(store.list().map((row) => [row.app, row.id])).toEqual([["com.example:a", second.meta.id]]);
+    expect(existsSync(join(store.appDir("com.example:a"), `${second.meta.id}.zip`))).toBe(false);
+    expect(readFileSync(join(base, "com.example_a", `${second.meta.id}.zip`), "utf8")).toBe("zip of the first");
   });
 
   it("a zip with no bug beside it is never given to an app, also when two ids shared one 1.8.5 folder (PR 15 CodeRabbit)", () => {
