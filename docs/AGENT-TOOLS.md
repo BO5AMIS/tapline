@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their state file, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -810,7 +810,9 @@ When a call can't go on without a person, the tool asks through the host's dialo
 - Fields: `t` (ISO 8601 UTC, ms), `source` (`tapwright` | `tapline`), `by` (`agent` | `person`), `tool`,
   `target` (as given), `element` (its line without the ref; none for a point), `ok`, `code` and `reason` (on
   failure), `ms`, `app`, `batch` (`{"id": "...", "step": 3}` inside `run`), `dry_run`, `confirmed` (true when
-  a person's OK let it through), `grant` (1.14: the name of the grant that let it through).
+  a person's OK let it through), `grant` (1.14: the name of the grant that let it through), `grant_use` (1.14.1: with `grant`, the count including this use,
+  such as `2 of 3 today`), `grant_asked` (1.14.1: a grant matched the touch but didn't cover it, so a person was asked: why,
+  one of `limit reached`, `quiet hours`, `ended` or `revoked`).
 - Typed text is never logged, only its length: `"chars": 12`. Secure fields: never anything but the length.
 - The viewer's Steps list and this log describe the same actions, with the same captions (VIEWER-PROTOCOL
   1.4 tables).
@@ -1584,8 +1586,8 @@ For hosts that can't keep an MCP connection: `tapwright call <tool> '<json>'` an
   signature. A place found this way is stored with its route key.
 - (1.13.1) `seenAt` is the host's clock when the event arrived. A place found up front isn't saved until it is visited.
 - (1.14) The link also carries a one-time code (§20.4), the other way: Tapline's host asks Tapwright's daemon on
-  loopback, `POST /otp {"app": "<app id>"}`, and gets `{"code": "<digits>", "expires": <epoch ms>}`, or `404` when
-  there is none. A code is handed over once and then dropped. It is never in an answer, a log or a report, and
+  loopback, `POST /otp {"app": "<app id>"}`, and gets `{"code": "<digits>", "expires": <epoch ms>, "source": "<bundle id>"}`,
+  or `404` when there is none. (1.14.1) `source` is the bundle id the code was read from, and §23's `otp` line uses it. A code is handed over once and then dropped. It is never in an answer, a log or a report, and
   Tapwright hands one over only for an app whose setting is on (§24).
   - **Who may ask.** Tapline's host authenticates with **Tapwright's** token (the one Tapwright's thin call uses,
     §18.10), never with its own. It asks only while a step of the connected app's session types `${otp.<that app>}`,
@@ -1696,22 +1698,34 @@ A mismatch of the app, the word or the route is not noted: that grant simply isn
 - A touch under a `draftsOnly` grant stops before the touch (§21.3). A draft a person sends isn't counted as a use of
   the grant: the person's OK let it through, not the grant.
 
-### 19.4 Counts and the state file
+### 19.4 Counts and use slots
 
-- A use is counted when the touch is made.
-- **The state file is next to the policy file, not per tool:** `<policy file>.state.json`. Both tools then share the
-  counts exactly when they share the policy file, and never otherwise.
-  ```json
-  {"version": 1, "uses": {"instagram_posting": {"2026-11-14": ["2026-11-14T09:00:12+03:00", "2026-11-14T09:41:50+03:00"]}}}
-  ```
-  Keys are grants by name, then the local date; each value is the ISO 8601 times (with offset) of that day's uses.
-  Entries are pruned after the grant's `until`.
-- **One lock for both tools:** `<policy file>.state.lock`, created exclusively; a lock older than 30 s is taken over.
-  The tool takes the lock, reads the file, checks the counts, records the use and writes the file, in one step, so two
-  tools can't both make the third use of `perDay: 3`. Writing is a temporary file and a rename, as for the map
-  (§18.9, with its retries on Windows).
-- Counts hold across restarts. A state file that doesn't parse is left alone; the tool treats every grant as used up
-  (every touch asks a person) and says so in `doctor` and in the first answer.
+- A use is counted just before the touch is made. (1.14.1) The use claims its slot first (below); a use proven not
+  delivered gives its slot back.
+- (1.14.1) **Uses are slot files next to the policy file, not per tool:** `<policy file>.uses/<grant name>/<YYYY-MM-DD>/<k>`
+  for the day, and `<policy file>.uses/<grant name>/<YYYY-MM-DDTHH>/h<k>` for the hour. Both tools then share the counts
+  exactly when they share the policy file, and never otherwise. The day and the hour are local time, as for quiet hours and
+  `until`. `perHour` is the clock hour.
+- **A use claims a slot.**
+  - Compute the day and the hour with a fresh clock at claim time.
+  - If `perHour` is set, first claim an hour slot, trying k = 1 … `perHour` in order.
+  - Then claim a day slot, trying k = 1 … `perDay` in order.
+  - Each claim creates the file with an exclusive create (`O_CREAT|O_EXCL`, `wx`). The first k that creates is the use.
+  - If every slot exists, the grant doesn't cover the touch.
+  - If the day claim fails, delete your own hour slot.
+- **Folders** are created "exist ok", because two claimers may create the same folder at once. Only the slot file needs
+  the exclusive create.
+- **Reuse.** A claim always tries k from 1, so a slot freed by a give-back is reused. The count is the number of slot
+  files present, not the highest k.
+- **Content.** `{"t": <ISO 8601 local time with offset>, "tool": "tapline" | "tapwright", "owner": "<random id>", "route":
+  <name, optional>}`.
+- **Give back.** A use proven not delivered deletes its own slot files, checking `owner` first.
+- **Damage.** An unreadable or garbage slot file still counts as a use. That fails closed.
+- **Pruning.** At start, a tool prunes the folders older than the grant's `until`. Revoking a grant deletes its folders.
+- **Why.** An exclusive create is atomic on NTFS, APFS and ext4. No two writers can claim the same slot, and nothing is
+  ever overwritten, so a stalled process can't undo another's use. A crash between claiming and touching leaves a used
+  slot with no touch: one use fewer, which fails closed.
+- Counts hold across restarts.
 - The built-in policy (no `--policy FILE`) has no grants.
 
 ### 19.5 The pause and the kill switch are two things
@@ -1802,13 +1816,26 @@ One format, so that both tools can read the same file:
 - **macOS:** a keychain generic password with service `tapline-tapwright-vault` and account = the file's **real path**
   (symlinks resolved), and the same UTF-8 JSON as its data. The file itself holds `{"version": 2, "protected":
   "keychain"}`. A file that is moved has a new real path, and its keychain entry is no longer found.
+  - (1.14.1) **Why chunks.** `security -i` takes one input line of about 4 KB, so one item holds about 1.9 KB.
+  - **Single form.** A vault that fits is ONE item, as above, holding the plain vault JSON.
+  - **Chunked form.** A larger vault is stored as chunk items with service `tapline-tapwright-vault` and account
+    `<realpath>#1`, `<realpath>#2`, …. The main item (account = the real path) then holds the manifest `{"chunks": n,
+    "sha256": "<hex of the whole JSON>"}`. A reader tells the two forms apart by the `chunks` key.
+  - **Write order.** Chunks `#1…#n` first, then the manifest item, then delete the stale chunks `#n+1…` of an earlier,
+    longer vault.
+  - **Failure.** A missing chunk or a sha mismatch means the vault is unreadable. Fail closed: no values, a clear `doctor`
+    message, and never a partial vault.
+  - **Chunk size.** Each tool may choose its own; the reader joins whatever is there.
+  - (1.14.1) `security -w` may print an item as hex. A reader decodes all-hex text only when it gives valid UTF-8, and the
+    sha256 decides.
 - **Plain:** `{"version": 2, "vault": {...}}`, for test data only. Every start says `Note: the vault file <path> is not
   encrypted; keep test data in it only.`, in `doctor` and in the session's first answer. A plain file inside a git work
   tree that doesn't ignore it is refused exactly as §18.6 says for an accounts file. A protected file holds no value,
   so the git rule doesn't apply to it.
 - Where neither protection exists (other systems), the file is plain, with the warning.
 - `tapwright vault protect FILE` and `tapline vault protect FILE` read a plain file and write it in this system's
-  protected form; either tool then reads it.
+  protected form; either tool then reads it. (1.14.1) `protect` keeps the plain file until the keychain copy reads back
+  and its sha256 matches.
 - A protected file that can't be opened (another user, a moved macOS file) loads no vault: every use answers `Error
   bad_params: the vault file can't be opened: <why>.`
 
@@ -1839,7 +1866,8 @@ A sign-in code that arrives by SMS or email can be typed without anyone seeing i
   turns it on for that app.
 - **Tapwright reads the code** (§24), because it can read other apps and notifications. **Tapline never reads
   notifications.** It types a code only when its host got it from Tapwright's host over the link (§18.11).
-- The audit log records each use as `kind: "otp"`, with the app and the source, never the code (§23).
+- The audit log records each use as `kind: "otp"`, with the app and the source, never the code (§23). (1.14.1) The source
+  is the `source` of the `/otp` answer (§18.11).
 
 ## 21. Content from others (v1.14)
 
@@ -1917,8 +1945,9 @@ One file per schedule, `~/.<tool>/schedules/<name>.json` (`~/.tapwright/schedule
 - Commands, in both tools: `<tool> schedule add <route> --at "09:00 daily" --with caption=@captions.txt [--name NAME]`
   (the name defaults to the route's), with `--on-file FOLDER` or, for Tapwright, `--on-notification APP` in place of
   `--at`; `<tool> schedule list`; `<tool> schedule remove NAME`; `<tool> run-schedule NAME` (one run, now).
-- **On Windows,** each schedule is a Task Scheduler task that **wakes the PC** and runs `<tool> run-schedule <name>`;
-  `schedule remove` removes the task. On other systems 1.14 doesn't say how a schedule is started; `run-schedule`
+- **On Windows,** each time schedule (`at`) is a Task Scheduler task that **wakes the PC** and runs `<tool> run-schedule
+  <name>`; `schedule remove` removes the task. (1.14.1) A time schedule wakes the PC; a file trigger (and a notification
+  trigger, on Tapwright) is checked while the PC is awake. On other systems 1.14 doesn't say how a schedule is started; `run-schedule`
   runs one from the system's own scheduler.
 
 ### 22.2 A run
@@ -1939,6 +1968,14 @@ One file per schedule, `~/.<tool>/schedules/<name>.json` (`~/.tapwright/schedule
   `skipped: the phone was in use` and does nothing.
 - **Never a second run of the same schedule at once:** while a run of it is waiting or running, a run that falls due is
   dropped with `skipped: the previous run is still going`.
+  - (1.14.1) **The run lock** answers "is a run of this schedule still going". The lock file is `{"owner", "pid",
+    "started"}`; `started` is the process start time when the OS gives it, so a reused pid isn't mistaken for the holder.
+  - **Acquire** with an exclusive create.
+  - **Stale** only when its pid no longer runs on this computer, or its start time differs.
+  - **Takeover** goes through `<lock>.takeover`, created with an exclusive create. Under it, read the lock again; if it
+    is unchanged and the holder is dead, unlink it and create your own; then remove `.takeover`.
+  - **A live holder is never displaced, however long it runs.** The run gives `skipped: the previous run is still going`.
+  - **Release** only if the content is still yours.
 - **The phone is locked** (Tapwright): the run unlocks only with `phone.passcode` from the user's file (§18.6; Tapwright
   1.7). Without it: `skipped: the phone is locked`.
 - **Tapline** can't open its app. A run starts only while the app is open, or after Tapwright opens it (§18.11);
@@ -1964,7 +2001,7 @@ and not the accessibility `audit` (§10).
   - `vault`: a vault value typed. `name` is the entry; `detail` names the field and the target, such as `password into
     secure field`.
   - `otp`: a one-time code typed. `app` is the app that asked and `detail` names the source (`from
-    com.apple.MobileSMS`), never the code.
+    com.apple.MobileSMS`), never the code. (1.14.1) The source is the `source` of the `/otp` answer (§18.11).
   - `schedule`: a scheduled run: `started`, `done`, `failed at step 3 (expect)` or `skipped: …` (§22.3). `name` is the
     schedule.
   - `approval`: a person's OK or refusal of a touch or a draft, and a grant created through the dialog (§19.6): `name`
