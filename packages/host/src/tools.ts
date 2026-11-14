@@ -24,7 +24,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { looseScrubber, mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
+import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -1307,8 +1307,6 @@ interface ExploreRun {
   waited0: number;
   /** Every value the run typed, scrubbed from everything it writes (the same forms and minimum length as a vault value). */
   typed: string[];
-  /** The scrubber over `typed`; null until a value is added. */
-  scrub: ((text: string) => string) | null;
 }
 
 /** The scope of one move of an explore run. */
@@ -1900,7 +1898,6 @@ export class TaplineTools {
     const text = typeof params["text"] === "string" ? params["text"] : "";
     if (text !== "" && !scope.run.typed.includes(text)) {
       scope.run.typed = [...scope.run.typed, text];
-      scope.run.scrub = looseScrubber(scope.run.typed, TYPED);
     }
     return { ...params, kind: "plain" };
   }
@@ -1914,8 +1911,7 @@ export class TaplineTools {
 
   /** Redaction for everything an explore run writes: the vault's values, every text the run typed, and this session's one-time codes. */
   private exploreScrub(run: ExploreRun, text: string): string {
-    const typed = run.scrub === null ? text : run.scrub(text);
-    return this.scrubSecrets(this.host.redactOut(typed));
+    return this.host.redactOut(this.scrubSecrets(text, { values: run.typed, token: TYPED }));
   }
 
   /** Whether the screen as it is now has a text input (read without changing anything). Unreadable counts as yes: the strict side. */
@@ -2375,7 +2371,7 @@ export class TaplineTools {
       ...(args.account !== undefined ? { account: args.account } : {}),
     };
     const progress = this.holdScope.getStore()?.progress;
-    const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], scrub: null };
+    const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [] };
     const explorer = new Explorer(this.exploreHost(session, map, wall, progress, run), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
     // Calls inside the call add no crash note or wait of their own: the report says what happened.
     const result = await this.noteScope.run(true, () => explorer.run());
@@ -5413,7 +5409,7 @@ export class TaplineTools {
     this.rivals += 1;
     // The outermost replay owns the run's list of typed values (repair's trials and the verification replay add to it, and share it).
     const owner = this.replayTyped === null;
-    if (owner) this.replayTyped = { values: [], scrub: null };
+    if (owner) this.replayTyped = { values: [] };
     try {
       return await this.replayHeld(args, options);
     } finally {
@@ -5423,20 +5419,18 @@ export class TaplineTools {
   }
 
   /** Every plain text a replay (with its repair trials and the check of a repaired script) has typed, and the scrubber over them. */
-  private replayTyped: { values: string[]; scrub: ((text: string) => string) | null } | null = null;
+  private replayTyped: { values: string[] } | null = null;
 
   /** Registers a text a replay is about to type, before it is sent; the run's redaction knows it from then on. */
   private registerReplayTyped(value: string): void {
     const run = this.replayTyped;
     if (run === null || value === "" || run.values.includes(value)) return;
     run.values = [...run.values, value];
-    run.scrub = looseScrubber(run.values, TYPED);
   }
 
   /** Redaction for everything a repair writes or answers: the replay's typed values, the vault's values and this session's one-time codes. */
   private replayScrub(text: string): string {
-    const scrub = this.replayTyped?.scrub ?? null;
-    return this.scrubSecrets(this.host.redactOut(scrub === null ? text : scrub(text)));
+    return this.host.redactOut(this.scrubSecrets(text, this.replayTyped === null ? null : { values: this.replayTyped.values, token: TYPED }));
   }
 
   /** Recordings, replays and journeys in progress (counted from their first line): explore refuses to start while any is held. */
@@ -5565,7 +5559,7 @@ export class TaplineTools {
    */
   private repairScope<T>(go: () => Promise<T>): Promise<T> {
     if (this.exploreScope.getStore() !== undefined) return go();
-    const run: ExploreRun = { used: 0, steps: Number.POSITIVE_INFINITY, minutes: Number.POSITIVE_INFINITY, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], scrub: null };
+    const run: ExploreRun = { used: 0, steps: Number.POSITIVE_INFINITY, minutes: Number.POSITIVE_INFINITY, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [] };
     return this.exploreScope.run({ count: 0, run }, go);
   }
 
@@ -6855,9 +6849,9 @@ export class TaplineTools {
   }
 
   /** A vault value or a one-time code typed in this session becomes its placeholder. */
-  private scrubSecrets(text: string): string {
+  private scrubSecrets(text: string, typed?: TypedSource | null): string {
     const store = this.options.accounts?.store;
-    return redactAll(store, this.otp.codes, text);
+    return redactAll(store, this.otp.codes, text, typed);
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */

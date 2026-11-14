@@ -1,7 +1,6 @@
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { looseScrubber } from "../src/accounts.js";
 import { TYPED, redactFinding } from "../src/findings.js";
 import type { TaplineHost } from "../src/server.js";
 import type { MapFile } from "../src/mapfile.js";
@@ -88,7 +87,7 @@ interface ScopeInternals {
   exploreScope: { run: <T>(scope: unknown, go: () => Promise<T>) => Promise<T> };
 }
 const inRunThatTyped = <T>(s: ExploreSetup, typed: string[], go: () => Promise<T>): Promise<T> => {
-  const run = { used: 0, steps: 50, minutes: 50, startedAt: s.clock.now, waited0: 0, typed, scrub: looseScrubber(typed, TYPED) };
+  const run = { used: 0, steps: 50, minutes: 50, startedAt: s.clock.now, waited0: 0, typed };
   return (s.tools as unknown as ScopeInternals).exploreScope.run({ count: 0, run }, go);
 };
 
