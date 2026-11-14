@@ -15,9 +15,12 @@ import { FakeApp, delay, startHost, type IncomingRequest, type Reply } from "./h
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
 const dirs: string[] = [];
+const registries: MapRegistry[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
+  // A map saved in the background while its folder is removed fails rmdir with ENOTEMPTY (seen on CI): flush first.
+  await Promise.all(registries.splice(0).map((r) => r.flushAll()));
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
@@ -106,6 +109,7 @@ async function setup(options: { maps?: boolean; capabilities?: string[]; tools?:
   const { app } = await FakeApp.connect(port, { capabilities: caps }, handler);
   apps.push(app);
   const registry = new MapRegistry({ mapsDir });
+  registries.push(registry);
   const confirmations = new Confirmations();
   const tools = new TaplineTools(host, {
     connect: { url: "", name: "Dev PC" },

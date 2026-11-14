@@ -19,9 +19,11 @@ import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
 const dirs: string[] = [];
+const registries: MapRegistry[] = [];
 afterEach(async () => {
   for (const app of apps.splice(0)) app.ws.terminate();
   await Promise.all(hosts.splice(0).map((h) => h.close()));
+  await Promise.all(registries.splice(0).map((r) => r.flushAll()));
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
@@ -94,6 +96,7 @@ async function setup(options: { map?: MapFile | null; maps?: boolean; route?: st
   const { app } = await FakeApp.connect(port, { app: APP, capabilities: options.capabilities ?? ["tree", "press", "logs", "dryRun", "place", "places"] }, handler);
   apps.push(app);
   const registry = new MapRegistry({ mapsDir });
+  registries.push(registry);
   const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, ...(options.maps === false ? {} : { maps: registry }), ...options.tools });
   return { tools, registry, state, mapsDir, folder, file: () => loadMap(folder, APP.id).map, requests };
 }
