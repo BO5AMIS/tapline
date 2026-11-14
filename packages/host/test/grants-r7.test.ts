@@ -310,6 +310,55 @@ describe("finding 3: midnight in a claim", () => {
     expect(slots(r, "2026-11-15")).toEqual([]);
   });
 
+  it("R10 finding 2: midnight passing during stillCovers' slot reads: the use is not covered from yesterday's slot, and today's only use is not doubled", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, until: "2026-11-21" }]);
+    r.clock.now = new Date(2026, 10, 14, 23, 59, 50);
+    const used = await r.make().decide(touch(), "use", "x");
+    if (used.kind !== "covered") throw new Error("not covered");
+    const ref: GrantUseRef = { name: used.name, owner: used.owner, slots: [...used.slots] };
+    let other: string | undefined;
+    const book = r.make({
+      afterSlotReads: async () => {
+        r.clock.now = new Date(2026, 10, 15, 0, 0, 5); // midnight passes while the owners were being read
+        other = (await r.make().decide(touch(), "use", "other")).kind; // the 15th's only use
+      },
+    });
+    expect(await book.stillCovers(touch(), ref)).toBe(false);
+    expect(other).toBe("covered");
+    expect(slots(r, "2026-11-14")).toEqual([]);
+    expect(slots(r, "2026-11-15")).toEqual(["1"]);
+  });
+
+  it("R10 finding 2: quiet hours that begin during stillCovers' slot reads win", async () => {
+    const r = rig([{ ...GRANT, perDay: 3, quiet: { from: "22:00", to: "23:00" } }]);
+    r.clock.now = new Date(2026, 10, 14, 21, 59, 59);
+    const used = await r.make().decide(touch(), "use", "x");
+    if (used.kind !== "covered") throw new Error("not covered");
+    const ref: GrantUseRef = { name: used.name, owner: used.owner, slots: [...used.slots] };
+    const book = r.make({ afterSlotReads: async () => void (r.clock.now = new Date(2026, 10, 14, 22, 0, 1)) });
+    expect(await book.stillCovers(touch(), ref)).toBe(false);
+  });
+
+  it("R10 finding 2: a use whose policy read and audit write follow midnight (the claim path) is not covered from yesterday's slot", async () => {
+    const r = rig([{ ...GRANT, perDay: 1, until: "2026-11-21" }]);
+    r.clock.now = new Date(2026, 10, 14, 23, 59, 59);
+    let other: string | undefined;
+    let first = true;
+    const book = r.make({
+      afterClaim: async () => {
+        if (!first) return;
+        first = false;
+        r.clock.now = new Date(2026, 10, 15, 0, 0, 1);
+        other = (await r.make().decide(touch(), "use", "other")).kind;
+      },
+    });
+    expect((await book.decide(touch(), "use", "a")).kind).toBe("ask");
+    expect(other).toBe("covered");
+    expect(slots(r, "2026-11-14")).toEqual([]);
+    expect(slots(r, "2026-11-15")).toEqual(["1"]);
+    expect(r.audit.lines.filter((l) => l["kind"] === "grant")).toHaveLength(1);
+  });
+
   it("stillCovers in the same day and hour changes nothing", async () => {
     const r = rig([{ ...GRANT, perDay: 2, perHour: 1 }]);
     const book = r.make();

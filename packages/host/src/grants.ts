@@ -293,6 +293,8 @@ export interface GrantBookOptions {
   beforeCreate?: (path: string) => Promise<void>;
   /** For tests: runs after a use's slot files exist and before the policy is read again and the audit line written. */
   afterClaim?: () => Promise<void>;
+  /** For tests: runs in `stillCovers` after the use's slot files were read and before the clock is read for the final check. */
+  afterSlotReads?: () => Promise<void>;
   /** For tests: runs inside the edit lock, after the policy was read and checked and before the new file is written. */
   beforePolicyWrite?: () => Promise<void>;
   /** The process facts the policy file's edit lock uses (pid, liveness, start time). Default: this process. */
@@ -621,13 +623,17 @@ export class GrantBook {
       if (matchWord([...PAYMENT_WORDS, ...ACCOUNT_WORDS], touch.element) !== null) return false;
       const grant = policy.grants.find((g) => g.name === use.name);
       if (grant === undefined) return false;
-      const at = this.now();
-      if (!this.holds(grant, touch, at)) return false;
+      if (!this.holds(grant, touch, this.now())) return false;
       if (use.owner === "" || use.slots.length === 0) return false;
       for (const slot of use.slots) {
         const path = this.slotPath(slot, use.name);
         if (path === null || (await slotOwner(path)) !== use.owner) return false;
       }
+      await this.options.afterSlotReads?.();
+      // The clock is read AFTER every await, as the last thing before answering true: time restrictions and the bucket are those of
+      // this very moment (no await between this read and the return).
+      const at = this.now();
+      if (!this.holds(grant, touch, at)) return false;
       if (this.inCurrentBuckets(use.slots, at)) return true;
       await this.dropSlots(use.name, use.owner, use.slots);
       const claimed = await this.claimBuckets(grant, grant.route ?? touch.routes[0]);
@@ -799,26 +805,36 @@ export class GrantBook {
   private async use(grant: Grant, detail: string, touch: GrantTouch): Promise<Claimed | string | null> {
     const audit = this.options.audit;
     if (audit === null || !safeGrantName(grant.name)) return null;
-    const claimed = await this.claimBuckets(grant, grant.route ?? touch.routes[0]);
-    if (claimed === null || typeof claimed === "string") return claimed;
-    const giveBack = (): Promise<void> => this.dropSlots(grant.name, claimed.owner, claimed.slots);
-    try {
-      await this.options.afterClaim?.();
-      const policy = await this.readPolicy();
-      const fresh = policy?.grants.find((g) => g.name === grant.name);
-      if (fresh === undefined || !this.holds(fresh, touch, this.now())) {
+    // After the awaits below the clock is read again, as the last thing before the audit line and the answer: a claim that midnight (or
+    // the next hour) overtook meanwhile is given back and made again in the current buckets, at most CLAIM_TRIES times.
+    for (let attempt = 0; attempt < CLAIM_TRIES; attempt++) {
+      const claimed = await this.claimBuckets(grant, grant.route ?? touch.routes[0]);
+      if (claimed === null || typeof claimed === "string") return claimed;
+      const giveBack = (): Promise<void> => this.dropSlots(grant.name, claimed.owner, claimed.slots);
+      try {
+        await this.options.afterClaim?.();
+        const policy = await this.readPolicy();
+        const fresh = policy?.grants.find((g) => g.name === grant.name);
+        const at = this.now();
+        if (fresh === undefined || !this.holds(fresh, touch, at)) {
+          await giveBack();
+          return null;
+        }
+        if (!this.inCurrentBuckets(claimed.slots, at)) {
+          await giveBack();
+          continue;
+        }
+        if (!audit.write({ kind: "grant", app: appKey(touch.app), name: grant.name, detail: `${detail} (${claimed.today} of ${grant.perDay} today)` })) {
+          await giveBack();
+          return null;
+        }
+        return claimed;
+      } catch {
         await giveBack();
         return null;
       }
-      if (!audit.write({ kind: "grant", app: appKey(touch.app), name: grant.name, detail: `${detail} (${claimed.today} of ${grant.perDay} today)` })) {
-        await giveBack();
-        return null;
-      }
-      return claimed;
-    } catch {
-      await giveBack();
-      return null;
     }
+    return null;
   }
 
   /** A temporary file and a rename, with retries on Windows. */
