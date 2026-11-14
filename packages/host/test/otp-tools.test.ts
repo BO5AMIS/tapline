@@ -380,6 +380,31 @@ describe("the code is asked for only after the host's own gates (PR T186C findin
     expect(textOf(answer)).not.toContain(FAKE_CODE);
     expect(audit).toHaveLength(0);
   });
+
+  it("the same in run: a batch is not resumed at the step whose code was dropped", async () => {
+    let back: () => void = () => undefined;
+    const client = new DoneClient(() => back());
+    const { tools, daemon, typed, app, host, audit } = await setup({}, true, {}, CAPABILITIES, {
+      dialogs: new Dialogs(client, { ttlMs: 2000 }),
+      personWaitMs: 2000,
+      personPollMs: 5,
+      personDoneGraceMs: 60,
+    });
+    back = () => app()?.send({ type: "event", event: "appState", data: { state: "active" } });
+    afterFetch = async () => {
+      afterFetch = undefined;
+      app()?.send({ type: "event", event: "appState", data: { state: "background" } });
+      for (let i = 0; i < 200 && host.current()?.appState?.state !== "background"; i++) await new Promise((r) => setTimeout(r, 5));
+    };
+    const answer = await callTool(tools, "run", { steps: [{ tool: "type_text", target: { id: "code" }, text }], look: false });
+    expect(answer.isError).toBe(true);
+    expect(fetches(daemon)).toBe(1);
+    expect(typed).toHaveLength(0);
+    expect(client.shown).toBe(0);
+    expect(textOf(answer)).toContain("not run again");
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+    expect(audit).toHaveLength(0);
+  });
 });
 
 describe("in run, drive and routes", () => {

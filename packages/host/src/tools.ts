@@ -1080,7 +1080,6 @@ export function describeError(error: unknown): string {
   return `Error internal: ${error instanceof Error ? error.message : String(error)}`;
 }
 
-/** Ends a guarded call inside the agent's turn with the policy's answer (nothing was touched). */
 /** Turns a request's params into what goes on the wire, right before the send (a one-time code is fetched there). */
 type LateParams = (params: unknown) => Promise<unknown>;
 
@@ -1098,6 +1097,7 @@ interface OtpLate {
   asked: boolean;
 }
 
+/** Ends a guarded call inside the agent's turn with the policy's answer (nothing was touched). */
 class PolicyStop extends Error {
   constructor(readonly answer: CallToolResult) {
     super("stopped by the policy");
@@ -3210,7 +3210,7 @@ export class TaplineTools {
     return this.grantNotes.run(grantLines, () =>
       this.noteScope.run(true, () =>
         this.reflexScope.run(reflexes, () => {
-          const result = this.otpCall.run({ asked: false }, () => this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive)));
+          const result = this.otpCall.run({ asked: false, dropped: false }, () => this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive)));
           const finish = (answer: CallToolResult): CallToolResult =>
             this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes);
           // The first answer of a session with grants says which grant is refused, and whether the state file is broken (§19.1, §19.4).
@@ -3376,10 +3376,11 @@ export class TaplineTools {
   private readonly personScope = new AsyncLocalStorage<Set<string>>();
 
   /**
-   * Whether a one-time code was asked for in this outer call (§18.11): once it was, nothing in the call runs the step again
-   * (not a needs-a-person retry, not a reflex's), because the code a call received and could not type is dropped, never asked for twice.
+   * One-time codes in this outer call (§18.11): `asked` once a code was asked for; `dropped` once a code was asked for and its
+   * type then failed. After a drop nothing in the call runs again (not a needs-a-person retry of a single call, not a batch
+   * resumed at the failed step, not a reflex's), because a code a call received and could not type is never asked for twice.
    */
-  private readonly otpCall = new AsyncLocalStorage<{ asked: boolean }>();
+  private readonly otpCall = new AsyncLocalStorage<{ asked: boolean; dropped: boolean }>();
 
   /**
    * AGENT-TOOLS 1.13 §11.5: a call that ended because only a person can go on (the app isn't there, an alert, an app that
@@ -3413,8 +3414,9 @@ export class TaplineTools {
     for (let round = 0; round < 4; round++) {
       const moment = await this.momentOf(answer, notAnsweringBefore);
       if (moment === null) return answer;
-      // A one-time code was asked for in this call: running it again would ask again, so the failure is the answer (§18.11).
-      if (this.otpCall.getStore()?.asked === true && batchStep(answer) === undefined) {
+      // A one-time code was asked for in this call and dropped: running it again (or resuming a batch at that step) would ask
+      // again, so the failure is the answer (§18.11).
+      if (this.otpCall.getStore()?.dropped === true) {
         return appendNote(answer, "A one-time code was already asked for and dropped, so the call was not run again. Repeat the step to ask for a new code.");
       }
       const dialogs = this.dialogs;
@@ -7365,7 +7367,11 @@ export class TaplineTools {
       if (checked.isError === true) return checked;
       // Another app selected while the step was checked: its code would be fetched for a type that can't happen.
       if (this.host.current()?.id !== session.id) return fail("Error not_connected: the app changed while the step was checked; no one-time code was asked for, and nothing was typed.");
-      return this.typeTextWith(args, typing);
+      return this.typeTextWith(args, typing).then((typed) => {
+        // Asked for and not typed: the code is dropped, and nothing in this call runs the step again.
+        if (typed.isError === true && late.asked && call !== undefined) call.dropped = true;
+        return typed;
+      });
     });
   }
 

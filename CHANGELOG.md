@@ -6,10 +6,14 @@ Fixes from the first joint one-time code check on a real phone with Tapwright 1.
 Tapwright, sha256 ef8e7b63) now states them.
 
 - **One-time codes (§18.11, §20.4).**
-  - Tapline asks Tapwright's daemon for a code only after the step's checks pass: the step runs as a dry run first, and
-    a refusal (`behind_alert`, `not_found`, `covered` and the rest) is the answer, with no code asked for. Before, a code
+  - Tapline asks Tapwright's daemon for a code only after the step's checks pass. The host's own gates come first (a
+    paused session, a person's input, the explorer's budget and typing rules, the lease), then the step runs in the app
+    as a dry run, and only then is the code fetched, by the `type` request itself, right before it is sent. A refusal
+    (`paused`, `behind_alert`, `not_found`, `covered` and the rest) is the answer, with no code asked for. Before, a code
     could be fetched, and spent, for a type that was then refused.
-  - A code that can't be typed after it arrived is dropped, never asked for again.
+  - A code that can't be typed after it arrived is dropped, never asked for again: a call whose code was dropped isn't
+    run again for a person's moment (a single call or a `run` resumed at that step), and no reflex retries it.
+  - Another app selected while the step is checked: no code is asked for (`not_connected`).
   - An app whose SDK can't dry-run a step gets no code (`unsupported`).
   - The whole exchange with the daemon may take 12 s (was 5 s). Tapwright's daemon waits up to 8 s for a notification
     banner over the app to go before it reads the app, and a 5 s limit gave up first.
@@ -22,6 +26,10 @@ Tapwright, sha256 ef8e7b63) now states them.
 - **Bug export (§29.7).** A bug exported to a GitHub issue is written under `.tapline/bugs/<app id>/<bug id>/` on the
   `qa-reports` branch (was `.tapline/bugs/<bug id>/`). Two apps can hold the same bug id; exported to one repository
   they no longer share a folder.
+- **One folder per app id.** An app id that is already a plain folder name (a bundle id, as a rule) keeps its folder
+  under `~/.tapline/bugs/` and `~/.tapline/explore/`, as in 1.8.5. Any other id now gets `_`, a cleaned part and a hash
+  of the id, so two ids that cleaned to the same name (`com.example/a`, `com.example_a`) no longer share one. Bugs and
+  explore runs that 1.8.5 kept for such an id stay in the old folder and aren't found by 1.8.6.
 - **Shared spec.** `docs/AGENT-TOOLS.md` is 1.16.2.
 - **Known limits.** The reload fix and the dry-run-first order have run in tests only; the joint check on the phone ran
   with the 12 s limit and passed.
