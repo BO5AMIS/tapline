@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
-import { appFolderName, legacyFolderName } from "./appfolder.js";
+import { appFolderName } from "./appfolder.js";
 import { decodedBases, normalizedBases, variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
@@ -371,40 +371,21 @@ export class BugStore {
           const dest = join(this.base, target, id);
           if (existsSync(dest)) continue;
           mkdirSync(join(this.base, target), { recursive: true, mode: 0o700 });
-          renameSync(join(this.base, folder, id), dest);
+          // The zip goes first, while its bug beside it still says whose it is: if the bug's own move then fails, the zip already
+          // waits in the right folder and the bug follows at the next start. A zip that can't move stays where it is; a zip is never
+          // given an owner from anything but the bug it sits beside.
           const zip = join(this.base, folder, `${id}.zip`);
           const zipDest = join(this.base, target, `${id}.zip`);
-          if (existsSync(zip) && !existsSync(zipDest)) renameSync(zip, zipDest);
+          if (existsSync(zip) && !existsSync(zipDest)) {
+            try {
+              renameSync(zip, zipDest);
+            } catch {
+              // the zip stays; the bug still moves
+            }
+          }
+          renameSync(join(this.base, folder, id), dest);
         } catch {
           // a bug that can't move stays, and isn't listed from the wrong folder
-        }
-      }
-    }
-    // A zip left behind (its move failed, or a run stopped between the bug and its zip): it follows its bug, found by id in the
-    // folder of the bug's own app, when exactly one app holds that id, the zip sits in the folder 1.8.5 made for that same app (so it
-    // is that app's zip, not one of another app whose bug of the same id is gone), and that folder has no zip of it yet. Otherwise it
-    // stays where it is. Retried at every start.
-    for (const folder of this.appFolders()) {
-      let zips: string[];
-      try {
-        zips = readdirSync(join(this.base, folder)).filter((name) => name.endsWith(".zip") && BUG_ID.test(name.slice(0, -4)));
-      } catch {
-        continue;
-      }
-      for (const zip of zips) {
-        const id = zip.slice(0, -4);
-        if (existsSync(join(this.base, folder, id))) continue;
-        try {
-          const owners = this.found(id);
-          if (owners.length !== 1) continue;
-          const owner = (owners[0] as { app: string }).app;
-          if (legacyFolderName(owner) !== folder) continue;
-          const target = appFolderName(owner);
-          const dest = join(this.base, target, zip);
-          if (target === folder || existsSync(dest)) continue;
-          renameSync(join(this.base, folder, zip), dest);
-        } catch {
-          // a zip that can't move stays
         }
       }
     }

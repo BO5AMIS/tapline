@@ -18,11 +18,6 @@ const MAX = 100;
  * - any other id gets `_`, a readable cleaned lowercase part, and 16 hex of the SHA-256 of its UTF-16 code units (lossless,
  *   also for malformed Unicode). A kept id never starts with `_`, so the two kinds never meet.
  */
-/** The folder 1.8.5 made for an app id (characters other than letters, digits, `.`, `_` and `-` became `_`), for the move at start. */
-export function legacyFolderName(appId: string): string {
-  return appId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_") || "unknown";
-}
-
 export function appFolderName(appId: string): string {
   if (SAFE.test(appId) && appId.length <= MAX && !appId.endsWith(".") && !RESERVED.test(appId)) return appId;
   const readable = appId
