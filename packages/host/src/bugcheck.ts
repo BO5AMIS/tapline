@@ -35,17 +35,45 @@ export interface Seen {
 
 export type ResetResult = { ok: true; words: string } | { ok: false };
 
+/**
+ * The only tools a reproduction step may name (§29.4): touches and navigation. Never `app_command` (a reset is the fresh start's, and only
+ * with `reset: "app"`), never `run`, `drive`, `wait` and the rest, whether the step is a top-level one or sits inside another.
+ */
+export const CHECK_TOOLS: readonly string[] = ["tap", "long_press", "toggle", "scroll", "swipe", "back", "open_url", "type_text"];
+
+const hasTool = (value: unknown, depth: number): boolean => {
+  if (depth > 8 || typeof value !== "object" || value === null) return false;
+  if (Array.isArray(value)) return value.some((item) => hasTool(item, depth + 1));
+  const record = value as Record<string, unknown>;
+  return typeof record["tool"] === "string" || Object.values(record).some((item) => hasTool(item, depth + 1));
+};
+
+/** Why a script can't be run, or null: every step is a plain object whose tool is allowed and that holds no other step (§29.4). */
+export function stepsProblem(steps: readonly unknown[]): string | null {
+  for (const [i, step] of steps.entries()) {
+    const tool = typeof step === "object" && step !== null && !Array.isArray(step) ? (step as Record<string, unknown>)["tool"] : undefined;
+    if (typeof tool !== "string" || !CHECK_TOOLS.includes(tool)) return `step ${i + 1} is ${typeof tool === "string" ? JSON.stringify(tool) : "not a step"}, which the check never runs`;
+    const { tool: _tool, ...rest } = step as Record<string, unknown>;
+    if (hasTool(rest, 0)) return `step ${i + 1} holds another step, which the check never runs`;
+  }
+  return null;
+}
+
 export interface CheckHost {
   clock(): number;
   wall(): Date;
   /** `<version> (<build>)` of the app in front, or null when no phone is connected. */
   build(): string | null;
   /** The fresh start (§25.8): the tool's own reset, and with `app` also the app's standard reset. `words` says which and whether data was kept. */
-  reset(mode: "own" | "app"): Promise<ResetResult>;
+  reset(mode: "own" | "app", signal?: AbortSignal): Promise<ResetResult>;
   /** Drives to the script's start place; false when it can't. */
-  start(place: string): Promise<boolean>;
-  /** One step, through the gate. `typed` is the value of a `${typed}` step (only ever given by a person at a prompt). */
-  step(step: PathStep, typed: string | null): Promise<StepResult>;
+  start(place: string, signal?: AbortSignal): Promise<boolean>;
+  /** One step, through the gate. `typed` is the value of a `${typed}` step (only ever given by a person at a prompt). `signal` aborts at the run's deadline. */
+  step(step: PathStep, typed: string | null, signal?: AbortSignal): Promise<StepResult>;
+  /** Why the check can't go on with this session (the app is gone, or another one is in front), or null. Asked before every action. */
+  away?(): string | null;
+  /** The longest a run lasts: one absolute deadline for its reset, its way to the start and every step; default `RUN_LIMIT_MS` (§29.4). */
+  deadlineMs?: number;
   mark(): unknown;
   since(mark: unknown): Promise<Seen>;
   /** The key of the place the app is on, or null when it isn't known. */
@@ -89,7 +117,10 @@ interface RunEnd {
   complete: boolean;
 }
 
-type RunResult = { kind: "made"; same: boolean; words: string; given: boolean } | { kind: "not_started" } | { kind: "no_reset" } | { kind: "stopped"; why: string };
+type RunResult = { kind: "made"; same: boolean; words: string; given: boolean } | { kind: "not_started" } | { kind: "no_reset" } | { kind: "stopped"; why: string } | { kind: "timed_out" };
+
+const EXPIRED: unique symbol = Symbol("expired");
+type Within = <T>(work: Promise<T>) => Promise<T | typeof EXPIRED>;
 
 /** Whether what a run ended with has the same signature as the bug (§29.4, §29.5). */
 async function sameBug(host: CheckHost, bug: CheckBug, end: RunEnd): Promise<boolean> {
@@ -139,9 +170,40 @@ async function sameBug(host: CheckHost, bug: CheckBug, end: RunEnd): Promise<boo
 }
 
 async function oneRun(host: CheckHost, bug: CheckBug, steps: PathStep[], options: CheckOptions): Promise<RunResult> {
-  const reset = await host.reset(options.reset);
+  // One absolute deadline for the whole run: the reset, the way to the start and every step (§29.4). At its end the signal reaches the host,
+  // which sends nothing more, the request in flight is no longer waited for, and the run counts as timed out.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), host.deadlineMs ?? RUN_LIMIT_MS);
+  timer.unref?.();
+  const expired = new Promise<typeof EXPIRED>((resolve) => controller.signal.addEventListener("abort", () => resolve(EXPIRED), { once: true }));
+  const within: Within = (work) => {
+    work.catch(() => undefined);
+    return Promise.race([work, expired]);
+  };
+  try {
+    return await runSteps(host, bug, steps, options, controller.signal, within);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runSteps(host: CheckHost, bug: CheckBug, steps: PathStep[], options: CheckOptions, signal: AbortSignal, within: Within): Promise<RunResult> {
+  const away = (): RunResult | null => {
+    const why = host.away?.() ?? null;
+    return why === null ? null : { kind: "stopped", why };
+  };
+  const gone = away();
+  if (gone !== null) return gone;
+  const reset = await within(host.reset(options.reset, signal));
+  if (reset === EXPIRED) return { kind: "timed_out" };
   if (!reset.ok) return { kind: "no_reset" };
-  if (bug.script.start !== null && !(await host.start(bug.script.start))) return { kind: "not_started" };
+  if (bug.script.start !== null) {
+    const beforeStart = away();
+    if (beforeStart !== null) return beforeStart;
+    const arrived = await within(host.start(bug.script.start, signal));
+    if (arrived === EXPIRED) return { kind: "timed_out" };
+    if (!arrived) return { kind: "not_started" };
+  }
   const started = host.clock();
   const mark = host.mark();
   let typed: string | null = null;
@@ -151,6 +213,8 @@ async function oneRun(host: CheckHost, bug: CheckBug, steps: PathStep[], options
   let complete = true;
   for (const [i, step] of steps.entries()) {
     if (host.clock() - started > RUN_LIMIT_MS) return { kind: "made", same: false, words: reset.words, given };
+    const lost = away();
+    if (lost !== null) return lost;
     const types = step.tool === "type_text";
     if (types && typed === null) {
       // A value is never in repro.json and never in a call: only a person at a prompt can give one (§29.4).
@@ -158,8 +222,13 @@ async function oneRun(host: CheckHost, bug: CheckBug, steps: PathStep[], options
       if (typed === null) return { kind: "stopped", why: `step ${i + 1} needs a person (a typed value)` };
       given = true;
     }
-    if (i === steps.length - 1) placeBefore = await host.placeKey();
-    const result = await host.step(step, types ? typed : null);
+    if (i === steps.length - 1) {
+      const key = await within(host.placeKey());
+      if (key === EXPIRED) return { kind: "timed_out" };
+      placeBefore = key;
+    }
+    const result = await within(host.step(step, types ? typed : null, signal));
+    if (result === EXPIRED) return { kind: "timed_out" };
     if (result.kind === "person") return { kind: "stopped", why: `step ${i + 1} needs a person (${result.why})` };
     if (result.kind === "stop") return { kind: "stopped", why: `stopped (${result.code})` };
     last = result;
@@ -168,11 +237,21 @@ async function oneRun(host: CheckHost, bug: CheckBug, steps: PathStep[], options
       break;
     }
   }
-  if (steps.length === 0) placeBefore = await host.placeKey();
-  const placeNow = await host.placeKey();
-  const seen = await host.since(mark);
+  if (steps.length === 0) {
+    const key = await within(host.placeKey());
+    if (key === EXPIRED) return { kind: "timed_out" };
+    placeBefore = key;
+  }
+  const lostAtEnd = away();
+  if (lostAtEnd !== null) return lostAtEnd;
+  const placeNow = await within(host.placeKey());
+  if (placeNow === EXPIRED) return { kind: "timed_out" };
+  const seen = await within(host.since(mark));
+  if (seen === EXPIRED) return { kind: "timed_out" };
   const end: RunEnd = { placeBefore, placeNow, last, seen, complete: complete && (last === null || last.kind === "ok") };
-  return { kind: "made", same: complete && (await sameBug(host, bug, end)), words: reset.words, given };
+  const same = complete ? await within(sameBug(host, bug, end)) : false;
+  if (same === EXPIRED) return { kind: "timed_out" };
+  return { kind: "made", same, words: reset.words, given };
 }
 
 /** The check: `n` runs from a fresh start (§29.4). The result is what `finding.json`'s `bug.reproduced` and the page take. */
@@ -182,6 +261,9 @@ export async function runCheck(host: CheckHost, input: CheckBug, n: number, opti
   const { finding } = input;
   if (finding.kind === "unreachable") return notChecked("an unreachable place has no steps");
   if (finding.kind === "dead_end" && input.script.steps.length === 0) return notChecked("a way back that is missing has no steps to run");
+  // Every step is checked before anything runs, nested ones too: nothing but a touch is ever sent, and no reset outside the fresh start (§29.4).
+  const wrong = stepsProblem(input.script.steps);
+  if (wrong !== null) return notChecked(wrong);
   let steps = input.script.steps;
   if (finding.kind === "expect_failed") {
     const expect = expectOf(finding.expected);
@@ -202,6 +284,10 @@ export async function runCheck(host: CheckHost, input: CheckBug, n: number, opti
     }
     if (run.kind === "stopped") {
       if (made === 0) return notChecked(run.why);
+      break;
+    }
+    if (run.kind === "timed_out") {
+      if (made === 0) return notChecked("timed out");
       break;
     }
     if (run.kind === "not_started") continue;

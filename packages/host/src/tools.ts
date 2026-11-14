@@ -62,7 +62,7 @@ import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type Sh
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { seenOf, type Seen } from "./seen.js";
 import { type BugMade, BugGateError, BugStore, appFolderName, isBugId, type BugCheck, type BugCheckOptions } from "./bugstore.js";
-import { RUN_LIMIT_MS, VERIFY_DEFAULT, runCheck, type CheckHost, type StepResult } from "./bugcheck.js";
+import { CHECK_TOOLS, RUN_LIMIT_MS, VERIFY_DEFAULT, runCheck, stepsProblem, type CheckHost, type StepResult } from "./bugcheck.js";
 import { bugTitle, cutDownLink, type BugFinding, type BugMeta } from "./bug.js";
 import { exportBug, type BugExportTarget } from "./bugexport.js";
 import { bugAnswer, makeBug, newestRun, observedFinding, readRunFinding, reproducedAnswer, shownPath, writablePath, type BugContext } from "./bugreport.js";
@@ -1356,6 +1356,8 @@ interface ExploreRun {
   typed: string[];
   /** The host-level registration of `typed` (the ingress scrubber knows each text from the moment it is typed, until the run ends). */
   ingress?: { add(value: string): void; end(): void };
+  /** The reproduction check's deadline: once it is aborted nothing more is sent (§29.4). */
+  signal?: AbortSignal;
 }
 
 /** The scope of one move of an explore run. */
@@ -1853,6 +1855,7 @@ export class TaplineTools {
     // Inside an explore run every request that is not a read is held to the run's rules, whoever sent it: the explorer's own move,
     // a saved route's step, a drive leg, a recovery or a reset (§25.5). Nothing can reach the app around this one gate.
     const scope = this.exploreScope.getStore();
+    if (scope?.run.signal?.aborted === true) return Promise.reject(new TaplineError("timeout", "the check ran out of time, so nothing more is sent."));
     const [method, params, options] = args;
     const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
     if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) return this.host.request(...args);
@@ -2757,6 +2760,10 @@ export class TaplineTools {
     const not = (why: string): BugMeta["reproduced"] => ({ checked: false, why });
     const session = this.host.current();
     if (session === undefined) return not("no phone connected");
+    // The check goes to a connected session of the bug's own app, and to no other (§29.4): with another app in front it makes no move.
+    const appOf = (s: SessionInfo): string => s.app.id ?? s.app.name;
+    if (appOf(session) !== bug.app) return not(`the app in front isn't ${bug.app} (it is ${appOf(session)}); open ${bug.app} on the phone first`);
+    const identity = identityOf(session);
     if (this.exploring) return not("an explore or another check is running here");
     if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return not("a journey is running");
     if (this.recordingState !== null || this.replayingState || this.rivals > 0) return not("a script is being recorded or replayed");
@@ -2820,8 +2827,14 @@ export class TaplineTools {
         const build = now.app.build ?? "";
         return `${now.app.version ?? ""} (${/\((.*)\)\s*$/.exec(build)?.[1] ?? build})`;
       },
-      reset: async (mode) => {
-        const { eh: h } = fresh();
+      away: () => {
+        const now = this.host.current();
+        if (now === undefined) return `stopped (the app disconnected)`;
+        return identityOf(now) === identity && appOf(now) === bug.app ? null : `stopped (${appOf(now)} is in front now, not ${bug.app})`;
+      },
+      reset: async (mode, signal) => {
+        const { run: fresher, eh: h } = fresh();
+        if (signal !== undefined) fresher.signal = signal;
         const reloaded = await h.reload();
         let wiped = false;
         // The standard `app_command reset` clears the app's data: only when it was asked for (§29.4).
@@ -2832,9 +2845,18 @@ export class TaplineTools {
         const words = wiped ? (reloaded.ok ? "reload and the app's reset command, data cleared" : "the app's reset command, data cleared") : "reload only, data kept";
         return { ok: true, words };
       },
-      start: async (place) => (await current().eh.go(place, "any", options.account)).ok,
-      step: async (step, typed) => {
-        const within = this.exploreWithin(current().run);
+      start: async (place, signal) => {
+        const now = current();
+        if (signal !== undefined) now.run.signal = signal;
+        return (await now.eh.go(place, "any", options.account)).ok;
+      },
+      step: async (step, typed, signal) => {
+        // Defence in depth: the engine checked every step before the run; a step outside the allowlist is refused before any branch (§29.4).
+        const wrong = stepsProblem([step]);
+        if (wrong !== null) return { kind: "error", code: "bad_params", message: wrong.replace(/^step 1 /, "the step ") };
+        const now = current();
+        if (signal !== undefined) now.run.signal = signal;
+        const within = this.exploreWithin(now.run);
         const { tool, expect, ...rest } = step as PathStep & { expect?: unknown };
         const params: Record<string, unknown> = { ...rest, look: false };
         const asShape = <T extends keyof typeof toolShapes>(): Shape<T> => params as unknown as Shape<T>;
@@ -2869,7 +2891,7 @@ export class TaplineTools {
               return null;
           }
         };
-        if (!["tap", "long_press", "toggle", "scroll", "swipe", "back", "open_url"].includes(tool)) return { kind: "error", code: "bad_params", message: `the check doesn't run a "${String(tool)}" step` };
+        if (!CHECK_TOOLS.includes(tool)) return { kind: "error", code: "bad_params", message: `the check doesn't run a "${String(tool)}" step` };
         const { value, last } = await within(() => call() as Promise<CallToolResult>);
         return resultOf(value, last);
       },
