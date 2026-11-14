@@ -5,8 +5,12 @@ import { appFolderName as fromBugStore } from "../src/bugstore.js";
 // The folder an app's bugs and explore runs live in, locally and on an export's qa-reports branch (AGENT-TOOLS 1.16.2 §29.7).
 
 describe("appFolderName", () => {
-  it("keeps an id that is already a safe folder name, so folders made by 1.8.5 still match", () => {
-    for (const id of ["com.example.wayfare", "com.example.Wayfare-2", "demo_app", "a"]) expect(appFolderName(id)).toBe(id);
+  it("keeps a lowercase id that is already a safe folder name, so folders made by 1.8.5 still match", () => {
+    for (const id of ["com.example.wayfare", "com.example.wayfare-2", "demo_app", "a"]) expect(appFolderName(id)).toBe(id);
+  });
+
+  it("an id with capitals is hashed, with its readable part in lowercase", () => {
+    expect(appFolderName("com.example.Wayfare")).toMatch(/^_com\.example\.wayfare-[0-9a-f]{16}$/);
   });
 
   it("gives two different ids two different folders, also when cleaning them would make them equal", () => {
@@ -34,6 +38,17 @@ describe("appFolderName", () => {
   it("an unsafe id's name starts with _ and never equals a kept id", () => {
     expect(appFolderName("com.example/a")).toMatch(/^_/);
     expect(appFolderName("_x")).toMatch(/^_x-[0-9a-f]{16}$/);
+  });
+
+  it("ids that differ only in case get different folders (Windows and macOS fold case)", () => {
+    const names = ["com.example.demo", "com.example.Demo", "COM.EXAMPLE.DEMO"].map(appFolderName);
+    expect(new Set(names.map((n) => n.toLowerCase())).size).toBe(3);
+    expect(appFolderName("com.example.demo")).toBe("com.example.demo");
+  });
+
+  it("malformed Unicode is hashed without loss: two lone surrogates get two folders", () => {
+    expect(appFolderName("\ud800")).not.toBe(appFolderName("\ud801"));
+    expect(appFolderName("a\ud800")).not.toBe(appFolderName("a�"));
   });
 
   it("is the same function the bug store uses", () => {
