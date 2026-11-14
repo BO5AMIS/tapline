@@ -377,6 +377,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private readonly sweepIntervalMs: number;
   private readonly helloTimeoutMs: number;
   private readonly logBufferSize: number;
+  /** The last sequence number given to a stored log line (see `LogEntry.seq`). */
+  private logSeq = 0;
   private readonly agentTouchSlackMs: number;
   /** Until when (this computer's clock) touch reports are another tool's agent touches, not a person's. */
   private agentTouchUntil = 0;
@@ -1147,6 +1149,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   }
 
   private pushEntry(session: Session, entry: LogEntry): void {
+    entry.seq = ++this.logSeq;
     session.events.push(entry);
     if (session.events.length > this.logBufferSize) {
       session.events.splice(0, session.events.length - this.logBufferSize);

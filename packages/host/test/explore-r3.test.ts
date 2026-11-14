@@ -81,3 +81,53 @@ describe("R3: a toggle is restored after an alert recovery", () => {
     expect(out).toMatch(/Stopped: .*toggle/i);
   });
 });
+
+describe("R3: explore and a recording, a replay or a journey exclude each other from both sides", () => {
+  it("record, a route recording, replay and a journey are refused while an explore runs", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const scriptsDir = mkdtempSync(join(tmpdir(), "tapline-r3-scripts-"));
+    dirs.push(scriptsDir);
+    const s = await setupExplore(hosts, apps, dirs, { tools: { scriptsDir } });
+    const answers: Promise<CallToolResult>[] = [];
+    s.world.onPress = (id) => {
+      if (id !== "open-settings" || answers.length > 0) return;
+      answers.push(s.tools.record({ start: true, name: "x" }));
+      answers.push(s.tools.record({ start: true, route: "sign_in" }));
+      answers.push(s.tools.replay({ name: "x" }));
+      answers.push(s.tools.journey({ start: true, goal: "find settings" }));
+    };
+    await s.tools.explore({});
+    const texts = (await Promise.all(answers)).map(textOf);
+    expect(texts).toHaveLength(4);
+    for (const t of texts) expect(t).toMatch(/can't start while an explore is running/);
+    // Nothing was left recording, and a recording can start once the explore is over.
+    expect(textOf(await s.tools.record({ start: true, name: "after" }))).toMatch(/Recording "after"/);
+  });
+});
+
+import { readFileSync, readdirSync } from "node:fs";
+import { join as joinPath } from "node:path";
+import { APP } from "./drive-helpers.js";
+
+describe("R3: a move's log window survives a full buffer", () => {
+  it("an error logged when the host's buffer is already full is still the move's finding", async () => {
+    const s = await setupExplore(hosts, apps, dirs, {
+      hostOptions: { logBufferSize: 3 },
+      world: (world) => {
+        world.errorOn["open-settings"] = ["settings a", "settings b", "settings c", "settings d"];
+        world.errorOn["open-trips"] = "trips boom";
+      },
+    });
+    await s.tools.explore({});
+    const appDir = joinPath(s.exploreDir, APP.id);
+    const names = readdirSync(appDir).sort();
+    const report = JSON.parse(readFileSync(joinPath(appDir, names[names.length - 1] as string, "report.json"), "utf8")) as { findings: Array<{ got: string; place: string | null }> };
+    const got = report.findings.map((f) => f.got);
+    expect(got).toContain("trips boom");
+    expect(got).toContain("settings b");
+    // The sequence number is the host's bookkeeping: no finding keeps it.
+    expect(JSON.stringify(report)).not.toContain('"seq"');
+  });
+});

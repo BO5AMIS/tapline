@@ -241,8 +241,10 @@ export const logEntrySchema = z.object({
   /** On a fatal error: the error type, and React's component stack when the SDK had one. */
   name: z.string().optional(),
   componentStack: z.string().optional(),
+  /** Set by the host when it stores the line: a number that only grows over the host's lifetime, also across a replaced session. */
+  seq: z.number().optional(),
 });
-export type LogEntry = z.infer<typeof logEntrySchema>;
+export type LogEntry =z.infer<typeof logEntrySchema>;
 
 /** The `crash` event: a fatal JS error the SDK kept on the phone and sends after it connects again. */
 export const crashEventSchema = z.object({

@@ -2254,6 +2254,15 @@ export class TaplineTools {
   /** An explore is running in this object: a second one waits for it to end. */
   private exploring = false;
 
+  /**
+   * Explore and a recording, a replay or a journey never overlap, from either side: this is the check of the second side.
+   * What the explorer itself runs (its routes, its drives, a repair's trials) is inside its scope and is not a rival.
+   */
+  private exploreExcludes(what: string): string | null {
+    if (this.exploring && this.exploreScope.getStore() === undefined) return `Error bad_params: ${what} can't start while an explore is running; wait for it to end.`;
+    return null;
+  }
+
   /** `explore`: drives the places nobody has driven, saves them to the map and reports what broke on the way. */
   async explore(args: Shape<"explore"> = {}): Promise<CallToolResult> {
     return (await this.exploreRun(args)).answer;
@@ -2279,7 +2288,7 @@ export class TaplineTools {
     if (map === undefined) return refuse("Error unsupported: this app reports no id of its own, so it has no map.");
     if (this.exploring) return refuse("Error busy: an explore is already running here; wait for it to end.");
     if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
-    if (this.journeyRun !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
+    if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
     if (this.recordingState !== null || this.replayingState) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
     if (args.account !== undefined) {
       const store = this.options.accounts?.store ?? null;
@@ -2394,15 +2403,25 @@ export class TaplineTools {
       },
       mark: () => {
         const now = live() ?? session;
-        return { crash: this.host.crashMark(), id: now.id, logCount: this.sessionLogs(now.id).length, ts: this.newestLogTs(now.id) };
+        // The window of a move's log lines is a sequence number the host gave each stored line: a full buffer, rollover and a replaced session don't move it.
+        return { crash: this.host.crashMark(), id: now.id, seq: this.sessionLogs(now.id).reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0) };
       },
       since: (raw): Since => {
-        const mark = raw as { crash: number; id: string; logCount: number; ts: number | undefined };
+        const mark = raw as { crash: number; id: string; seq: number };
         const events = this.host.crashEventsAfter(mark.crash, session);
         const crashed = events.find((event) => event.kind === "crash");
         const crash = crashed !== undefined && crashed.kind === "crash" ? crashed.crash : null;
         const all = this.sessionLogs(mark.id);
-        const fresh = all.length >= mark.logCount ? all.slice(mark.logCount) : all.filter((entry) => (entry.ts ?? 0) > (mark.ts ?? 0));
+        // A replaced session's lines come twice in that concatenation (its own record and the new session's carried copy): each sequence number counts once.
+        const seen = new Set<number>();
+        const fresh = all
+          .filter((entry) => {
+            const seq = entry.seq ?? 0;
+            if (seq <= mark.seq || seen.has(seq)) return false;
+            seen.add(seq);
+            return true;
+          })
+          .map(({ seq: _seq, ...entry }) => entry);
         return {
           crash,
           disconnected: events.some((event) => event.kind === "disconnect"),
@@ -5109,6 +5128,8 @@ export class TaplineTools {
     const op = args.action ?? (args.start === true ? "start" : args.stop === true ? "stop" : "status");
     switch (op) {
       case "start": {
+        const exclusive = this.exploreExcludes("a recording");
+        if (exclusive !== null) return fail(exclusive);
         if (args.route !== undefined) return this.startRoute(args.route, args.name);
         const name = (args.name ?? "").trim() || `session-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
         if (this.scriptPath(name) === null) {
@@ -5186,6 +5207,8 @@ export class TaplineTools {
 
   /** `record` with `route` (AGENT-TOOLS 1.13 §18.5): what follows is saved as a route from the place the app is at. */
   private async startRoute(raw: string, given: string | undefined): Promise<CallToolResult> {
+    const exclusive = this.exploreExcludes("recording a route");
+    if (exclusive !== null) return fail(exclusive);
     const name = routeSlug(raw);
     if (name === null) return fail("Error bad_params: give the route a name of letters, digits, '.', '_' and '-' (e.g. \"sign_in\").");
     if (given !== undefined && given.trim() !== "" && routeSlug(given) !== name) {
@@ -5294,6 +5317,8 @@ export class TaplineTools {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
+    const exclusive = this.exploreExcludes("a replay");
+    if (exclusive !== null) return fail(exclusive);
     if (this.recording !== null) return fail(`Error bad_params: stop recording "${this.recording.name}" before replaying.`);
     // On Windows and macOS a twin in another case would be found as if it were this name, and on Linux not: refuse it everywhere.
     const scriptClash = given === "" ? this.scriptClash(name) : null;
@@ -7232,6 +7257,8 @@ export class TaplineTools {
   }
 
   private async journeyStart(args: Shape<"journey">): Promise<CallToolResult> {
+    const exclusive = this.exploreExcludes("a journey");
+    if (exclusive !== null) return fail(exclusive);
     const running = this.journeyRun;
     if (running !== undefined) {
       return fail(`Error bad_params: a journey is already running (${JSON.stringify(running.state.goal)}); stop it first with stop: true and reached.`);
