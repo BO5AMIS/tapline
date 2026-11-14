@@ -215,8 +215,20 @@ export class BugStore {
 
   /** The bug's folder and what it holds, or null. */
   read(app: string, id: string): Stored | null {
+    return this.readIn(appFolderName(app), id);
+  }
+
+  /**
+   * A bug read from an app folder by its folder name, as listed (never encoded again: a hashed name isn't an app id). It counts only
+   * when the folder is its own app's: a bug in another folder (one 1.8.5 made for that id, or a copy) is neither listed nor found.
+   */
+  private readIn(folder: string, id: string): Stored | null {
+    const stored = this.readAt(join(this.base, folder, id), id);
+    return stored !== null && appFolderName(stored.finding.app) === folder ? stored : null;
+  }
+
+  private readAt(dir: string, id: string): Stored | null {
     if (!isBugId(id)) return null;
-    const dir = this.bugDir(app, id);
     try {
       const parsed: unknown = JSON.parse(readContainedText(dir, join(dir, "finding.json")));
       if (typeof parsed !== "object" || parsed === null || !("bug" in parsed)) return null;
@@ -266,7 +278,7 @@ export class BugStore {
     if (!isBugId(id)) return [];
     const all: Array<{ app: string; stored: Stored }> = [];
     for (const name of this.appFolders()) {
-      const stored = this.read(name, id);
+      const stored = this.readIn(name, id);
       if (stored !== null) all.push({ app: stored.finding.app, stored });
     }
     return all;
@@ -280,9 +292,10 @@ export class BugStore {
     }
   }
 
-  private bugIds(app: string): string[] {
+  /** The bug ids in an app folder, by its folder name. */
+  private bugIdsIn(folder: string): string[] {
     try {
-      return readdirSync(this.appDir(app), { withFileTypes: true }).filter((e) => e.isDirectory() && BUG_ID.test(e.name)).map((e) => e.name);
+      return readdirSync(join(this.base, folder), { withFileTypes: true }).filter((e) => e.isDirectory() && BUG_ID.test(e.name)).map((e) => e.name);
     } catch {
       return [];
     }
@@ -292,8 +305,8 @@ export class BugStore {
   list(app?: string): BugListEntry[] {
     const out: BugListEntry[] = [];
     for (const folder of app !== undefined ? [appFolderName(app)] : this.appFolders()) {
-      for (const id of this.bugIds(folder)) {
-        const stored = this.read(folder, id);
+      for (const id of this.bugIdsIn(folder)) {
+        const stored = this.readIn(folder, id);
         if (stored === null) continue;
         out.push({ app: stored.finding.app, id, title: bugTitle(stored.finding), count: stored.meta.seen.count, last: stored.meta.seen.last, reproduced: reproducedWords(stored.meta.reproduced) });
       }
@@ -303,16 +316,21 @@ export class BugStore {
 
   /** Removes an app's oldest bugs beyond the newest `kept`, with their zips; `keep` is never removed (§29.2). */
   prune(app: string, keep?: string): void {
+    this.pruneIn(appFolderName(app), keep);
+  }
+
+  /** `prune` by the app folder's name, as listed (never encoded again). Only the folder's own bugs count and go. */
+  private pruneIn(folder: string, keep?: string): void {
     try {
-      const rows = this.bugIds(app).flatMap((id) => {
-        const stored = this.read(app, id);
+      const rows = this.bugIdsIn(folder).flatMap((id) => {
+        const stored = this.readIn(folder, id);
         return stored === null ? [] : [{ id, last: stored.meta.seen.last }];
       });
       rows.sort((a, b) => (a.last < b.last ? 1 : a.last > b.last ? -1 : a.id.localeCompare(b.id)));
       for (const row of rows.slice(this.kept)) {
         if (row.id === keep) continue;
-        rmSync(this.bugDir(app, row.id), { recursive: true, force: true });
-        rmSync(join(this.appDir(app), `${row.id}.zip`), { force: true });
+        rmSync(join(this.base, folder, row.id), { recursive: true, force: true });
+        rmSync(join(this.base, folder, `${row.id}.zip`), { force: true });
       }
     } catch {
       // a folder that can't be removed stays
@@ -321,7 +339,7 @@ export class BugStore {
 
   /** At start: every app's bugs beyond the newest kept are removed (§29.2). */
   pruneAll(): void {
-    for (const folder of this.appFolders()) this.prune(folder);
+    for (const folder of this.appFolders()) this.pruneIn(folder);
   }
 
   /** The folder for a new bug, and whether it is the folder of a bug with this signature. */

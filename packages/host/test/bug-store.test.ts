@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -250,6 +250,37 @@ describe("the folder (§29.2)", () => {
     ]);
     expect(rows[0]).toMatchObject({ count: 1, reproduced: "not checked" });
     expect(store.list("com.example.other")).toHaveLength(1);
+  });
+
+  it("an app id with a hashed folder is listed, looked up and pruned like any other (its folder name is never encoded again)", () => {
+    const store = new BugStore(tmp(), 2);
+    const app = "com.example.Demo";
+    const ids: string[] = [];
+    for (let n = 0; n < 3; n++) {
+      const made = makeBug(context(store), args(crash({ app, got: `the app crashed: Error: kind ${n}x${"abc"[n]}`, crash: { reason: `Error${n}: x`, frames: [`*A.tsx:1 f${n}`] }, when: `2026-11-1${n}T09:00:00.000Z` }), { sourceKey: `run${n}/f1` }));
+      ids.push(made.meta.id);
+    }
+    expect(store.appDir(app)).not.toContain(app);
+    // listed with and without the app, newest first; the oldest pruned at the third
+    expect(store.list().map((row) => [row.app, row.id])).toEqual([[app, ids[2]], [app, ids[1]]]);
+    expect(store.list(app).map((row) => row.id)).toEqual([ids[2], ids[1]]);
+    // found without the app
+    expect(store.lookup(ids[2] as string)).toMatchObject({ found: { app } });
+    expect(store.holders(ids[2] as string)).toEqual([app]);
+    // pruneAll reaches its folder too
+    const later = new BugStore(store.base, 1);
+    later.pruneAll();
+    expect(later.list(app).map((row) => row.id)).toEqual([ids[2]]);
+  });
+
+  it("a bug in a folder that isn't its app's own (a 1.8.5 folder, or a planted one) is not listed or found", () => {
+    const store = new BugStore(tmp());
+    const made = makeBug(context(store), args(crash({ app: "com.example.Demo" })));
+    // the same bug copied to the folder 1.8.5 used for that id, and to another app's folder
+    cpSync(store.bugDir("com.example.Demo", made.meta.id), join(store.base, "com.example.Demo", made.meta.id), { recursive: true });
+    cpSync(store.bugDir("com.example.Demo", made.meta.id), join(store.appDir("com.example.wayfare"), made.meta.id), { recursive: true });
+    expect(store.list().map((row) => row.app)).toEqual(["com.example.Demo"]);
+    expect(store.holders(made.meta.id)).toEqual(["com.example.Demo"]);
   });
 });
 
