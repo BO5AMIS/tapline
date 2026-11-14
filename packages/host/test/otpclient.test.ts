@@ -1,4 +1,4 @@
-import { createServer } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { createOtpService, fetchOtp, noCodeMessage, otpReference, proofFor, OtpCodes, type OtpDeps } from "../src/otpclient.js";
 import { FAKE_CODE, FAKE_TOKEN, startFakeTapwright, tapwrightHome, type FakeDaemon } from "./fake-tapwright.js";
@@ -39,6 +39,8 @@ describe("the proof", () => {
   it("is HMAC-SHA256 over the label, the raw challenge, the address and the port, NUL between", () => {
     const expected = proofFor(FAKE_TOKEN, CHALLENGE, "127.0.0.1", 4242);
     expect(expected).toMatch(/^[0-9a-f]{64}$/);
+    // A fixed known answer, made outside this code (openssl dgst -sha256 -hmac over the bytes of the spec text), so a wrong label, separator or encoding can't pass by agreeing with itself.
+    expect(expected).toBe("0979dca783c48548c79042bc9169a2d47b00090ba2589ceb34106530a5460f18");
     expect(proofFor(FAKE_TOKEN, CHALLENGE, "127.0.0.1", 4243)).not.toBe(expected);
     expect(proofFor(FAKE_TOKEN, CHALLENGE, "::ffff:127.0.0.1", 4242)).not.toBe(expected);
     expect(proofFor(FAKE_TOKEN, Buffer.alloc(32, 8), "127.0.0.1", 4242)).not.toBe(expected);
@@ -268,5 +270,25 @@ describe("what is scrubbed", () => {
     const got = await service.fetch(APP);
     expect(got.ok).toBe(true);
     expect(service.codes.redact(`x${FAKE_CODE}y`)).toBe("x<one-time code>y");
+  });
+});
+
+describe("after the time is up (PR 12 CodeRabbit)", () => {
+  it("a connection that completes after the timeout is closed and never asks for the code", async () => {
+    const { daemon, deps } = await setup();
+    let late: Socket | undefined;
+    const slow = (port: number): Promise<Socket> =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          const made = connect({ host: "127.0.0.1", port, family: 4 });
+          late = made;
+          made.once("connect", () => resolve(made));
+        }, 120);
+      });
+    const got = await fetchOtp(APP, { ...deps, timeoutMs: 30, dial: slow });
+    expect(got).toMatchObject({ ok: false, reason: "timeout" });
+    await new Promise((done) => setTimeout(done, 400));
+    expect(daemon.requests).toEqual([]);
+    expect(late?.destroyed).toBe(true);
   });
 });

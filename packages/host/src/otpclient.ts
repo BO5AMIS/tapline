@@ -50,6 +50,8 @@ export interface OtpDeps {
   timeoutMs?: number;
   /** How long to wait after the proof for a daemon that closes the connection at once (ms). Default 15. */
   settleMs?: number;
+  /** For tests: how the connection is made (default: the loopback socket). */
+  dial?: (port: number) => Promise<Socket>;
 }
 
 export type OtpFailure = "no_file" | "bad_file" | "unreachable" | "no_proof" | "closed" | "none" | "refused" | "bad_reply" | "expired" | "timeout";
@@ -257,12 +259,19 @@ export async function fetchOtp(app: string, deps: OtpDeps = {}): Promise<OtpFetc
   const challenge = random(32);
   let wire: Wire | undefined;
   let timer: NodeJS.Timeout | undefined;
+  // Set when the time is up: after that nothing more is sent, and a connection that completes late is closed.
+  let aborted = false;
+  const timedOut = (): OtpFetch => fail("timeout", "Tapwright's daemon didn't answer in time.");
   const run = async (): Promise<OtpFetch> => {
     let socket: Socket;
     try {
-      socket = await dial(port);
+      socket = await (deps.dial ?? dial)(port);
     } catch {
       return fail("unreachable", "Tapwright's daemon didn't answer on this computer; start it (Tapwright 1.7) and try again.");
+    }
+    if (aborted) {
+      socket.destroy();
+      return timedOut();
     }
     const opened = new Wire(socket);
     wire = opened;
@@ -281,9 +290,11 @@ export async function fetchOtp(app: string, deps: OtpDeps = {}): Promise<OtpFetc
     // A daemon that closes its connection after the proof gets nothing: the token never goes to a second connection.
     const settle = deps.settleMs ?? 15;
     if (settle > 0) await new Promise<void>((done) => setTimeout(done, settle));
+    if (aborted) return timedOut();
     if (!opened.usable() || (proved.headers["connection"] ?? "").toLowerCase().includes("close")) {
       return fail("closed", "Tapwright's daemon closed the connection after it proved itself; nothing was sent, and the token is never sent on a new connection.");
     }
+    if (aborted) return timedOut();
     let answer: Reply;
     try {
       answer = await opened.request("/otp", port, JSON.stringify({ app }), `Bearer ${token}`);
@@ -306,7 +317,11 @@ export async function fetchOtp(app: string, deps: OtpDeps = {}): Promise<OtpFetc
   };
   try {
     const limit = new Promise<OtpFetch>((resolve) => {
-      timer = setTimeout(() => resolve(fail("timeout", "Tapwright's daemon didn't answer in time.")), deps.timeoutMs ?? 5000);
+      timer = setTimeout(() => {
+        aborted = true;
+        wire?.socket.destroy();
+        resolve(timedOut());
+      }, deps.timeoutMs ?? 5000);
     });
     return await Promise.race([run(), limit]);
   } catch {
