@@ -411,15 +411,18 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
           sinceMs = deps.now().getTime();
           t0 = deps.clock();
           deps.audit.write({ kind: "schedule", name, detail: "started" });
-          // The file's time is saved only once the route has begun: a skip (the app is closed, the phone is busy) or a failure to connect leaves the file for the next check.
-          if (newest !== null) writeSeen(deps.configDir, name, newest);
         }
         try {
           answer = await host.call(tool, args);
         } catch (error) {
           answer = { text: `Error internal: ${error instanceof Error ? error.message : String(error)}`, isError: true };
         }
-        if (!isBusyAnswer(answer)) break;
+        if (!isBusyAnswer(answer)) {
+          // The file's time is saved only once the route has begun (or its outcome is unknown, which counts as begun): a skip (the app is
+          // closed, the phone is busy or paused through the whole wait) or a failure to connect leaves the file for the next check.
+          if (newest !== null) writeSeen(deps.configDir, name, newest);
+          break;
+        }
       }
       const left = deadline - deps.clock();
       if (left <= 0) return skip(SKIP_USE, host.via);

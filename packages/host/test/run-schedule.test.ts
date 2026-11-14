@@ -365,6 +365,36 @@ describe("a file trigger's check", () => {
     expect(readFileSync(seen, "utf8")).toBe(before);
   });
 
+  it("inUse() is false but the first call stays busy until the wait runs out: no route step began, so the file stays eligible (PR 12 Codex cycle 2)", async () => {
+    const { r, inbox } = fileRig();
+    const { seen } = arm(r, inbox);
+    const before = readFileSync(seen, "utf8");
+    r.host.answers = [{ text: "Error busy: A person is using the app in the live viewer.", isError: true }];
+    const skipped = await runSchedule("daily", { checkTrigger: true }, r.deps);
+    expect(skipped.code).toBe(2);
+    expect(skipped.text).toMatch(/phone was in use/);
+    expect(r.host.calls.length).toBeGreaterThan(1);
+    expect(readFileSync(seen, "utf8")).toBe(before);
+    // and once the phone is free, the same file runs
+    r.host.answers = [OK];
+    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(0);
+    expect(readFileSync(seen, "utf8")).not.toBe(before);
+  });
+
+  it("a paused call leaves the file eligible, and a call that ends unknown (an exception) uses it up", async () => {
+    const { r, inbox } = fileRig();
+    const { seen } = arm(r, inbox);
+    const before = readFileSync(seen, "utf8");
+    r.host.answers = [{ text: "Error paused: the live view has paused agents.", isError: true }];
+    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(2);
+    expect(readFileSync(seen, "utf8")).toBe(before);
+    r.host.call = async (): Promise<CallAnswer> => {
+      throw new Error("the connection dropped mid-call");
+    };
+    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(1);
+    expect(readFileSync(seen, "utf8")).not.toBe(before);
+  });
+
   it("a host that can't be reached leaves the file eligible too", async () => {
     const { r, inbox } = fileRig();
     const { seen } = arm(r, inbox);
