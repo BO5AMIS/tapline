@@ -141,8 +141,8 @@ export function parseGrants(raw: unknown, today: string, block: (app: string) =>
     if (label.startsWith("#")) return refuse("name is missing.");
     if (!safeGrantName(label)) return refuse("name may only use letters, digits, _, . and - (it names a folder), and not be . or .. or end in a dot.");
     if (seen.has(label)) return refuse("name is already used by an earlier grant.");
-    // Two names that are one under case folding and Unicode NFKC share a uses folder on a case-insensitive file system: the later is refused, active or revoked.
-    if (keys.has(grantKey(label))) return refuse("name differs from an earlier grant's only in case or Unicode form (they would share one uses folder).");
+    // Two names that are equal ignoring ASCII case share a uses folder on a case-insensitive file system: the later is refused, active or revoked.
+    if (keys.has(grantKey(label))) return refuse("name differs from an earlier grant's only in case (they would share one uses folder).");
     seen.add(label);
     keys.add(grantKey(label));
     if (typeof g.app !== "string" || g.app.trim() === "") return refuse("app is missing.");
@@ -200,9 +200,14 @@ export function parseGrants(raw: unknown, today: string, block: (app: string) =>
  * another one already made.
  */
 
-/** What two grant names are compared by: case folded and Unicode NFKC normalized. Names that agree here are one name. */
+/** A name with its ASCII capitals lower-cased (nothing else changes). */
+function asciiLower(name: string): string {
+  return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/** What two grant names are compared by: equal ignoring ASCII case (names are limited to `[A-Za-z0-9._-]`). Names that agree here are one name. */
 export function grantKey(name: string): string {
-  return name.normalize("NFKC").toLowerCase();
+  return asciiLower(name);
 }
 
 /**
@@ -210,7 +215,12 @@ export function grantKey(name: string): string {
  * name's case therefore never picks another folder, and `g` and `G` are one folder on every file system.
  */
 export function usesFolder(name: string): string {
-  return name.toLowerCase();
+  return asciiLower(name);
+}
+
+/** The policy file's edit lock (§19.5). */
+export function policyEditLockPath(policyPath: string): string {
+  return `${policyPath}.edit.lock`;
 }
 
 /** Whether a grant's name is safe as a folder name: letters, digits, `_`, `.` and `-`; never `.`, `..` or one that ends in a dot (Windows drops it). */
@@ -486,7 +496,7 @@ export class GrantBook {
    * can't get the lock within `editLockWaitMs` fails closed: nothing is written. A string is why it couldn't.
    */
   private async editPolicy(change: (file: Record<string, unknown>) => boolean): Promise<true | string> {
-    const lockPath = `${this.options.policyPath}.edit.lock`;
+    const lockPath = policyEditLockPath(this.options.policyPath);
     const deps = this.options.editLock ?? ownLockDeps();
     const waitMs = this.options.editLockWaitMs ?? 5000;
     const pollMs = this.options.editLockPollMs ?? 25;

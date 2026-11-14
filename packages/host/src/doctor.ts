@@ -5,7 +5,9 @@ import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNTS_WARNING, loadAccounts, type GitProbe } from "./accounts.js";
 import { GrantBook } from "./grants.js";
-import { DEFAULT_PORT,DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
+import { configDir, DEFAULT_PORT,DEFAULT_PORT_FALLBACK, lanAddresses, pairedBefore, tokenFilePath } from "./config.js";
+import { ownLockDeps, type PidLockDeps } from "./pidlock.js";
+import { findStuckLocks } from "./unlockcmd.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -36,8 +38,10 @@ export interface DoctorDeps {
   gitProbe?: GitProbe;
   /** `--policy FILE`: its grants are checked when given (AGENT-TOOLS 1.14 §19.1, §19.4). */
   policyFile?: string;
-  /** The clock for the grants' dates; default: now. */
+
   now?: () => Date;
+  /** The process facts the stuck-lock check uses (pid, liveness, start time); default: this process. */
+  lockDeps?: PidLockDeps;
 }
 
 /** The grants of a policy file: refused grants and a uses folder that can't be read are warnings (§19.1, §19.4). */
@@ -57,6 +61,18 @@ async function checkGrants(file: string, now: (() => Date) | undefined): Promise
     status: "warn",
     detail: problems.join("; "),
     fix: report.usesBroken ? `Make ${file}.uses a readable folder that holds only slot files, or delete it (until then a grant whose uses can't be read counts as used up).` : "A refused grant covers nothing; fix it in the policy file, or remove it.",
+  };
+}
+
+/** Locks no run will clear by itself (§22.3, §19.5): empty, unreadable, or held by a dead process. Each is named with its path and the command that removes it. */
+function checkLocks(deps: DoctorDeps): CheckResult {
+  const stuck = findStuckLocks({ configDir: configDir(deps.env), ...(deps.policyFile !== undefined ? { policyFile: deps.policyFile } : {}), deps: deps.lockDeps ?? ownLockDeps() });
+  if (stuck.length === 0) return { name: "Locks", status: "pass", detail: "no stuck lock" };
+  return {
+    name: "Locks",
+    status: "warn",
+    detail: stuck.map((s) => `${s.path} is stuck (${s.why})`).join("; "),
+    fix: [...new Set(stuck.map((s) => s.command))].join("\n"),
   };
 }
 
@@ -465,6 +481,8 @@ export async function runDoctor(overrides: Partial<DoctorDeps> = {}): Promise<Ch
     const file = deps.policyFile;
     results.push(await guard("Grants", "warn", () => checkGrants(file, deps.now)));
   }
+  const locks = await guard("Locks", "warn", () => checkLocks(deps));
+  if (locks.status !== "pass") results.push(locks);
   return results;
 }
 

@@ -29,6 +29,8 @@ import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
 import { APP_WAIT_MS, processStartTime, runSchedule } from "./runschedule.js";
 import { AuditLog } from "./auditlog.js";
+import { ownLockDeps } from "./pidlock.js";
+import { grantsUnlock, scheduleUnlock } from "./unlockcmd.js";
 import { connectScheduleHost, realTaskEntry, redactorFor, spawnSchedRunner } from "./schedulehost.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
 import { TaplineTools } from "./tools.js";
@@ -58,12 +60,14 @@ Commands:
            tapline report [--since <90m | 2h | 1d | date | epoch ms>] (default: the last 24 hours)
   grants   List the grants in the policy file, today's counts and the last uses: tapline grants --policy <file>;
            --revoke-all revokes every grant in it at once (a running route stops at its next touch that needs one)
+           tapline grants unlock --policy <file> removes a stuck edit lock (empty, unreadable or held by a dead process; never a live one)
   audit-log  What was done under a person's standing permission (grants used, revoked, approvals):
            tapline audit-log [--since <date or ISO time>] lists the lines; --delete deletes the log
   schedule Run a saved route on a time or when a file appears, with no model (Windows Task Scheduler; a time schedule wakes the PC, a file trigger does not):
            tapline schedule add <route> --at "09:00 daily" [--with caption=@captions.txt] [--name NAME]
            [--policy FILE] [--accounts FILE] [--maps DIR]  (or --on-file FOLDER in place of --at);
-           tapline schedule list; tapline schedule remove NAME
+           tapline schedule list; tapline schedule remove NAME;
+           tapline schedule unlock NAME removes a stuck run lock (empty, unreadable or held by a dead process; never a live one)
   run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
            (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
   vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
@@ -421,6 +425,11 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "grants": {
       // For a person at a terminal (AGENT-TOOLS 1.14 §19.5, §19.7): it reads and edits the policy file; needs no host and no app.
+      if (positionals[1] === "unlock") {
+        const unlocked = grantsUnlock(values.policy, { audit: new AuditLog(join(configDir(), "audit")), deps: ownLockDeps() });
+        (unlocked.code === 0 ? process.stdout : process.stderr).write(`${unlocked.text}\n`);
+        return unlocked.code;
+      }
       const outcome = await runGrants({ policy: values.policy, auditDir: join(configDir(), "audit"), revokeAll: values["revoke-all"] === true });
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
@@ -456,9 +465,11 @@ export async function main(argv: string[]): Promise<number> {
             )
           : verb === "list"
             ? scheduleList(deps.configDir)
-            : verb === "remove"
+            : verb === "unlock"
+              ? scheduleUnlock(positionals[2], { configDir: deps.configDir, audit: new AuditLog(join(deps.configDir, "audit")), deps: ownLockDeps() })
+              : verb === "remove"
               ? await scheduleRemove(positionals[2], deps)
-              : { text: 'Usage: tapline schedule add <route> --at "09:00 daily" | --on-file FOLDER\n       tapline schedule list\n       tapline schedule remove NAME', code: 2 };
+              : { text: 'Usage: tapline schedule add <route> --at "09:00 daily" | --on-file FOLDER\n       tapline schedule list\n       tapline schedule remove NAME\n       tapline schedule unlock NAME', code: 2 };
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
     }

@@ -113,10 +113,10 @@ tapline mcp
 - Grants (1.7) are in the policy file, version 2: a person's standing OK for a touch, with limits. A covered touch
   answers `Note: allowed by grant "name" (2 of 3 today).` and asks no one; you never create, change or revoke one (only
   the person does). For the person, in a terminal: `tapline grants --policy FILE` (the grants, today's counts, the last
-  uses), `tapline grants --policy FILE --revoke-all` (the kill switch), `tapline audit-log [--since <date>]` and
+  uses), `tapline grants --policy FILE --revoke-all` (the kill switch), `tapline grants unlock --policy FILE` (removes a stuck policy edit lock: empty, unreadable or held by a dead process, never a live one), `tapline audit-log [--since <date>]` and
   `--delete`, and `tapline doctor --policy FILE` (a refused grant, a broken state file).
 - Scheduled runs (1.7) are for the person: `tapline schedule add <route> --at "09:00 daily"` (or `--on-file FOLDER`), `schedule list`,
-  `schedule remove NAME`, and `tapline run-schedule NAME` runs one now with the schedule's policy, accounts and maps (a running host carries it only when it has those same files; else the run has its own host). Set
+  `schedule remove NAME`, `schedule unlock NAME` (removes a run lock that is empty, unreadable or held by a dead process, never a live one; `tapline doctor` names such locks) and `tapline run-schedule NAME` runs one now with the schedule's policy, accounts and maps (a running host carries it only when it has those same files; else the run has its own host). Set
   one up only when the user asks for it; the app must be open on the phone, or the run is skipped (`skipped: the app is not
   open`). Reports are in `~/.tapline/runs/`, lines in `tapline audit-log`.
 - `--no-dialog` keeps a person's OK to the live view (the host's own dialog is off), for a host that

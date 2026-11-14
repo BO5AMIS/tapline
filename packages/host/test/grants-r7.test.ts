@@ -167,10 +167,10 @@ describe("finding 1: every policy-file mutation runs under an edit lock, on fres
 describe("finding 2: grant names that differ only by case (or by Unicode form) are one name", () => {
   const base = { app: "x", words: ["Remove"], until: "2026-11-20" };
 
-  it("grantKey folds case and Unicode compatibility forms", () => {
+  it("grantKey is equality ignoring ASCII case (names are [A-Za-z0-9._-])", () => {
     expect(grantKey("G")).toBe(grantKey("g"));
     expect(grantKey("Instagram_Post")).toBe(grantKey("instagram_post"));
-    expect(grantKey("ｇ")).toBe(grantKey("g")); // a full-width g
+    expect(grantKey("ｇ")).not.toBe(grantKey("g")); // a full-width g is no valid name and no alias of g
     expect(grantKey("a")).not.toBe(grantKey("b"));
   });
 

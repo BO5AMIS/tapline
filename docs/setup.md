@@ -137,7 +137,7 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as
   absolute paths, and `@file` is read when the run starts, relative to that folder) and, on Windows, registers a Task
   Scheduler task that runs `tapline run-schedule <name>` (a time schedule sets `WakeToRun`, so it wakes the PC). `--on-file FOLDER` runs when a
-  new file appears there (the task checks every minute and does not wake the PC). `tapline schedule list`, `tapline schedule remove NAME`. The
+  new file appears there (the task checks every minute and does not wake the PC). `tapline schedule list`, `tapline schedule remove NAME`, `tapline schedule unlock NAME`. The
   phone's app must be open and connected: a running `tapline host` is used only when it runs with the schedule's own policy, accounts and maps
   (the run asks it, and never drives through a host that differs); otherwise the run starts its own host with the schedule's
   policy, accounts and maps and waits `--wait` seconds (default 60) for the app, and skips if the app doesn't connect to it. Skips:
@@ -145,6 +145,8 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   `skipped: the app is not open`; a draft with no one to show it to ends `stopped: a draft is waiting for a person.`.
   Reports go to `~/.tapline/runs/`, lines to the audit log. Other systems: the schedule is saved; start it from cron or
   launchd with `tapline run-schedule <name>`.
+  **Stuck locks.** A lock that is empty or unreadable (a run crashed mid-write where hard links are not available) is never taken over, so it blocks its schedule, or edits of the policy file, until a person removes it. `tapline doctor` (with `--policy FILE` for the policy edit lock) names each stuck lock with its full path and the command that removes it: `tapline schedule unlock NAME` or `tapline grants unlock --policy FILE`. Both remove the lock (and its `.takeover`) only when no live holder is proven, name the pid when there is one, and write an audit line.
+$P
 - `--no-dialog` (`mcp`): don't open the host's dialog for a person's OK or a "needs a person" moment;
   the live view still asks. Use it with a chat app that passes dialogs to the model instead of
   showing them to a person.

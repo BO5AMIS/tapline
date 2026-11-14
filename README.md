@@ -294,7 +294,7 @@ order, pair again (or give each agent a fixed `--port`).
   (`perDay`, `perHour`, `until` within 30 days, quiet hours, a saved route). Only you make one: by editing the file,
   or by saying Allow to the host's dialog, which offers a grant after you allow a touch there. Payments, purchases and
   account deletion are never grantable. `tapline grants --policy FILE` lists the grants with today's counts and the last
-  uses; `tapline grants --policy FILE --revoke-all` revokes them all at once (the live view's Pause only pauses: the
+  uses; `tapline grants unlock --policy FILE` removes a stuck policy edit lock; `tapline grants --policy FILE --revoke-all` revokes them all at once (the live view's Pause only pauses: the
   grants stand when you resume). `tapline audit-log [--since <date or ISO time>]` shows what was done under a
   grant or your OK (in `~/.tapline/audit/`, 90 days); `tapline audit-log --delete` deletes it. `tapline doctor --policy FILE`
   says which grant is refused. These are commands for you, not tools the agent can call.
@@ -302,7 +302,7 @@ order, pair again (or give each agent a fixed `--port`).
   [--with caption=@captions.txt] [--name NAME] [--policy FILE] [--accounts FILE] [--maps DIR]` (or `--on-file FOLDER`
   to run when a new file appears; `--at` is `HH:MM daily`, `HH:MM weekdays` or an ISO date-time for one run). On Windows
   it registers a Task Scheduler task that runs `tapline run-schedule <name>` (a time schedule wakes the PC to run it; a file trigger checks the folder every minute and does not wake the PC); `tapline schedule list`
-  and `tapline schedule remove NAME` do the rest. The schedule file is `~/.tapline/schedules/<name>.json`, and the
+  and `tapline schedule remove NAME` do the rest; `tapline schedule unlock NAME` removes a stuck run lock. The schedule file is `~/.tapline/schedules/<name>.json`, and the
   policy, accounts and maps it names are in force (a running `tapline host` carries the run only when it runs with those same
   files; otherwise the run starts its own host, and skips if the app doesn't connect to it): grants and their limits apply to
   a scheduled run as to an agent (the counts are shared), the vault types by name, and a draft stops the run. A run needs the app open on the phone

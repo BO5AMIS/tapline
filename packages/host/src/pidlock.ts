@@ -258,3 +258,73 @@ export function holdsPidLock(path: string, token: string): boolean {
   const text = readText(path);
   return text !== null && parseHolder(text).owner === token;
 }
+
+/**
+ * What a lock file is right now. `stuck` is a lock no run will ever clear by itself and a person has to see: empty, unreadable, or
+ * held by a process that is provably dead. `live` is a holder that is proven alive (never displaced).
+ */
+export type StuckState = { state: "stuck"; why: "empty" | "unreadable" | "dead"; pid?: number };
+export type PidLockState = { state: "absent" } | { state: "live"; pid: number } | StuckState;
+
+/** Looks at the lock at `path` without changing it. */
+export function inspectPidLock(deps: PidLockDeps, path: string): PidLockState {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    return codeOf(error) === "ENOENT" ? { state: "absent" } : { state: "stuck", why: "unreadable" };
+  }
+  if (text.trim() === "") return { state: "stuck", why: "empty" };
+  const holder = parseHolder(text);
+  if (typeof holder.pid !== "number" || !Number.isInteger(holder.pid) || typeof holder.owner !== "string") return { state: "stuck", why: "unreadable" };
+  return holderIsDead(deps, holder) ? { state: "stuck", why: "dead", pid: holder.pid } : { state: "live", pid: holder.pid };
+}
+
+/** The words for a stuck lock's cause. */
+export function stuckWords(state: StuckState): string {
+  if (state.why === "empty") return "empty";
+  if (state.why === "unreadable") return "unreadable";
+  return `held by a process that is gone (pid ${state.pid ?? "?"})`;
+}
+
+export interface UnlockResult {
+  /** `none`: no lock file; `live`: a live holder is proven, nothing removed; `removed`: stuck files removed; `failed`: a stuck file couldn't be removed. */
+  status: "none" | "live" | "removed" | "failed";
+  /** The live holder's process id when `status` is `live`. */
+  pid?: number;
+  /** Every file removed, with why. */
+  removed: Array<{ path: string; why: string }>;
+  /** The file of a `live` or `failed` answer. */
+  path?: string;
+}
+
+/**
+ * Removes the lock at `path` and its `.takeover`, but only when no holder is proven alive: an empty or unreadable file, or one whose
+ * holder is dead (its process is gone, or has another start time). A live holder in either file refuses and removes nothing. A file
+ * is removed only if it still holds what was judged (a lock that changed hands in between is put back).
+ */
+export function unlockPidLock(deps: PidLockDeps, path: string): UnlockResult {
+  const judged: Array<{ path: string; text: string | null; stuck: StuckState }> = [];
+  for (const file of [path, `${path}.takeover`]) {
+    const state = inspectPidLock(deps, file);
+    if (state.state === "live") return { status: "live", pid: state.pid, removed: [], path: file };
+    if (state.state === "stuck") judged.push({ path: file, text: readText(file), stuck: state });
+  }
+  if (judged.length === 0) return { status: "none", removed: [] };
+  const removed: Array<{ path: string; why: string }> = [];
+  for (const item of judged) {
+    if (item.text === null) {
+      // Unreadable: the content can't be compared, so a plain delete.
+      try {
+        unlinkSync(item.path);
+        removed.push({ path: item.path, why: stuckWords(item.stuck) });
+      } catch {
+        return { status: "failed", removed, path: item.path };
+      }
+      continue;
+    }
+    if (removeIfUnchanged(deps, item.path, item.text)) removed.push({ path: item.path, why: stuckWords(item.stuck) });
+    else return { status: "failed", removed, path: item.path };
+  }
+  return { status: "removed", removed };
+}
