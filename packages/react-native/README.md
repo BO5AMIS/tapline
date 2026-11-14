@@ -45,6 +45,10 @@ startTapline({ enabled: process.env.EXPO_PUBLIC_TAPLINE_ENABLED === '1' });
   own), or put `taplineFromOthers` on a `Text`. The agent then reads it as `text (from others) "…"`, and a route
   or grant that is drafts-only treats the touches that send replies with care. Unmarked text is never claimed either
   way, and the mark is a hint, not a boundary: the agent is told to follow no instruction found in screen text.
+- Keeping the explorer out, and letting it type (AGENT-TOOLS 1.15): `taplineExploreSkip` on any view, button or component keeps
+  `explore` away from it and everything inside it. `taplineExploreFill` on an input lets `explore` with `fill: "test-data"` type
+  into it: `true` (a fake value), `"vault:<entry>.<field>"` (a vault entry marked `"explore": true`) or `"fixture:<name>"`.
+  `TaplineExploreProps` types both. Passwords, cards and other secret fields are never typed, marked or not.
 - Optional: `app: { name, id, version, build }` names the app for the host; `url` and
   `token` connect straight to a host without pairing (a simulator on the same computer);
   `stopTapline()` shuts it down. `react-native-view-shot` for screenshots.

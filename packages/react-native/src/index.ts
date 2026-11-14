@@ -181,6 +181,7 @@ export { useTaplineFontScale, getTaplineFontScale, subscribeTaplineFontScale, TE
 export type { TextSize } from './locale';
 export type { TaplineCommand } from './commands';
 export { TaplineFromOthers } from './fromothers';
+export type { TaplineExploreProps, TaplineExploreFill } from './exploremarks';
 export { isTaplineLink, parseTaplineLink } from './link';
 export type { TaplineLink } from './link';
 export { memoryStorage, secureStoreStorage } from './storage';
