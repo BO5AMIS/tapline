@@ -27,7 +27,7 @@ import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
 import { createPairCode, forgetLink, pairingLink } from "./pairing.js";
 import { failureWithDiff, junitXml } from "./script.js";
 import { TaplineHost } from "./server.js";
-import { APP_WAIT_MS, runSchedule } from "./runschedule.js";
+import { APP_WAIT_MS, processStartTime, runSchedule } from "./runschedule.js";
 import { AuditLog } from "./auditlog.js";
 import { connectScheduleHost, realTaskEntry, redactorFor, spawnSchedRunner } from "./schedulehost.js";
 import { formatInstalled, installSkill, skillSource } from "./skill.js";
@@ -489,6 +489,7 @@ export async function main(argv: string[]): Promise<number> {
               return (error as NodeJS.ErrnoException).code === "EPERM";
             }
           },
+          startOf: (pid) => processStartTime(pid),
           appWaitMs: wait * 1000,
         },
       );

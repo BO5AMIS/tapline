@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readAuditLines, type AuditLog } from "./auditlog.js";
 import { newFilesSince, readScheduleFile, readSeen, resolveWith, schedulePath, schedulesDir, writeSeen, type Schedule } from "./schedule.js";
@@ -16,8 +17,6 @@ export const BUSY_WAIT_MS = 10 * 60 * 1000;
 export const BUSY_POLL_MS = 5000;
 /** How long a run waits for the app to connect when it starts its own host. */
 export const APP_WAIT_MS = 60_000;
-/** A lock older than this is a leftover of a run that died, even when its process id was taken by another program. */
-export const LOCK_STALE_MS = 6 * 3600 * 1000;
 
 export interface CallAnswer {
   text: string;
@@ -52,6 +51,8 @@ export interface RunDeps {
   redactFor: (schedule: Schedule) => Promise<(text: string) => string>;
   pid: number;
   alive: (pid: number) => boolean;
+  /** When a process started, as text that is the same each time for one process (null: unknown). A lock keeps it so a reused process id is not taken for the holder. */
+  startOf?: (pid: number) => string | null;
   appWaitMs?: number;
   busyWaitMs?: number;
   /** For tests: runs after a run found a leftover lock and before it takes the lock over (another run may get in between). */
@@ -113,82 +114,175 @@ function lockPath(configDir: string, name: string): string {
   return join(schedulesDir(configDir), `${name}.lock`);
 }
 
-type LockHolder = { pid?: unknown; t?: unknown; owner?: unknown };
+/** What a lock file holds: the run's owner token, its process id and the process's start time (null when it can't be told). */
+interface LockHolder {
+  owner?: unknown;
+  pid?: unknown;
+  started?: unknown;
+}
 
 function parseHolder(text: string): LockHolder {
   try {
     const parsed: unknown = JSON.parse(text);
     return typeof parsed === "object" && parsed !== null ? (parsed as LockHolder) : {};
   } catch {
-    return {}; // an unreadable lock is a leftover
+    return {};
   }
 }
 
-/** A unique name for a lock file moved aside: only the one who moved it ever touches it. */
+/** What runs a program and answers its output; throws when it fails. Injectable, so the start time of a process can be tested. */
+export type RunProgram = (file: string, args: string[]) => string;
+
+const runProgram: RunProgram = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+
+/**
+ * When a process started, as text that is the same each time it is asked for the same process; null when it can't be told. A lock
+ * keeps it beside the process id, so a process id that was reused by another program is not mistaken for the holder. Windows asks
+ * PowerShell (`Get-Process -Id N`, about half a second, asked only for a run's own start and when a lock is found), elsewhere `ps`.
+ */
+export function processStartTime(pid: number, platform: string = process.platform, run: RunProgram = runProgram): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const out =
+      platform === "win32"
+        ? run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`])
+        : run("ps", ["-o", "lstart=", "-p", String(pid)]);
+    const text = out.trim();
+    return text === "" ? null : text;
+  } catch {
+    return null;
+  }
+}
+
+/** A lock that can't be read as a holder (empty, cut short, garbage) is a run that is still writing it until it is this old; then a leftover. */
+const UNREADABLE_LOCK_MS = 10_000;
+
+/** Whether the run a lock names is gone: its process doesn't run, or the process that has that id started at another time. */
+function holderIsDead(deps: RunDeps, holder: LockHolder): boolean {
+  if (typeof holder.pid !== "number" || !Number.isInteger(holder.pid)) return false;
+  if (!deps.alive(holder.pid)) return true;
+  if (typeof holder.started === "string" && deps.startOf !== undefined) {
+    const now = deps.startOf(holder.pid);
+    return now !== null && now !== holder.started;
+  }
+  return false;
+}
+
+/** Whether a lock's text is a leftover: its holder is gone, or it is not a holder at all and old enough that no run is still writing it. */
+function isLeftover(deps: RunDeps, path: string, text: string): boolean {
+  const holder = parseHolder(text);
+  if (typeof holder.pid === "number" && typeof holder.owner === "string") return holderIsDead(deps, holder);
+  try {
+    return Date.now() - statSync(path).mtimeMs > UNREADABLE_LOCK_MS;
+  } catch {
+    return false; // gone meanwhile: the next round creates it
+  }
+}
+
+function readText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** A unique name for a file moved aside: only the one who moved it ever touches it. */
 function tombstone(path: string): string {
   return `${path}.${randomBytes(6).toString("hex")}.tomb`;
 }
 
 /**
- * One run of a schedule at a time: the lock is a file created exclusively, holding the run's process id, time and an owner token.
- * A lock that is a leftover is taken over by renaming it to a tombstone of its own and checking that the tombstone holds what was
- * read; a lock that changed hands meanwhile is put back, never deleted. Returns the owner token, or null when the lock is held.
+ * Removes the file at `path` only when it still holds `seen`: it is moved to a name of its own (one move, so only one remover gets
+ * it), and what was moved is checked; a file that changed hands in between is put back, never deleted.
+ */
+function removeIfUnchanged(path: string, seen: string): boolean {
+  const tomb = tombstone(path);
+  try {
+    renameSync(path, tomb);
+  } catch {
+    return false;
+  }
+  try {
+    const moved = readFileSync(tomb, "utf8");
+    if (moved === seen) return true;
+    writeFileSync(path, moved, { flag: "wx" });
+  } catch {
+    // put back by someone else already, or unreadable: the next round decides
+  } finally {
+    rmSync(tomb, { force: true });
+  }
+  return false;
+}
+
+/**
+ * One run of a schedule at a time. The lock only answers "is a run of this schedule still going": it counts nothing, and a live
+ * holder is never displaced, however long it takes. It is a file created exclusively (`wx`) that holds the run's owner token, its
+ * process id and the process's start time. It is a leftover only when its process no longer runs, or a process with that id started at
+ * another time. A leftover is taken over under `<lock>.takeover`, also created exclusively: under it the lock is read again, and
+ * only if it is unchanged and its holder is dead is it deleted and a lock of the taker's own created (`wx`); then `.takeover` goes.
+ * A `.takeover` whose own process is dead is cleared the same way. Returns the owner token, or null when a run holds the lock.
  */
 export function takeLock(deps: RunDeps, name: string): string | null {
   const path = lockPath(deps.configDir, name);
+  const takeoverPath = `${path}.takeover`;
   mkdirSync(schedulesDir(deps.configDir), { recursive: true });
   const token = `${randomBytes(8).toString("hex")}-${deps.pid}`;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const mine = `${JSON.stringify({ owner: token, pid: deps.pid, started: deps.startOf?.(deps.pid) ?? null })}\n`;
+  for (let attempt = 0; attempt < 6; attempt++) {
     try {
-      writeFileSync(path, JSON.stringify({ pid: deps.pid, t: deps.now().getTime(), owner: token }), { flag: "wx" });
+      writeFileSync(path, mine, { flag: "wx" });
       return token;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
     }
-    let seen: string;
-    try {
-      seen = readFileSync(path, "utf8");
-    } catch {
-      continue; // released between our create and our read: try to create again
-    }
-    const holder = parseHolder(seen);
-    const fresh = typeof holder.t === "number" && deps.now().getTime() - holder.t < LOCK_STALE_MS;
-    if (typeof holder.pid === "number" && fresh && deps.alive(holder.pid)) return null;
+    const seen = readText(path);
+    if (seen === null) continue; // released between our create and our read: try to create again
+    if (!isLeftover(deps, path, seen)) return null;
     deps.beforeReclaim?.();
-    const tomb = tombstone(path);
+    // Under .takeover only one contender at a time looks at a leftover.
     try {
-      renameSync(path, tomb);
-    } catch {
-      continue; // another run took it over first, or its holder released it
+      writeFileSync(takeoverPath, mine, { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+      const other = readText(takeoverPath);
+      // Someone else is taking it over now (or was, and died): a dead taker's .takeover is cleared, a live one's is waited out.
+      if (other !== null && isLeftover(deps, takeoverPath, other)) removeIfUnchanged(takeoverPath, other);
+      continue;
     }
     try {
-      const moved = readFileSync(tomb, "utf8");
-      if (moved !== seen) writeFileSync(path, moved, { flag: "wx" }); // it changed hands after we looked: give it back
-    } catch {
-      // put back by someone else already, or unreadable: the next round decides
+      const now = readText(path);
+      if (now === seen && isLeftover(deps, path, now)) {
+        try {
+          unlinkSync(path);
+        } catch {
+          continue;
+        }
+        try {
+          writeFileSync(path, mine, { flag: "wx" });
+          return token;
+        } catch {
+          continue; // a run that came in first holds it now
+        }
+      }
     } finally {
-      rmSync(tomb, { force: true });
+      // only our own .takeover is removed
+      const held = readText(takeoverPath);
+      if (held === mine) removeIfUnchanged(takeoverPath, mine);
     }
   }
   return null;
 }
 
-/** Releases the lock only while it still holds this run's token; another run's lock is never removed. */
+/** Releases the lock only while its content is still this run's; another run's lock is never removed. */
 export function dropLock(deps: RunDeps, name: string, token: string): void {
   const path = lockPath(deps.configDir, name);
-  const tomb = tombstone(path);
+  const text = readText(path);
+  if (text === null || parseHolder(text).owner !== token) return;
   try {
-    renameSync(path, tomb);
+    unlinkSync(path);
   } catch {
-    return; // already gone
-  }
-  try {
-    const moved = readFileSync(tomb, "utf8");
-    if (parseHolder(moved).owner !== token) writeFileSync(path, moved, { flag: "wx" });
-  } catch {
-    // put back by someone else already: leave it
-  } finally {
-    rmSync(tomb, { force: true });
+    // already gone
   }
 }
 

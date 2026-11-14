@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditLog, readAuditLines } from "../src/auditlog.js";
-import { BUSY_WAIT_MS, dropLock, runSchedule, takeLock, type CallAnswer, type RunDeps, type ScheduleHost } from "../src/runschedule.js";
+import { BUSY_WAIT_MS, dropLock, processStartTime, runSchedule, takeLock, type CallAnswer, type RunDeps, type ScheduleHost } from "../src/runschedule.js";
 import { schedulePath, schedulesDir, type Schedule } from "../src/schedule.js";
 
 // AGENT-TOOLS 1.14 §22.2, §22.3, §23: `tapline run-schedule`, with a fake host, an injected clock and no phone.
@@ -292,16 +292,6 @@ describe("when a run can't start (§22.3)", () => {
     expect(third.code).toBe(0);
   });
 
-  it("a lock left by a run that died (its process is gone, or it is very old) doesn't block", async () => {
-    const r = rig();
-    writeFileSync(join(schedulesDir(r.dir), "daily.lock"), JSON.stringify({ pid: 999, t: r.deps.now().getTime() }));
-    expect((await runSchedule("daily", {}, r.deps)).code).toBe(0); // alive() says no
-    writeFileSync(join(schedulesDir(r.dir), "daily.lock"), JSON.stringify({ pid: 999, t: r.deps.now().getTime() - 7 * 3600 * 1000 }));
-    r.deps.alive = (): boolean => true;
-    expect((await runSchedule("daily", {}, r.deps)).code).toBe(0); // alive but older than any run
-    writeFileSync(join(schedulesDir(r.dir), "daily.lock"), "garbage");
-    expect((await runSchedule("daily", {}, r.deps)).code).toBe(0);
-  });
 
   it("stopped: a draft is waiting for a person.", async () => {
     const text = 'Error not_allowed: Ran 4 of 6 steps; stopped at step 5 (tap "Post"): needs_confirmation: a draft is waiting for a person (button "Post", policy word "Post"). Open the live view.';
@@ -392,24 +382,85 @@ describe("a file trigger's check", () => {
   });
 });
 
-describe("the run lock is owned (PR 12 review)", () => {
+describe("the run lock answers only 'is a run still going' (PR 12, 1.14.1)", () => {
   const lockFile = (r: Rig): string => join(schedulesDir(r.dir), "daily.lock");
-  const staleLock = (r: Rig): string => {
-    writeFileSync(lockFile(r), JSON.stringify({ pid: 999, t: r.deps.now().getTime() - 7 * 3600 * 1000 }));
-    return lockFile(r);
+  const holderOf = (r: Rig): { owner: string; pid: number; started: string | null } => JSON.parse(readFileSync(lockFile(r), "utf8")) as { owner: string; pid: number; started: string | null };
+  /** A lock left by a run in process 999. */
+  const leftBy999 = (r: Rig, started: string | null = null): string => {
+    const text = `${JSON.stringify({ owner: "dead-999", pid: 999, started })}\n`;
+    writeFileSync(lockFile(r), text);
+    return text;
   };
+  /** Process 999 is gone; every other process runs. */
+  const only999Dead = (pid: number): boolean => pid !== 999;
 
-  it("two runs that find the same leftover lock: one takes it, the other never deletes the new lock, so no run is duplicated", () => {
+  it("the lock holds the owner, the process id and the process's start time", () => {
     const r = rig();
-    staleLock(r);
+    const deps: RunDeps = { ...r.deps, pid: 1111, alive: () => true, startOf: (pid) => `started-${pid}` };
+    const token = takeLock(deps, "daily");
+    expect(holderOf(r)).toEqual({ owner: token, pid: 1111, started: "started-1111" });
+    dropLock(deps, "daily", token as string);
+    expect(existsSync(lockFile(r))).toBe(false);
+  });
+
+  it("a lock left by a run that died (its process is gone) doesn't block, and the new lock is the taker's", async () => {
+    const r = rig({}, {}, { alive: only999Dead });
+    leftBy999(r);
+    expect((await runSchedule("daily", {}, r.deps)).code).toBe(0);
+    expect(existsSync(lockFile(r))).toBe(false);
+    expect(existsSync(`${lockFile(r)}.takeover`)).toBe(false);
+  });
+
+  it("a live holder is never displaced, however long it has been running", () => {
+    const r = rig();
     const alive = (): boolean => true;
-    const first: RunDeps = { ...r.deps, pid: 1111, alive };
+    const old: RunDeps = { ...r.deps, pid: 1111, alive };
+    const oldToken = takeLock(old, "daily");
+    expect(oldToken).not.toBeNull();
+    for (const hours of [1, 7, 24, 24 * 30]) {
+      r.time.ms += hours * 3600 * 1000;
+      expect(takeLock({ ...r.deps, pid: 2222, alive }, "daily")).toBeNull();
+    }
+    expect(holderOf(r).owner).toBe(oldToken);
+    expect(existsSync(`${lockFile(r)}.takeover`)).toBe(false);
+  });
+
+  it("a long run that is still going makes the next one skip: the previous run is still going", async () => {
+    const r = rig({}, {}, { alive: () => true });
+    writeFileSync(lockFile(r), `${JSON.stringify({ owner: "x-1", pid: 5, started: null })}\n`);
+    r.time.ms += 40 * 3600 * 1000;
+    const out = await runSchedule("daily", {}, r.deps);
+    expect(out.code).toBe(2);
+    expect(out.text.split("\n")[0]).toBe('Schedule "daily" skipped: the previous run is still going');
+    expect(r.connects).toBe(0);
+  });
+
+  it("a process id reused by another program counts as dead: its start time differs", () => {
+    const r = rig();
+    const text = leftBy999(r, "2026-11-13T05:00:00.0000000Z");
+    const alive = (): boolean => true; // the id runs now, but it is another program
+    const sameProgram: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? "2026-11-13T05:00:00.0000000Z" : "mine") };
+    expect(takeLock(sameProgram, "daily")).toBeNull(); // same start time: the same run, still going
+    expect(readFileSync(lockFile(r), "utf8")).toBe(text);
+    const reused: RunDeps = { ...r.deps, pid: 1111, alive, startOf: (pid) => (pid === 999 ? "2026-11-14T08:00:00.0000000Z" : "mine") };
+    const token = takeLock(reused, "daily");
+    expect(token).not.toBeNull();
+    expect(holderOf(r)).toEqual({ owner: token, pid: 1111, started: "mine" });
+    // a start time that can't be told now proves nothing: the holder stays
+    const unknown: RunDeps = { ...r.deps, pid: 3333, alive, startOf: () => null };
+    expect(takeLock(unknown, "daily")).toBeNull();
+  });
+
+  it("a dead pid is taken over by exactly one of two contenders, even when both saw it first", () => {
+    const r = rig();
+    leftBy999(r);
+    const first: RunDeps = { ...r.deps, pid: 1111, alive: only999Dead };
     let firstToken: string | null = null;
-    // the second run has read the leftover; before it takes it over, the first run gets in
+    // the second has read the leftover; before it takes it over, the first one takes it over completely
     const second: RunDeps = {
       ...r.deps,
       pid: 2222,
-      alive,
+      alive: only999Dead,
       beforeReclaim: () => {
         firstToken = takeLock(first, "daily");
       },
@@ -417,35 +468,105 @@ describe("the run lock is owned (PR 12 review)", () => {
     const secondToken = takeLock(second, "daily");
     expect(firstToken).not.toBeNull();
     expect(secondToken).toBeNull();
-    const held = JSON.parse(readFileSync(lockFile(r), "utf8")) as { pid: number; owner: string };
-    expect(held.pid).toBe(1111);
-    expect(held.owner).toBe(firstToken);
+    expect(holderOf(r)).toMatchObject({ owner: firstToken, pid: 1111 });
+    expect(existsSync(`${lockFile(r)}.takeover`)).toBe(false);
   });
 
-  it("a run that stalled past the takeover can't release its successor's lock", () => {
+  it("two contenders at the same moment: the one that holds .takeover wins, the other leaves the lock alone", () => {
+    const r = rig();
+    const text = leftBy999(r);
+    // a live contender is in the middle of its takeover
+    writeFileSync(`${lockFile(r)}.takeover`, `${JSON.stringify({ owner: "t-1", pid: 1111, started: null })}\n`);
+    const second: RunDeps = { ...r.deps, pid: 2222, alive: only999Dead };
+    expect(takeLock(second, "daily")).toBeNull();
+    expect(readFileSync(lockFile(r), "utf8")).toBe(text);
+    expect(existsSync(`${lockFile(r)}.takeover`)).toBe(true);
+  });
+
+  it("a .takeover whose own process is dead is cleared, and the takeover goes on", () => {
+    const r = rig();
+    leftBy999(r);
+    writeFileSync(`${lockFile(r)}.takeover`, `${JSON.stringify({ owner: "t-0", pid: 888, started: null })}\n`);
+    const alive = (pid: number): boolean => pid !== 999 && pid !== 888;
+    const token = takeLock({ ...r.deps, pid: 2222, alive }, "daily");
+    expect(token).not.toBeNull();
+    expect(holderOf(r)).toMatchObject({ owner: token, pid: 2222 });
+    expect(existsSync(`${lockFile(r)}.takeover`)).toBe(false);
+  });
+
+  it("a takeover that finds the lock changed under it deletes nothing", () => {
+    const r = rig();
+    leftBy999(r);
+    const live = `${JSON.stringify({ owner: "new-1", pid: 1111, started: null })}\n`;
+    const second: RunDeps = {
+      ...r.deps,
+      pid: 2222,
+      alive: only999Dead,
+      // between the contender's look and its takeover, the lock changes hands (a rival that took it over and finished)
+      beforeReclaim: () => writeFileSync(lockFile(r), live),
+    };
+    expect(takeLock(second, "daily")).toBeNull();
+    expect(readFileSync(lockFile(r), "utf8")).toBe(live);
+  });
+
+  it("garbage in the lock is a run still writing it until it is old; then a leftover", () => {
+    const r = rig();
+    writeFileSync(lockFile(r), "garbage");
+    expect(takeLock({ ...r.deps, pid: 2222, alive: only999Dead }, "daily")).toBeNull();
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile(r), old, old);
+    expect(takeLock({ ...r.deps, pid: 2222, alive: only999Dead }, "daily")).not.toBeNull();
+  });
+
+  it("a release removes the lock only while its content is still this run's", () => {
     const r = rig();
     const alive = (): boolean => true;
-    const old: RunDeps = { ...r.deps, pid: 1111, alive };
-    const oldToken = takeLock(old, "daily");
-    expect(oldToken).not.toBeNull();
-    // the old run stalls for hours; its lock is taken over by a new run
-    r.time.ms += 7 * 3600 * 1000;
-    const successor: RunDeps = { ...r.deps, pid: 2222, alive };
-    const newToken = takeLock(successor, "daily");
-    expect(newToken).not.toBeNull();
-    expect(newToken).not.toBe(oldToken);
-    // the old run wakes and finishes: its release leaves the new lock in place, and nobody else can take it
-    dropLock(old, "daily", oldToken as string);
-    expect((JSON.parse(readFileSync(lockFile(r), "utf8")) as { owner: string }).owner).toBe(newToken);
+    const mine: RunDeps = { ...r.deps, pid: 1111, alive };
+    const token = takeLock(mine, "daily") as string;
+    // another run's lock stands there (what a takeover leaves): the old holder's release leaves it
+    const theirs = `${JSON.stringify({ owner: "new-2222", pid: 2222, started: null })}\n`;
+    writeFileSync(lockFile(r), theirs);
+    dropLock(mine, "daily", token);
+    expect(readFileSync(lockFile(r), "utf8")).toBe(theirs);
     expect(takeLock({ ...r.deps, pid: 3333, alive }, "daily")).toBeNull();
-    dropLock(successor, "daily", newToken as string);
+    dropLock(mine, "daily", "new-2222");
     expect(existsSync(lockFile(r))).toBe(false);
+    // and a release of a lock that is gone does nothing
+    dropLock(mine, "daily", token);
   });
 
   it("a run's own release removes its lock and leaves no tombstone", async () => {
     const r = rig();
     expect((await runSchedule("daily", {}, r.deps)).code).toBe(0);
     expect(readdirSync(schedulesDir(r.dir)).filter((f) => f.includes("daily.lock"))).toEqual([]);
+  });
+});
+
+describe("a process's start time (the lock's check against a reused process id)", () => {
+  it("asks PowerShell on Windows and ps elsewhere, through the injected runner", () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const run = (file: string, args: string[]): string => {
+      calls.push({ file, args });
+      return "  2026-11-14T05:00:00.0000000Z\r\n";
+    };
+    expect(processStartTime(4242, "win32", run)).toBe("2026-11-14T05:00:00.0000000Z");
+    expect(calls[0]?.file).toBe("powershell.exe");
+    expect(calls[0]?.args.join(" ")).toContain("Get-Process -Id 4242");
+    expect(processStartTime(4242, "linux", () => "Fri Nov 13 05:00:00 2026\n")).toBe("Fri Nov 13 05:00:00 2026");
+    expect(processStartTime(4242, "darwin", (file, args) => `${file} ${args.join(" ")}`)).toBe("ps -o lstart= -p 4242");
+  });
+
+  it("is null when it can't be told: a failing runner, empty output, a bad process id", () => {
+    expect(processStartTime(4242, "win32", () => { throw new Error("no such process"); })).toBeNull();
+    expect(processStartTime(4242, "linux", () => "\n")).toBeNull();
+    expect(processStartTime(0, "linux", () => "x")).toBeNull();
+    expect(processStartTime(1.5, "linux", () => "x")).toBeNull();
+  });
+
+  it("gives this process a start time with the real runner (or null where nothing can tell)", () => {
+    const first = processStartTime(process.pid);
+    expect(first === null || first.length > 0).toBe(true);
+    expect(processStartTime(process.pid)).toBe(first);
   });
 });
 
