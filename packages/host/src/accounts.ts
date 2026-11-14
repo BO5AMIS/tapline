@@ -306,6 +306,13 @@ export function safeEncode(text: string): string {
   return encodeURIComponent(wellFormed(text));
 }
 
+/** A complete text as it is, with direction marks and zero-width characters stripped, with whitespace collapsed, and both. Never cut: a window of any of them is a window of the whole. */
+export function normalizedBases(text: string): string[] {
+  const collapse = (t: string): string => t.replace(/\s+/g, " ").trim();
+  const stripped = text.replace(INVISIBLE, "");
+  return [...new Set<string>([text, stripped, collapse(text), collapse(stripped)])];
+}
+
 /**
  * The shapes a value can take on its way back: as it is, with direction marks and zero-width characters stripped, with
  * whitespace collapsed (as the app's `normalizeText` leaves it), each of those inside a JSON string (also twice, and with
@@ -314,8 +321,7 @@ export function safeEncode(text: string): string {
  */
 export function variantsOf(value: string): string[] {
   const collapse = (text: string): string => text.replace(/\s+/g, " ").trim();
-  const stripped = value.replace(INVISIBLE, "");
-  const bases = new Set<string>([value, stripped, collapse(value), collapse(stripped)]);
+  const bases = new Set<string>(normalizedBases(value));
   for (const base of [...bases]) {
     if (base.length <= CUT) continue;
     bases.add(safeHead(base, CUT));

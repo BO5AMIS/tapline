@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
-import { variantsOf } from "./accounts.js";
+import { normalizedBases, variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
 import type { PlaceKey } from "./mapfile.js";
@@ -51,22 +51,8 @@ export type GateValues = readonly string[] | (() => readonly string[]);
 
 /** The width of the pieces the gate looks for (§29.6, §20.3). */
 const PIECE = 12;
-/** A value longer than this is cut into overlapping chunks of this length (a typed paste can be any size); no part of it is left out. */
-const CHUNK = 4000;
 
 const htmlEscaped = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-
-/** The parts of a value: itself, or overlapping chunks that share PIECE - 1 characters, so every 12-character window lies in a chunk. */
-function chunksOf(value: string): string[] {
-  const chars = [...value];
-  if (chars.length <= CHUNK) return [value];
-  const out: string[] = [];
-  for (let at = 0; ; at += CHUNK - (PIECE - 1)) {
-    out.push(chars.slice(at, at + CHUNK).join(""));
-    if (at + CHUNK >= chars.length) break;
-  }
-  return out;
-}
 
 /** A 53-bit hash of the PIECE characters at `at`. A clash can only make the gate refuse a file, never let one through. */
 function windowHash(text: string, at: number): number {
@@ -80,37 +66,61 @@ function windowHash(text: string, at: number): number {
   return h1 * 0x200000 + (h2 & 0x1fffff);
 }
 
-/** Every form of a value that a file could hold: itself, its encodings and its escaped markup. */
+/**
+ * Every form of a COMPLETE value that a file could hold: normalized first (whitespace collapsed, direction marks and zero-width characters stripped,
+ * every combination), then its encodings and escaped markup. Nothing is cut before the forms are made, so no window of a form is lost to a boundary.
+ */
 function formsOfValue(value: string): string[] {
-  const out = new Set<string>();
-  for (const part of chunksOf(value)) {
-    for (const form of variantsOf(part)) out.add(form);
-    out.add(part);
-    out.add(htmlEscaped(part));
+  const out = new Set<string>(variantsOf(value));
+  for (const base of normalizedBases(value)) {
+    out.add(base);
+    out.add(htmlEscaped(base));
   }
   return [...out].filter((form) => form !== "");
 }
 
+/** A text as the gate holds it: its normalized forms, whole, and the hash of every 12-character window of each. */
+interface Held {
+  bases: string[];
+  windows: Set<number>;
+}
+
+function holdText(text: string): Held {
+  const bases = normalizedBases(text);
+  const windows = new Set<number>();
+  for (const base of bases) for (let i = 0; i + PIECE <= base.length; i++) windows.add(windowHash(base, i));
+  return { bases, windows };
+}
+
 /**
- * Looks for a value in a text by any of its forms, whole or by ANY 12-character piece of a form (not only its start): the pieces of the text
- * are collected once and the values' pieces are checked against them one by one, so nothing big is kept and the work stays near the sum of the lengths.
+ * The index of the first text that holds a value, by any form of it, whole or by ANY 12-character window of a form (not only its start), or -1.
+ * The texts' windows are collected once (each text normalized whole first) and each value's forms are streamed past them one by one, so memory
+ * stays near the size of the texts and the work near the sum of the lengths, however long a value is.
  */
-function probeOf(values: readonly string[]): (text: string) => boolean {
-  const whole = new Set<string>();
-  const hashes = new Set<number>();
+function firstHolding(texts: readonly string[], values: readonly string[]): number {
+  if (texts.length === 0) return -1;
+  const held = texts.map(holdText);
+  let hit = -1;
+  const found = (at: number): void => {
+    if (hit === -1 || at < hit) hit = at;
+  };
   for (const value of values) {
     if ([...value].length < 3) continue;
     for (const form of formsOfValue(value)) {
-      // A form of 12 or more characters is found by its pieces (the whole of it is among them); a shorter one only whole.
-      if (form.length < PIECE) whole.add(form);
-      for (let i = 0; i + PIECE <= form.length; i++) hashes.add(windowHash(form, i));
+      // A form under 12 characters can only be found whole; a longer one by its windows (the whole of it is among them).
+      if (form.length < PIECE) {
+        for (let at = 0; at < (hit === -1 ? held.length : hit); at++) if (held[at]?.bases.some((base) => base.includes(form)) === true) found(at);
+        if (hit === 0) return 0;
+        continue;
+      }
+      for (let i = 0; i + PIECE <= form.length; i++) {
+        const h = windowHash(form, i);
+        for (let at = 0; at < (hit === -1 ? held.length : hit); at++) if (held[at]?.windows.has(h) === true) found(at);
+        if (hit === 0) return 0;
+      }
     }
   }
-  return (text) => {
-    for (const form of whole) if (text.includes(form)) return true;
-    for (let i = 0; i + PIECE <= text.length; i++) if (hashes.has(windowHash(text, i))) return true;
-    return false;
-  };
+  return hit;
 }
 
 /**
@@ -119,12 +129,12 @@ function probeOf(values: readonly string[]): (text: string) => boolean {
  */
 export function gateFiles(files: Record<string, string>, redact: BugText, values: GateValues = []): string | null {
   const list = typeof values === "function" ? values() : values;
-  const holds = list.length > 0 ? probeOf(list) : null;
-  for (const [name, text] of Object.entries(files)) {
-    if (redact(text) !== text) return name;
-    if (holds !== null && holds(text)) return name;
-  }
-  return null;
+  const entries = Object.entries(files);
+  let failed = entries.findIndex(([, text]) => redact(text) !== text);
+  const upTo = failed === -1 ? entries.length : failed;
+  const at = list.length > 0 ? firstHolding(entries.slice(0, upTo).map(([, text]) => text), list) : -1;
+  if (at !== -1) failed = at;
+  return failed === -1 ? null : (entries[failed]?.[0] ?? null);
 }
 
 export interface BugMakeInput {
