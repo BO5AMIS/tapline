@@ -19,6 +19,7 @@ import { setUpDevServe } from "./dev.js";
 import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runAuditLog, runGrants } from "./grantscmd.js";
+import { ownExploreHost, runExplore } from "./explorecmd.js";
 import { runInit } from "./init.js";
 import { scheduleAdd, scheduleList, scheduleRemove, type ScheduleDeps } from "./schedule.js";
 import { runReport } from "./report.js";
@@ -68,6 +69,10 @@ Commands:
            [--policy FILE] [--accounts FILE] [--maps DIR]  (or --on-file FOLDER in place of --at);
            tapline schedule list; tapline schedule remove NAME;
            tapline schedule unlock NAME removes a stuck run lock (empty, unreadable or held by a dead process; never a live one)
+  explore  Explore the app by itself, with no agent, and write the report (~/.tapline/explore/<app>/<time>/):
+           tapline explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue]
+           [--account NAME] [--policy FILE] [--accounts FILE] [--maps DIR]  (exit 0: nothing found, 1: findings, a crash included,
+           2: it couldn't start, or a person or a pause stopped it; the report is still written)
   run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
            (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
   vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
@@ -116,7 +121,12 @@ Options:
   --metro-port <n>   For dev: Metro's port (default 8081)
   --https-port <n>   For dev: the https port Tailscale serves Metro on (default 8443)
   --stop             For dev: stop serving Metro
-  --wait <s>         For replay and run-schedule: how long to wait for the app to connect (default 60)
+  --minutes <n>, --steps <n>, --depth <n>  For explore: the budget (default 10 minutes, 500 steps, 8 places deep)
+  --from <place>, --focus <place>  For explore: where it starts, and the place whose subtree it keeps to
+  --fill <none|test-data>  For explore: type nothing (default), or only into fields the app marks as safe for tests
+  --continue         For explore: go on after a crash, when the app can be opened again
+  --account <name>   For explore: a vault account marked "explore": true, for the way back after a reset
+  --wait <s>         For replay, run-schedule and explore: how long to wait for the app to connect (default 60)
   --at <when>        For schedule add: "HH:MM daily", "HH:MM weekdays" or an ISO date-time (one run)
   --with <name=value>  For schedule add: a value for one of the route's variables; "@file" is the text of that file,
                      read when the run starts (a relative path is relative to ~/.tapline/schedules). Repeat for more
@@ -305,6 +315,14 @@ export function parseCli(argv: string[]) {
       since: { type: "string" },
       junit: { type: "string" },
       "update-references": { type: "boolean" },
+      minutes: { type: "string" },
+      steps: { type: "string" },
+      depth: { type: "string" },
+      from: { type: "string" },
+      focus: { type: "string" },
+      fill: { type: "string" },
+      continue: { type: "boolean" },
+      account: { type: "string" },
       at: { type: "string" },
       with: { type: "string", multiple: true },
       name: { type: "string" },
@@ -472,6 +490,19 @@ export async function main(argv: string[]): Promise<number> {
               : { text: 'Usage: tapline schedule add <route> --at "09:00 daily" | --on-file FOLDER\n       tapline schedule list\n       tapline schedule remove NAME\n       tapline schedule unlock NAME', code: 2 };
       (outcome.code === 0 ? process.stdout : process.stderr).write(`${outcome.text}\n`);
       return outcome.code;
+    }
+    case "explore": {
+      const code = await runExplore(
+        { minutes: values.minutes, steps: values.steps, depth: values.depth, from: values.from, focus: values.focus, fill: values.fill, continue: values.continue, account: values.account, wait: values.wait },
+        {
+          connect: () => ownExploreHost(runtimeOptions),
+          clock: Date.now,
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          out: (text) => process.stdout.write(`${text}\n`),
+          err: (text) => process.stderr.write(`${text}\n`),
+        },
+      );
+      return code;
     }
     case "run-schedule": {
       const wait = values.wait === undefined ? APP_WAIT_MS / 1000 : Number(values.wait);

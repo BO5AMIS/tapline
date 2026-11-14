@@ -250,6 +250,8 @@ export class Explorer {
   private readonly queue: string[] = [];
   private readonly enqueued = new Set<string>();
   private readonly typedAt = new Set<string>();
+  /** The typing steps of the visit in progress, per place: a finding that follows them has them in its path, as `${typed}` (§27.1). */
+  private readonly typedSteps = new Map<string, PathStep[]>();
   private readonly firstFrames = new Map<string, NonNullable<TreeElement["frame"]>>();
   private startPlace: string | null = null;
   private focusRoute: string[] | undefined;
@@ -404,6 +406,7 @@ export class Explorer {
     if (!(await this.ensureAt(place))) return;
     const map = this.host.map;
     this.seen.add(place);
+    this.typedSteps.delete(place);
     this.firstFrames.clear();
     const done = new Set<string>();
     let scrolled = 0;
@@ -723,8 +726,9 @@ export class Explorer {
     };
     const after = this.host.since(mark);
     if (after.crash !== null || (after.disconnected && !out.ok)) {
+      // With `continue` the app is open again by now: the visit goes on from where the place is.
       await this.onCrash(place, sig, step, after);
-      return false;
+      return this.recover(place);
     }
     if (!out.ok) {
       switch (out.code) {
@@ -940,6 +944,7 @@ export class Explorer {
       this.steps += out.used;
       this.progress();
       const step: PathStep = { ...input.step, tool: "type_text", text: TYPED };
+      if (out.ok) this.typedSteps.set(place, [...(this.typedSteps.get(place) ?? []), step]);
       const ok = await this.afterMove(place, input.sig, step, mark, out, "type");
       if (!ok) return false;
       if (out.ok) map.markTried(place, input.sig, { result: "same" });
@@ -957,7 +962,7 @@ export class Explorer {
     const after = this.host.since(mark);
     if (after.crash !== null) {
       await this.onCrash(at, "back", { tool: "back" }, after);
-      return false;
+      return this.recover(place);
     }
     if (!out.ok && (out.code === "busy" || out.code === "paused" || out.code === "locked")) throw new Stop(out.code);
     if (out.ok) {
@@ -1119,7 +1124,7 @@ export class Explorer {
       device: info.device,
       place,
       path_from: path.from,
-      path: [...path.steps, ...own],
+      path: [...path.steps, ...(this.typedSteps.get(place ?? "") ?? []).filter((typed) => !own.includes(typed)), ...own],
       expected: detail.expected,
       got: detail.got,
       logs: logs.slice(-LOG_LINES_MAX),

@@ -63,7 +63,7 @@ export interface ExWorld {
   /** Pressing these ids sends the app to the background (a link out). */
   leaveOn: Set<string>;
   /** Pressing these ids logs an error line. */
-  errorOn: Record<string, string>;
+  errorOn: Record<string, string | string[]>;
   /** Pressing these ids takes this long to settle (ms). */
   slowOn: Record<string, number>;
   /** A press on these ids is refused. */
@@ -302,7 +302,8 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
     const target = params["target"] as Wire | undefined;
     const found = find(world, target);
     if (found === undefined) return { ok: false, error: { code: "not_found", message: "No element matches" } };
-    const id = found.el.id ?? "";
+    // A control with no id is named by its text in these tables.
+    const id = found.el.id ?? found.el.text ?? "";
     const refused = world.refuse[id];
     if (refused !== undefined) return { ok: false, error: refused };
     if (world.alertOpen) return { ok: false, error: { code: "not_actionable", message: "behind_alert: An alert is open; answer it first" } };
@@ -320,7 +321,8 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
     }
     settledMs = world.slowOn[id] ?? settledMs;
     const logTo = (line: string): void => current?.send({ type: "event", event: "error", data: { message: line, level: "error", ts: Date.now() } });
-    if (world.errorOn[id] !== undefined) logTo(world.errorOn[id] as string);
+    const logged = world.errorOn[id];
+    if (logged !== undefined) for (const line of Array.isArray(logged) ? logged : [logged]) logTo(line);
     if (world.crashOn.has(id)) {
       const app = current;
       app?.send({ type: "event", event: "error", data: { ...FATAL("undefined is not an object (evaluating 'trip.days.map')"), ts: Date.now() } });
