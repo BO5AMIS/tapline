@@ -270,17 +270,17 @@ describe("chunks that look like hex (PR 12 Codex cycle 3, finding 5)", () => {
     expect(await securityKeychain(fake.run).read(account)).toBe(whole);
   });
 
-  it("more than 8 ambiguous chunks: raw-all and decoded-all are tried, and nothing else", async () => {
+  it("more than 12 ambiguous chunks: raw-all and decoded-all are tried, and nothing else", async () => {
     const fake = fakeSecurity();
-    const parts = Array.from({ length: 12 }, () => "41".repeat(8));
+    const parts = Array.from({ length: 13 }, () => "41".repeat(8));
     parts.forEach((part, i) => fake.entries.set(`${account}#${i + 1}`, Buffer.from(part, "utf8")));
     const raw = parts.join("");
-    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 12, sha256: sha(raw) }), "utf8"));
+    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 13, sha256: sha(raw) }), "utf8"));
     expect(await securityKeychain(fake.run).read(account)).toBe(raw);
-    // a mixed truth (one chunk really was hex of text, the rest plain) is out of reach with 12 ambiguous chunks: fail closed, in words
+    // a mixed truth (one chunk really was hex of text, the rest plain) is out of reach with 13 ambiguous chunks: fail closed, in words
     const mixed = parts.map((p, i) => (i === 3 ? "A".repeat(8) : p)).join("");
     expect(mixed).not.toBe(raw);
-    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 12, sha256: sha(mixed) }), "utf8"));
+    fake.entries.set(account, Buffer.from(JSON.stringify({ chunks: 13, sha256: sha(mixed) }), "utf8"));
     await expect(securityKeychain(fake.run).read(account)).rejects.toThrow(/incomplete/);
   });
 });

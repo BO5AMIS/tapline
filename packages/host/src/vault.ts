@@ -105,8 +105,12 @@ function securityQuote(text: string): string {
  */
 const LINE_BUDGET = 3900;
 const MIN_CHUNK = 64;
-/** Chunks that could be read as hex or as text: up to this many are tried in every combination, more only all-raw and all-decoded. */
-const MAX_AMBIGUOUS = 8;
+/**
+ * Chunks that could be read as hex or as text. Each chunk's reading is decided on its own where it can be (one whose hex isn't valid
+ * UTF-8 is raw), and only the truly ambiguous ones are searched, with the manifest's sha256 as the oracle: up to 2^12 combinations.
+ * More than this many fails closed with the doctor message. The writer never stores an ambiguous chunk (see `write`).
+ */
+const MAX_AMBIGUOUS = 12;
 
 /** A chunked vault that can't be put back together: a chunk is missing or the checksum differs. Never a partial vault. */
 export class VaultIncompleteError extends Error {}
@@ -170,15 +174,15 @@ export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
     const ambiguous = readings.flatMap((r, i) => (r.decoded === null ? [] : [i]));
     // The reading of each ambiguous chunk is whatever makes the checksum come out; the search is bounded.
     let found: Buffer | null = null;
-    if (ambiguous.length <= MAX_AMBIGUOUS) {
+    // The two plain readings first (a long text of many non-ASCII chunks is all-decoded however many chunks there are), then the search.
+    found = matches(readings.map((r) => r.raw)) ?? matches(readings.map((r) => r.decoded ?? r.raw));
+    if (found === null && ambiguous.length <= MAX_AMBIGUOUS) {
       for (let mask = 0; mask < 2 ** ambiguous.length && found === null; mask++) {
         found = matches(readings.map((r, i) => {
           const at = ambiguous.indexOf(i);
           return at >= 0 && (mask >> at) & 1 ? (r.decoded as Buffer) : r.raw;
         }));
       }
-    } else {
-      found = matches(readings.map((r) => r.raw)) ?? matches(readings.map((r) => r.decoded ?? r.raw));
     }
     if (found === null) throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunks don't match their checksum)");
     return found.toString("utf8");
@@ -210,6 +214,9 @@ export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
       for (let at = 0; at < data.length; ) {
         let end = Math.min(at + size, data.length);
         while (end < data.length && end > at && ((data[end] ?? 0) & 0xc0) === 0x80) end--;
+        // A piece of only hex digits, in an even number, reads two ways (`security -w` prints data that isn't text as hex): cut it one
+        // byte short so no stored chunk is ambiguous. The reader still takes the frozen form (§20.2), so older vaults read as before.
+        if (end < data.length && end - at > 1 && (end - at) % 2 === 0 && /^[0-9a-fA-F]+$/.test(data.subarray(at, end).toString("latin1"))) end--;
         pieces.push(data.subarray(at, end));
         at = end;
       }
