@@ -85,7 +85,7 @@ describe("grants: the app, the lock and inherited names (PR 12 CodeRabbit)", () 
     expect(Object.keys(Object)).toEqual([]);
     expect(Object.keys(Object.prototype.toString)).toEqual([]);
     const folders = readdirSync(`${r.path}.uses`);
-    expect(folders).toEqual([name]);
+    expect(folders).toEqual([name.toLowerCase()]); // the folder is the lower-cased name (R7 finding 2)
     const again = new GrantBook(r.options);
     const second = await again.decide(touch(), "use", "x");
     expect(second.kind).toBe("ask");

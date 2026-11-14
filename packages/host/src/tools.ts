@@ -1447,29 +1447,10 @@ export class TaplineTools {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly otp: OtpService;
 
-  private readonly host: TaplineHost;
-
   constructor(
-    host: TaplineHost,
+    private readonly host: TaplineHost,
     private readonly options: ToolsOptions,
   ) {
-    // Every request to the app goes through the lease check: a run's call whose lease ran out after it was queued sends nothing (§22.3).
-    this.host = new Proxy(host, {
-      get: (target, prop) => {
-        if (prop === "request") {
-          return (...rest: Parameters<TaplineHost["request"]>): ReturnType<TaplineHost["request"]> => {
-            try {
-              this.checkLease();
-            } catch (error) {
-              return Promise.reject(error);
-            }
-            return target.request(...rest);
-          };
-        }
-        const value: unknown = Reflect.get(target, prop, target);
-        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-      },
-    });
     this.reloadWaitMs = options.reloadWaitMs ?? 20_000;
     this.clock = options.clock ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -1731,6 +1712,16 @@ export class TaplineTools {
     return lease.run(who, run, this.holdScope.getStore()?.lease);
   }
 
+  /** Every request to the app goes through the lease check: a run's call whose lease ran out after it was queued sends nothing (§22.3). */
+  private sendRequest(...args: Parameters<TaplineHost["request"]>): ReturnType<TaplineHost["request"]> {
+    try {
+      this.checkLease();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.host.request(...args);
+  }
+
   /** Throws `lease_lost` when this call carries a lease credential that is not the standing holder's (right before something is sent). */
   checkLease(): void {
     this.options.lease?.assertCurrent(this.holdScope.getStore()?.lease);
@@ -1943,7 +1934,7 @@ export class TaplineTools {
       known: async () => (session.capabilities.includes("places") ? map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] })),
       tree: async () => {
         // In a user's eyes a drive reads only what is on the glass (17.1).
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", this.userEyes() ? { glass: true } : {}, { sessionId: session.id }));
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", this.userEyes() ? { glass: true } : {}, { sessionId: session.id }));
         if (!tree.success) throw new TaplineError("internal", "the app returned an element list the host could not read.");
         return tree.data;
       },
@@ -2067,7 +2058,7 @@ export class TaplineTools {
         }
         moveSent = true;
         try {
-          return await this.host.request(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+          return await this.sendRequest(wire.method, wire.params, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
         } catch (error) {
           if (notDelivered(error)) moveSent = false;
           throw error;
@@ -2173,7 +2164,7 @@ export class TaplineTools {
       let tree: TreeResult;
       let place: string | null;
       try {
-        const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+        const read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }));
         if (!read.success) break;
         tree = read.data;
         place = at ?? (await placeNow(this.placeSource(session), map))?.place.name ?? null;
@@ -2240,7 +2231,7 @@ export class TaplineTools {
     const t = target as Record<string, unknown>;
     if ("index" in t || "ref" in t || "x" in t || !("testID" in t || "label" in t || "text" in t)) return null;
     try {
-      const read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }));
+      const read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }));
       return read.success ? candidatesFor(target, read.data.elements) : null;
     } catch {
       return null;
@@ -2422,7 +2413,7 @@ export class TaplineTools {
   private async openOsAlert(): Promise<NonNullable<TreeResult["alerts"]>[number] | null> {
     const session = this.host.current();
     if (session === undefined) return null;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
     return tree.success ? (tree.data.alerts ?? []).find((alert) => !alert.standIn) ?? null : null;
   }
 
@@ -3023,14 +3014,14 @@ export class TaplineTools {
       let holds: boolean;
       if (once) {
         try {
-          const raw = await this.host.request("waitFor", params, { sessionId: session.id });
+          const raw = await this.sendRequest("waitFor", params, { sessionId: session.id });
           holds = typeof raw === "object" && raw !== null && (raw as { found?: unknown }).found === true;
         } catch {
           // A check that couldn't be made doesn't hide the step: it runs and says what is wrong itself.
           holds = true;
         }
       } else {
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
         holds = tree.success ? holdsIn(tree.data.elements, condition) : true;
       }
       if (!holds) return skippedLine(number, condition.kind, condition.label, condition.gone);
@@ -3140,7 +3131,7 @@ export class TaplineTools {
   private async currentRoute(): Promise<string[] | null> {
     const session = this.host.current();
     if (session === undefined) return null;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
     return tree.success && tree.data.route !== undefined ? tree.data.route.names : null;
   }
 
@@ -3166,7 +3157,7 @@ export class TaplineTools {
     const until = Date.now() + seconds * 1000;
     let actual: string | undefined;
     for (;;) {
-      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+      const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
       const element = tree.success
         ? tree.data.elements.find((el) => (e.id !== undefined ? el.testID === e.id : labelOfElement(el).toLowerCase() === (e.label ?? "").toLowerCase()))
         : undefined;
@@ -3190,7 +3181,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     let raw: unknown;
     try {
-      raw = await this.host.request("inspect", { target: toWireTarget(args.target) }, { sessionId: session.id });
+      raw = await this.sendRequest("inspect", { target: toWireTarget(args.target) }, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
@@ -3209,7 +3200,7 @@ export class TaplineTools {
     }
     let raw: unknown;
     try {
-      raw = await this.host.request("audit", args.types !== undefined ? { types: args.types } : {}, { sessionId: session.id });
+      raw = await this.sendRequest("audit", args.types !== undefined ? { types: args.types } : {}, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
@@ -3235,7 +3226,7 @@ export class TaplineTools {
     const earlier = this.uxJourney?.earlier() ?? null;
     let raw: unknown;
     try {
-      raw = await this.host.request(
+      raw = await this.sendRequest(
         "uxCheck",
         { ...(this.userEyes() ? { glass: true } : {}), ...(this.uxRules.wayBack ? { wayBack: true } : {}), ...(earlier !== null ? { earlier } : {}) },
         { sessionId: session.id },
@@ -3291,7 +3282,7 @@ export class TaplineTools {
     return runMedia(args, {
       state: this.mediaState,
       session,
-      request: (params) => this.host.request("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
+      request: (params) => this.sendRequest("media", params, { sessionId: session.id, timeoutMs: 60_000 }),
       describeError,
       askPerson: (message) => this.personForMedia(message),
     });
@@ -3304,7 +3295,7 @@ export class TaplineTools {
     if (session === undefined) return this.notConnected();
     let raw: unknown;
     try {
-      raw = await this.host.request("check", {}, { sessionId: session.id });
+      raw = await this.sendRequest("check", {}, { sessionId: session.id });
     } catch (error) {
       return fail(describeError(error));
     }
@@ -3360,7 +3351,7 @@ export class TaplineTools {
     // counts on from the highest one; `look` (onlyChanges false) always restarts at e1.
     const eyes = this.userEyes();
     const treeParams: Record<string, unknown> = { ...(askChanges ? { changes: true } : {}), ...(eyes ? { glass: true } : {}) };
-    const treePromise = this.host.request("tree", treeParams, { sessionId: sid });
+    const treePromise = this.sendRequest("tree", treeParams, { sessionId: sid });
     const shotPromise =
       wantScreenshot && !this.noScreenshot.has(sid)
         ? this.host
@@ -3494,7 +3485,7 @@ export class TaplineTools {
     return {
       capabilities: session.capabilities,
       latest: () => this.host.sessions().find((s) => s.id === session.id)?.place,
-      request: (method, params) => this.host.request(method, params ?? {}, { sessionId: session.id }),
+      request: (method, params) => this.sendRequest(method, params ?? {}, { sessionId: session.id }),
     };
   }
 
@@ -3661,7 +3652,7 @@ export class TaplineTools {
           const delivery = this.deliveryScope.getStore();
           if (delivery !== undefined) delivery.sent = true;
           try {
-            return await this.host.request(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
+            return await this.sendRequest(method, sent, { sessionId: session.id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
           } catch (error) {
             if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
             throw error;
@@ -3832,7 +3823,7 @@ export class TaplineTools {
       ? elementSchema.safeParse((result as { element: unknown }).element)
       : null;
     if (!element?.success) return chosen;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId }).catch(() => null));
     if (!tree.success) return chosen;
     const t = target as { testID?: unknown; label?: unknown; text?: unknown };
     const same = tree.data.elements.filter((el) =>
@@ -3957,7 +3948,7 @@ export class TaplineTools {
   async readOverlay(sessionId?: string): Promise<OverlayRead | null> {
     const sid = sessionId ?? this.host.current()?.id;
     if (sid === undefined) return null;
-    const parsed = overlaySchema.safeParse(await this.host.request("overlay", {}, { sessionId: sid }));
+    const parsed = overlaySchema.safeParse(await this.sendRequest("overlay", {}, { sessionId: sid }));
     if (!parsed.success) return null;
     const { rev, screen, elements } = parsed.data;
     this.lastScreen = { w: screen.width, h: screen.height };
@@ -3979,7 +3970,7 @@ export class TaplineTools {
     const session = this.host.current();
     if (session === undefined) return { ok: false, message: "No app is connected." };
     try {
-      await this.host.request("feed", feedParams(on, quality), { sessionId: session.id });
+      await this.sendRequest("feed", feedParams(on, quality), { sessionId: session.id });
       return { ok: true };
     } catch (error) {
       return {
@@ -4004,7 +3995,7 @@ export class TaplineTools {
       // nothing does (a list moves natively), it scrolls, as before.
       if (swipe !== undefined) {
         try {
-          const swiped = await this.host.request("swipe", swipe, { sessionId: session.id });
+          const swiped = await this.sendRequest("swipe", swipe, { sessionId: session.id });
           return { ok: true, action: this.describeAction(personKind(input, "swipe"), swiped, point) };
         } catch (error) {
           if (!(error instanceof TaplineError && error.code === "not_actionable")) {
@@ -4013,7 +4004,7 @@ export class TaplineTools {
         }
       }
       try {
-        const result = await this.host.request(method, params, { sessionId: session.id });
+        const result = await this.sendRequest(method, params, { sessionId: session.id });
         return { ok: true, action: this.describeAction(personKind(input, method), result, point) };
       } catch (error) {
         return { ...failure(error), action: { kind: personKind(input, method), ...(point ? { point } : {}) } };
@@ -4098,7 +4089,7 @@ export class TaplineTools {
     const session = this.host.current();
     if (feed?.on === true && session !== undefined) {
       try {
-        const answer = feedAnswerSchema.safeParse(await this.host.request("feed", feedParams(true, feed.quality), { sessionId: session.id }));
+        const answer = feedAnswerSchema.safeParse(await this.sendRequest("feed", feedParams(true, feed.quality), { sessionId: session.id }));
         const stats = answer.success ? answer.data.stats : undefined;
         if (stats !== undefined) {
           lines.push(
@@ -4123,7 +4114,7 @@ export class TaplineTools {
   // -- compare_screen and filmstrip
 
   private async takeShot(sessionId: string, width: number, quality: number): Promise<ShotImage> {
-    const raw = await this.host.request("screenshot", { format: "jpg", quality, maxWidth: width }, { sessionId });
+    const raw = await this.sendRequest("screenshot", { format: "jpg", quality, maxWidth: width }, { sessionId });
     const parsed = screenshotResultSchema.safeParse(raw);
     if (!parsed.success) throw new TaplineError("internal", "The app returned a screenshot the host could not read.");
     return parsed.data;
@@ -4184,7 +4175,7 @@ export class TaplineTools {
   /** The element list for naming regions and masking, read as a peek: the agent's refs and baseline must stay as they are. */
   private async peekElements(sessionId: string): Promise<{ scaleBase: number | undefined; elements: TreeResult["elements"] }> {
     try {
-      const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId }));
+      const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId }));
       if (tree.success && tree.data.screen) return { scaleBase: tree.data.screen.width, elements: tree.data.elements };
     } catch {
       // positions stay in pixels
@@ -4614,7 +4605,7 @@ export class TaplineTools {
             frames.push(await this.takeShot(session.id, frameWidth, 0.8));
             pressSent = true;
             try {
-              await this.host.request("press", pressParams, { sessionId: session.id });
+              await this.sendRequest("press", pressParams, { sessionId: session.id });
             } catch (error) {
               if (notDelivered(error)) pressSent = false;
               throw error;
@@ -5449,7 +5440,7 @@ export class TaplineTools {
   private async draftText(session: SessionInfo): Promise<string> {
     let read: ReturnType<typeof treeResultSchema.safeParse>;
     try {
-      read = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id, internal: true }));
+      read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true }));
     } catch {
       return "";
     }
@@ -5565,7 +5556,7 @@ export class TaplineTools {
     this.actionStartedAt = Date.now();
     let result: unknown;
     try {
-      result = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id });
+      result = await this.sendRequest(method, { ...params, dryRun: true }, { sessionId: session.id });
     } catch (error) {
       this.logExtra = { dry_run: true };
       this.showAction("agent", method, undefined, params, error instanceof TaplineError ? error.code : "internal", error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined);
@@ -5611,7 +5602,7 @@ export class TaplineTools {
     if (session.capabilities.includes("dryRun")) {
       let raw: unknown;
       try {
-        raw = await this.host.request(method, { ...params, dryRun: true }, { sessionId: session.id, internal: true });
+        raw = await this.sendRequest(method, { ...params, dryRun: true }, { sessionId: session.id, internal: true });
       } catch (error) {
         const reason = error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined;
         return {
@@ -5640,7 +5631,7 @@ export class TaplineTools {
     }
     let raw: unknown;
     try {
-      raw = await this.host.request("tree", {}, { sessionId: session.id, internal: true });
+      raw = await this.sendRequest("tree", {}, { sessionId: session.id, internal: true });
     } catch (error) {
       return { kind: "error", text: describeError(error), code: error instanceof TaplineError ? error.code : "internal" };
     }
@@ -6077,7 +6068,7 @@ export class TaplineTools {
       if (session === undefined) return this.notConnected();
       let raw: unknown;
       try {
-        raw = await this.host.request("commands", {}, { sessionId: session.id });
+        raw = await this.sendRequest("commands", {}, { sessionId: session.id });
       } catch (error) {
         return fail(describeError(error));
       }
@@ -6247,7 +6238,7 @@ export class TaplineTools {
     if (entries.length === 0) {
       // Nothing streamed to the host yet; ask the app for the lines it buffered before we connected.
       try {
-        const raw = await this.host.request("logs", args.since !== undefined ? { since: args.since } : {}, { sessionId: session.id });
+        const raw = await this.sendRequest("logs", args.since !== undefined ? { since: args.since } : {}, { sessionId: session.id });
         const list = typeof raw === "object" && raw !== null && "entries" in raw ? (raw as { entries: unknown }).entries : [];
         entries = z.array(logEntrySchema).catch([]).parse(list);
       } catch {
@@ -6278,7 +6269,7 @@ export class TaplineTools {
       try {
         // The app goes away on purpose: that is no crash.
         this.host.expectEnd(session.id);
-        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+        await this.sendRequest("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
       } catch (error) {
         // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
         const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
@@ -6317,7 +6308,7 @@ export class TaplineTools {
       try {
         // The app goes away on purpose: that is no crash.
         this.host.expectEnd(session.id);
-        await this.host.request("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
+        await this.sendRequest("reload", {}, { sessionId: session.id, timeoutMs: 5000 });
       } catch (error) {
         // The app dies mid-reload, so a dropped connection or a missing answer means it worked.
         const worked = error instanceof TaplineError && (error.code === "reconnecting" || error.code === "timeout" || error.code === "not_answering");
@@ -6350,7 +6341,7 @@ export class TaplineTools {
     // The first settled screen: the app waits until React hasn't committed for a moment (§6).
     // The first settled screen: a launch time is only reported when the app said it settled.
     try {
-      await this.host.request("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
+      await this.sendRequest("perfSettle", {}, { sessionId: fresh.id, timeoutMs: 8000 });
     } catch (error) {
       return { stop: fail(describeError(error)) };
     }
@@ -6363,7 +6354,7 @@ export class TaplineTools {
     // The window's number: the stop names it, so a call never takes another call's numbers (an older SDK has none).
     let stopParams: Record<string, unknown> = {};
     try {
-      const started = await this.host.request("perfStart", {}, id);
+      const started = await this.sendRequest("perfStart", {}, id);
       const windowId = typeof started === "object" && started !== null ? (started as { id?: unknown }).id : undefined;
       if (typeof windowId === "number") stopParams = { id: windowId };
     } catch (error) {
@@ -6378,7 +6369,7 @@ export class TaplineTools {
       if (press !== undefined) {
         if (delivery !== undefined) delivery.sent = true;
         try {
-          await this.host.request("press", press, id);
+          await this.sendRequest("press", press, id);
         } catch (error) {
           if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
           throw error;
@@ -6387,10 +6378,10 @@ export class TaplineTools {
       const rest = seconds * 1000 - (Date.now() - started);
       if (rest > 0) await sleep(rest);
     } catch (error) {
-      await this.host.request("perfStop", stopParams, id).catch(() => undefined);
+      await this.sendRequest("perfStop", stopParams, id).catch(() => undefined);
       throw error;
     }
-    const parsed = perfResultSchema.safeParse(await this.host.request("perfStop", stopParams, id));
+    const parsed = perfResultSchema.safeParse(await this.sendRequest("perfStop", stopParams, id));
     if (!parsed.success) throw new TaplineError("internal", "the app returned performance numbers the host could not read.");
     return parsed.data;
   }
@@ -6640,7 +6631,7 @@ export class TaplineTools {
       peek: async () => {
         const session = bound();
         if (session === undefined) return undefined;
-        const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
         if (!tree.success) return undefined;
         const t = tree.data;
         return {
@@ -6718,7 +6709,7 @@ export class TaplineTools {
       // A picker stub the journey armed and nobody used goes back, so a person's next pick is their own (finding 5).
       await attempt("the photo picker could not be put back", async () => {
         const live = this.journeySession();
-        if (live !== undefined && live.capabilities.includes("media")) await this.host.request("media", { op: "disarm" }, { sessionId: live.id });
+        if (live !== undefined && live.capabilities.includes("media")) await this.sendRequest("media", { op: "disarm" }, { sessionId: live.id });
       });
       const undoLines: string[] = [];
       // A network condition a stress moment turned on mid-flow goes back too (one the journey began with is undone above).
@@ -6892,7 +6883,7 @@ export class TaplineTools {
   private async freshScreenSize(): Promise<{ width: number; height: number } | null> {
     const session = this.host.current();
     if (session === undefined) return null;
-    const tree = treeResultSchema.safeParse(await this.host.request("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id }).catch(() => null));
     const screen = tree.success ? tree.data.screen : null;
     return screen ? { width: screen.width, height: screen.height } : null;
   }
@@ -7010,7 +7001,7 @@ export class TaplineTools {
     if (session === undefined) return { survived: false, why: "the app isn't connected any more." };
     // What a person sees (AGENT-TOOLS 1.12 §17.4): in a user's eyes the glass only; a label a screen reader hears is no proof.
     const tree = treeResultSchema.safeParse(
-      await this.host.request("tree", { peek: true, ...(this.userEyes() ? { glass: true } : {}) }, { sessionId: session.id }).catch(() => null),
+      await this.sendRequest("tree", { peek: true, ...(this.userEyes() ? { glass: true } : {}) }, { sessionId: session.id }).catch(() => null),
     );
     if (!tree.success) return { survived: false, why: "the app didn't answer when asked what is on screen." };
     const parts: Array<{ ok: boolean | null; why: string }> = [];
@@ -7078,7 +7069,7 @@ export class TaplineTools {
       }
     }
     try {
-      const raw = await this.host.request("command", { name: call.command, args: call.args }, { sessionId: session.id });
+      const raw = await this.sendRequest("command", { name: call.command, args: call.args }, { sessionId: session.id });
       const inner = typeof raw === "object" && raw !== null && "result" in raw ? (raw as { result: unknown }).result : undefined;
       const previous = typeof inner === "object" && inner !== null && "previous" in inner ? (inner as { previous: unknown }).previous : undefined;
       return { ok: true, ...(typeof previous === "string" && previous !== "" ? { previous } : {}) };
