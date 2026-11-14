@@ -1362,6 +1362,8 @@ interface ExploreRun {
   ingress?: { add(value: string): void; end(): void };
   /** The reproduction check's deadline: once it is aborted nothing more is sent (§29.4). */
   signal?: AbortSignal;
+  /** The identity of the one app this run may talk to (the reproduction check): a request sent while another app is current is refused, never sent (§29.4). */
+  pin?: string;
 }
 
 /** The scope of one move of an explore run. */
@@ -1859,6 +1861,10 @@ export class TaplineTools {
     // Inside an explore run every request that is not a read is held to the run's rules, whoever sent it: the explorer's own move,
     // a saved route's step, a drive leg, a recovery or a reset (§25.5). Nothing can reach the app around this one gate.
     const scope = this.exploreScope.getStore();
+    if (scope?.run.pin !== undefined) {
+      const now = this.host.current();
+      if (now === undefined || identityOf(now) !== scope.run.pin) return Promise.reject(new TaplineError("not_connected", "the app the check runs on is no longer the one in front, so nothing more is sent."));
+    }
     if (scope?.run.signal?.aborted === true) return Promise.reject(new TaplineError("timeout", "the check ran out of time, so nothing more is sent."));
     const [method, params, options] = args;
     const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
@@ -2807,7 +2813,7 @@ export class TaplineTools {
     const fresh = (): { run: ExploreRun; eh: ExploreHost } => {
       run?.ingress?.end();
       // A run lasts at most a minute (§29.4); the budget of the gate holds it to that.
-      const made: ExploreRun = { used: 0, steps: 300, minutes: RUN_LIMIT_MS / 60_000, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], ingress: this.host.typedRun() };
+      const made: ExploreRun = { used: 0, steps: 300, minutes: RUN_LIMIT_MS / 60_000, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], ingress: this.host.typedRun(), pin: identity };
       run = made;
       eh = this.exploreHost(session, map, wall, undefined, made);
       return { run: made, eh };
@@ -2840,6 +2846,10 @@ export class TaplineTools {
       }
       return { kind: "error", code, message: firstLine(message) };
     };
+    const frontNow = (): boolean => {
+      const now = this.host.current();
+      return now !== undefined && identityOf(now) === identity && appOf(now) === bug.app;
+    };
     const host: CheckHost = {
       clock: () => this.clock(),
       wall: () => new Date(wall()),
@@ -2860,7 +2870,11 @@ export class TaplineTools {
         const reloaded = await h.reload();
         let wiped = false;
         // The standard `app_command reset` clears the app's data: only when it was asked for (§29.4).
-        if (mode === "app" && (await h.commands()).includes("reset")) wiped = (await h.runCommand("reset")).ok;
+        // The app is checked again after every awaited read, immediately before the next send, and the run's pin refuses any request made while another app is current.
+        if (mode === "app") {
+          const offered = frontNow() ? await h.commands() : [];
+          if (offered.includes("reset") && frontNow()) wiped = (await h.runCommand("reset")).ok;
+        }
         if (!reloaded.ok && !wiped) return { ok: false };
         // A reset that brought the app to no readable place isn't one (§29.4).
         if ((await h.tree()) === null) return { ok: false };
