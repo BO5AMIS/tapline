@@ -409,6 +409,19 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
         world.typed.push({ id: found.el.id, text });
         return { ok: true, result: { element: wire(world, found.el, found.index), value: text, settledMs: 10 } };
       }
+      case "waitFor": {
+        // What `expect` and `wait_for` ask: is it on the screen (or gone); `once` answers at once, else the app times out at once.
+        const els = visible(world);
+        const present = els.some((el) => {
+          if (typeof params["testID"] === "string") return el.id === params["testID"];
+          if (typeof params["label"] === "string") return (el.label ?? el.text ?? "").toLowerCase() === params["label"].toLowerCase();
+          if (typeof params["text"] === "string") return (el.text ?? el.label ?? "").includes(params["text"]);
+          return true;
+        });
+        const holds = params["gone"] === true ? !present : present;
+        if (params["once"] === true) return { ok: true, result: { found: holds } };
+        return holds ? { ok: true, result: { waitedMs: 0 } } : { ok: false, error: { code: "timeout", message: "Timed out waiting for the element" } };
+      }
       case "logs":
         return { ok: true, result: { entries: [] } };
       case "commands":

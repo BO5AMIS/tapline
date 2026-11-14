@@ -287,11 +287,11 @@ function toCandidate(item: Scored, step: Step, target: Target, brk: Break, here:
   // Several elements named the same way: the new target says which (§9.4's `index`).
   const same = host.match(base, tree.elements);
   const newTarget: Target = same.length > 1 ? { ...base, index: Math.max(0, same.indexOf(item.element)) } : base;
-  const shown = describeElement(item.element);
+  const shown = describeElement(item.element, false);
   const cause = brk.code === "ambiguous" ? `${describeTarget(target)} matched more than one element` : `${describeTarget(target)} wasn't found`;
   return {
     kind: "target",
-    summary: `${step.tool} ${describeTarget(newTarget)}, ${shown}${here !== null ? ` on ${here}` : ""}`,
+    summary: `${step.tool} ${describeElement(item.element)}${here !== null ? ` on ${here}` : ""}`,
     score: item.score,
     parts: item.parts,
     newTarget,

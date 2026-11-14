@@ -387,9 +387,9 @@ export function closestRefs(message: string): string[] {
 // -- the answer's words
 
 /** One short line for an element, as the suggestion shows it: `id=login-button, button "Log in"`. A row shows only its id (its text is content). */
-export function describeElement(element: TreeElement): string {
+export function describeElement(element: TreeElement, withId = true): string {
   const parts: string[] = [];
-  if (filled(element.testID)) parts.push(`id=${element.testID}`);
+  if (withId && filled(element.testID)) parts.push(`id=${element.testID}`);
   if (element.row !== true) {
     const words = filled(element.text) ? element.text : filled(element.label) ? element.label : null;
     const role = filled(element.role) ? element.role : "element";
