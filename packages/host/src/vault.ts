@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
@@ -94,23 +95,103 @@ function securityQuote(text: string): string {
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * `security -i` reads at most 4095 bytes per input line, and a line is the whole command with its hex data: about 1.9 KB of vault
+ * JSON at most. Anything that fits is stored as one entry, the form the spec fixes (§20.2). A larger vault is stored in chunks
+ * under other accounts and a small manifest under the file's own account (a Tapline layout: Tapwright reads a vault that fits in
+ * one entry until the spec says how it reads this).
+ */
+const LINE_BUDGET = 3900;
+const MIN_CHUNK = 64;
+const CHUNK_TEXT = "c:";
+const MANIFEST_KEY = "tapline_chunks";
+
+interface Manifest {
+  id: string;
+  n: number;
+  bytes: number;
+}
+
+function manifestOf(text: string | null): Manifest | null {
+  if (text === null || !text.startsWith(`{"${MANIFEST_KEY}":`)) return null;
+  try {
+    const found = (JSON.parse(text) as Record<string, unknown>)[MANIFEST_KEY];
+    if (typeof found !== "object" || found === null) return null;
+    const { id, n, bytes } = found as { id?: unknown; n?: unknown; bytes?: unknown };
+    return typeof id === "string" && /^[0-9a-f]{12}$/.test(id) && typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 100_000 && typeof bytes === "number" ? { id, n, bytes } : null;
+  } catch {
+    return null;
+  }
+}
+
+const chunkAccount = (account: string, id: string, index: number): string => `${account}#${id}.${index}`;
+
 /** Through the `security` CLI. The data goes in on stdin (`security -i`), so it is never in the process list. */
 export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
-  const read = async (account: string): Promise<string | null> => {
+  /** The stored text of one entry, or null when there is none. `security -w` prints data that isn't plain text as hex. */
+  const readText = async (account: string): Promise<string | null> => {
     const out = await run("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"], "");
     if (out.code !== 0) return null;
     const text = out.stdout.replace(/\r?\n$/, "");
     if (text === "") return null;
-    // `security -w` prints data that isn't plain text as hex.
-    return text.startsWith("{") ? text : /^[0-9a-fA-F]+$/.test(text) ? Buffer.from(text, "hex").toString("utf8") : null;
+    return text.startsWith("{") || text.startsWith(CHUNK_TEXT) ? text : /^[0-9a-fA-F]+$/.test(text) ? Buffer.from(text, "hex").toString("utf8") : null;
+  };
+  const read = async (account: string): Promise<string | null> => {
+    const text = await readText(account);
+    const manifest = manifestOf(text);
+    if (manifest === null) return text;
+    const parts: Buffer[] = [];
+    for (let i = 0; i < manifest.n; i++) {
+      const chunk = await readText(chunkAccount(account, manifest.id, i));
+      if (chunk === null || !chunk.startsWith(CHUNK_TEXT) || !/^[0-9a-f]*$/.test(chunk.slice(CHUNK_TEXT.length))) return null;
+      parts.push(Buffer.from(chunk.slice(CHUNK_TEXT.length), "hex"));
+    }
+    const whole = Buffer.concat(parts);
+    return whole.length === manifest.bytes ? whole.toString("utf8") : null;
+  };
+  const addLine = (account: string, data: Buffer): string => `add-generic-password -U -s ${securityQuote(KEYCHAIN_SERVICE)} -a ${securityQuote(account)} -X ${data.toString("hex")}`;
+  /** Stores one entry. The interactive mode doesn't always set the exit code, so the caller reads back what mattered. */
+  const store = async (account: string, data: Buffer): Promise<void> => {
+    await run("security", ["-i"], `${addLine(account, data)}\n`);
+  };
+  const drop = async (account: string, manifest: Manifest | null): Promise<void> => {
+    if (manifest === null) return;
+    for (let i = 0; i < manifest.n; i++) await run("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", chunkAccount(account, manifest.id, i)], "").catch(() => undefined);
   };
   return {
     read,
     async write(account, json) {
-      const hex = Buffer.from(json, "utf8").toString("hex");
-      await run("security", ["-i"], `add-generic-password -U -s ${securityQuote(KEYCHAIN_SERVICE)} -a ${securityQuote(account)} -X ${hex}\n`);
-      // The interactive mode doesn't always set the exit code: what was stored is read back.
-      if ((await read(account)) !== json) throw new Error("the keychain didn't keep the entry");
+      const previous = manifestOf(await readText(account));
+      const data = Buffer.from(json, "utf8");
+      if (Buffer.byteLength(addLine(account, data)) <= LINE_BUDGET) {
+        await store(account, data);
+        if ((await read(account)) !== json) throw new Error("the keychain didn't keep the entry");
+        await drop(account, previous);
+        return;
+      }
+      const id = randomBytes(6).toString("hex");
+      const room = Math.floor((LINE_BUDGET - Buffer.byteLength(addLine(chunkAccount(account, id, 999_999), Buffer.alloc(0)))) / 2);
+      const size = Math.floor((room - CHUNK_TEXT.length) / 2);
+      if (size < MIN_CHUNK) throw new Error("the vault file's path is too long to store in the macOS keychain");
+      const count = Math.ceil(data.length / size);
+      const fresh: Manifest = { id, n: count, bytes: data.length };
+      // The chunks first, under a fresh id, then the manifest: until the manifest is replaced the old vault is intact.
+      for (let i = 0; i < count; i++) {
+        const text = `${CHUNK_TEXT}${data.subarray(i * size, (i + 1) * size).toString("hex")}`;
+        await store(chunkAccount(account, id, i), Buffer.from(text, "utf8"));
+        // a chunk that wasn't kept stops the write before the manifest points to it
+        if ((await readText(chunkAccount(account, id, i))) !== text) {
+          await drop(account, { id, n: i + 1, bytes: 0 });
+          throw new Error("the keychain didn't keep the entry");
+        }
+      }
+      await store(account, Buffer.from(JSON.stringify({ [MANIFEST_KEY]: fresh }), "utf8"));
+      if ((await read(account)) !== json) {
+        // the manifest wasn't kept: the old entry still holds the old vault, and the new chunks are of no use
+        await drop(account, fresh);
+        throw new Error("the keychain didn't keep the entry");
+      }
+      await drop(account, previous);
     },
   };
 }
