@@ -250,69 +250,274 @@ function escapedSource(value: string): string {
 
 /** The shortest prefix of a value that is scrubbed alone: what an app's cut leaves of it (§20.3, a fragment of 12 or more). */
 const PREFIX_MIN = 12;
-/** The longest prefix chain, the app's own cap on kept text. */
-const PREFIX_MAX = 2000;
 
-/** The first 12 characters of a value and as many of the following ones as the text goes on to match (a cut leaves a prefix). */
-function prefixSource(base: string): string | null {
-  const chars = [...base].slice(0, PREFIX_MAX);
-  if (chars.length <= PREFIX_MIN) return null;
-  let tail = "";
-  for (let i = chars.length - 1; i >= PREFIX_MIN; i--) tail = `(?:${escapeRegExp(chars[i] as string)}${tail})?`;
-  return `${chars.slice(0, PREFIX_MIN).map((c) => escapeRegExp(c)).join("")}${tail}`;
+/** A text as a run of UTF-16 units, each with the span of the original text it came from (decoding keeps the way back). */
+interface View {
+  text: string;
+  start: number[];
+  end: number[];
 }
 
-interface Rule {
-  source: string;
-  weight: number;
+interface Step {
+  out: string;
+  used: number;
+}
+
+function plainView(text: string): View {
+  const start: number[] = [];
+  const end: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    start.push(i);
+    end.push(i + 1);
+  }
+  return { text, start, end };
+}
+
+/** Rewrites a view: `step(text, i)` says what replaces the units from `i` and how many it covers, or null to keep the unit. */
+function transform(view: View, step: (text: string, i: number) => Step | null): View {
+  let text = "";
+  const start: number[] = [];
+  const end: number[] = [];
+  let i = 0;
+  while (i < view.text.length) {
+    const hit = step(view.text, i);
+    if (hit === null || hit.used <= 0) {
+      text += view.text[i] as string;
+      start.push(view.start[i] as number);
+      end.push(view.end[i] as number);
+      i += 1;
+      continue;
+    }
+    const from = view.start[i] as number;
+    const to = view.end[i + hit.used - 1] as number;
+    for (let k = 0; k < hit.out.length; k++) {
+      start.push(from);
+      end.push(to);
+    }
+    text += hit.out;
+    i += hit.used;
+  }
+  return { text, start, end };
+}
+
+const HEX2 = /^[0-9a-fA-F]{2}$/;
+
+/** How many bytes the UTF-8 sequence opened by `lead` has (1 for a byte that opens none). */
+function sequenceLength(lead: number): number {
+  if (lead < 0x80) return 1;
+  if (lead >= 0xf0 && lead < 0xf8) return 4;
+  if (lead >= 0xe0 && lead < 0xf0) return 3;
+  if (lead >= 0xc2 && lead < 0xe0) return 2;
+  return 1;
+}
+
+/** Percent-decoding: a run of %XX bytes becomes its UTF-8 characters; a sequence that doesn't finish stays escaped. */
+function percentStep(text: string, i: number): Step | null {
+  if (text[i] !== "%") return null;
+  const bytes: number[] = [];
+  let j = i;
+  while (text[j] === "%" && HEX2.test(text.slice(j + 1, j + 3))) {
+    bytes.push(parseInt(text.slice(j + 1, j + 3), 16));
+    j += 3;
+  }
+  let out = "";
+  let taken = 0;
+  while (taken < bytes.length) {
+    const need = sequenceLength(bytes[taken] as number);
+    if (taken + need > bytes.length) break;
+    const piece = Buffer.from(bytes.slice(taken, taken + need)).toString("utf8");
+    if (piece.includes("�")) break;
+    out += piece;
+    taken += need;
+  }
+  return taken === 0 ? null : { out, used: taken * 3 };
+}
+
+const SIMPLE_ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", "\\": "\\", '"': '"', "/": "/", "'": "'" };
+
+/** JSON string escapes: `\uXXXX` (either case), `\n`, `\\`, `\"` and the rest. */
+function jsonStep(text: string, i: number): Step | null {
+  if (text[i] !== "\\") return null;
+  const next = text[i + 1];
+  if (next === undefined) return null;
+  if (next === "u" && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) return { out: String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16)), used: 6 };
+  const hit = SIMPLE_ESCAPES[next];
+  return hit === undefined ? null : { out: hit, used: 2 };
+}
+
+const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", sol: "/", bsol: "\\", num: "#", percnt: "%", plus: "+", equals: "=" };
+
+/** HTML entities: numeric (decimal or hex, any padding) and the common named ones. */
+function entityStep(text: string, i: number): Step | null {
+  if (text[i] !== "&") return null;
+  const m = /^&(?:#([0-9]+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));/.exec(text.slice(i, i + 16));
+  if (m === null) return null;
+  let out: string | undefined;
+  if (m[1] !== undefined || m[2] !== undefined) {
+    const cp = m[1] !== undefined ? parseInt(m[1], 10) : parseInt(m[2] as string, 16);
+    out = cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : undefined;
+  } else out = NAMED_ENTITIES[(m[3] as string).toLowerCase()];
+  return out === undefined ? null : { out, used: m[0].length };
+}
+
+const plusStep = (text: string, i: number): Step | null => (text[i] === "+" ? { out: " ", used: 1 } : null);
+
+const STEPS = [percentStep, jsonStep, entityStep, plusStep];
+const MAX_VIEWS = 48;
+
+/** The text and each of its decodings (up to three layers, in any order), so an escape of any kind reads as the characters it stands for. */
+function viewsOf(text: string): View[] {
+  const first = plainView(text);
+  const seen = new Set<string>([first.text]);
+  const all: View[] = [first];
+  let layer: View[] = [first];
+  for (let depth = 0; depth < 3; depth++) {
+    const next: View[] = [];
+    for (const view of layer) {
+      for (const step of STEPS) {
+        if (all.length >= MAX_VIEWS) return all;
+        const moved = transform(view, step);
+        if (seen.has(moved.text)) continue;
+        seen.add(moved.text);
+        all.push(moved);
+        next.push(moved);
+      }
+    }
+    layer = next;
+  }
+  return all;
+}
+
+/** The view without invisible characters, each whitespace run as one space. */
+function normalizedView(view: View): View {
+  let text = "";
+  const start: number[] = [];
+  const end: number[] = [];
+  let inSpace = false;
+  for (let i = 0; i < view.text.length; i++) {
+    const c = view.text[i] as string;
+    if (INVISIBLE_ANY.test(c)) continue;
+    const space = /\s/.test(c);
+    if (space && inSpace) {
+      end[end.length - 1] = view.end[i] as number;
+      continue;
+    }
+    inSpace = space;
+    text += space ? " " : c;
+    start.push(view.start[i] as number);
+    end.push(view.end[i] as number);
+  }
+  return { text, start, end };
+}
+
+/** How much of a half-written escape (a cut in the middle of `%C3%A`, `\u00`, `&#x`) follows `at`: it belongs to the fragment. */
+function dangling(text: string, at: number): number {
+  const rest = text.slice(at, at + 64);
+  const percent = /^%(?:[0-9a-fA-F](?![0-9a-fA-F]))?/.exec(rest);
+  if (percent !== null && !HEX2.test(rest.slice(1, 3))) return percent[0].length;
+  const json = /^\\{1,2}u[0-9a-fA-F]{0,3}(?![0-9a-fA-F])/.exec(rest);
+  if (json !== null) return json[0].length;
+  const entity = /^&#?[xX]?[0-9a-fA-F]*(?![0-9a-fA-F;])/.exec(rest);
+  if (entity !== null && entity[0].length > 1 && /^&#/.test(rest)) return entity[0].length;
+  const run = /^(?:%[0-9a-fA-F]{2})+/.exec(rest);
+  if (run !== null) {
+    const bytes: number[] = [];
+    for (let k = 0; k < run[0].length; k += 3) bytes.push(parseInt(run[0].slice(k + 1, k + 3), 16));
+    let b = 0;
+    while (b < bytes.length) {
+      const need = sequenceLength(bytes[b] as number);
+      if (b + need > bytes.length) return (bytes.length - b) * 3;
+      b += need;
+    }
+  }
+  return 0;
+}
+
+interface Span {
+  start: number;
+  end: number;
   token: string;
 }
 
+/** Every place the text holds a prefix of 12 or more characters of `base` in any encoding: its first 12 and as many more as the text goes on to match. */
+function prefixSpans(text: string, views: readonly View[], base: string, token: string, out: Span[]): void {
+  const head = base.slice(0, PREFIX_MIN);
+  for (const raw of views) {
+    if (raw.text.length < PREFIX_MIN) continue;
+    const view = normalizedView(raw);
+    let from = view.text.indexOf(head);
+    while (from !== -1) {
+      let len = PREFIX_MIN;
+      while (len < base.length && view.text[from + len] === base[len]) len++;
+      const end = view.end[from + len - 1] as number;
+      out.push({ start: view.start[from] as number, end: end + dangling(text, end), token });
+      from = view.text.indexOf(head, from + 1);
+    }
+  }
+}
+
 /**
- * One pass over the text with every value's every form, longest first, so a value that holds another is scrubbed whole and a
- * placeholder is never scrubbed again.
+ * Every value's every form, found in one pass and cut into spans. Where spans overlap the leftmost wins (the longest of those
+ * that start together), and one that runs past its end is scrubbed beyond it too, so no fragment of a longer value survives a
+ * shorter one. A placeholder is never scrubbed again.
  */
 function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, field: string) => string = placeholderOf): (text: string) => string {
-  const rules = new Map<string, Rule>();
-  const add = (source: string, weight: number, token: string): void => {
-    if (!rules.has(source)) rules.set(source, { source, weight, token });
-  };
+  const literals = new Map<string, string>();
+  const patterns = new Map<string, string>();
+  const bases = new Map<string, string>();
   for (const [name, entry] of Object.entries(entries)) {
     for (const [field, value] of Object.entries(entry.values)) {
       if (value.length < MIN_SCRUB) continue;
       const token = tokenOf(name, field);
-      for (const form of variantsOf(value)) {
-        add(escapeRegExp(form), form.length, token);
-      }
-      if (value.length <= 500) {
-        const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
-        for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) add(fuzzySource(base), base.length + 0.5, token);
-      }
-      if (value.length <= 2000) {
-        const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
-        for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) add(escapedSource(base), base.length + 0.6, token);
-      }
-      // What an app's cut leaves of a long value: a prefix of 12 or more characters, raw or JSON-escaped.
-      const collapsedAll = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
-      for (const base of new Set([value, collapsedAll])) {
-        for (const form of new Set([base, JSON.stringify(base).slice(1, -1)])) {
-          const source = prefixSource(form);
-          if (source !== null) add(source, PREFIX_MIN, token);
-        }
-      }
+      for (const form of variantsOf(value)) if (!literals.has(form)) literals.set(form, token);
+      const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
+      const addPattern = (source: string): void => {
+        if (!patterns.has(source)) patterns.set(source, token);
+      };
+      if (value.length <= 500) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(fuzzySource(base));
+      if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base));
+      // What an app's cut leaves of a value: a prefix of 12 or more characters, in any of the encodings.
+      if (collapsed.length >= PREFIX_MIN && !bases.has(collapsed)) bases.set(collapsed, token);
     }
   }
-  const list = [...rules.values()].sort((a, b) => b.weight - a.weight);
-  if (list.length === 0) return (text) => text;
-  const pattern = new RegExp(list.map((rule) => `(${rule.source})`).join("|"), "g");
+  const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token }));
+  const forms = [...literals];
+  const prefixes = [...bases];
+  if (forms.length === 0 && regexes.length === 0 && prefixes.length === 0) return (text) => text;
   return (text) => {
     if (text.length < MIN_SCRUB) return text;
-    return text.replace(pattern, (...args: unknown[]) => {
-      for (let i = 0; i < list.length; i++) {
-        if (args[i + 1] !== undefined) return (list[i] as Rule).token;
+    const spans: Span[] = [];
+    for (const [form, token] of forms) {
+      let at = text.indexOf(form);
+      while (at !== -1) {
+        spans.push({ start: at, end: at + form.length, token });
+        at = text.indexOf(form, at + 1);
       }
-      return String(args[0]);
-    });
+    }
+    for (const { re, token } of regexes) {
+      re.lastIndex = 0;
+      for (const m of text.matchAll(re)) {
+        const got = (m[1] as string).length;
+        if (got > 0) spans.push({ start: m.index, end: m.index + got, token });
+      }
+    }
+    if (prefixes.length > 0 && text.length >= PREFIX_MIN) {
+      const views = viewsOf(text);
+      for (const [base, token] of prefixes) prefixSpans(text, views, base, token, spans);
+    }
+    if (spans.length === 0) return text;
+    spans.sort((a, b) => a.start - b.start || b.end - a.end);
+    let out = "";
+    let cursor = 0;
+    let last = "";
+    for (const span of spans) {
+      if (span.end <= cursor) continue;
+      if (span.start >= cursor) out += text.slice(cursor, span.start) + span.token;
+      else if (span.token !== last) out += span.token;
+      last = span.token;
+      cursor = span.end;
+    }
+    return out + text.slice(cursor);
   };
 }
 
