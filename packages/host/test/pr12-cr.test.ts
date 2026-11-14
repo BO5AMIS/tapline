@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AuditSink } from "../src/auditlog.js";
+import { AuditLog } from "../src/auditlog.js";
 import { GrantBook, type GrantTouch } from "../src/grants.js";
+import { runGrants } from "../src/grantscmd.js";
 
 // PR 12, CodeRabbit round: grants (app scope, the lock, inherited names).
 
@@ -87,5 +89,28 @@ describe("grants: the app, the lock and inherited names (PR 12 CodeRabbit)", () 
     const again = new GrantBook(r.options);
     const second = await again.decide(touch(), "use", "x");
     expect(second.kind).toBe("ask");
+  });
+});
+
+describe("tapline grants: last uses are scoped by app and name (PR 12 CodeRabbit)", () => {
+  it("two policy files with a grant of one name keep their last uses apart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-pr12cr-"));
+    dirs.push(dir);
+    const auditDir = join(dir, "audit");
+    const audit = new AuditLog(auditDir, () => NOW);
+    audit.open();
+    const fileA = join(dir, "a.json");
+    const fileB = join(dir, "b.json");
+    const policy = (app: string): string => JSON.stringify({ version: 2, confirm: ["Post"], block: [], grants: [{ ...GRANT, name: "posting", app, perDay: 5 }] });
+    writeFileSync(fileA, policy("com.one"));
+    writeFileSync(fileB, policy("com.two"));
+    await new GrantBook({ policyPath: fileA, audit, now: () => NOW }).decide(touch({ app: { id: "com.one", name: "One" } }), "use", "tap ONE-ACTION");
+    await new GrantBook({ policyPath: fileB, audit, now: () => NOW, sleep: async () => undefined }).decide(touch({ app: { id: "com.two", name: "Two" } }), "use", "tap TWO-ACTION");
+    const a = await runGrants({ policy: fileA, auditDir, now: () => NOW });
+    expect(a.text).toContain("ONE-ACTION");
+    expect(a.text).not.toContain("TWO-ACTION");
+    const b = await runGrants({ policy: fileB, auditDir, now: () => NOW });
+    expect(b.text).toContain("TWO-ACTION");
+    expect(b.text).not.toContain("ONE-ACTION");
   });
 });
