@@ -104,6 +104,9 @@ export interface ExWorld {
   /** Pressing these ids opens a system alert (a permission prompt) that blocks every touch until a reload or a reset. */
   alertOn: Set<string>;
   alertOpen: boolean;
+  /** Methods whose (non-dry) requests the fake app holds unanswered until a test answers them: a start-up paused in the middle. */
+  hold: Set<string>;
+  held: IncomingRequest[];
   /** A real JPEG (base64, 300x600) the fake serves as the screenshot; the default is a stub that cannot be decoded. */
   shot?: string;
   /** After a link out the app comes back to the front after this many ms (real time); none: it stays away. */
@@ -191,6 +194,8 @@ export function wayfare(): ExWorld {
     recipient: {},
     alertOn: new Set(),
     alertOpen: false,
+    hold: new Set(),
+    held: [],
     asked: [],
     reloads: 0,
     resets: 0,
@@ -361,6 +366,10 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
     if (!dry) {
       world.asked.push(req.method);
       clock.now += world.msPerRequest;
+    }
+    if (!dry && world.hold.has(req.method)) {
+      world.held.push(req);
+      return "ignore";
     }
     if (world.away && req.method !== "tree") return { ok: false, error: { code: "in_background", message: "the app is in the background" } };
     switch (req.method) {

@@ -2321,6 +2321,18 @@ export class TaplineTools {
 
   /** `explore` with what the command line needs to pick its exit code: the outcome and where the report is. */
   async exploreRun(args: Shape<"explore"> = {}): Promise<{ answer: CallToolResult; outcome?: ExploreOutcome; reportPath?: string }> {
+    // Reserved before anything else is read or awaited, held for the whole run and released in `finally`: a record, replay or journey that starts
+    // meanwhile sees it, and a second explore answers busy.
+    if (this.exploring) return { answer: fail("Error busy: an explore is already running here; wait for it to end.") };
+    this.exploring = true;
+    try {
+      return await this.exploreHeld(args);
+    } finally {
+      this.exploring = false;
+    }
+  }
+
+  private async exploreHeld(args: Shape<"explore">): Promise<{ answer: CallToolResult; outcome?: ExploreOutcome; reportPath?: string }> {
     const refuse = (message: string): { answer: CallToolResult } => ({ answer: fail(message) });
     if (args.guide !== undefined && args.guide !== "none") return refuse("Error unsupported: guide isn't offered yet; explore chooses by itself.");
     const budget = { minutes: args.minutes ?? EXPLORE_DEFAULTS.minutes, steps: args.steps ?? EXPLORE_DEFAULTS.steps, depth: args.depth ?? EXPLORE_DEFAULTS.depth };
@@ -2337,10 +2349,9 @@ export class TaplineTools {
     if (this.options.maps === undefined) return refuse("Error unsupported: this server keeps no maps.");
     const map = this.mapOf(session);
     if (map === undefined) return refuse("Error unsupported: this app reports no id of its own, so it has no map.");
-    if (this.exploring) return refuse("Error busy: an explore is already running here; wait for it to end.");
     if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
     if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
-    if (this.recordingState !== null || this.replayingState) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
+    if (this.recordingState !== null || this.replayingState || this.rivals > 0) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
     if (args.account !== undefined) {
       const store = this.options.accounts?.store ?? null;
       if (store === null || !store.names().includes(args.account)) return refuse(`Error bad_params: no account "${args.account}" in the vault.`);
@@ -2367,13 +2378,7 @@ export class TaplineTools {
     const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], scrub: null };
     const explorer = new Explorer(this.exploreHost(session, map, wall, progress, run), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
     // Calls inside the call add no crash note or wait of their own: the report says what happened.
-    this.exploring = true;
-    let result: Awaited<ReturnType<Explorer["run"]>>;
-    try {
-      result = await this.noteScope.run(true, () => explorer.run());
-    } finally {
-      this.exploring = false;
-    }
+    const result = await this.noteScope.run(true, () => explorer.run());
     if (!isOutcome(result)) return refuse(result.error);
     const reportPath = writeExploreReport(folder, result.report, (text) => this.exploreScrub(run, text), result.detail);
     const where = reportPath ?? `${folder.dir}`;
@@ -5229,6 +5234,7 @@ export class TaplineTools {
             : `Recording ${this.recording.route !== undefined ? "route " : ""}"${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
         );
       case "discard": {
+        if (this.recordStarting !== null && this.recording === this.recordStarting) return fail("Error busy: the recording is still starting; try again in a moment.");
         const was = this.recording?.name;
         this.recording = null;
         return text(was === undefined ? "Not recording." : `Discarded the recording "${was}".`);
@@ -5236,6 +5242,7 @@ export class TaplineTools {
       case "stop": {
         const recording = this.recording;
         if (recording === null) return fail("Error bad_params: not recording; start with record { start: true, name }.");
+        if (recording === this.recordStarting) return fail("Error busy: the recording is still starting; try again in a moment.");
         if (recording.route !== undefined) return this.stopRoute(recording, recording.route, args.path);
         const path = args.path !== undefined && args.path.trim() !== "" ? args.path.trim() : this.scriptPath(recording.name);
         if (path === null) return fail("Error internal: no scripts folder is configured; give a path.");
@@ -5298,9 +5305,20 @@ export class TaplineTools {
     if (map === undefined) return fail("Error unsupported: this server keeps no map for this app, so a route can't be saved.");
     const twin = caseTwin(name, Object.keys(map.data().routes));
     if (twin !== null) return fail(`Error bad_params: the route "${name}" differs only in case from the existing "${twin}"; use that name.`);
-    const here = await placeNow(this.placeSource(session), map);
+    // Reserved before the first await (a second start, an explore and a stop all see it), and released if the place can't be found.
+    const reserved = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [], route: { start: "", variables: new Set<string>(), map } };
+    this.recording = reserved;
+    this.recordStarting = reserved;
+    let here: Awaited<ReturnType<typeof placeNow>> = null;
+    try {
+      here = await placeNow(this.placeSource(session), map);
+    } finally {
+      this.recordStarting = null;
+      if (here === null && this.recording === reserved) this.recording = null;
+    }
     if (here === null) return fail("Error not_found: the app's current place isn't known, so a route can't start here; look at the screen first.");
-    this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [], route: { start: here.place.name, variables: new Set(), map } };
+    if (this.recording !== reserved) return fail("Error bad_params: the recording was discarded while it started.");
+    reserved.route.start = here.place.name;
     return text(
       `Recording route "${name}" on ${session.app.name}, from ${here.place.name}. Every action from now on is a step; type_text with as saves its text as a variable. Stop with record { stop: true }.`,
     );
@@ -5391,6 +5409,21 @@ export class TaplineTools {
 
   /** `adopt` is a person's choice and only the command line passes it: no tool parameter reaches it (AGENT-TOOLS 1.15 §26.5). */
   async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string; gateRepaired?: boolean } = {}): Promise<CallToolResult> {
+    // Held before the first await and released in `finally`: explore can't start while a replay waits for its fresh start or its way to the route's start.
+    this.rivals += 1;
+    try {
+      return await this.replayHeld(args, options);
+    } finally {
+      this.rivals -= 1;
+    }
+  }
+
+  /** Recordings, replays and journeys in progress (counted from their first line): explore refuses to start while any is held. */
+  private rivals = 0;
+  /** The route recording that is still finding its start place (its state is reserved, and stop and discard wait for it). */
+  private recordStarting: object | null = null;
+
+  private async replayHeld(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string; gateRepaired?: boolean }): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
