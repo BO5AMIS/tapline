@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
+import { appFolderName } from "./appfolder.js";
 import { decodedBases, normalizedBases, variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
@@ -15,8 +16,8 @@ export const BUGS_KEPT = 100;
 /** The sources `seen.sources` keeps (§29.5). */
 export const SOURCES_KEPT = 50;
 
-/** A folder name for an app id, as the explore reports use. */
-export const appFolderName = (appId: string): string => appId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_") || "unknown";
+/** A folder name for an app id, as the explore reports use: one folder per id (AGENT-TOOLS 1.16.2 §29.7, appfolder.ts). */
+export { appFolderName };
 
 const BUG_ID = /^bug_[0-9a-f]{16}(?:_\d+)?$/;
 export const isBugId = (text: string): boolean => BUG_ID.test(text);

@@ -11,6 +11,7 @@ import type { TaplineHost } from "../src/server.js";
 import { APP } from "./drive-helpers.js";
 import { btn, flushExploreMaps, setupExplore, type ExploreSetup, type ExploreSetupOptions } from "./explore-helpers.js";
 import type { FakeApp } from "./helpers.js";
+import { appFolderName } from "../src/appfolder.js";
 
 const hosts: TaplineHost[] = [];
 const apps: FakeApp[] = [];
@@ -271,7 +272,9 @@ describe("the report folder (§25.10)", () => {
     dirs.push(base);
     const folder = openRunFolder(base, "../evil/app", new Date(Date.UTC(2026, 10, 14, 9, 0, 0)));
     expect(folder.dir.startsWith(base)).toBe(true);
-    expect(readdirSync(base)).toEqual(["__evil_app"]);
+    // Not a plain name: `_`, the cleaned id and a hash of it, so no other id can share the folder (1.16.2 §29.7).
+    expect(readdirSync(base)).toEqual([appFolderName("../evil/app")]);
+    expect(readdirSync(base)[0]).toMatch(/^_evil_app-[0-9a-f]{16}$/);
     writeFileSync(join(folder.dir, "x"), "");
   });
 

@@ -2,6 +2,7 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FINDING_KINDS, redactFinding, type Finding } from "./findings.js";
 import type { SkipWhy } from "./mapfile.js";
+import { appFolderName } from "./appfolder.js";
 
 // The report of `explore` (AGENT-TOOLS 1.15 §25.10): one folder per run, `report.json`, `report.md`, a picture per finding in
 // `findings/` and a script per finding in `repro/`. The newest 20 folders of an app are kept.
@@ -86,8 +87,8 @@ export function stoppedWords(reason: StopReason, detail?: string): string {
   }
 }
 
-/** A folder name for an app id: the id's own characters when they are plain, else `_`. */
-const appFolder = (appId: string): string => appId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_") || "unknown";
+/** A folder name for an app id: the same one the bug store reads a run from (appfolder.ts). */
+const appFolder = appFolderName;
 
 const RUN_FOLDER = /^\d{8}T\d{6}Z(?:-\d+)?$/;
 
