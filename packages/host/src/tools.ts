@@ -2913,7 +2913,14 @@ export class TaplineTools {
           if (typed === null) return { kind: "person", why: "a typed value" };
           params["text"] = typed;
           const { value, last } = await within(() => this.typeText(asShape<"type_text">()), false, true);
-          return resultOf(value, last);
+          const typedResult = resultOf(value, last);
+          if (typedResult.kind !== "ok" || expect === undefined) return typedResult;
+          // The step's own expect is evaluated after the typing, by the same check the other steps' expects use (`run`'s).
+          const checked = await within(async () => {
+            const missed = await this.expectMissed(expect as Expect);
+            return missed === null ? text("ok") : fail(`Error expect_failed: its action ran, but ${missed}`);
+          });
+          return checked.value.isError === true ? resultOf(checked.value, checked.last) : typedResult;
         }
         if (expect !== undefined) {
           const runStep: Record<string, unknown> = { tool, ...rest, expect };
