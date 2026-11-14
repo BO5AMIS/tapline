@@ -16,7 +16,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
-import { loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
+import { combinedRedact, loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
 import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
 import { Confirmations } from "./confirm.js";
@@ -205,7 +205,17 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const withHistory = (load: AccountsLoad): AccountsLoad => {
     if (load.store === null) return load;
     const current = load.store;
-    return { ...load, store: { ...current, redact: (text: string) => retired.reduce((t, old) => old.redact(t), current.redact(text)) } };
+    // One scrubber over the current and every retired value, matched together against the original text (never chained).
+    let built = -1;
+    let combined: (text: string) => string = current.redact;
+    const redact = (text: string): string => {
+      if (built !== retired.length) {
+        combined = retired.length === 0 ? current.redact : combinedRedact([current, ...retired]);
+        built = retired.length;
+      }
+      return combined(text);
+    };
+    return { ...load, store: { ...current, redact } };
   };
   let currentRaw: AccountsLoad | undefined = accounts;
   const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts: accounts === undefined ? undefined : withHistory(accounts) };

@@ -739,13 +739,31 @@ function has(entries: Record<string, VaultEntry>, name: string): VaultEntry | un
 
 const PASSCODE_NOTE = "an account's passcode is typed only by Tapwright on a locked phone's keypad; Tapline never types it.";
 
+/** The entries each store was made from, so a scrubber over several stores can be built from their union (never chained). */
+const ENTRIES_OF = new WeakMap<AccountStore, Record<string, VaultEntry>>();
+
+/**
+ * One scrubber over the values of several stores (the current one and the ones a reload retired): every value is matched against the
+ * ORIGINAL text in one pass and the spans are merged leftmost-longest, so a value two stores share a prefix, a suffix or a middle
+ * of is never half-scrubbed by the other one. Each value keeps its own entry's placeholder.
+ */
+export function combinedRedact(stores: readonly AccountStore[]): (text: string) => string {
+  const union: Record<string, VaultEntry> = {};
+  stores.forEach((store, i) => {
+    const entries = ENTRIES_OF.get(store);
+    if (entries === undefined) return;
+    for (const [name, entry] of Object.entries(entries)) union[`${i}\u0000${name}`] = entry;
+  });
+  return scrubber(union, (key, field) => placeholderOf(key.slice(key.indexOf("\u0000") + 1), field));
+}
+
 function storeOf(entries: Record<string, VaultEntry>): AccountStore {
   const scrub = scrubber(entries);
   const names = Object.keys(entries);
   const list = (word: string): string => (names.length === 0 ? "the vault file has none" : `the ${word} are ${names.join(", ")}`);
   const forApp = (entry: VaultEntry, appId: string): string | null =>
     entry.apps !== undefined && !entry.apps.includes(appId) ? `isn't for this app (${appId}); it is for ${entry.apps.join(", ")}.` : null;
-  return {
+  const store: AccountStore = {
     names: () => [...names],
     kindOf: (name) => has(entries, name)?.kind,
     redact: scrub,
@@ -775,6 +793,8 @@ function storeOf(entries: Record<string, VaultEntry>): AccountStore {
       return { ok: true, value };
     },
   };
+  ENTRIES_OF.set(store, entries);
+  return store;
 }
 
 /** The store of a version 1 file (the accounts of §18.6). */
