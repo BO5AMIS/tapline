@@ -249,3 +249,18 @@ describe("R2 finding 3: a toggle is repaired only to its own role", () => {
     expect(action).toMatchObject({ result: "same", role: "switch" });
   });
 });
+
+describe("R3: the repaired file's pictures", () => {
+  it("copies the original's references folder beside the repaired file, once", async () => {
+    const { mkdirSync, writeFileSync, existsSync, readFileSync } = await import("node:fs");
+    const r = await rig();
+    r.script("rename", RENAMED);
+    const from = join(r.scriptsDir, "rename.references");
+    mkdirSync(from);
+    writeFileSync(join(from, "home.jpg"), "PICTURE");
+    const answer = textOf(await r.s.tools.replay({ name: "rename", repair: "apply" }));
+    expect(answer).toContain("with 1 repair");
+    expect(readFileSync(join(r.scriptsDir, "rename.repaired.references", "home.jpg"), "utf8")).toBe("PICTURE");
+    expect(existsSync(from)).toBe(true);
+  });
+});

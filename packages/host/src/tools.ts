@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -5581,6 +5581,10 @@ export class TaplineTools {
     try {
       writeFileSync(repairedPath, repairedText, { mode: 0o600 });
       writeFileSync(notesPath, markdown, { mode: 0o600 });
+      // A replay of the repaired file looks for its pictures beside it: the original's folder is copied once, an existing one is never touched.
+      const picturesFrom = this.scriptSideFolder(scriptPath, "references");
+      const picturesTo = this.scriptSideFolder(repairedPath, "references");
+      if (existsSync(picturesFrom) && !existsSync(picturesTo)) cpSync(picturesFrom, picturesTo, { recursive: true, errorOnExist: true, force: false });
     } catch (error) {
       return fail(`Error internal: the run passed, but the repaired script couldn't be written: ${error instanceof Error ? error.message : String(error)}`);
     }
