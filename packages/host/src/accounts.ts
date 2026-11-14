@@ -45,14 +45,16 @@ export const KIND_FIELDS: Record<VaultKind, readonly string[]> = {
 const secret = z.string().min(3, SHORT);
 const plain = z.string().min(1);
 const apps = z.array(z.string().min(1)).optional();
+/** `"explore": true` marks an entry the explorer may type or sign in with (AGENT-TOOLS 1.15 §25.6). Never a password, a card or a phone. */
+const explore = z.boolean().optional();
 
 const entrySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("account"), username: secret.optional(), password: secret.optional(), apps }),
-  z.object({ kind: z.literal("card"), number: secret.optional(), expiry: secret.optional(), cvc: secret.optional(), apps }),
-  z.object({ kind: z.literal("address"), street: plain.optional(), city: plain.optional(), postcode: plain.optional(), country: plain.optional(), apps }),
-  z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps }),
-  z.object({ kind: z.literal("note"), text: secret.optional(), apps }),
-  z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps }),
+  z.object({ kind: z.literal("account"), username: secret.optional(), password: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("card"), number: secret.optional(), expiry: secret.optional(), cvc: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("address"), street: plain.optional(), city: plain.optional(), postcode: plain.optional(), country: plain.optional(), apps, explore }),
+  z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("note"), text: secret.optional(), apps, explore }),
+  z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps, explore }),
 ]);
 
 /** Version 2 (§20.1). A top-level `otp` key is Tapwright's and is ignored here. */
@@ -68,6 +70,7 @@ const accountSchema = z.object({
   /** Tapwright's: the phone's passcode. Tapline loads it without complaint and never types it. */
   passcode: z.string().min(1).optional(),
   apps,
+  explore,
 });
 
 /** Version 1 (§18.6). */
@@ -82,6 +85,8 @@ export interface VaultEntry {
   kind: VaultKind;
   values: Record<string, string>;
   apps?: string[];
+  /** Marked `"explore": true` in the file (§25.6): `explore` may type its safe fields and sign in with it. */
+  explore?: true;
 }
 
 /** Where `value=` and the other answers name a value: `<home's street>`. */
@@ -98,6 +103,8 @@ export interface AccountStore {
   names(): string[];
   /** What kind an entry is. */
   kindOf(name: string): VaultKind | undefined;
+  /** Whether the entry is marked `"explore": true` (§25.6). A store that does not know the mark treats every entry as unmarked. */
+  exploreMarked?(name: string): boolean;
   /** One value of an account, for an app (`${account.<field>}`: the call's `account` names the entry, and it is an `account`). */
   resolve(name: string, field: string, appId: string): AccountResolved;
   /** One value of any entry, for an app (`${vault.<name>.<field>}`). */
@@ -188,6 +195,28 @@ function asciiJson(text: string): string {
 const CUT = 200;
 
 /**
+ * The first `length` code units of a text, never ending inside a surrogate pair (the cut backs off one unit when it would
+ * leave a high surrogate at the end). A cut that is not at a pair is exact.
+ */
+export function safeHead(text: string, length: number): string {
+  if (text.length <= length) return text;
+  const last = text.charCodeAt(length - 1);
+  const next = text.charCodeAt(length);
+  const splits = last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+  return text.slice(0, splits ? length - 1 : length);
+}
+
+/** A text with each lone surrogate replaced by U+FFFD, as a browser's URL serializer does. */
+export function wellFormed(text: string): string {
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
+}
+
+/** `encodeURIComponent` that never throws: a lone surrogate becomes `%EF%BF%BD`. */
+export function safeEncode(text: string): string {
+  return encodeURIComponent(wellFormed(text));
+}
+
+/**
  * The shapes a value can take on its way back: as it is, with direction marks and zero-width characters stripped, with
  * whitespace collapsed (as the app's `normalizeText` leaves it), each of those inside a JSON string (also twice, and with
  * non-ASCII escaped), and in a URL (percent or form encoded, either case of hex). A value the app cuts at 200 characters
@@ -197,18 +226,22 @@ export function variantsOf(value: string): string[] {
   const collapse = (text: string): string => text.replace(/\s+/g, " ").trim();
   const stripped = value.replace(INVISIBLE, "");
   const bases = new Set<string>([value, stripped, collapse(value), collapse(stripped)]);
-  for (const base of [...bases]) if (base.length > CUT) bases.add(base.slice(0, CUT));
+  for (const base of [...bases]) {
+    if (base.length <= CUT) continue;
+    bases.add(safeHead(base, CUT));
+    bases.add(base.slice(0, CUT)); // the app's own cut may split a pair
+  }
   const forms = new Set<string>();
   for (const base of bases) {
     const jsons = [base, JSON.stringify(base).slice(1, -1), asciiJson(base), JSON.stringify(JSON.stringify(base)).slice(1, -1)];
     for (const form of jsons) {
       forms.add(form);
-      const percent = encodeURIComponent(form);
+      const percent = safeEncode(form);
       forms.add(percent);
       forms.add(percent.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()));
       forms.add(percent.replace(/%20/g, "+"));
       // URLSearchParams encodes more than encodeURIComponent does (`~` becomes %7E).
-      forms.add(new URLSearchParams({ k: form }).toString().slice(2));
+      forms.add(new URLSearchParams({ k: wellFormed(form) }).toString().slice(2));
     }
   }
   return [...forms].filter((form) => form !== "");
@@ -490,11 +523,51 @@ interface Probe {
   base: string;
   token: string;
   head: RegExp;
+  /** The head's text up to its first space (a space may read as a plus): what a view must hold, when it is long enough to gate on. */
+  gate?: string;
 }
 
 function probeOf(base: string, token: string): Probe {
-  const head = base.slice(0, PREFIX_MIN);
-  return { base, token, head: new RegExp([...head].map((c) => (c === " " ? "[ +]" : escapeRegExp(c))).join(""), "g") };
+  const head = safeHead(base, PREFIX_MIN);
+  const gate = head.split(" ")[0] as string;
+  return { base, token, head: new RegExp([...head].map((c) => (c === " " ? "[ +]" : escapeRegExp(c))).join(""), "g"), ...(gate.length >= GRAM ? { gate } : {}) };
+}
+
+// -- a cheap necessary condition for a long text
+
+const GRAM = 3;
+/** Shorter texts are searched directly: indexing them would cost more than it saves. */
+const GRAM_TEXT_MIN = 4096;
+const GRAM_BITS = 20;
+
+/** The text's 3-character pieces as a bit table (hashed: a collision only lets a candidate through, never drops one). */
+function gramsOf(text: string): Uint8Array {
+  const table = new Uint8Array(1 << GRAM_BITS);
+  let a = text.charCodeAt(0);
+  let b = text.charCodeAt(1);
+  for (let i = 2; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    table[gramHash(a, b, c)] = 1;
+    a = b;
+    b = c;
+  }
+  return table;
+}
+
+function gramHash(a: number, b: number, c: number): number {
+  return (Math.imul(a, 0x9e3779b1) ^ Math.imul(b, 0x85ebca6b) ^ Math.imul(c, 0xc2b2ae35)) >>> (32 - GRAM_BITS);
+}
+
+/** Whether the pieces of `needle` (every one, or 48 spread over a long one, first and last included) are all in the text (false: it certainly isn't there). */
+function hasGrams(table: Uint8Array, needle: string): boolean {
+  const last = needle.length - GRAM;
+  if (last < 0) return true;
+  const step = last < 48 ? 1 : last / 47;
+  for (let at = 0; at <= last; at += step) {
+    const i = Math.floor(at);
+    if (table[gramHash(needle.charCodeAt(i), needle.charCodeAt(i + 1), needle.charCodeAt(i + 2))] !== 1) return false;
+  }
+  return table[gramHash(needle.charCodeAt(last), needle.charCodeAt(last + 1), needle.charCodeAt(last + 2))] === 1;
 }
 
 const sameChar = (seen: string | undefined, wanted: string | undefined): boolean => seen === wanted || (wanted === " " && seen === "+");
@@ -503,11 +576,13 @@ const sameChar = (seen: string | undefined, wanted: string | undefined): boolean
  * Every place a decoded view holds a value (all of it, when it is shorter than 12 characters) or a prefix of 12 or more of its
  * characters: the first 12 and as many more as the text goes on to match. The span is the original text of those characters.
  */
-function probeSpans(views: readonly View[], probe: Probe, out: Span[]): void {
+function probeSpans(views: readonly View[], probe: Probe, out: Span[], grams: ReadonlyArray<Uint8Array | null>): void {
   const { base, head, token } = probe;
-  const need = Math.min(PREFIX_MIN, base.length);
-  for (const view of views) {
+  const need = Math.min(safeHead(base, PREFIX_MIN).length, base.length);
+  for (const [v, view] of views.entries()) {
     if (view.text.length < need) continue;
+    const gate = grams[v];
+    if (gate !== null && gate !== undefined && probe.gate !== undefined && !hasGrams(gate, probe.gate)) continue;
     head.lastIndex = 0;
     for (let m = head.exec(view.text); m !== null; m = head.exec(view.text)) {
       const from = m.index;
@@ -528,11 +603,11 @@ const ENCODERS: ReadonlyArray<(text: string) => string> = [
   (s) => JSON.stringify(s).slice(1, -1),
   (s) => asciiJson(s),
   (s) => asciiJson(s).replace(/\\u([0-9a-f]{4})/g, (_m, h: string) => `\\u${h.toUpperCase()}`),
-  (s) => encodeURIComponent(s),
-  (s) => encodeURIComponent(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
-  (s) => encodeURIComponent(s).replace(/%20/g, "+"),
-  (s) => encodeURIComponent(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()).replace(/%20/g, "+"),
-  (s) => new URLSearchParams({ k: s }).toString().slice(2),
+  (s) => safeEncode(s),
+  (s) => safeEncode(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+  (s) => safeEncode(s).replace(/%20/g, "+"),
+  (s) => safeEncode(s).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()).replace(/%20/g, "+"),
+  (s) => new URLSearchParams({ k: wellFormed(s) }).toString().slice(2),
   (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"),
   (s) => [...s].map((c) => (/[a-zA-Z0-9]/.test(c) ? c : `&#${c.codePointAt(0)};`)).join(""),
   // a serializer that names the four markup characters and writes every other symbol as a number
@@ -656,26 +731,33 @@ function formSpans(views: readonly View[], index: FormIndex, out: Span[]): void 
 function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, field: string) => string = placeholderOf): (text: string) => string {
   const literals = new Map<string, string>();
   const patterns = new Map<string, string>();
+  // The raw text a pattern needs when the text holds no escape or invisible character: its first word (see `Grams`).
+  const needles = new Map<string, string>();
   const bases = new Map<string, string>();
   const formBases = new Map<string, string>();
   for (const [name, entry] of Object.entries(entries)) {
-    for (const [field, value] of Object.entries(entry.values)) {
+    // A value with a lone surrogate reaches the host from the app as U+FFFD (UTF-8 has no lone surrogate): both readings are scrubbed.
+    const readings = Object.entries(entry.values).flatMap(([field, raw]): Array<[string, string]> => (wellFormed(raw) === raw ? [[field, raw]] : [[field, raw], [field, wellFormed(raw)]]));
+    for (const [field, value] of readings) {
       if (value.length < MIN_SCRUB) continue;
       const token = tokenOf(name, field);
       for (const form of variantsOf(value)) if (!literals.has(form)) literals.set(form, token);
       const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
-      const addPattern = (source: string): void => {
-        if (!patterns.has(source)) patterns.set(source, token);
+      const addPattern = (source: string, base: string): void => {
+        if (patterns.has(source)) return;
+        patterns.set(source, token);
+        const word = base.split(/\s+/).find((piece) => piece !== "");
+        if (word !== undefined && word.length >= GRAM) needles.set(source, word);
       };
-      if (value.length <= 500) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(fuzzySource(base));
-      if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base));
+      if (value.length <= 500) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(fuzzySource(base), base);
+      if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base), base);
       // The value whole, and what an app's cut leaves of it (a prefix of 12 or more characters), in every layer of encoding.
       if (collapsed.length >= MIN_SCRUB && !bases.has(collapsed)) bases.set(collapsed, token);
       // The value's encoded forms are searched in the raw text itself, so decoding can never lose the literal reading.
       for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB && !formBases.has(base)) formBases.set(base, token);
     }
   }
-  const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token }));
+  const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token, needle: needles.get(source) }));
   const forms = [...literals];
   const probes = [...bases].map(([base, token]) => probeOf(base, token));
   const formIndex = formIndexOf(formBases);
@@ -683,14 +765,20 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
   return (text) => {
     if (text.length < MIN_SCRUB) return text;
     const spans: Span[] = [];
+    // A long text is indexed once by its 3-character pieces; a form or pattern whose own pieces are not all in the text can't match.
+    const grams = text.length >= GRAM_TEXT_MIN ? gramsOf(text) : null;
+    // With no escape, no invisible character and no markup character in the text, a pattern reads as its first word, raw.
+    const plain = grams !== null && !ESCAPE_HINT.test(text);
     for (const [form, token] of forms) {
+      if (grams !== null && !hasGrams(grams, form)) continue;
       let at = text.indexOf(form);
       while (at !== -1) {
         spans.push({ start: at, end: at + form.length, token });
         at = text.indexOf(form, at + 1);
       }
     }
-    for (const { re, token } of regexes) {
+    for (const { re, token, needle } of regexes) {
+      if (plain && needle !== undefined && grams !== null && !hasGrams(grams, needle)) continue;
       re.lastIndex = 0;
       for (const m of text.matchAll(re)) {
         const got = (m[1] as string).length;
@@ -700,7 +788,8 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
     if (probes.length > 0) {
       const raw = viewsOf(text);
       const views = raw.map(normalizedView);
-      for (const probe of probes) probeSpans(views, probe, spans);
+      const viewGrams = views.map((view) => (view.text === text ? grams : view.text.length >= GRAM_TEXT_MIN ? gramsOf(view.text) : null));
+      for (const probe of probes) probeSpans(views, probe, spans, viewGrams);
       formSpans(raw, formIndex, spans);
     }
     if (spans.length === 0) return text;
@@ -741,15 +830,15 @@ function normalizedEntries(file: AccountsFile | VaultFile): Record<string, Vault
         if (value !== undefined) values[field] = value;
       }
       const onlyPasscode = values["passcode"] !== undefined && values["username"] === undefined && values["password"] === undefined;
-      out[name] = { kind: onlyPasscode ? "phone" : "account", values, ...(account.apps !== undefined ? { apps: account.apps } : {}) };
+      out[name] = { kind: onlyPasscode ? "phone" : "account", values, ...(account.apps !== undefined ? { apps: account.apps } : {}), ...(account.explore === true ? { explore: true as const } : {}) };
     }
     return out;
   }
   for (const [name, entry] of Object.entries(file.vault)) {
-    const { kind, apps: appList, ...fields } = entry;
+    const { kind, apps: appList, explore: marked, ...fields } = entry;
     const values: Record<string, string> = {};
     for (const [field, value] of Object.entries(fields)) if (typeof value === "string") values[field] = value;
-    out[name] = { kind, values, ...(appList !== undefined ? { apps: appList } : {}) };
+    out[name] = { kind, values, ...(appList !== undefined ? { apps: appList } : {}), ...(marked === true ? { explore: true as const } : {}) };
   }
   return out;
 }
@@ -768,7 +857,7 @@ const ENTRIES_OF = new WeakMap<AccountStore, Record<string, VaultEntry>>();
  * ORIGINAL text in one pass and the spans are merged leftmost-longest, so a value two stores share a prefix, a suffix or a middle
  * of is never half-scrubbed by the other one. Each value keeps its own entry's placeholder.
  */
-export function combinedRedact(stores: readonly AccountStore[], codes?: { values: readonly string[]; token: string }): (text: string) => string {
+export function combinedRedact(stores: readonly AccountStore[], codes?: { values: readonly string[]; token: string }, typed?: { values: readonly string[]; token: string }): (text: string) => string {
   const union: Record<string, VaultEntry> = {};
   stores.forEach((store, i) => {
     const entries = ENTRIES_OF.get(store);
@@ -780,10 +869,26 @@ export function combinedRedact(stores: readonly AccountStore[], codes?: { values
   codes?.values.forEach((value, i) => {
     union[`${CODE_KEY}${i}`] = { kind: "note", values: { text: value } };
   });
-  return scrubber(union, (key, field) => (codes !== undefined && key.startsWith(CODE_KEY) ? codes.token : placeholderOf(key.slice(key.indexOf("\u0000") + 1), field)));
+  // The texts a run typed are sources of the same matcher too, each shown as the typed placeholder: a typed `jane` and a vault
+  // `jane.quill@example.test` are matched against the same original text, so the longer complete match wins.
+  typed?.values.forEach((value, i) => {
+    union[`${TYPED_KEY}${i}`] = { kind: "note", values: { text: value } };
+  });
+  return scrubber(union, (key, field) => {
+    if (codes !== undefined && key.startsWith(CODE_KEY)) return codes.token;
+    if (typed !== undefined && key.startsWith(TYPED_KEY)) return typed.token;
+    return placeholderOf(key.slice(key.indexOf("\u0000") + 1), field);
+  });
 }
 
 const CODE_KEY = "otp\u0001";
+const TYPED_KEY = "typed\u0001";
+
+/** The plain texts a run (an explore, a replay with its repairs) has typed, and their placeholder. `values` is a new array whenever one is added. */
+export interface TypedSource {
+  readonly values: readonly string[];
+  readonly token: string;
+}
 
 /** The registered one-time codes, as the one matcher needs them: the codes (the same array until one is added) and their placeholder. */
 export interface CodeSource {
@@ -820,7 +925,8 @@ const SHARED = new WeakMap<AccountStore, { bases: readonly AccountStore[]; codes
  * text, never one scrubber after another: where a code and a vault value overlap, the longer complete match wins. The matcher is
  * cached until a code is registered or the vault's stores change.
  */
-export function redactAll(store: AccountStore | null | undefined, codes: CodeSource, text: string): string {
+export function redactAll(store: AccountStore | null | undefined, codes: CodeSource, text: string, typed?: TypedSource | null): string {
+  if (typed !== null && typed !== undefined && typed.values.length > 0) return redactWithTyped(store, codes, typed, text);
   if (store === null || store === undefined) return codes.redact(text);
   const values = codes.values();
   if (values.length === 0) return store.redact(text);
@@ -833,6 +939,31 @@ export function redactAll(store: AccountStore | null | undefined, codes: CodeSou
   return redact(text);
 }
 
+/** The host's ingress scrubber: the live store, the session's codes and (given by the host per call) the active run's typed texts. */
+export function ingressRedactor(store: () => AccountStore | null | undefined, codes: CodeSource): (text: string, typed: TypedSource) => string {
+  return (text, typed) => redactAll(store(), codes, text, typed);
+}
+
+const NO_STORE: object = {};
+const SHARED_TYPED = new WeakMap<object, { bases: readonly AccountStore[]; codes: readonly string[]; typed: readonly string[]; redact: (text: string) => string }>();
+
+/** `redactAll` with the run's typed texts as one more source of the same matcher (cached until a text is typed, a code registers or the stores change). */
+function redactWithTyped(store: AccountStore | null | undefined, codes: CodeSource, typed: TypedSource, text: string): string {
+  const bases = store === null || store === undefined ? [] : (BASES_OF.get(store)?.() ?? [store]);
+  if (bases.some((base) => ENTRIES_OF.get(base) === undefined)) {
+    // A store this module did not make (no entries to merge): the typed texts go last, as the best that can be done.
+    const rest = store === null || store === undefined ? codes.redact(text) : codes.redact(store.redact(text));
+    return looseScrubber(typed.values, typed.token)(rest);
+  }
+  const key: object = store ?? NO_STORE;
+  const values = codes.values();
+  const hit = SHARED_TYPED.get(key);
+  if (hit !== undefined && hit.typed === typed.values && hit.codes === values && hit.bases.length === bases.length && hit.bases.every((base, i) => base === bases[i])) return hit.redact(text);
+  const redact = combinedRedact(bases, values.length === 0 ? undefined : { values, token: codes.token }, { values: typed.values, token: typed.token });
+  SHARED_TYPED.set(key, { bases: [...bases], codes: values, typed: typed.values, redact });
+  return redact(text);
+}
+
 function storeOf(entries: Record<string, VaultEntry>): AccountStore {
   const scrub = scrubber(entries);
   const names = Object.keys(entries);
@@ -842,6 +973,7 @@ function storeOf(entries: Record<string, VaultEntry>): AccountStore {
   const store: AccountStore = {
     names: () => [...names],
     kindOf: (name) => has(entries, name)?.kind,
+    exploreMarked: (name) => has(entries, name)?.explore === true,
     redact: scrub,
     resolve(name, field, appId) {
       const entry = has(entries, name);
@@ -963,20 +1095,35 @@ export function redactValue(value: unknown, redact: (text: string) => string): u
  * The backstop at a writer of files (§20.3): scrubs the content values of a JSON value, never its keys, so a script keeps
  * its tool names and its `${vault.home.street}` placeholders.
  */
-export function redactContent(value: unknown, redact: (text: string) => string): unknown {
+export function redactContent(value: unknown, redact: (text: string) => string, isSyntax: (piece: string) => boolean = isPlaceholder): unknown {
   if (typeof value === "string") {
-    // `${…}` is syntax (a placeholder, a variable): only the text between is content.
+    // `${…}` is syntax (a placeholder, a variable): only the text between is content. `isSyntax` says which pieces are kept as they are.
     return value
       .split(/(\$\{[^}]*\})/)
-      .map((piece) => (piece.startsWith("${") && piece.endsWith("}") ? piece : redact(piece)))
+      .map((piece) => (piece.startsWith("${") && piece.endsWith("}") && isSyntax(piece) ? piece : redact(piece)))
       .join("");
   }
-  if (Array.isArray(value)) return value.map((item) => redactContent(item, redact));
+  if (Array.isArray(value)) return value.map((item) => redactContent(item, redact, isSyntax));
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactContent(item, redact)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactContent(item, redact, isSyntax)]));
   }
   return value;
 }
+
+/**
+ * Like `redactContent`, but every string reaches the redactor WHOLE: a secret that crosses a `${…}`-shaped span is still matched.
+ * A string is kept untouched only when `keep` says the tool itself generated it (the whole value, never a shape inside text).
+ */
+export function redactWhole(value: unknown, redact: (text: string) => string, keep: (text: string) => boolean): unknown {
+  if (typeof value === "string") return keep(value) ? value : redact(value);
+  if (Array.isArray(value)) return value.map((item) => redactWhole(item, redact, keep));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactWhole(item, redact, keep)]));
+  }
+  return value;
+}
+
+const isPlaceholder = (): boolean => true;
 
 /** Keys whose values are the tool's own words (a tool or method name, a time, a format), never a typed or shown value. */
 const CONTENT_FREE = new Set(["t", "tool", "source", "method", "format", "version", "kind", "app", "name", "start", "end", "route", "variables"]);

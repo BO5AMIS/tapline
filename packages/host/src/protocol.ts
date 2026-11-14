@@ -121,6 +121,10 @@ export const elementSchema = z.object({
   row: z.boolean().nullish(),
   /** Text the app marked as written by other people (AGENT-TOOLS 1.14 §21.1). Absent: nothing is claimed either way. */
   fromOthers: z.boolean().nullish(),
+  /** The app marked it never to be touched by the explorer (`taplineExploreSkip`, AGENT-TOOLS 1.15 §28.4). Read when the SDK sends it. */
+  exploreSkip: z.boolean().nullish(),
+  /** An input the app marks as safe for tests (`taplineExploreFill`, §28.4): `true`, `"vault:<entry>.<field>"` or `"fixture:<name>"`. */
+  exploreFill: z.union([z.boolean(), z.string()]).nullish(),
 });
 export type TreeElement = z.infer<typeof elementSchema>;
 
@@ -237,8 +241,10 @@ export const logEntrySchema = z.object({
   /** On a fatal error: the error type, and React's component stack when the SDK had one. */
   name: z.string().optional(),
   componentStack: z.string().optional(),
+  /** Set by the host when it stores the line: a number that only grows over the host's lifetime, also across a replaced session. */
+  seq: z.number().optional(),
 });
-export type LogEntry = z.infer<typeof logEntrySchema>;
+export type LogEntry =z.infer<typeof logEntrySchema>;
 
 /** The `crash` event: a fatal JS error the SDK kept on the phone and sends after it connects again. */
 export const crashEventSchema = z.object({

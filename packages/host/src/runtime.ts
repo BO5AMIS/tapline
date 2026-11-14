@@ -16,7 +16,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
-import { historyStore, loadAccounts, redactAll, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
+import { historyStore, ingressRedactor, loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
 import { bounded, ScheduleTimeout, VAULT_LOAD_TIMEOUT_MS } from "./runschedule.js";
 import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
@@ -221,7 +221,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   let currentRaw: AccountsLoad | undefined = accounts;
   const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts: accounts === undefined ? undefined : withHistory(accounts) };
   const host = new TaplineHost({
-    redact: (text: string) => redactAll(live.accounts?.store, otp.codes, text),
+    redact: ingressRedactor(() => live.accounts?.store, otp.codes),
     redactsVault: accounts?.store != null,
     token: config.token,
     port: config.port,
@@ -327,6 +327,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     baselinesDir: join(configDir(options.env), "baselines"),
     // Journey reports (AGENT-TOOLS 1.12 §17.5) and the user's own gh and git for `export`
     journeysDir: join(configDir(options.env), "journeys"),
+    // `explore` reports (AGENT-TOOLS 1.15 §25.10): one folder per run, the newest 20 of an app kept
+    exploreDir: join(configDir(options.env), "explore"),
     exportRunner: realRunner,
     // The action log (AGENT-TOOLS 1.8 §12), unless --no-log
     ...(options.noLog === true ? {} : { logDir: join(configDir(options.env), "log") }),

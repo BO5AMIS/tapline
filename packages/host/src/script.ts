@@ -58,6 +58,8 @@ export interface MethodStep {
   params: Record<string, unknown>;
   /** Tapline: the screen's route when the step was recorded, checked on replay (a step field, not a parameter). */
   route?: string[];
+  /** The place where the step ran (AGENT-TOOLS 1.15 §26.6), a step field and not a parameter. */
+  place?: string;
 }
 
 const TOOL_OF: Record<string, string> = {
@@ -111,7 +113,7 @@ export function toToolStep(step: MethodStep): Step | null {
     params["id"] = params["testID"];
     delete params["testID"];
   }
-  return { tool, ...params, ...(step.route !== undefined && step.route.length > 0 ? { route: step.route } : {}) } as Step;
+  return { tool, ...params, ...(step.route !== undefined && step.route.length > 0 ? { route: step.route } : {}), ...(step.place !== undefined && step.place !== "" ? { place: step.place } : {}) } as Step;
 }
 
 /**
@@ -201,6 +203,20 @@ export function failureWithDiff(failure: string): string {
   const note = lines.map((line) => /^Note: the difference is saved at (.+)\.$/.exec(line)).find((m) => m !== null && m !== undefined);
   if (note === null || note === undefined) return failure;
   lines[0] = `${lines[0] ?? ""} (diff: ${note[1] ?? ""})`;
+  return lines.join("\n");
+}
+
+/**
+ * A failed replay's failure text for JUnit with a repair suggestion (AGENT-TOOLS 1.15 §26.5): the failure message (the first line)
+ * ends with the suggestion's lines, so a CI report shows what to change without opening the log.
+ */
+export function failureWithRepair(failure: string): string {
+  const lines = failure.split("\n");
+  const at = lines.findIndex((line) => /^Repair \(suggest/.test(line));
+  if (at < 0) return failure;
+  const end = lines.findIndex((line, i) => i > at && (/^To check it:/.test(line) || /^Finding/.test(line)));
+  const piece = lines.slice(at, end < 0 ? lines.length : end).map((line) => line.trim()).filter((line) => line !== "").join(" ");
+  lines[0] = `${lines[0] ?? ""} [${piece}]`;
   return lines.join("\n");
 }
 

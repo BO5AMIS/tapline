@@ -82,6 +82,10 @@ export interface TaplineElement {
   row?: true;
   /** Inside a view the app marked as text other people wrote (AGENT-TOOLS 1.14 §21.1); absent otherwise, never `false`. */
   fromOthers?: true;
+  /** The app marked this element, or a view around it, `taplineExploreSkip` (AGENT-TOOLS 1.15 §25.5); absent otherwise, never `false`. */
+  exploreSkip?: true;
+  /** The app marked this input for the explorer to fill: `true`, `"vault:<entry>.<field>"` or `"fixture:<name>"` (§25.6). */
+  exploreFill?: true | `vault:${string}` | `fixture:${string}`;
 }
 
 export interface ScreenInfo {

@@ -48,6 +48,7 @@ const HANDLERS: Handlers = {
   session_report: (tools, args) => tools.sessionReport(args),
   map: (tools, args) => tools.map(args),
   drive: (tools, args) => tools.drive(args),
+  explore: (tools, args) => tools.explore(args),
 };
 
 export interface ToolMeta {
@@ -93,6 +94,8 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   map: { title: "The app's map", readOnly: false },
   // It moves the app along roads the map knows, with the policy checked before every move.
   drive: { title: "Drive to a place", readOnly: false },
+  // It drives the app by itself: every move is an ordinary action, and it never touches what the safety floor covers.
+  explore: { title: "Explore the app", readOnly: false },
 };
 
 export function isToolName(name: string): name is ToolName {

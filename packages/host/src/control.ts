@@ -34,6 +34,8 @@ export class ControlQueue {
   private reported: Driver = null;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private isPaused = false;
+  /** Milliseconds agent actions spent waiting for a person to be quiet, in all (`explore` does not count them toward its minutes). */
+  private waitedTotal = 0;
   private readonly listeners = new Set<() => void>();
 
   constructor(options: ControlOptions = {}) {
@@ -51,6 +53,11 @@ export class ControlQueue {
 
   paused(): boolean {
     return this.isPaused;
+  }
+
+  /** The time agent actions have waited for a person so far (it only grows). */
+  waitedMs(): number {
+    return this.waitedTotal;
   }
 
   setPaused(on: boolean): void {
@@ -91,19 +98,27 @@ export class ControlQueue {
     });
   }
 
-  /** An agent action: refused while paused; waits for the person to be idle; then runs in turn. */
-  async runAgent<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.isPaused) throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");
+  /**
+   * An agent action: refused while paused; waits for the person to be idle; then runs in turn. `ignorePause` is for the second half of a
+   * move that must not be split (the explorer's flip back of a toggle, AGENT-TOOLS 1.15 §25.7): a pause doesn't refuse it, a person's input still goes first.
+   */
+  async runAgent<T>(fn: () => Promise<T>, options: { ignorePause?: boolean } = {}): Promise<T> {
+    const ignorePause = options.ignorePause === true;
+    if (this.isPaused && !ignorePause) throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");
     const started = this.now();
-    while (this.now() - this.lastPersonAt < this.idleMs) {
-      if (this.now() - started >= this.giveUpMs) {
-        throw new TaplineError(
-          "busy",
-          "A person is using the app in the live viewer. Try again when they stop, or ask them.",
-        );
+    try {
+      while (this.now() - this.lastPersonAt < this.idleMs) {
+        if (this.now() - started >= this.giveUpMs) {
+          throw new TaplineError(
+            "busy",
+            "A person is using the app in the live viewer. Try again when they stop, or ask them.",
+          );
+        }
+        await this.sleep(POLL_MS);
+        if (this.isPaused && !ignorePause) throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");
       }
-      await this.sleep(POLL_MS);
-      if (this.isPaused) throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");
+    } finally {
+      this.waitedTotal += this.now() - started;
     }
     return this.serial(async () => {
       this.running = "agent";

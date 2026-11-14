@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { HOST_VERSION } from "./version.js";
 import { TOOL_META, runTool, type ToolName } from "./dispatch.js";
 import { DIALOG_TTL_MS, Dialogs, type ElicitClient } from "./elicit.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
@@ -59,9 +60,25 @@ export function elicitClientFor(server: McpServer): ElicitClient {
   };
 }
 
+/** What the SDK hands a tool handler: the abort signal, the request's progress token and the way to send a notification. */
+interface ToolExtra {
+  signal: AbortSignal;
+  _meta?: { progressToken?: string | number } | undefined;
+  sendNotification: (notification: { method: "notifications/progress"; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void>;
+}
+
+/** AGENT-TOOLS 1.15 §25.2: while `explore` runs it says where it is, once every 10 steps, in an MCP progress notification when the client gave a progress token. */
+function progressOf(extra: ToolExtra): ((line: string, steps: number) => void) | undefined {
+  const token = extra._meta?.progressToken;
+  if (token === undefined) return undefined;
+  return (message, steps) => {
+    void extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: steps, message } }).catch(() => undefined);
+  };
+}
+
 /** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. `noDialog` is `--no-dialog`. */
 export function createMcpServer(tools: TaplineTools, options: { noDialog?: boolean } = {}): McpServer {
-  const server = new McpServer({ name: "tapline", version: "1.7.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "tapline", version: HOST_VERSION }, { instructions: INSTRUCTIONS });
 
   for (const name of Object.keys(TOOL_META) as ToolName[]) {
     const meta = TOOL_META[name];
@@ -74,7 +91,7 @@ export function createMcpServer(tools: TaplineTools, options: { noDialog?: boole
         ...(meta.readOnly ? { annotations: { readOnlyHint: true } } : {}),
       },
       // The request's abort signal closes a dialog the call is waiting on when the client cancels or times out.
-      (args: Record<string, unknown>, extra: { signal: AbortSignal }) => tools.withCall(extra.signal, () => runTool(tools, name, args)),
+      (args: Record<string, unknown>, extra: ToolExtra) => tools.withCall(extra.signal, () => runTool(tools, name, args), undefined, progressOf(extra)),
     );
   }
 

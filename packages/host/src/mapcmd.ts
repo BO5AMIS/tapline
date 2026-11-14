@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { coverageLine } from "./explored.js";
 import { readRouteSync, type MapReflex, type MapRoad } from "./mapfile.js";
 import { declaredLink, placeNameFromRoute, samePlace, type AppMap, type KnownPlaces, type Place } from "./places.js";
 import { asWords, decodeComplete, decodePath, linkReadable, linkWords, matchWord } from "./policy.js";
@@ -195,7 +196,15 @@ async function listing(ctx: MapContext): Promise<MapAnswer> {
     `${plural(reflexes.length, "reflex", "reflexes")}. Now at: ${here?.name ?? "unknown"}.`;
   const lines = [head];
   if (places.length > 0) lines.push(`Places: ${capped(places.map(([name, place]) => withLink(name, place.link))).join(", ")}`);
-  const up = notVisited(map, await ctx.known());
+  const known = await ctx.known();
+  // After the Places line, and only when some place has an explored record (§28.3).
+  const coverage = coverageLine(
+    places.map(([, place]) => place.explored),
+    map.currentBuild(),
+    known.places.length > 0 ? notVisited(map, known).length : null,
+  );
+  if (coverage !== null) lines.push(coverage);
+  const up = notVisited(map, known);
   if (up.length > 0) lines.push(`Known up front, not visited: ${capped(up).join(", ")}.`);
   if (routes.length > 0) lines.push(`Routes: ${capped(routes.map(([name, relative]) => routeLine(map, name, relative))).join(", ")}`);
   if (reflexes.length > 0) lines.push(`Reflexes: ${capped(reflexes.map((reflex) => reflex.name)).join(", ")}.`);

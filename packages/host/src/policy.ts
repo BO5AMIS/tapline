@@ -31,6 +31,9 @@ export const policySchema = z.object({
   confirm: z.array(z.string()).optional(),
   block: z.array(z.string()).optional(),
   apps: z.record(z.string(), listsSchema).optional(),
+  // AGENT-TOOLS 1.15 §25.5, §25.7: `{"skip": [words], "submit": [ids]}` for `explore`. Read forgivingly by explorefloor.ts; a key of
+  // another shape never makes the file unreadable.
+  explore: z.unknown().optional(),
 });
 export type PolicyFile = z.infer<typeof policySchema>;
 export interface Lists {

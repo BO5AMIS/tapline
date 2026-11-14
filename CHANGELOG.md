@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.8.0, "the Explorer Update" (2026-11-14)
+
+Tapline can now search an app by itself and mend its own saved tests, as AGENT-TOOLS 1.15 (agreed with Tapwright, sha256
+19dbc8b3) defines them. The search needs no model: an agent pays for one call, and CI can run the same thing from the
+command line.
+
+- **`explore` (§25, §27).**
+  - A breadth-first search over the screens and actions nobody has driven yet. It saves new places and roads to the map and
+    ends back where it started. The same build, start and map explore the same places in the same order.
+  - Every move is an ordinary action with the usual checks and action log. It skips a control whose label, text or id
+    words match the floor words (spends, sends, posts, deletes, signs out), a password, card or security field, a place about
+    the account or privacy, the policy's lists, or anything the app marked; it can't tell what a control with a neutral label
+    does, so those need `taplineExploreSkip`. No grant covers it, and it never answers a system alert.
+  - `fill: "test-data"` types fake values only into fields the app marks as safe. A toggle it flips is flipped back, and
+    a toggle it can't restore stops the run.
+  - The report is `report.md` and `report.json` in `~/.tapline/explore/<app id>/<time>/` (the newest 20 are kept), with
+    coverage, what was skipped and why, and the findings. A finding is one shape: crash, JS error, dead end, refused touch,
+    slow screen, accessibility or UX problem, or a place that couldn't be reached. Each has its path, a small picture where
+    it helps and a script that repeats it. Nothing typed or secret is written; a vault value never appears.
+  - `tapline explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue]
+    [--account NAME]`: exit 0 nothing found and the run ended normally, 1 findings or a run that ended in trouble (a crash, a toggle that couldn't be restored, no way back, the app closed), 2 couldn't start or a person or a pause stopped it. The MCP tool sends a progress
+    note every 10 steps.
+- **Self-repairing tests (§26).**
+  - `replay` with `repair: "suggest"` (or `tapline replay <name> --repair suggest`) says how a step that no longer finds its
+    target would be mended without trying any repair; the steps before the break still run, as in an ordinary replay. `apply` makes the repair, runs on, and writes `<name>.repaired.json` and
+    `<name>.repair.md` next to the script; the original stays as it is. Every repair is written to the audit log.
+  - A repair is made only for a renamed or moved target, a screen in the way, or an element behind a scroll, with at most 3
+    candidates tried and 5 repairs per run. A near tie is not repaired.
+  - `tapline replay <name> --repair apply --adopt` replaces the original with the repaired file after a repaired run passed,
+    and keeps the first original as `<name>.orig.json`. It is a person's choice: the tool call has no `adopt`.
+  - Never repaired: a failed `expect`, which is reported as a finding, typed text, a sign-in, a one-time code, a toggle of
+    another kind, a native Back, a step under a policy word, and any tool other than a touch or a scroll.
+- **The explored record and coverage (§28).** The map keeps what the explorer did at each place (tried, refused, skipped, what
+  is left), merged by action signature, with no row text and no typed text. `map` gains a `Coverage:` line.
+- **SDK props.** `taplineExploreSkip` keeps the explorer from a view and everything inside it; `taplineExploreFill` marks an
+  input it may type into (`true`, `"vault:<entry>.<field>"` or `"fixture:<name>"`). Both are in the tree sent to the host,
+  inherited down the tree, and typed as `TaplineExploreProps`. The id suffix `-test-safe` marks an input as well.
+- **Known limits.**
+  - Repair scores only the id stem and the words, because a saved script keeps only the target (no role, position or
+    component of the old element), so a rename like `Skip` to `Not now` is not repaired.
+  - A `fixture:<name>` mark is read but not typed yet.
+  - During an explore, nothing types but the explorer's own `fill`. A reset that needs to sign back in is refused, and
+    that branch ends with its reason.
+  - A toggle step is repaired only where an explore has recorded the toggle's role. Maps explored before 1.8 need a new
+    explore first.
+  - A successful `apply` runs the script twice: once to repair it, and once as written before anything is saved.
+  - `explore` can't be scheduled, and it does not answer a system alert or reopen the app after a crash: a person does.
+  - Nothing here has run on a real phone yet; the tests use a fake app and a fake host.
+  - The host reads its own version from its package.json, so findings and reports carry it.
+
 ## 1.7.0, "the Control Update" (2026-11-14)
 
 Standing permissions, personal data by name, safety for text written by strangers, scheduled runs, and a record of

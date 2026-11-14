@@ -1,5 +1,6 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
@@ -10,9 +11,10 @@ import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, Viewe
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
 import { briefLines, briefScreen } from "./brief.js";
-import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
+import type { MapRoad } from "./mapfile.js";
+import { LINK_NOT_SAVED, classifyMove, placeBefore, placeNameFromRoute, placeNow, placeSeen, type AppMap, type MapRegistry, type Place, type PlaceSource } from "./places.js";
 import { NO_CHANGE_WATCH_MS, noChangeClause, noChangeNote, readPressFacts, saysNoVisibleChange, secondTapSentence, saysRequestsRunning, threwText, type NoChangeAction } from "./nochange.js";
-import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, offScreenLine, roleOf } from "./format.js";
+import { alertNotes, alertSignature, changeParts, networkLine, describeElement, filterLogs, formatElement, formatLogAnswer, formatLogs, formatOffScreenAfterList, formatStatus, formatTree, logLevelOf, offScreenLine, roleOf } from "./format.js";
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
@@ -21,8 +23,8 @@ import { reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
-import { driveArgsError, driveQuietly, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type VaultUse } from "./accounts.js";
+import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -56,7 +58,14 @@ import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, l
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
-import { caseTwin, readScript, refStep, scriptSteps, type SharedScript } from "./script.js";
+import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
+import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
+import { namedTarget } from "./signature.js";
+import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
+import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
+import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
+import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
+import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
 import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -319,6 +328,12 @@ export const toolShapes = {
   replay: {
     name: z.string().optional().describe("A saved script's name; omit name and path to list saved scripts"),
     path: z.string().optional().describe("A script file to replay (the shared agent-tools-script format)"),
+    repair: z
+      .enum(["suggest", "apply"])
+      .optional()
+      .describe(
+        "Self-repair (AGENT-TOOLS 1.15 §26). suggest: replay as usual and, at the first break that may be repaired, rank the candidates without touching any; writes nothing. apply: replay and repair as it goes (a real run); on a full pass it writes <script>.repaired.json and <script>.repair.md beside the original and never overwrites it. A person adopts a repaired script on the command line only.",
+      ),
     look: lookField,
     screenshot: screenshotField,
   },
@@ -375,6 +390,17 @@ export const toolShapes = {
     look: lookField,
     brief: briefField,
     dry_run: dryRunField,
+  },
+  explore: {
+    minutes: z.number().optional().describe("Time budget in minutes, 1 to 60 (default 10); time spent waiting for a person does not count"),
+    steps: z.number().optional().describe("Budget of moves, 1 to 5000 (default 500): each touch, scroll, back and reset"),
+    depth: z.number().optional().describe("How many places deep from the start it expands, 1 to 20 (default 8); a deeper place is saved, not expanded"),
+    from: z.string().optional().describe("A place's name to start at; the tool drives there first (default: where the app is)"),
+    focus: z.string().optional().describe("A place's name: it expands only places below it (default: the whole app)"),
+    fill: z.enum(["none", "test-data"]).optional().describe("\"none\" (default) types nothing; \"test-data\" types only into fields the app marks as safe for tests"),
+    continue: z.boolean().optional().describe("Go on after a crash, when the app can be opened again (default false: stop at the first crash)"),
+    account: z.string().optional().describe("A vault account marked \"explore\": true in the vault file, for the way back after a reset"),
+    guide: z.string().optional().describe("Reserved; only \"none\" is offered in this version"),
   },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
@@ -662,6 +688,12 @@ export interface ToolsOptions {
   exportRunner?: Runner;
   /** Cap for the journey GIF in bytes (tests lower it; default 3 MB). */
   gifMaxBytes?: number;
+  /** Where `explore` keeps its report folders (e.g. ~/.tapline/explore): `<app id>/<UTC time>/` (AGENT-TOOLS 1.15 §25.10). Unset: explore answers that it can't keep a report. */
+  exploreDir?: string;
+  /** Wall-clock time in ms for the times in a finding and a report (tests pass their own). Default: Date.now. */
+  wallClock?: () => number;
+  /** How long `explore` waits for the app to be in front or connected again (a crash with `continue`, a move that left the app). Default 60 000 ms. */
+  exploreGraceMs?: number;
 }
 
 /**
@@ -694,6 +726,8 @@ interface ScriptStep {
   method: string;
   params: Record<string, unknown>;
   route?: string[];
+  /** The name of the place where the step ran, when the host has a map (AGENT-TOOLS 1.15 §26.6). */
+  place?: string;
   fragile?: boolean;
   /** Typed into a password field: its text wasn't saved (never written to the file). */
   secret?: boolean;
@@ -733,10 +767,9 @@ function stableParams(params: unknown, result: unknown): { params: Record<string
       ? elementSchema.safeParse((result as { element: unknown }).element)
       : null;
   if (element?.success) {
-    const { testID, label, text: shown } = element.data;
-    if (typeof testID === "string" && testID !== "") copy["target"] = { testID };
-    else if (typeof label === "string" && label !== "") copy["target"] = { label };
-    else if (typeof shown === "string" && shown !== "") copy["target"] = { text: shown };
+    // The same choice the explorer's action signature makes (§25.3): id, else label, else text.
+    const named = namedTarget(element.data);
+    if (named !== null) copy["target"] = named;
   }
   const kept = copy["target"];
   const fragile = typeof kept === "object" && kept !== null && "ref" in kept;
@@ -1163,7 +1196,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive", explore: "explore",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
@@ -1261,6 +1294,39 @@ export const GRANT_OFFER_PER_DAY = 3;
 export const GRANT_OFFER_DAYS = 7;
 
 /** The tool handlers behind the MCP server. They only talk to a TaplineHost, so they are easy to test. */
+/**
+ * What one explore run holds for every request any of its moves sends (§25.5): the budget counts each one, and every text it types
+ * is known for redaction. Shared by all the moves of the run, so a route, a drive leg, a recovery or a reset cannot step outside it.
+ */
+interface ExploreRun {
+  /** Requests that reached the app and answered, for the steps budget. */
+  used: number;
+  steps: number;
+  minutes: number;
+  startedAt: number;
+  waited0: number;
+  /** Every value the run typed, scrubbed from everything it writes (the same forms and minimum length as a vault value). */
+  typed: string[];
+  /** The host-level registration of `typed` (the ingress scrubber knows each text from the moment it is typed, until the run ends). */
+  ingress?: { add(value: string): void; end(): void };
+}
+
+/** The scope of one move of an explore run. */
+interface ExploreScope {
+  count: number;
+  last?: { method: string; result: unknown };
+  restoring?: boolean;
+  run: ExploreRun;
+  /** This move is the explorer's own `type`, and one typing request may go (explore types nowhere else: no route, no drive leg). */
+  mayType?: boolean;
+}
+
+/** Requests that only read: they cost no step and are never held back by the explore gate. */
+/** Requests that touch the app: each is made from an unprotected place (and a scroll at an unskipped view). */
+const EXPLORE_TOUCHES: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "type", "scroll", "swipe"]);
+
+const EXPLORE_READS: ReadonlySet<string> = new Set(["tree", "place", "places", "logs", "commands", "audit", "uxCheck", "screenshot", "overlay", "waitFor", "inspect", "check", "feed", "perfSettle", "perfStart", "perfStop"]);
+
 export class TaplineTools {
   private readonly reloadWaitMs: number;
   /** The action log (§12), when one is configured. */
@@ -1310,7 +1376,9 @@ export class TaplineTools {
   readonly confirmations: Confirmations;
   private dialogs: Dialogs | undefined;
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
-  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string }>();
+  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string; progress?: (line: string, steps: number) => void }>();
+  /** Set around every move and read `explore` makes (AGENT-TOOLS 1.15 §25.5): the touch check never asks and no grant is looked at; counts the requests it made. */
+  private readonly exploreScope = new AsyncLocalStorage<ExploreScope>();
   /** Read at each use: a host that reloads its policy (a scheduled run asks for its facts) hands every client the new one. */
   private get policy(): PolicyFile {
     return this.options.policy ?? DEFAULT_POLICY;
@@ -1391,7 +1459,7 @@ export class TaplineTools {
    * While a script replays (AGENT-TOOLS 1.9 §14.3): the references folder next to it (looked in first), where a
    * failed check puts its red picture, and whether the checks save instead of compare (`--update-references`).
    */
-  private replayContext: { referencesDir: string; diffDir: string; update: boolean } | null = null;
+  private replayContext: { referencesDir: string; diffDir: string; update: boolean; gateRepaired: boolean } | null = null;
   /** Where the latest failed check of the running batch saved its picture. */
   private diffSaved: string | null = null;
   /** What the last `performance` call measured, for the `under` limits of a `run` step. */
@@ -1699,7 +1767,9 @@ export class TaplineTools {
    */
   private agentTurn<T>(run: () => Promise<T>): Promise<T> {
     const control = this.options.control;
-    const go = control !== undefined ? () => control.runAgent(run) : run;
+    // The flip back of an explorer's toggle is one move with the flip: a pause between them doesn't refuse it (§25.7).
+    const restoring = this.exploreScope.getStore()?.restoring === true;
+    const go = control !== undefined ? () => control.runAgent(run, restoring ? { ignorePause: true } : {}) : run;
     return this.leaseGate(go);
   }
 
@@ -1724,7 +1794,137 @@ export class TaplineTools {
     } catch (error) {
       return Promise.reject(error);
     }
-    return this.host.request(...args);
+    // Inside an explore run every request that is not a read is held to the run's rules, whoever sent it: the explorer's own move,
+    // a saved route's step, a drive leg, a recovery or a reset (§25.5). Nothing can reach the app around this one gate.
+    const scope = this.exploreScope.getStore();
+    const [method, params, options] = args;
+    const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
+    if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) return this.host.request(...args);
+    return this.exploreSend(scope, args);
+  }
+
+  /** The explore gate: the budget, then the typing rules; counts the request it lets through. */
+  private async exploreSend(scope: ExploreScope, args: Parameters<TaplineHost["request"]>): Promise<unknown> {
+    const [method, rawParams, options] = args;
+    const run = scope.run;
+    // The flip back of a toggle is one move with the flip (§25.7): the budget never splits them.
+    const budget = scope.restoring === true ? null : this.exploreBudget(run);
+    if (budget !== null) throw new TaplineError("not_allowed", `explore's ${budget} budget is used up, so nothing more is sent (explore budget: ${budget}).`);
+    // A pipelined move carries the request it makes inside it.
+    const inner = method === "move" && typeof rawParams === "object" && rawParams !== null ? (rawParams as { method?: unknown }).method : method;
+    let params = rawParams;
+    // Every touch (a press, a scroll, typing, a swipe) is made from a place that is not protected, and a scroll aims at a view that is not skipped.
+    if (typeof inner === "string" && EXPLORE_TOUCHES.has(inner)) await this.exploreTouchGate(inner, method, rawParams, options?.sessionId);
+    if (inner === "type") {
+      if (method !== "type") throw new TaplineError("not_allowed", "explore types only through its own fill, never inside a drive (explore skip: policy).");
+      params = await this.exploreTyping(scope, rawParams, options?.sessionId);
+    }
+    run.used += 1;
+    return this.host.request(method, params, options);
+  }
+
+  /**
+   * The floor on where a touch is made and what a scroll moves (§25.5), for every request that goes through the gate: the place the app
+   * stands on (its stored or person-given name, its route and the live title of the screen) must not be an account, privacy or security
+   * place, and a scroll's recipient (the scroll view itself, inherited skip marks included) must pass the whole floor. `back`, links,
+   * reloads and commands are not touches: the way out of such a place is always open.
+   */
+  private async exploreTouchGate(inner: string, method: string, rawParams: unknown, sessionId: string | undefined): Promise<void> {
+    const session = (sessionId !== undefined ? this.host.sessions().find((s) => s.id === sessionId) : undefined) ?? this.host.current();
+    if (session === undefined) return;
+    let raw: unknown;
+    try {
+      raw = await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true });
+    } catch {
+      throw new TaplineError("not_allowed", "explore can't tell which place the app is on, so it touches nothing (explore skip: floor).");
+    }
+    const read = treeResultSchema.safeParse(raw);
+    if (!read.success) throw new TaplineError("not_allowed", "explore can't read the screen it would touch (explore skip: floor).");
+    const tree = read.data;
+    const map = this.mapOf(session);
+    const named = map === undefined ? null : await placeSeen({ capabilities: [], latest: () => undefined, request: async () => raw }, map);
+    const route = [...(tree.place?.route ?? []), ...(tree.route?.names ?? [])];
+    const word = protectedPlaceWord(named ?? "", route, screenTitles(tree.elements));
+    if (word !== null) throw new TaplineError("not_allowed", `explore touches nothing on a protected place (policy word ${JSON.stringify(word)}) (explore skip: floor).`);
+    if (inner !== "scroll") return;
+    const params = method === "move" && typeof rawParams === "object" && rawParams !== null ? (rawParams as { params?: unknown }).params : rawParams;
+    const asked: Record<string, unknown> = typeof params === "object" && params !== null ? { ...(params as Record<string, unknown>) } : {};
+    let views: TreeElement[];
+    if (session.capabilities.includes("dryRun")) {
+      const resolved = await this.resolveForPolicy(session, "scroll", asked);
+      if (resolved.kind === "error") throw new TaplineError("not_allowed", `explore won't scroll: ${resolved.text.replace(/^Error \w+:\s*/, "")} (explore skip: floor).`);
+      views = resolved.raw;
+    } else {
+      // An app with no dry runs can't say which view moves: every scroll view on the screen must pass.
+      views = tree.elements.filter((el) => roleOf(el) === "scroll");
+    }
+    const rules = this.exploreRules(session);
+    for (const view of views) {
+      const hit = recipientVerdict(view, rules, false);
+      if (hit !== null) {
+        const word = hit.word !== undefined ? ` (policy word ${JSON.stringify(this.host.redactOut(hit.word))})` : "";
+        throw new TaplineError("not_allowed", `explore won't scroll ${this.shortName(this.host.redactOut(view), false)}${word} (explore skip: ${hit.why}).`);
+      }
+    }
+  }
+
+  /** `steps` or `minutes` when the run's budget is used up, else null. */
+  private exploreBudget(run: ExploreRun): "steps" | "minutes" | null {
+    if (run.used >= run.steps) return "steps";
+    const waited = (this.options.control?.waitedMs() ?? 0) - run.waited0;
+    if ((this.clock() - run.startedAt - waited) / 60_000 >= run.minutes) return "minutes";
+    return null;
+  }
+
+  /**
+   * The one way explore types (§25.6): the explorer's own `type` move, into a field that is verified plain, never marked skip, never a
+   * password or card field, with no submit. Every other typing (a route's, a drive's) is refused. Returns the request's params with the
+   * plain-field guard added, and registers the text for redaction before it is sent.
+   */
+  private async exploreTyping(scope: ExploreScope, raw: unknown, sessionId: string | undefined): Promise<unknown> {
+    if (scope.mayType !== true) throw new TaplineError("not_allowed", "explore types only through its own fill, never in a route or a drive leg (explore skip: policy).");
+    if (typeof raw !== "object" || raw === null) throw new TaplineError("not_allowed", "explore won't type that (explore skip: policy).");
+    const params: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+    if (params["submit"] === true) throw new TaplineError("not_allowed", "explore never presses return while it types (explore skip: may_submit).");
+    // One typing request per move: no second one goes through.
+    scope.mayType = false;
+    const session = this.host.current();
+    if (session === undefined || (sessionId !== undefined && session.id !== sessionId)) throw new TaplineError("not_connected", "the app changed while explore was about to type; nothing was typed.");
+    // The guard: the SDK refuses a field that isn't plain; the dry run resolves the real field and asks the same, so a secure or unknown field is never typed.
+    const checked = await this.resolveForPolicy(session, "type", { ...params, text: "", kind: "plain" });
+    if (checked.kind === "error") throw new TaplineError("not_allowed", `explore won't type: ${checked.text.replace(/^Error \w+:\s*/, "")} (explore skip: floor).`);
+    const field = checked.raw[0];
+    if (field === undefined) throw new TaplineError("not_allowed", "explore won't type: the field could not be resolved (explore skip: floor).");
+    const hit = recipientVerdict(field, this.exploreRules(session), false) ?? (field.role === "input" ? null : ({ why: "floor", word: "not an input" } satisfies FloorHit));
+    if (hit !== null) throw new TaplineError("not_allowed", `explore won't type into ${this.shortName(this.host.redactOut(field), false)}${hit.word !== undefined ? ` (policy word ${JSON.stringify(hit.word)})` : ""} (explore skip: ${hit.why}).`);
+    const text = typeof params["text"] === "string" ? params["text"] : "";
+    if (text !== "" && !scope.run.typed.includes(text)) {
+      scope.run.typed = [...scope.run.typed, text];
+      scope.run.ingress?.add(text);
+    }
+    return { ...params, kind: "plain" };
+  }
+
+  /** The floor's rules for this app: the union of the global and the app's policy lists, the user's skip list and `submit` ids. */
+  private exploreRules(session: SessionInfo): FloorRules {
+    const lists = exploreLists(this.policy, session.app);
+    const settings = exploreSettings(this.policy);
+    return { policy: [...lists.confirm, ...lists.block], skip: settings.skip, submit: settings.submit };
+  }
+
+  /** Redaction for everything an explore run writes: the vault's values, every text the run typed, and this session's one-time codes. */
+  private exploreScrub(run: ExploreRun, text: string): string {
+    return this.host.redactOut(this.scrubSecrets(text, { values: run.typed, token: TYPED }));
+  }
+
+  /** Whether the screen as it is now has a text input (read without changing anything). Unreadable counts as yes: the strict side. */
+  private async screenHasInput(session: SessionInfo): Promise<boolean> {
+    try {
+      const read = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true }));
+      return !read.success || read.data.elements.some((el) => roleOf(el) === "input");
+    } catch {
+      return true;
+    }
   }
 
   /** Throws `lease_lost` when this call carries a lease credential that is not the standing holder's (right before something is sent). */
@@ -1968,6 +2168,12 @@ export class TaplineTools {
    * policy file lists, so that every such touch stops at a draft.
    */
   private touchLists(session: SessionInfo): { confirm: string[]; block: string[] } {
+    // `explore` (AGENT-TOOLS 1.15 §25.5): the floor is every touch's confirm list, whatever the policy file says (`"confirm": []`, an
+    // app's own empty lists and --no-policy don't lower it): the union of the built-in words and the global and the app's lists.
+    if (this.exploreScope.getStore() !== undefined) {
+      const union = exploreLists(this.policy, session.app);
+      return { confirm: [...new Set([...FLOOR_WORDS, ...union.confirm, ...exploreSettings(this.policy).skip])], block: union.block };
+    }
     const lists = listsFor(this.policy, session.app);
     return this.draftsScope.getStore() === true ? { confirm: [...lists.confirm, ...REACH_WORDS], block: lists.block } : lists;
   }
@@ -2081,6 +2287,8 @@ export class TaplineTools {
       return { kind: "error", code, message: error instanceof TaplineError ? error.message : describeError(error) };
     }
     const done = call.pipelined && typeof raw === "object" && raw !== null && "done" in raw ? (raw as { done: unknown }).done : raw;
+    const driven = this.exploreScope.getStore();
+    if (driven !== undefined) driven.count += 1;
     this.noteTouch(method, params, done);
     this.showAction("agent", method, done, params);
     if (granted !== undefined) this.journeyRun?.noteOk(granted);
@@ -2089,6 +2297,299 @@ export class TaplineTools {
     if (call.of === "drive" && tool === "open_url" && this.journeyRun?.userEyes === true) this.journeyRun.noteShortcut({ tool: "open_url", what: url });
     const moved = call.pipelined ? parseMoveResult(raw) : { place: null };
     return { kind: "done", place: moved.place, ...("next" in moved && moved.next !== undefined ? { next: moved.next } : {}), ...(granted !== undefined ? { via: granted } : {}), ...(sentDraft ? { sent: true as const } : {}) };
+  }
+
+  // -- explore (AGENT-TOOLS 1.15 §25): the search is in explore.ts, what it may touch in explorefloor.ts
+
+  /** An explore is running in this object: a second one waits for it to end. */
+  private exploring = false;
+
+  /**
+   * Explore and a recording, a replay or a journey never overlap, from either side: this is the check of the second side.
+   * What the explorer itself runs (its routes, its drives, a repair's trials) is inside its scope and is not a rival.
+   */
+  private exploreExcludes(what: string): string | null {
+    if (this.exploring && this.exploreScope.getStore() === undefined) return `Error bad_params: ${what} can't start while an explore is running; wait for it to end.`;
+    return null;
+  }
+
+  /** `explore`: drives the places nobody has driven, saves them to the map and reports what broke on the way. */
+  async explore(args: Shape<"explore"> = {}): Promise<CallToolResult> {
+    return (await this.exploreRun(args)).answer;
+  }
+
+  /** `explore` with what the command line needs to pick its exit code: the outcome and where the report is. */
+  async exploreRun(args: Shape<"explore"> = {}): Promise<{ answer: CallToolResult; outcome?: ExploreOutcome; reportPath?: string }> {
+    // Reserved before anything else is read or awaited, held for the whole run and released in `finally`: a record, replay or journey that starts
+    // meanwhile sees it, and a second explore answers busy.
+    if (this.exploring) return { answer: fail("Error busy: an explore is already running here; wait for it to end.") };
+    this.exploring = true;
+    try {
+      return await this.exploreHeld(args);
+    } finally {
+      this.exploring = false;
+    }
+  }
+
+  private async exploreHeld(args: Shape<"explore">): Promise<{ answer: CallToolResult; outcome?: ExploreOutcome; reportPath?: string }> {
+    const refuse = (message: string): { answer: CallToolResult } => ({ answer: fail(message) });
+    if (args.guide !== undefined && args.guide !== "none") return refuse("Error unsupported: guide isn't offered yet; explore chooses by itself.");
+    const budget = { minutes: args.minutes ?? EXPLORE_DEFAULTS.minutes, steps: args.steps ?? EXPLORE_DEFAULTS.steps, depth: args.depth ?? EXPLORE_DEFAULTS.depth };
+    for (const name of ["minutes", "steps", "depth"] as const) {
+      const [low, high] = EXPLORE_LIMITS[name];
+      const value = budget[name];
+      const whole = name !== "minutes";
+      if (!Number.isFinite(value) || value < low || value > high || (whole && !Number.isInteger(value))) {
+        return refuse(`Error bad_params: ${name} is ${whole ? "a whole number" : "a number"} from ${low} to ${high}, not ${String(value)}.`);
+      }
+    }
+    const session = this.host.current();
+    if (session === undefined) return { answer: this.notConnected() };
+    if (this.options.maps === undefined) return refuse("Error unsupported: this server keeps no maps.");
+    const map = this.mapOf(session);
+    if (map === undefined) return refuse("Error unsupported: this app reports no id of its own, so it has no map.");
+    if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
+    if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
+    if (this.recordingState !== null || this.replayingState || this.rivals > 0) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
+    if (args.account !== undefined) {
+      const store = this.options.accounts?.store ?? null;
+      if (store === null || !store.names().includes(args.account)) return refuse(`Error bad_params: no account "${args.account}" in the vault.`);
+      if (store.kindOf(args.account) !== "account" || store.exploreMarked?.(args.account) !== true) {
+        return refuse(`Error bad_params: account "${args.account}" isn't marked "explore": true in the vault file, so explore doesn't use it.`);
+      }
+    }
+    const wall = this.options.wallClock ?? Date.now;
+    let folder: ReturnType<typeof openRunFolder>;
+    try {
+      folder = openRunFolder(this.options.exploreDir, session.app.id ?? session.app.name, new Date(wall()));
+    } catch (error) {
+      return refuse(`Error internal: explore couldn't make its report folder: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const exploreArgs: ExploreArgs = {
+      ...budget,
+      fill: args.fill ?? EXPLORE_DEFAULTS.fill,
+      continue: args.continue ?? EXPLORE_DEFAULTS.continue,
+      ...(args.from !== undefined ? { from: args.from } : {}),
+      ...(args.focus !== undefined ? { focus: args.focus } : {}),
+      ...(args.account !== undefined ? { account: args.account } : {}),
+    };
+    const progress = this.holdScope.getStore()?.progress;
+    const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], ingress: this.host.typedRun() };
+    const explorer = new Explorer(this.exploreHost(session, map, wall, progress, run), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
+    // Calls inside the call add no crash note or wait of their own: the report says what happened.
+    let result: Awaited<ReturnType<Explorer["run"]>>;
+    try {
+      result = await this.noteScope.run(true, () => explorer.run());
+    } finally {
+      run.ingress?.end();
+    }
+    if (!isOutcome(result)) return refuse(result.error);
+    const reportPath = writeExploreReport(folder, result.report, (text) => this.exploreScrub(run, text), result.detail);
+    const where = reportPath ?? `${folder.dir}`;
+    const shown = where.startsWith(homedir()) ? `~${where.slice(homedir().length)}`.replace(/\\/g, "/") : where;
+    const stopped = result.report.stopped;
+    if (stopped === "paused" || stopped === "busy" || stopped === "locked") {
+      const why = stopped === "paused" ? "The user paused the agent in the live viewer." : stopped === "busy" ? "A person is using the app in the live viewer." : "The phone is locked.";
+      const done = `Done: ${result.report.used.steps} steps, ${result.report.coverage.places} places. Left at: ${result.leftAt ?? "unknown"}. Report: ${shown}`;
+      return { answer: fail(`Error ${stopped}: ${why} ${done}`), outcome: result, ...(reportPath !== null ? { reportPath } : {}) };
+    }
+    const lines = answerLines(result.report, result.findingsLine, shown, result.detail);
+    return { answer: text(lines.join("\n")), outcome: result, ...(reportPath !== null ? { reportPath } : {}) };
+  }
+
+  /** What the explorer needs from this host. Every move is an ordinary action of this tool, inside the explorer's scope (§25.1, §25.5). */
+  private exploreHost(session: SessionInfo, map: AppMap, wall: () => number, progress: ((line: string, steps: number) => void) | undefined, run: ExploreRun): ExploreHost {
+    const identity = identityOf(session);
+    const live = (): SessionInfo | undefined => {
+      const now = this.host.current();
+      return now !== undefined && identityOf(now) === identity ? now : undefined;
+    };
+    const sleepMs = (ms: number): Promise<void> => this.sleep(ms);
+    const within = async <T>(go: () => Promise<T>, restoring = false, mayType = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
+      const scope: ExploreScope = { count: 0, run, ...(restoring ? { restoring: true } : {}), ...(mayType ? { mayType: true } : {}) };
+      const before = run.used;
+      const value = await this.exploreScope.run(scope, go);
+      // The steps a move cost are the requests the gate let through, successful or not: the same count the budget holds.
+      return { value, count: run.used - before, last: scope.last };
+    };
+    const refusal = (answer: CallToolResult): { code: string; message: string; text: string } => {
+      const said = answerText(answer);
+      const m = /^Error (\w+):\s*([\s\S]*)$/.exec(said);
+      return { code: m?.[1] ?? "internal", message: m?.[2] ?? said, text: said };
+    };
+    const outcomeOf = (answer: CallToolResult, count: number, last: { method: string; result: unknown } | undefined): MoveOutcome => {
+      if (answer.isError === true) return { ok: false, used: count, ...refusal(answer) };
+      const result = last?.result;
+      const settled = typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
+      const value = typeof result === "object" && result !== null && "value" in result ? (result as { value: unknown }).value : undefined;
+      return { ok: true, used: count, text: answerText(answer), ...(typeof settled === "number" && Number.isFinite(settled) ? { settledMs: settled } : {}), ...(value !== undefined ? { value } : {}) };
+    };
+    const rulesNow = (): FloorRules => this.exploreRules(session);
+    const host: ExploreHost = {
+      now: () => this.clock(),
+      waitedMs: () => this.options.control?.waitedMs() ?? 0,
+      wall: () => new Date(wall()),
+      info: () => {
+        const now = live() ?? session;
+        const platform = now.device.platform === "ios" ? "iOS" : now.device.platform === "android" ? "Android" : now.device.platform;
+        const build = now.app.build ?? "";
+        return {
+          app: now.app.id,
+          name: now.app.name,
+          appVersion: now.app.version ?? "",
+          build: /\((.*)\)\s*$/.exec(build)?.[1] ?? build,
+          buildLabel: map.currentBuild(),
+          device: { model: now.device.model ?? now.device.name ?? "unknown", os: `${platform}${now.device.osVersion !== undefined ? ` ${now.device.osVersion}` : ""}` },
+        };
+      },
+      map,
+      known: async () => {
+        const now = live() ?? session;
+        return now.capabilities.includes("places") ? map.ensureKnown(now.id, () => this.sendRequest("places", {}, { sessionId: now.id })) : (map.knownPlaces() ?? { source: "none", places: [] });
+      },
+      tree: async () => {
+        const now = live();
+        if (now === undefined) return null;
+        try {
+          const parsed = treeResultSchema.safeParse(await this.sendRequest("tree", {}, { sessionId: now.id }));
+          if (!parsed.success) return null;
+          // The explorer has just looked: a person's earlier touch no longer makes its refs stale.
+          this.personActed = false;
+          return parsed.data;
+        } catch (error) {
+          if (error instanceof TaplineError) return null;
+          throw error;
+        }
+      },
+      mark: () => {
+        const now = live() ?? session;
+        // The window of a move's log lines is a sequence number the host gave each stored line: a full buffer, rollover and a replaced session don't move it.
+        return { crash: this.host.crashMark(), id: now.id, seq: this.sessionLogs(now.id).reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0) };
+      },
+      since: (raw): Since => {
+        const mark = raw as { crash: number; id: string; seq: number };
+        const events = this.host.crashEventsAfter(mark.crash, session);
+        const crashed = events.find((event) => event.kind === "crash");
+        const crash = crashed !== undefined && crashed.kind === "crash" ? crashed.crash : null;
+        const all = this.sessionLogs(mark.id);
+        // A replaced session's lines come twice in that concatenation (its own record and the new session's carried copy): each sequence number counts once.
+        const seen = new Set<number>();
+        const fresh = all
+          .filter((entry) => {
+            const seq = entry.seq ?? 0;
+            if (seq <= mark.seq || seen.has(seq)) return false;
+            seen.add(seq);
+            return true;
+          })
+          .map(({ seq: _seq, ...entry }) => entry);
+        return {
+          crash,
+          disconnected: events.some((event) => event.kind === "disconnect"),
+          errors: fresh.filter((entry) => logLevelOf(entry) === "error" && !(crash !== null && entry.fatal === true)),
+        };
+      },
+      move: async (move: ExploreMove): Promise<MoveOutcome> => {
+        const restores = move.tool === "toggle" && move.value !== undefined;
+        const { value, count, last } = await within(() => {
+          switch (move.tool) {
+            case "tap":
+              return this.tap({ target: move.target, look: false });
+            case "toggle":
+              return this.toggle({ target: move.target, ...(move.value !== undefined ? { value: move.value } : {}), look: false });
+            case "scroll":
+              return this.scroll(move.to !== undefined ? { to: move.to, look: false } : { direction: move.direction ?? "down", look: false });
+            case "back":
+              return this.back({ look: false });
+            case "type":
+              return this.typeText({ target: move.target, text: move.text, look: false });
+          }
+        }, restores, move.tool === "type");
+        return outcomeOf(value, count, last);
+      },
+      go: async (place, by, account) => {
+        const { value, count } = await within(() => this.drive({ to: place, by, look: false, ...(account !== undefined ? { account } : {}) }));
+        return { ok: value.isError !== true, used: count, text: answerText(value) };
+      },
+      reload: async () => {
+        const { value, count } = await within(() => this.reload({}));
+        const said = answerText(value);
+        return { ok: value.isError !== true && !/has not reconnected yet/.test(said), used: Math.max(count, 1), text: said };
+      },
+      commands: async () => {
+        const now = live();
+        if (now === undefined) return [];
+        try {
+          const parsed = commandsSchema.safeParse(await this.sendRequest("commands", {}, { sessionId: now.id }));
+          return parsed.success ? parsed.data.commands.map((c) => c.name) : [];
+        } catch {
+          return [];
+        }
+      },
+      runCommand: async (name) => {
+        const { value, count } = await within(() => this.appCommand({ name, look: false }));
+        return { ok: value.isError !== true, used: Math.max(count, 1), text: answerText(value) };
+      },
+      audit: async () => {
+        const now = live();
+        if (now === undefined || !now.capabilities.includes("audit")) return null;
+        try {
+          const parsed = auditResultSchema.safeParse(await this.sendRequest("audit", {}, { sessionId: now.id }));
+          if (!parsed.success || parsed.data.issues.length === 0) return null;
+          return parsed.data.issues.map((issue) => `${issue.type}: ${issue.element ? formatElement({ ...issue.element, ref: "" }, { actions: false }) : "the screen"}: ${issue.problem}. Fix: ${issue.fix}.`);
+        } catch {
+          return null;
+        }
+      },
+      ux: async () => {
+        const now = live();
+        if (now === undefined || !now.capabilities.includes("uxCheck")) return null;
+        try {
+          const parsed = uxResultSchema.safeParse(await this.sendRequest("uxCheck", {}, { sessionId: now.id }));
+          if (!parsed.success || parsed.data.issues.length === 0) return null;
+          return parsed.data.issues.map((issue) => `${issue.kind}: ${issue.element ? formatElement({ ...issue.element, ref: "" }, { actions: false }) : "the screen"}: ${issue.problem}.`);
+        } catch {
+          return null;
+        }
+      },
+      picture: async () => {
+        const now = live();
+        if (now === undefined || !now.capabilities.includes("screenshot") || this.noScreenshot.has(now.id) || this.secureWindow()) return null;
+        try {
+          const shot = await this.takeShot(now.id, 300, 0.6);
+          return Buffer.from(shot.data, "base64");
+        } catch {
+          return null;
+        }
+      },
+      frontState: () => {
+        const now = live();
+        if (now === undefined) return "gone";
+        return now.appState === undefined || now.appState.state === "active" ? "front" : "background";
+      },
+      waitForApp: async (ms) => {
+        for (let waited = 0; ; waited += 200) {
+          const now = live();
+          if (now !== undefined && (now.appState === undefined || now.appState.state === "active")) return true;
+          if (waited >= ms) return false;
+          await sleepMs(Math.min(200, Math.max(1, ms - waited)));
+        }
+      },
+      redact: (text) => this.exploreScrub(run, text),
+      progress: (line, steps) => progress?.(line, steps),
+      cancelled: () => this.holdScope.getStore()?.signal?.aborted === true,
+      get rules(): FloorRules {
+        return rulesNow();
+      },
+      vaultFill: (entry, field) => {
+        const store = this.options.accounts?.store ?? null;
+        if (store === null || store.exploreMarked?.(entry) !== true) return "no";
+        const kind = store.kindOf(entry);
+        // Never a password, a card or the phone's passcode (§25.6): an identity, an address, a note, or an account's username.
+        const allowed = kind === "identity" ? field !== "phone" : kind === "address" || kind === "note" ? true : kind === "account" ? field === "username" : false;
+        return allowed ? "ok" : "no";
+      },
+    };
+    return host;
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
@@ -2776,7 +3277,7 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
       // §9.1: `if` needs exactly one of text, id or label.
       if (given_if !== undefined && (typeof given_if !== "object" || given_if === null || Array.isArray(given_if))) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): if is an object with one of text, id or label (and gone), not ${JSON.stringify(given_if)}.`);
@@ -2920,7 +3421,9 @@ export class TaplineTools {
       }
       stepMark = this.newestLogTs(session.id);
       this.batch = { id: batchId, step: i + 1 };
-      const answer = await this.runStep(step).finally(() => {
+      // The verification replay of a repaired script: a step a repair wrote or changed keeps the whole floor (the gate in repair mode); the user's own steps run as written.
+      const gated = this.replayContext?.gateRepaired === true && (step as { repaired?: unknown }).repaired !== undefined;
+      const answer = await (gated ? this.repairScope(() => this.runStep(step)) : this.runStep(step)).finally(() => {
         this.batch = outerBatch;
       });
       const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n").trim();
@@ -3098,7 +3601,7 @@ export class TaplineTools {
   }
 
   private runStepNow(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, route: _route, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown };
+    const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
     const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
@@ -3507,6 +4010,26 @@ export class TaplineTools {
     }
   }
 
+  /** Redaction for what the map keeps: the run's typed values inside an explore, always the vault's values and the session's codes. */
+  private mapScrub(text: string): string {
+    const run = this.exploreScope.getStore()?.run;
+    return run !== undefined ? this.exploreScrub(run, text) : this.replayScrub(text);
+  }
+
+  /** A road with every text checked by `mapScrub`: names that change are dropped; null when the move itself holds such a text. */
+  private cleanRoad<M extends object>(move: M, names: NonNullable<MapRoad["names"]>): { move: M; names: NonNullable<MapRoad["names"]> } | null {
+    const holds = (value: unknown): boolean => typeof value === "string" && this.mapScrub(value) !== value;
+    const target = (move as { target?: unknown }).target;
+    if (typeof target === "object" && target !== null && Object.values(target).some(holds)) return null;
+    if (holds((move as { url?: unknown }).url)) return null;
+    const kept: NonNullable<MapRoad["names"]> = {};
+    for (const key of ["id", "label", "text"] as const) {
+      const value = names[key];
+      if (value !== undefined && !holds(value)) kept[key] = value;
+    }
+    return { move, names: kept };
+  }
+
   /** Before a move: where the app is. Only for calls that can be roads (§18.2). */
   private roadStart(session: SessionInfo, method: string): { map: AppMap; from: Place | null; typed: boolean } | null {
     if (this.options.maps === undefined || this.replaying || !ROAD_METHODS.has(method)) return null;
@@ -3560,7 +4083,11 @@ export class TaplineTools {
         if (!link.saved) return [link.message];
         move = { ...move, url: link.link };
       }
-      map.recordMove(from, move, classified.names, arrived, Date.now() - (this.actionStartedAt ?? Date.now()), start.typed ? "typed" : undefined);
+      // Nothing a person or a run typed, and no vault value or code, goes into a road: a name that shows one is dropped, and a road that
+      // can only be told by such a text is not saved (it could not be replayed without the secret either).
+      const clean = this.cleanRoad(move, classified.names);
+      if (clean === null) return [];
+      map.recordMove(from, clean.move, clean.names, arrived, Date.now() - (this.actionStartedAt ?? Date.now()), start.typed ? "typed" : undefined);
       return [];
     } catch {
       return [];
@@ -3685,6 +4212,11 @@ export class TaplineTools {
         return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
       }
     }
+    const captured = this.exploreScope.getStore();
+    if (captured !== undefined) {
+      captured.count += 1;
+      captured.last = { method, result };
+    }
     const line = describe(result);
     this.noteTouch(method, params, result);
     if (nothingDone?.(result) === true) {
@@ -3802,6 +4334,7 @@ export class TaplineTools {
       if (typed?.variable !== undefined) this.recording.route?.variables.add(typed.variable);
       if (typed?.account === true) this.recording.route?.variables.add("account");
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
+      if (road !== null && road.from !== null) step.place = road.from.name;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
     }
@@ -4681,6 +5214,8 @@ export class TaplineTools {
     const op = args.action ?? (args.start === true ? "start" : args.stop === true ? "stop" : "status");
     switch (op) {
       case "start": {
+        const exclusive = this.exploreExcludes("a recording");
+        if (exclusive !== null) return fail(exclusive);
         if (args.route !== undefined) return this.startRoute(args.route, args.name);
         const name = (args.name ?? "").trim() || `session-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}`;
         if (this.scriptPath(name) === null) {
@@ -4703,6 +5238,7 @@ export class TaplineTools {
             : `Recording ${this.recording.route !== undefined ? "route " : ""}"${this.recording.name}": ${this.recording.steps.length} step${this.recording.steps.length === 1 ? "" : "s"} so far.`,
         );
       case "discard": {
+        if (this.recordStarting !== null && this.recording === this.recordStarting) return fail("Error busy: the recording is still starting; try again in a moment.");
         const was = this.recording?.name;
         this.recording = null;
         return text(was === undefined ? "Not recording." : `Discarded the recording "${was}".`);
@@ -4710,6 +5246,7 @@ export class TaplineTools {
       case "stop": {
         const recording = this.recording;
         if (recording === null) return fail("Error bad_params: not recording; start with record { start: true, name }.");
+        if (recording === this.recordStarting) return fail("Error busy: the recording is still starting; try again in a moment.");
         if (recording.route !== undefined) return this.stopRoute(recording, recording.route, args.path);
         const path = args.path !== undefined && args.path.trim() !== "" ? args.path.trim() : this.scriptPath(recording.name);
         if (path === null) return fail("Error internal: no scripts folder is configured; give a path.");
@@ -4758,6 +5295,8 @@ export class TaplineTools {
 
   /** `record` with `route` (AGENT-TOOLS 1.13 §18.5): what follows is saved as a route from the place the app is at. */
   private async startRoute(raw: string, given: string | undefined): Promise<CallToolResult> {
+    const exclusive = this.exploreExcludes("recording a route");
+    if (exclusive !== null) return fail(exclusive);
     const name = routeSlug(raw);
     if (name === null) return fail("Error bad_params: give the route a name of letters, digits, '.', '_' and '-' (e.g. \"sign_in\").");
     if (given !== undefined && given.trim() !== "" && routeSlug(given) !== name) {
@@ -4770,9 +5309,20 @@ export class TaplineTools {
     if (map === undefined) return fail("Error unsupported: this server keeps no map for this app, so a route can't be saved.");
     const twin = caseTwin(name, Object.keys(map.data().routes));
     if (twin !== null) return fail(`Error bad_params: the route "${name}" differs only in case from the existing "${twin}"; use that name.`);
-    const here = await placeNow(this.placeSource(session), map);
+    // Reserved before the first await (a second start, an explore and a stop all see it), and released if the place can't be found.
+    const reserved = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [], route: { start: "", variables: new Set<string>(), map } };
+    this.recording = reserved;
+    this.recordStarting = reserved;
+    let here: Awaited<ReturnType<typeof placeNow>> = null;
+    try {
+      here = await placeNow(this.placeSource(session), map);
+    } finally {
+      this.recordStarting = null;
+      if (here === null && this.recording === reserved) this.recording = null;
+    }
     if (here === null) return fail("Error not_found: the app's current place isn't known, so a route can't start here; look at the screen first.");
-    this.recording = { name, app: { name: session.app.name, ...(session.app.id ? { id: session.app.id } : {}) }, steps: [], route: { start: here.place.name, variables: new Set(), map } };
+    if (this.recording !== reserved) return fail("Error bad_params: the recording was discarded while it started.");
+    reserved.route.start = here.place.name;
     return text(
       `Recording route "${name}" on ${session.app.name}, from ${here.place.name}. Every action from now on is a step; type_text with as saves its text as a variable. Stop with record { stop: true }.`,
     );
@@ -4861,10 +5411,51 @@ export class TaplineTools {
     return lines.length === 0 ? "No saved scripts." : ["Saved scripts:", ...lines].join("\n");
   }
 
-  async replay(args: Shape<"replay">, options: { updateReferences?: boolean } = {}): Promise<CallToolResult> {
+  /** `adopt` is a person's choice and only the command line passes it: no tool parameter reaches it (AGENT-TOOLS 1.15 §26.5). */
+  async replay(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string; gateRepaired?: boolean } = {}): Promise<CallToolResult> {
+    // Held before the first await and released in `finally`: explore can't start while a replay waits for its fresh start or its way to the route's start.
+    this.rivals += 1;
+    // The outermost replay owns the run's list of typed values (repair's trials and the verification replay add to it, and share it).
+    const owner = this.replayTyped === null;
+    if (owner) this.replayTyped = { values: [], ingress: this.host.typedRun() };
+    try {
+      return await this.replayHeld(args, options);
+    } finally {
+      this.rivals -= 1;
+      if (owner) {
+        this.replayTyped?.ingress.end();
+        this.replayTyped = null;
+      }
+    }
+  }
+
+  /** Every plain text a replay (with its repair trials and the check of a repaired script) has typed, and the scrubber over them. */
+  private replayTyped: { values: string[]; ingress: { add(value: string): void; end(): void } } | null = null;
+
+  /** Registers a text a replay is about to type, before it is sent; the run's redaction knows it from then on. */
+  private registerReplayTyped(value: string): void {
+    const run = this.replayTyped;
+    if (run === null || value === "" || run.values.includes(value)) return;
+    run.values = [...run.values, value];
+    run.ingress.add(value);
+  }
+
+  /** Redaction for everything a repair writes or answers: the replay's typed values, the vault's values and this session's one-time codes. */
+  private replayScrub(text: string): string {
+    return this.host.redactOut(this.scrubSecrets(text, this.replayTyped === null ? null : { values: this.replayTyped.values, token: TYPED }));
+  }
+
+  /** Recordings, replays and journeys in progress (counted from their first line): explore refuses to start while any is held. */
+  private rivals = 0;
+  /** The route recording that is still finding its start place (its state is reserved, and stop and discard wait for it). */
+  private recordStarting: object | null = null;
+
+  private async replayHeld(args: Shape<"replay">, options: { updateReferences?: boolean; adopt?: boolean; sideOf?: string; gateRepaired?: boolean }): Promise<CallToolResult> {
     const name = (args.name ?? "").trim();
     const given = (args.path ?? "").trim();
     if (name === "" && given === "") return text(this.scriptList());
+    const exclusive = this.exploreExcludes("a replay");
+    if (exclusive !== null) return fail(exclusive);
     if (this.recording !== null) return fail(`Error bad_params: stop recording "${this.recording.name}" before replaying.`);
     // On Windows and macOS a twin in another case would be found as if it were this name, and on Linux not: refuse it everywhere.
     const scriptClash = given === "" ? this.scriptClash(name) : null;
@@ -4914,12 +5505,15 @@ export class TaplineTools {
       else if (said.startsWith("Reload requested, but")) notes.push("Note: the app hadn't reconnected after starting fresh when the steps began.");
     }
     const scriptPath = path;
+    // A check of the repaired script borrows the original's picture references and diffs (`sideOf`).
+    const sidePath = options.sideOf ?? path;
     const execute = async (steps: Step[]): Promise<CallToolResult> => {
       this.replaying = true;
       this.replayContext = {
-        referencesDir: this.scriptSideFolder(scriptPath, "references"),
-        diffDir: this.scriptSideFolder(scriptPath, "diff"),
+        referencesDir: this.scriptSideFolder(sidePath, "references"),
+        diffDir: this.scriptSideFolder(sidePath, "diff"),
         update: options.updateReferences === true,
+        gateRepaired: options.gateRepaired === true,
       };
       try {
         const answer = await this.inRoute(script.version === 2 ? script.name : undefined, () => this.run({ steps, look: args.look, screenshot: args.screenshot, brief: false }), script.version === 2 && script.draftsOnly === true);
@@ -4933,10 +5527,324 @@ export class TaplineTools {
         this.replayContext = null;
       }
     };
-    if (script.version !== 2) return execute(script.steps);
+    // Self-repair (§26): `suggest` runs as usual and ranks candidates at the first break; `apply` repairs as it goes.
+    let ranSteps: Step[] = script.steps;
+    let repairRun: RepairRun | null = null;
+    const repairHost = args.repair === undefined ? null : this.repairHost(session, script, scriptPath, execute);
+    // Where the script starts, for the replay that proves a repaired script as written (a script that doesn't start fresh needs the app back there).
+    const startPlace = repairHost !== null && args.repair === "apply" ? await repairHost.place() : null;
+    const backAtStart = async (): Promise<boolean> => {
+      if (repairHost === null || script.version === 2 || script.fresh !== false) return true;
+      if (startPlace === null) return false;
+      if ((await repairHost.place()) === startPlace) return true;
+      await repairHost.returnTo(startPlace);
+      for (let i = 0; i < 6 && (await repairHost.place()) !== startPlace; i++) await repairHost.back();
+      return (await repairHost.place()) === startPlace;
+    };
+    const run = async (steps: Step[]): Promise<CallToolResult> => {
+      if (repairHost === null || args.repair !== "apply") {
+        ranSteps = steps;
+        return execute(steps);
+      }
+      repairRun = await runWithRepair(repairHost, steps);
+      return repairRun.answer;
+    };
+    // Everything a repair answers is redacted whole, before any cut or formatting of the caller's.
+    const redacted = (answer: CallToolResult): CallToolResult => ({ ...answer, content: answer.content.map((block) => (block.type === "text" ? { ...block, text: this.replayScrub(block.text) } : block)) });
+    const finish = async (answer: CallToolResult): Promise<CallToolResult> => {
+      if (repairHost === null) return answer;
+      if (args.repair === "suggest") return redacted(await this.suggestRepair(repairHost, answer, ranSteps, session, script));
+      return redacted(repairRun === null ? answer : await this.finishRepair(session, script, scriptPath, repairRun, options.adopt === true, backAtStart));
+    };
+    if (script.version !== 2) return finish(await run(script.steps));
     // A route starts at a place: after the fresh start the app is driven there (an `off_route` fails the replay), then it runs (18.5).
-    const outcome = await routeRunner.run(script, {}, this.routeContext(execute, (place) => this.replayDriveTo(place)), accountStore);
-    return outcome.kind === "ran" ? outcome.answer : fail(`Error ${outcome.code}: ${outcome.message}`);
+    const outcome = await routeRunner.run(script, {}, this.routeContext(run, (place) => this.replayDriveTo(place)), accountStore);
+    return outcome.kind === "ran" ? finish(outcome.answer) : fail(`Error ${outcome.code}: ${outcome.message}`);
+  }
+
+  // -- self-repairing tests (AGENT-TOOLS 1.15 §26)
+
+  /**
+   * Runs what a repair does of its own in the explore gate's scope with no budget: every touch inside meets the whole floor on the
+   * element that really receives it, a typing request is refused, and nothing asks a person (§25.5). A hit stops that move before
+   * anything is sent, so the candidate that caused it is rejected.
+   */
+  private repairScope<T>(go: () => Promise<T>): Promise<T> {
+    if (this.exploreScope.getStore() !== undefined) return go();
+    const run: ExploreRun = { used: 0, steps: Number.POSITIVE_INFINITY, minutes: Number.POSITIVE_INFINITY, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [] };
+    return this.exploreScope.run({ count: 0, run }, go);
+  }
+
+  /** What a repair needs from this host: the checks of any touch run inside `runSteps`, and nothing here writes the map. */
+  private repairHost(session: SessionInfo, script: SharedScript, scriptPath: string, execute: (steps: Step[]) => Promise<CallToolResult>): RepairHost {
+    const live = (): SessionInfo => this.host.current() ?? session;
+    const map = this.mapOf(session);
+    const words = (): string[] => {
+      // The union of the global and the app's lists, as explore reads them: an app's own lists never lower the floor (§25.5).
+      const lists = exploreLists(this.policy, session.app);
+      return [...new Set([...FLOOR_WORDS, ...lists.confirm, ...lists.block, ...exploreSettings(this.policy).skip])];
+    };
+    const named = script.name || basename(scriptPath, ".json");
+    return {
+      script: named,
+      runSteps: execute,
+      // Every move a repair makes of its own meets the whole explore floor on the element that really receives it (§25.5, §26.4).
+      trial: (steps) => this.repairScope(() => execute(steps)),
+      toggleRole: (place, target) => {
+        if (map === undefined || place === null) return null;
+        const sig = target.id !== undefined ? `id:${target.id}` : target.label !== undefined ? `label:${target.label}` : target.text !== undefined ? `text:${target.text}` : null;
+        if (sig === null) return null;
+        const role = map.triedAction(place, target.index !== undefined ? `${sig}#${target.index}` : sig)?.["role"];
+        return typeof role === "string" && role !== "" ? role : null;
+      },
+      tree: async () => {
+        const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: live().id }).catch(() => null));
+        return tree.success ? tree.data : null;
+      },
+      place: async () => (map === undefined ? null : placeSeen(this.placeSource(live()), map)),
+      placeName: (route) => placeNameFromRoute(route),
+      way: (from, to) => {
+        if (map === undefined) return null;
+        const start = map.data().places[from];
+        if (start === undefined || map.data().places[to] === undefined) return null;
+        const plan = planWay(map, { name: from, key: start.key, link: null }, { name: to, link: null }, { by: "taps", tapsOnly: true });
+        if ("error" in plan || !plan.proven || plan.moves.length === 0) return null;
+        const steps: Step[] = [];
+        for (const move of plan.moves) {
+          const road = move.road;
+          const target = road.move.target;
+          if (move.viaLink || move.route !== undefined || !["tap", "long_press", "toggle"].includes(road.move.tool) || target === undefined) return null;
+          if (target.x !== undefined || target.y !== undefined) return null;
+          const by = target.id !== undefined ? { id: target.id } : target.label !== undefined ? { label: target.label } : target.text !== undefined ? { text: target.text } : null;
+          if (by === null) return null;
+          steps.push({ tool: road.move.tool, target: by, place: road.from } as Step);
+        }
+        return steps;
+      },
+      returnTo: async (place) => this.repairScope(async () => (await this.replayDriveTo(place)).ok),
+      back: async () => (await this.repairScope(() => execute([{ tool: "back" } as Step]))).isError !== true,
+      match: (target, elements) => candidatesFor(wireTarget(target), elements),
+      never: {
+        draftsOnly: script.version === 2 && script.draftsOnly === true,
+        policyHit: (subject) => matchWord(words(), floorSubject(subject)),
+      },
+      redact: (value) => this.replayScrub(value),
+      audit: (detail) => this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: named, detail: this.replayScrub(detail) }) ?? false,
+      now: () => this.clock(),
+    };
+  }
+
+  /** `suggest`: after the usual failure text, the candidates of the first break, ranked, with nothing touched (§26.5). */
+  private async suggestRepair(host: RepairHost, answer: CallToolResult, steps: Step[], session: SessionInfo, script: SharedScript): Promise<CallToolResult> {
+    const brk = parseBreak(answer);
+    if (brk === null) return answer;
+    const analysis = await analyse(host, steps, brk.index, brk);
+    const lines = [...suggestionText(analysis), ...this.expectFinding(session, script, steps, brk)];
+    const [top, ...rest] = answer.content;
+    return top !== undefined && top.type === "text" ? { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...lines].join("\n") }, ...rest] } : answer;
+  }
+
+  /** The §27 finding of an `expect` that failed: a line that reports it and the finding as one JSON line. It is never repaired. */
+  private expectFinding(session: SessionInfo, script: SharedScript, steps: Step[], brk: { index: number; code: string; message: string }): string[] {
+    if (brk.code !== "expect_failed") return [];
+    const step = steps[brk.index];
+    if (step === undefined) return [];
+    const platform = session.device.platform === "ios" ? "iOS" : session.device.platform === "android" ? "Android" : session.device.platform;
+    const build = session.app.build ?? "";
+    const place = (step as Record<string, unknown>)["place"];
+    const wall = this.options.wallClock ?? Date.now;
+    const finding: Finding = {
+      id: "f1",
+      kind: "expect_failed",
+      app: session.app.id ?? session.app.name,
+      app_version: session.app.version ?? "",
+      build: /\((.*)\)\s*$/.exec(build)?.[1] ?? build,
+      tool: "tapline",
+      tool_version: EXPLORE_TOOL_VERSION,
+      when: new Date(wall()).toISOString(),
+      device: { model: session.device.model ?? session.device.name ?? "unknown", os: `${platform}${session.device.osVersion !== undefined ? ` ${session.device.osVersion}` : ""}` },
+      place: typeof place === "string" ? place : null,
+      path_from: typeof place === "string" ? place : null,
+      path: steps.slice(0, brk.index + 1).map((item): PathStep => {
+        const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+        // A typed value is never kept (§27.1).
+        if (tool !== "type_text") return { tool, ...rest };
+        const { text: _text, ...kept } = rest as Record<string, unknown>;
+        return { tool, ...kept, text: TYPED };
+      }),
+      expected: step.expect === undefined ? "the step's expect holds" : `the step's expect holds (${JSON.stringify(step.expect)})`,
+      got: cutText(firstLine(this.replayScrub(brk.message)), LOG_LINE_MAX),
+      picture: null,
+      logs: [],
+      repro: null,
+      count: 1,
+    };
+    const safe = redactFinding(finding, (value) => this.replayScrub(value));
+    return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
+  }
+
+  /** `apply` ended: a failure adds its notes (and an expect's finding); a pass with repairs writes the two files and learns the roads (§26.5). */
+  private async finishRepair(session: SessionInfo, script: SharedScript, scriptPath: string, run: RepairRun, adopt: boolean, backAtStart: () => Promise<boolean>): Promise<CallToolResult> {
+    const withLines = (answer: CallToolResult, lines: string[]): CallToolResult => {
+      const [top, ...rest] = answer.content;
+      return lines.length === 0 || top === undefined || top.type !== "text" ? answer : { ...answer, content: [{ type: "text", text: [top.text.trimEnd(), ...lines].join("\n") }, ...rest] };
+    };
+    if (!run.ok) {
+      const steps = run.work.map((item) => item.step);
+      const finding = run.failure === undefined ? [] : this.expectFinding(session, script, steps, { index: run.failure.step - 1, code: run.failure.code, message: run.failure.message });
+      return withLines(run.answer, [...run.notes, ...finding]);
+    }
+    if (run.repairs.length === 0) return run.answer;
+    const dir = dirname(scriptPath);
+    const stem = basename(scriptPath).replace(/\.json$/i, "");
+    const repairedPath = join(dir, `${stem}.repaired.json`);
+    const notesPath = join(dir, `${stem}.repair.md`);
+    const origPath = join(dir, `${stem}.orig.json`);
+    const wall = this.options.wallClock ?? Date.now;
+    const at = new Date(wall());
+    const build = this.mapOf(session)?.currentBuild() ?? session.app.build ?? "";
+    let original: Record<string, unknown>;
+    try {
+      const raw: unknown = JSON.parse(readFileSync(scriptPath, "utf8"));
+      original = sharedScriptSchema.safeParse(raw).success ? (raw as Record<string, unknown>) : (script as unknown as Record<string, unknown>);
+    } catch {
+      original = script as unknown as Record<string, unknown>;
+    }
+    const repaired = this.backstop(repairedScript(original, run.work, { from: basename(scriptPath), at: at.toISOString().replace(/\.\d{3}Z$/, "Z"), build, count: run.repairs.length }));
+    const repairedText = `${JSON.stringify(repaired, null, 2)}\n`;
+    const markdown = this.replayScrub(repairMarkdown(script.name || stem, { date: at.toISOString().slice(0, 10), version: EXPLORE_TOOL_VERSION, build }, run.repairs));
+    // The script as it will be written must pass a fresh, ordinary replay (no repair) on this app; nothing is written when it doesn't (§26.4).
+    // The emitted file is proven against exactly the pictures it will use: an adopted file keeps the original's folder; a file written beside the
+    // original gets its own sidecar, refreshed from the original's folder first (an older one is replaced, never trusted).
+    const picturesFrom = this.scriptSideFolder(scriptPath, "references");
+    const picturesTo = this.scriptSideFolder(repairedPath, "references");
+    if (!adopt) {
+      const stale = this.refreshSidecar(picturesFrom, picturesTo);
+      if (stale !== null) return fail(`Error internal: the repaired script's picture references couldn't be refreshed (${stale}); nothing was written.`);
+    }
+    const refused = await this.verifyEmitted(scriptPath, repairedText, backAtStart, adopt ? scriptPath : repairedPath);
+    if (refused !== null) {
+      for (const record of run.repairs) this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: this.replayScrub(`step ${record.step}: ${repairPhrase(record)}, rejected (the repaired script failed its replay as written)`) });
+      return fail(refused);
+    }
+    try {
+      writeFileSync(repairedPath, repairedText, { mode: 0o600 });
+      writeFileSync(notesPath, markdown, { mode: 0o600 });
+    } catch (error) {
+      return fail(`Error internal: the run passed, but the repaired script couldn't be written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.learnRepairs(session, run.repairs);
+    const count = run.repairs.length;
+    const total = run.work.filter((item) => item.origin !== null).length;
+    const phrases = run.repairs.map((record) => (record.kind === "target" ? `step ${record.step} ${repairPhrase(record)}` : `step ${record.step} inserted ${record.shown}`));
+    let adopted = false;
+    const extra: string[] = [];
+    if (adopt) {
+      const logged = this.options.audit?.write({ kind: "repair", app: session.app.id ?? session.app.name, name: script.name || stem, detail: "adopted" }) ?? false;
+      if (!logged) extra.push("Note: the audit log couldn't be written, so the script was not adopted.");
+      else {
+        try {
+          // The first original is never lost: the copy is made only when there is none yet.
+          if (!existsSync(origPath)) copyFileSync(scriptPath, origPath);
+          const temporary = join(dir, `${stem}.json.${process.pid}.tmp`);
+          writeFileSync(temporary, repairedText, { mode: 0o600 });
+          renameSync(temporary, scriptPath);
+          rmSync(repairedPath, { force: true });
+          adopted = true;
+        } catch (error) {
+          extra.push(`Note: couldn't adopt the repaired script: ${error instanceof Error ? error.message : String(error)}. The original is unchanged.`);
+        }
+      }
+    }
+    const head = `Ran ${total} of ${total} steps in ${run.seconds.toFixed(1)} s, with ${count} repair${count === 1 ? "" : "s"} (${adopted ? "adopted" : "not adopted"}).`;
+    const files = adopted
+      ? `Adopted: ${stem}.json now holds the repaired script; the original is kept as ${stem}.orig.json. Wrote ${stem}.repair.md.`
+      : `Wrote ${stem}.repaired.json and ${stem}.repair.md. The original is unchanged.`;
+    return text([head, `Repaired: ${phrases.join("; ")}.`, files, ...extra].join("\n"));
+  }
+
+  /**
+   * Makes `to` (the repaired file's picture folder) a copy of `from` (the original's), atomically: copied to a temporary folder, then renamed over
+   * the old one, which is put back if the rename fails. With no original folder an older sidecar is removed. Null when done, else why not.
+   */
+  private refreshSidecar(from: string, to: string): string | null {
+    const temporary = `${to}.${process.pid}.tmp`;
+    const old = `${to}.${process.pid}.old`;
+    try {
+      rmSync(temporary, { recursive: true, force: true });
+      rmSync(old, { recursive: true, force: true });
+      if (!existsSync(from)) {
+        rmSync(to, { recursive: true, force: true });
+        return null;
+      }
+      cpSync(from, temporary, { recursive: true });
+      const had = existsSync(to);
+      if (had) renameSync(to, old);
+      try {
+        renameSync(temporary, to);
+      } catch (error) {
+        if (had) renameSync(old, to);
+        throw error;
+      }
+      rmSync(old, { recursive: true, force: true });
+      return null;
+    } catch (error) {
+      rmSync(temporary, { recursive: true, force: true });
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /**
+   * Replays the repaired script exactly as it would be written, as an ordinary replay of its own (repair off), from the start the
+   * original had. Null when it passes; else the failure to answer with. The probe file lives beside the script for a moment only.
+   */
+  private async verifyEmitted(scriptPath: string, text: string, backAtStart: () => Promise<boolean>, picturesOf: string): Promise<string | null> {
+    const stem = basename(scriptPath).replace(/\.json$/i, "");
+    const probe = join(dirname(scriptPath), `${stem}.repaired.json.${process.pid}.probe.json`);
+    const nothing = "nothing was written";
+    try {
+      writeFileSync(probe, text, { mode: 0o600 });
+    } catch (error) {
+      return `Error internal: the repaired script couldn't be replayed as written (${error instanceof Error ? error.message : String(error)}); ${nothing}.`;
+    }
+    try {
+      if (!(await backAtStart())) return `Error not_connected: the run passed, but the app couldn't be taken back to where the script starts, so the repaired script couldn't be replayed as written; ${nothing}.`;
+      const answer = await this.replay({ path: probe }, { sideOf: picturesOf, gateRepaired: true });
+      if (answer.isError !== true) return null;
+      const said = answer.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      const [first = "", ...rest] = said.split("\n");
+      const m = /^Error (\w+):\s*(.*)$/.exec(first);
+      return [`Error ${m?.[1] ?? "internal"}: the run passed with its repairs, but the repaired script failed when replayed as written (${m?.[2] ?? first}); ${nothing}.`, ...rest].join("\n");
+    } finally {
+      rmSync(probe, { force: true });
+    }
+  }
+
+  /** A passing `apply` updates the road that has a repaired move: its `move` and `names` take the new target, proven for the build (§26.5). Nothing else of the map. */
+  private learnRepairs(session: SessionInfo, repairs: RepairRun["repairs"]): void {
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return;
+      for (const record of repairs) {
+        if (record.kind !== "target" || record.was === null || record.now === null || record.now.index !== undefined) continue;
+        const was = record.was;
+        const road = map.data().roads.find((candidate) => {
+          const target = candidate.move.target;
+          if (candidate.move.tool !== record.tool || target === undefined) return false;
+          if (record.place !== undefined && candidate.from !== record.place) return false;
+          if (was.id !== undefined) return target.id === was.id;
+          if (was.label !== undefined) return target.label === was.label;
+          return was.text !== undefined && target.text === was.text;
+        });
+        if (road === undefined) continue;
+        const names = record.now.id !== undefined ? { id: record.now.id } : record.now.label !== undefined ? { label: record.now.label } : record.now.text !== undefined ? { text: record.now.text } : null;
+        if (names === null || this.cleanRoad({ target: names }, {}) === null) continue;
+        const stored = map.repairRoad(road, { ...road.move, target: names }, names, false);
+        if (stored !== null) map.markDriven(stored, stored.ms);
+      }
+    } catch {
+      // the map is a help; a repair that passed stands without it
+    }
   }
 
   /** Where a saved route of that name is, in the current app's map folder; null when there is none. */
@@ -5145,6 +6053,8 @@ export class TaplineTools {
     known?: KnownElements,
   ): Promise<{ stop: CallToolResult } | { waited: Waited | null }> {
     const dialogs = this.dialogs;
+    // The explorer opens no dialog and no live-view request (§25.5): the check right before the touch stops it.
+    if (this.exploreScope.getStore() !== undefined) return { waited: null };
     if (dialogs === undefined || !dialogs.available() || lists.confirm.length === 0) return { waited: null };
     const resolved = known !== undefined ? ({ kind: "ok", elements: known.elements, raw: known.raw } as const) : await this.resolveForPolicy(session, method, params);
     // A target that can't be checked is answered by the check right before the touch.
@@ -5259,8 +6169,8 @@ export class TaplineTools {
    * Runs a call of the agent with its own wait counter and, when there is one, the request's abort signal, so a
    * wait for a person's OK is counted for this call only and closes when the call is cancelled.
    */
-  withCall<T>(signal: AbortSignal | undefined, run: () => T, leaseCredential?: string): T {
-    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}), ...(leaseCredential !== undefined ? { lease: leaseCredential } : {}) }, run);
+  withCall<T>(signal: AbortSignal | undefined, run: () => T, leaseCredential?: string, progress?: (line: string, steps: number) => void): T {
+    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}), ...(leaseCredential !== undefined ? { lease: leaseCredential } : {}), ...(progress !== undefined ? { progress } : {}) }, run);
   }
 
   /**
@@ -5289,6 +6199,25 @@ export class TaplineTools {
     if (verdict.kind === "blocked") {
       this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "blocked");
       return { stop: fail(this.blockedLine(verdict.element, verdict.word)) };
+    }
+    // `explore` is never asked and no grant stands in for it (§25.5): a touch that needs a person's OK isn't made, and no use is counted.
+    if (verdict.kind === "confirm" && this.exploreScope.getStore() !== undefined) {
+      this.showAction("agent", method, { element: verdict.element }, params, "not_allowed", "needs_confirmation");
+      return { stop: fail(`Error not_allowed: needs_confirmation: ${this.shortName(verdict.element, false)} needs a person's OK (policy word ${JSON.stringify(verdict.word)}); explore never asks, so it skips it.`) };
+    }
+    // The element that really receives the touch (after any scroll, whichever the target named) meets the whole floor (§25.5): the
+    // app's skip marks (inherited ones included), a card or password field and the submit rule, on top of the words above.
+    if (this.exploreScope.getStore() !== undefined) {
+      const rules = this.exploreRules(session);
+      for (const [i, raw] of resolved.raw.entries()) {
+        const needsInput = submitWord(raw) !== null && !isListedSubmit(raw, rules);
+        const hit = recipientVerdict(raw, rules, needsInput ? await this.screenHasInput(session) : false);
+        if (hit === null) continue;
+        const shown = resolved.elements[i] ?? raw;
+        this.showAction("agent", method, { element: shown }, params, "not_allowed", "needs_confirmation");
+        const word = hit.word !== undefined ? ` (policy word ${JSON.stringify(this.host.redactOut(hit.word))})` : "";
+        return { stop: fail(`Error not_allowed: needs_confirmation: ${this.shortName(shown, false)} is skipped by explore${word}: the touch would reach a protected control (explore skip: ${hit.why}).`) };
+      }
     }
     // A reflex never asks (§18.7): what the screen shows now is flagged, so the reflex is skipped, with no dialog and no request.
     if (verdict.kind === "confirm" && this.inReflexStep()) return { stop: this.reflexNeedsPerson(verdict.element, verdict.word) };
@@ -5526,8 +6455,10 @@ export class TaplineTools {
   ): { kind: "blocked" | "confirm"; element: TreeElement; raw: TreeElement; word: string } | { kind: "none" } {
     // The words are matched on the raw elements, so a label an account value hides is still the word it is. What the
     // verdict carries for showing (`element`, `word`) is scrubbed; `raw` stays inside, for the key and the fingerprint.
+    // For `explore` only (§25.5), an element with no label and no text is matched on its id as words, so `delete-row` counts as `Delete`.
+    const subject = (element: TreeElement): { label?: string | null; text?: string | null } => (this.exploreScope.getStore() !== undefined ? floorSubject(element) : element);
     for (const [i, raw] of resolved.raw.entries()) {
-      const word = matchWord(lists.block, raw);
+      const word = matchWord(lists.block, subject(raw));
       const element = resolved.elements[i];
       if (word !== null && element !== undefined) return { kind: "blocked", element, raw, word: this.host.redactOut(word) };
     }
@@ -5537,7 +6468,7 @@ export class TaplineTools {
       if (raw.role === "link" && raw.label === UNREADABLE_LINK && element !== undefined) return { kind: "confirm", element, raw, word: UNREADABLE_LINK };
     }
     for (const [i, raw] of resolved.raw.entries()) {
-      const word = matchWord(lists.confirm, raw);
+      const word = matchWord(lists.confirm, subject(raw));
       const element = resolved.elements[i];
       if (word !== null && element !== undefined) return { kind: "confirm", element, raw, word: this.host.redactOut(word) };
     }
@@ -5801,6 +6732,8 @@ export class TaplineTools {
       return this.dryRun("type_text", "type", { ...plain, text: "", ...(wire.values["kind"] !== undefined ? { kind: wire.values["kind"] } : {}) });
     }
     const use = account !== null && account.ok ? account.use : undefined;
+    // A plain text typed during a replay is registered for redaction before it is sent (a vault, account or code value is covered already).
+    if (wire === undefined && !mentionsVault(args.text)) this.registerReplayTyped(args.text);
     // What the audit line says about the field the value went into (§23): the app's own answer says whether it was secure.
     let secureField: boolean | undefined;
     const typed = this.act(
@@ -5928,9 +6861,9 @@ export class TaplineTools {
   }
 
   /** A vault value or a one-time code typed in this session becomes its placeholder. */
-  private scrubSecrets(text: string): string {
+  private scrubSecrets(text: string, typed?: TypedSource | null): string {
     const store = this.options.accounts?.store;
-    return redactAll(store, this.otp.codes, text);
+    return redactAll(store, this.otp.codes, text, typed);
   }
 
   /** The batch's account: the default for its steps' `${account.…}` while `run` runs. */
@@ -6506,6 +7439,8 @@ export class TaplineTools {
   }
 
   private async journeyStart(args: Shape<"journey">): Promise<CallToolResult> {
+    const exclusive = this.exploreExcludes("a journey");
+    if (exclusive !== null) return fail(exclusive);
     const running = this.journeyRun;
     if (running !== undefined) {
       return fail(`Error bad_params: a journey is already running (${JSON.stringify(running.state.goal)}); stop it first with stop: true and reached.`);

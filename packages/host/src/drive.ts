@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import type { AccountStore } from "./accounts.js";
+import { safeEncode, type AccountStore } from "./accounts.js";
 import { cheapestWay, describeWay, howText, isRouteLeg, type WayLeg } from "./mapcmd.js";
 import type { MapRoad, Move } from "./mapfile.js";
 import { declaredLink, keyFromState, placeNameFromRoute, placeNow, type AppMap, type KnownPlaces, type Observation, type Place, type PlaceSource } from "./places.js";
@@ -250,7 +250,7 @@ export function fillLink(link: string, values: Record<string, string>): { ok: tr
       missing.push(name);
       return whole;
     }
-    return encodeURIComponent(value);
+    return safeEncode(value);
   });
   return missing.length > 0 ? { ok: false, missing } : { ok: true, url };
 }

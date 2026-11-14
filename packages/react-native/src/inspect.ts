@@ -11,6 +11,7 @@ import {
 } from './fiber';
 import { openAlerts } from './alerts';
 import { marksFromOthers } from './fromothers';
+import { exploreMarksOf, type ExploreMarks } from './exploremarks';
 import { placeFrom, type PlaceParts } from './placekey';
 import { keyboardState } from './keyboard';
 import { refreshCover } from './native';
@@ -76,6 +77,8 @@ export interface HostNode {
   row?: true;
   /** Inside a subtree the app marked as text from other people (AGENT-TOOLS 1.14 §21.1). */
   fromOthers?: true;
+  /** What the app told the explorer (AGENT-TOOLS 1.15 §25): `taplineExploreSkip` and `taplineExploreFill`, own or inherited. */
+  explore?: ExploreMarks;
 }
 
 /** Invisible direction marks (AGENT-TOOLS v1.3): U+200E, U+200F, U+202A–U+202E, U+2066–U+2069. */
@@ -162,6 +165,8 @@ interface Collected {
   modals: Fiber[];
   /** The open modals that sit inside text marked as from others: what is shown inside one carries the marker too. */
   markedModals: Set<Fiber>;
+  /** The explore marks (skip, fill) in force at an open modal: what is shown inside it carries them too. */
+  modalMarks: Map<Fiber, ExploreMarks>;
   /** Set while a modal is open: the topmost modal's host, and the whole tree walked with it (the screen behind included). */
   behind?: { sheet: Fiber; nodes: HostNode[] };
 }
@@ -231,6 +236,7 @@ function walk(
   presentation?: string,
   inRow = false,
   fromOthers = false,
+  explore?: ExploreMarks,
 ): string[] {
   const segments: string[] = [];
   for (let fiber = first; fiber; fiber = fiber.sibling) {
@@ -242,9 +248,11 @@ function walk(
       if (TAB_HOST.test(hostType)) collectTabs(fiber.child, out.tabs);
       if (hidesSubtree(hostType, propsOf(fiber))) continue;
       const others = fromOthers || marksFromOthers(fiber);
+      const marks = exploreMarksOf(fiber, explore);
       if (MODAL_HOSTS.has(hostType)) {
         out.modals.push(fiber);
         if (others) out.markedModals.add(fiber);
+        if (marks) out.modalMarks.set(fiber, marks);
       }
       const isText = TEXT_HOSTS.has(hostType);
       const row = inRow || owners.some(isListItemOwner);
@@ -264,19 +272,20 @@ function walk(
         insideText,
         ...(row ? { row: true as const } : {}),
         ...(others ? { fromOthers: true as const } : {}),
+        ...(marks ? { explore: marks } : {}),
       };
       out.nodes.push(node);
-      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row, others);
+      const inner = walk(fiber.child, node.index, [], insideText || isText, out, chain, shown, row, others, marks);
       node.text = normalizeText(isText ? inner.join('') : inner.join(' '), isText);
       if (isText) segments.push(inner.join(''));
       else for (const piece of inner) segments.push(piece);
     } else if (isCompositeTag(fiber.tag)) {
       const route = routeOf(fiber, chain, presentation);
       if (route) out.routes.push(route);
-      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow, fromOthers || marksFromOthers(fiber));
+      const inner = walk(fiber.child, parent, [...owners, fiber], insideText, out, route ? [...chain, route] : chain, route ? undefined : presentation, inRow, fromOthers || marksFromOthers(fiber), exploreMarksOf(fiber, explore));
       for (const piece of inner) segments.push(piece);
     } else {
-      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow, fromOthers);
+      const inner = walk(fiber.child, parent, owners, insideText, out, chain, presentation, inRow, fromOthers, explore);
       for (const piece of inner) segments.push(piece);
     }
   }
@@ -284,16 +293,16 @@ function walk(
 }
 
 function collect(roots: FiberRootLike[]): Collected {
-  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
+  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set(), modalMarks: new Map() };
   for (const root of roots) walk(root.current.child, -1, [], false, out, []);
   // iOS hides what is behind a modal from accessibility, so a person (and Tapwright, which reads
   // that tree) sees only the topmost modal: list only that, no screen behind it and no tab bar.
   const top = out.modals[out.modals.length - 1];
   if (!top) return out;
-  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
+  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set(), modalMarks: new Map() };
   // The marker a wrapper outside the modal gave it is kept on what the modal shows.
-  walk(top.child, -1, [], false, only, [], undefined, false, out.markedModals.has(top));
-  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, markedModals: out.markedModals, behind: { sheet: top, nodes: out.nodes } };
+  walk(top.child, -1, [], false, only, [], undefined, false, out.markedModals.has(top), out.modalMarks.get(top));
+  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, markedModals: out.markedModals, modalMarks: out.modalMarks, behind: { sheet: top, nodes: out.nodes } };
 }
 
 /** What the place is made of, without describing any element (cheap enough for every commit); null without React roots. */
@@ -645,6 +654,7 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
           redundantText = true;
           // The ancestor now shows this text as its own: the marker goes with it, or the default list would show others' words unmarked.
           if (node.fromOthers === true) ancestor.fromOthers = true;
+          if (node.explore?.skip === true) ancestor.explore = { ...ancestor.explore, skip: true };
           break;
         }
         p = ancestor.parent;
@@ -1324,6 +1334,8 @@ export function toElement(entry: Entry, frame: Frame | null, ref: string = refFo
     checked: info.checked,
     ...(entry.node.row === true ? { row: true as const } : {}),
     ...(entry.node.fromOthers === true ? { fromOthers: true as const } : {}),
+    ...(entry.node.explore?.skip === true ? { exploreSkip: true as const } : {}),
+    ...(entry.node.explore?.fill !== undefined ? { exploreFill: entry.node.explore.fill } : {}),
   };
 }
 
