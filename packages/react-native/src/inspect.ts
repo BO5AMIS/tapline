@@ -160,6 +160,8 @@ interface Collected {
   tabs: TabFound[];
   /** Open modals' host fibers (not inside a hidden subtree), in tree order. */
   modals: Fiber[];
+  /** The open modals that sit inside text marked as from others: what is shown inside one carries the marker too. */
+  markedModals: Set<Fiber>;
   /** Set while a modal is open: the topmost modal's host, and the whole tree walked with it (the screen behind included). */
   behind?: { sheet: Fiber; nodes: HostNode[] };
 }
@@ -239,10 +241,13 @@ function walk(
       const hostType = typeof fiber.type === 'string' ? fiber.type : '';
       if (TAB_HOST.test(hostType)) collectTabs(fiber.child, out.tabs);
       if (hidesSubtree(hostType, propsOf(fiber))) continue;
-      if (MODAL_HOSTS.has(hostType)) out.modals.push(fiber);
+      const others = fromOthers || marksFromOthers(fiber);
+      if (MODAL_HOSTS.has(hostType)) {
+        out.modals.push(fiber);
+        if (others) out.markedModals.add(fiber);
+      }
       const isText = TEXT_HOSTS.has(hostType);
       const row = inRow || owners.some(isListItemOwner);
-      const others = fromOthers || marksFromOthers(fiber);
       let shown = presentation;
       if (hostType === 'RNSScreen') {
         const stack = propsOf(fiber).stackPresentation;
@@ -279,15 +284,16 @@ function walk(
 }
 
 function collect(roots: FiberRootLike[]): Collected {
-  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
+  const out: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
   for (const root of roots) walk(root.current.child, -1, [], false, out, []);
   // iOS hides what is behind a modal from accessibility, so a person (and Tapwright, which reads
   // that tree) sees only the topmost modal: list only that, no screen behind it and no tab bar.
   const top = out.modals[out.modals.length - 1];
   if (!top) return out;
-  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [] };
-  walk(top.child, -1, [], false, only, []);
-  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, behind: { sheet: top, nodes: out.nodes } };
+  const only: Collected = { nodes: [], routes: [], tabs: [], modals: [], markedModals: new Set() };
+  // The marker a wrapper outside the modal gave it is kept on what the modal shows.
+  walk(top.child, -1, [], false, only, [], undefined, false, out.markedModals.has(top));
+  return { nodes: only.nodes, routes: out.routes, tabs: [], modals: out.modals, markedModals: out.markedModals, behind: { sheet: top, nodes: out.nodes } };
 }
 
 /** What the place is made of, without describing any element (cheap enough for every commit); null without React roots. */
@@ -637,6 +643,8 @@ export function describeNodes(nodes: HostNode[]): NodeInfo[] {
         if (!ancestor || !info) break;
         if (info.actions.length > 0 && info.text === node.text) {
           redundantText = true;
+          // The ancestor now shows this text as its own: the marker goes with it, or the default list would show others' words unmarked.
+          if (node.fromOthers === true) ancestor.fromOthers = true;
           break;
         }
         p = ancestor.parent;

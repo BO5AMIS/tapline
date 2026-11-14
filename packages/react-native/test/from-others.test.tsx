@@ -1,6 +1,6 @@
 import { mount, unmountAll, useFrames, frame } from './helpers';
 import React from 'react';
-import { Dimensions, PixelRatio, Text, View } from 'react-native';
+import { Dimensions, PixelRatio, Pressable, Text, View } from 'react-native';
 import { act } from 'react-test-renderer';
 import { forgetLastTree, resetRefs, setMeasurer, tree } from '../src/inspect';
 import { TaplineFromOthers } from '../src/index';
@@ -101,4 +101,36 @@ test('the wrapper draws nothing of its own', async () => {
     </TaplineFromOthers>,
   );
   expect(renderer.toJSON()).toMatchObject({ type: 'Text' });
+});
+
+test('marked text that a pressable exposes as its own text keeps the marker on the pressable (PR 12 CodeRabbit)', async () => {
+  await mount(
+    <View>
+      <Pressable testID="reply" onPress={() => undefined}>
+        <TaplineFromOthers>
+          <Text>Message</Text>
+        </TaplineFromOthers>
+      </Pressable>
+      <Pressable testID="mine" onPress={() => undefined}>
+        <Text>Message</Text>
+      </Pressable>
+    </View>,
+  );
+  useFrames({ reply: frame(0, 0, 300, 40), mine: frame(0, 50, 300, 40) });
+  const result = await tree({});
+  const reply = result.elements.find((e) => e.testID === 'reply');
+  expect(reply?.text).toBe('Message');
+  expect(reply?.fromOthers).toBe(true);
+  expect(result.elements.find((e) => e.testID === 'mine')).not.toHaveProperty('fromOthers');
+});
+
+test('a wrapper outside an open modal still marks the modal\'s visible text (PR 12 CodeRabbit)', async () => {
+  await mount(
+    <TaplineFromOthers>
+      {React.createElement('RCTModalHostView', { visible: true }, <Text testID="inside">Written by someone else</Text>)}
+    </TaplineFromOthers>,
+  );
+  useFrames({ inside: frame(0, 0, 300, 20) });
+  const result = await tree({});
+  expect(result.elements.find((e) => e.testID === 'inside')?.fromOthers).toBe(true);
 });
