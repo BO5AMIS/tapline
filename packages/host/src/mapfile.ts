@@ -437,6 +437,12 @@ function renameName(name: string, renames: Record<string, string>): string {
   return Object.hasOwn(renames, name) ? (renames[name] as string) : name;
 }
 
+/** An explored record whose actions' destinations follow the renames, as a road's `to` does. */
+function renameExplored(record: ExploredRecord, renames: Record<string, string>): ExploredRecord {
+  if (Object.keys(renames).length === 0 || !record.actions.some((action) => action.to !== undefined && Object.hasOwn(renames, action.to))) return record;
+  return { ...record, actions: record.actions.map((action) => (action.to !== undefined ? { ...action, to: renameName(action.to, renames) } : action)) };
+}
+
 function renamePlaces(file: MapFile, renames: Record<string, string>): MapFile {
   if (Object.keys(renames).length === 0) return file;
   const places: Record<string, MapPlace> = {};
@@ -448,6 +454,9 @@ function renamePlaces(file: MapFile, renames: Record<string, string>): MapFile {
     const blocked = target !== name && file.places[target] !== undefined;
     places[blocked ? name : target] = place;
     if (!blocked && target !== name) applied[name] = target;
+  }
+  for (const [name, place] of Object.entries(places)) {
+    if (place.explored !== undefined) places[name] = { ...place, explored: renameExplored(place.explored, applied) };
   }
   return {
     ...file,
@@ -478,6 +487,15 @@ export function mergeMapsWithRenames(
   const both: Record<string, string> = {};
   // A different place with the same name: only my side takes the new name.
   const clash: Record<string, string> = {};
+  // My explored records wait until every rename is known: each side's destinations follow its own renames.
+  const mineExplored: Array<{ name: string; record: ExploredRecord }> = [];
+  // Places that are mine alone: their explored record is mine and follows my renames, not the disk's.
+  const mineOnly = new Set<string>();
+  const holdExplored = (name: string, place: MapPlace): MapPlace => {
+    if (place.explored !== undefined) mineExplored.push({ name, record: place.explored });
+    const { explored: _explored, ...rest } = place;
+    return rest;
+  };
 
   for (const [name, place] of Object.entries(mine.places)) {
     const identity = placeIdentity(place.key);
@@ -485,14 +503,14 @@ export function mergeMapsWithRenames(
     if (known !== undefined) {
       const existing = places[known] as MapPlace;
       if (known === name) {
-        places[known] = mergePlace(existing, place);
+        places[known] = mergePlace(existing, holdExplored(known, place));
         continue;
       }
       // Found independently under two names: the older name stays.
       const keepMine = compareLast(place.last, existing.last) < 0 && places[name] === undefined;
       const kept = keepMine ? name : known;
       if (keepMine) delete places[known];
-      places[kept] = mergePlace(existing, place);
+      places[kept] = mergePlace(existing, holdExplored(kept, place));
       nameByKey.set(identity, kept);
       if (name !== kept) both[name] = kept;
       if (known !== kept) baseRenames[known] = kept;
@@ -504,15 +522,25 @@ export function mergeMapsWithRenames(
       const fresh = `${name}_${n}`;
       taken.add(fresh);
       places[fresh] = place;
+      mineOnly.add(fresh);
       nameByKey.set(identity, fresh);
       clash[name] = fresh;
       continue;
     }
     places[name] = place;
+    mineOnly.add(name);
     nameByKey.set(identity, name);
   }
 
   const mineMap = { ...both, ...clash };
+  for (const [name, place] of Object.entries(places)) {
+    if (place.explored !== undefined) places[name] = { ...place, explored: renameExplored(place.explored, mineOnly.has(name) ? mineMap : baseRenames) };
+  }
+  for (const { name, record } of mineExplored) {
+    const target = places[name] as MapPlace;
+    const moved = renameExplored(record, mineMap);
+    places[name] = { ...target, explored: target.explored !== undefined ? mergeExplored(target.explored, moved) : moved };
+  }
   const roads = new Map<string, MapRoad>();
   const add = (road: MapRoad, renames: Record<string, string>): void => {
     const moved: MapRoad = { ...road, from: renameName(road.from, renames), to: renameName(road.to, renames) };
