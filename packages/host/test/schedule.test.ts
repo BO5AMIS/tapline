@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   REGISTER_SCRIPT,
@@ -106,6 +107,26 @@ describe("schedule add", () => {
     expect(REGISTER_SCRIPT).not.toMatch(/SettingsSet[^\n]*-WakeToRun/);
     expect(REGISTER_SCRIPT).toContain("if ($env:TAPLINE_TASK_KIND -ne 'watch') { $settings.WakeToRun = $true }");
     expect(REGISTER_SCRIPT).toContain("Register-ScheduledTask");
+  });
+
+  it("the success message says which one happens: a time schedule wakes the PC, a file trigger does not (PR 12 CodeRabbit)", async () => {
+    const { deps, cwd } = rig();
+    mkdirSync(join(cwd, "inbox"));
+    const timed = await scheduleAdd({ route: "r", name: "timed", at: "09:00 daily" }, deps);
+    expect(timed.text).toMatch(/wakes the PC to run it/);
+    expect(timed.text).not.toMatch(/does not wake/);
+    const watch = await scheduleAdd({ route: "r", name: "watch", onFile: "inbox" }, deps);
+    expect(watch.text).toMatch(/checks the folder every minute and does not wake the PC/);
+    expect(watch.text).not.toMatch(/wakes the PC to run it/);
+  });
+
+  it("the docs say the same: time schedules wake the PC, file-trigger checks do not", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    for (const file of ["README.md", join("docs", "setup.md"), join("packages", "host", "src", "schedule.ts")]) {
+      const text = readFileSync(join(root, file), "utf8");
+      expect(text, file).not.toMatch(/Task Scheduler task that wakes the PC and runs/);
+      expect(text, file).toMatch(/does not wake the PC|never wakes the PC/);
+    }
   });
 
   it("passes no user value through the script text: it is a constant and the values ride in the environment", async () => {

@@ -301,7 +301,7 @@ order, pair again (or give each agent a fixed `--port`).
   **Scheduled runs (1.7).** A saved route can run by itself, with no model: `tapline schedule add <route> --at "09:00 daily"
   [--with caption=@captions.txt] [--name NAME] [--policy FILE] [--accounts FILE] [--maps DIR]` (or `--on-file FOLDER`
   to run when a new file appears; `--at` is `HH:MM daily`, `HH:MM weekdays` or an ISO date-time for one run). On Windows
-  it registers a Task Scheduler task that wakes the PC and runs `tapline run-schedule <name>`; `tapline schedule list`
+  it registers a Task Scheduler task that runs `tapline run-schedule <name>` (a time schedule wakes the PC to run it; a file trigger checks the folder every minute and does not wake the PC); `tapline schedule list`
   and `tapline schedule remove NAME` do the rest. The schedule file is `~/.tapline/schedules/<name>.json`, and the
   policy, accounts and maps it names are in force (a running `tapline host` carries the run only when it runs with those same
   files; otherwise the run starts its own host, and skips if the app doesn't connect to it): grants and their limits apply to

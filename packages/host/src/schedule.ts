@@ -4,8 +4,8 @@ import { z } from "zod";
 
 /**
  * AGENT-TOOLS 1.14 §22.1: the schedule file and `tapline schedule add|list|remove`. One file per schedule in
- * `~/.tapline/schedules/<name>.json`; on Windows each schedule is a Task Scheduler task that wakes the PC and runs
- * `tapline run-schedule <name>`. The task is registered through an injected runner, so a test sees the exact command.
+ * `~/.tapline/schedules/<name>.json`; on Windows each schedule is a Task Scheduler task that runs
+ * `tapline run-schedule <name>`. A time schedule wakes the PC to run; a file trigger's once-a-minute check never wakes the PC. The task is registered through an injected runner, so a test sees the exact command.
  */
 
 export const SCHEDULE_NAME = /^[A-Za-z0-9][\w.-]{0,60}$/;
@@ -399,7 +399,9 @@ export async function scheduleAdd(options: AddOptions, deps: ScheduleDeps): Prom
   }
   return {
     text: [
-      `Scheduled "${name}": route ${route}, ${when}. Windows Task Scheduler runs it and wakes the PC (task "${taskName(name)}"); the file is ${path}.`,
+      folder === null
+        ? `Scheduled "${name}": route ${route}, ${when}. Windows Task Scheduler runs it and wakes the PC to run it (task "${taskName(name)}"); the file is ${path}.`
+        : `Scheduled "${name}": route ${route}, ${when}. Windows Task Scheduler checks the folder every minute and does not wake the PC; the run starts when a new file appears (task "${taskName(name)}"); the file is ${path}.`,
       `The phone's app must be open when it runs, or the run is skipped (tapline run-schedule ${name} runs it now).`,
       ...notes,
     ].join("\n"),

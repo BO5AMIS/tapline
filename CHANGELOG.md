@@ -33,7 +33,7 @@ app; the whole phone (system apps, notifications, unattended running) is Tapwrig
   - **Drafts only:** Send, Post, Publish, Reply and Comment under a drafts-only grant or route stop before the touch.
     The draft is shown to a person to send or not.
 - **Scheduled runs (§22).**
-  - `tapline schedule add|list|remove` writes a schedule and registers a Windows task that wakes the PC.
+  - `tapline schedule add|list|remove` writes a schedule and registers a Windows task (a time schedule wakes the PC; a file trigger's once-a-minute check does not).
   - `tapline run-schedule` runs the route with grants, the vault and drafts only in force. It skips, with the exact
     reason, when the phone is in use, the app isn't open, or a run is still going.
 - **The audit log (§23).** Grant uses, revocations, approvals, vault and code uses, and scheduled runs are recorded in

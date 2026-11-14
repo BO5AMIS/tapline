@@ -60,7 +60,7 @@ Commands:
            --revoke-all revokes every grant in it at once (a running route stops at its next touch that needs one)
   audit-log  What was done under a person's standing permission (grants used, revoked, approvals):
            tapline audit-log [--since <date or ISO time>] lists the lines; --delete deletes the log
-  schedule Run a saved route on a time or when a file appears, with no model (Windows Task Scheduler wakes the PC):
+  schedule Run a saved route on a time or when a file appears, with no model (Windows Task Scheduler; a time schedule wakes the PC, a file trigger does not):
            tapline schedule add <route> --at "09:00 daily" [--with caption=@captions.txt] [--name NAME]
            [--policy FILE] [--accounts FILE] [--maps DIR]  (or --on-file FOLDER in place of --at);
            tapline schedule list; tapline schedule remove NAME
