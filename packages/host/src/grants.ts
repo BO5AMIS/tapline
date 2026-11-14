@@ -311,7 +311,7 @@ const CLAIM_TRIES = 4;
 const RENAME_WAIT_MS = 20;
 
 /** A claimed use: the day's count including this use, who made it, and its slot files. */
-type Claimed = { today: number; owner: string; slots: string[] };
+type Claimed = { today: number; perDay: number; owner: string; slots: string[] };
 
 type SlotResult = { file: string; count: number } | { full: number } | null;
 
@@ -598,11 +598,11 @@ export class GrantBook {
       return {
         kind: "covered",
         name: grant.name,
-        counts: `${counted.today} of ${grant.perDay}`,
+        counts: `${counted.today} of ${counted.perDay}`,
         counted: mode === "use",
         owner: counted.owner,
         slots: counted.slots,
-        line: `Note: allowed by grant ${name} (${counted.today} of ${grant.perDay} today).`,
+        line: `Note: allowed by grant ${name} (${counted.today} of ${counted.perDay} today).`,
       };
     }
     return { kind: "ask", notes, asked };
@@ -634,7 +634,7 @@ export class GrantBook {
       // this very moment (no await between this read and the return).
       const at = this.now();
       if (!this.holds(grant, touch, at)) return false;
-      if (this.inCurrentBuckets(use.slots, at)) return true;
+      if (this.inCurrentBuckets(use.slots, at) && this.fits(grant, use.slots)) return true;
       await this.dropSlots(use.name, use.owner, use.slots);
       const claimed = await this.claimBuckets(grant, grant.route ?? touch.routes[0]);
       if (claimed === null || typeof claimed === "string") return false;
@@ -642,6 +642,29 @@ export class GrantBook {
       use.slots = claimed.slots;
     }
     return false;
+  }
+
+  /**
+   * Whether a claim still fits the grant as the policy file has it now: its day slot number is within perDay, and, when the grant has a
+   * perHour, it holds an hour slot whose number is within perHour. A policy that was changed between the claim and the touch (a quota
+   * cut, a perHour added) makes an old claim fall outside the new limits; it is then given back and claimed again, or the touch asks.
+   */
+  private fits(grant: Grant, slots: string[]): boolean {
+    let days = 0;
+    let hours = 0;
+    for (const slot of slots) {
+      const file = slot.split("/")[2] ?? "";
+      const hour = /^h([0-9]+)$/.exec(file);
+      if (hour !== null) {
+        hours += 1;
+        if (grant.perHour === undefined || Number(hour[1]) > grant.perHour) return false;
+        continue;
+      }
+      const day = /^([0-9]+)$/.exec(file);
+      if (day === null || Number(day[1]) > grant.perDay) return false;
+      days += 1;
+    }
+    return days === 1 && (grant.perHour === undefined ? hours === 0 : hours === 1);
   }
 
   /** Whether every slot of a use is in the day (or hour) folder of `at`: a use from an earlier day or hour is not counted against the current one. */
@@ -701,7 +724,7 @@ export class GrantBook {
   private async peek(grant: Grant, at: Date): Promise<Claimed | string | null> {
     const counts = await this.countsAt(grant, at);
     if (counts === null) return null;
-    return this.limit(grant, counts) ?? { today: counts.today + 1, owner: "", slots: [] };
+    return this.limit(grant, counts) ?? { today: counts.today + 1, perDay: grant.perDay, owner: "", slots: [] };
   }
 
   /**
@@ -788,7 +811,7 @@ export class GrantBook {
           await giveBack();
           continue;
         }
-        return { today: day.count, owner, slots };
+        return { today: day.count, perDay: grant.perDay, owner, slots };
       } catch {
         await giveBack();
         return null;
@@ -807,8 +830,9 @@ export class GrantBook {
     if (audit === null || !safeGrantName(grant.name)) return null;
     // After the awaits below the clock is read again, as the last thing before the audit line and the answer: a claim that midnight (or
     // the next hour) overtook meanwhile is given back and made again in the current buckets, at most CLAIM_TRIES times.
+    let current = grant;
     for (let attempt = 0; attempt < CLAIM_TRIES; attempt++) {
-      const claimed = await this.claimBuckets(grant, grant.route ?? touch.routes[0]);
+      const claimed = await this.claimBuckets(current, current.route ?? touch.routes[0]);
       if (claimed === null || typeof claimed === "string") return claimed;
       const giveBack = (): Promise<void> => this.dropSlots(grant.name, claimed.owner, claimed.slots);
       try {
@@ -820,11 +844,14 @@ export class GrantBook {
           await giveBack();
           return null;
         }
-        if (!this.inCurrentBuckets(claimed.slots, at)) {
+        // The claim is checked against the refreshed grant: after a quota cut or a changed perHour it is given back, and claimed once more
+        // under the new limits (the loop), which asks a person when they leave no room.
+        if (!this.inCurrentBuckets(claimed.slots, at) || !this.fits(fresh, claimed.slots)) {
           await giveBack();
+          current = fresh;
           continue;
         }
-        if (!audit.write({ kind: "grant", app: appKey(touch.app), name: grant.name, detail: `${detail} (${claimed.today} of ${grant.perDay} today)` })) {
+        if (!audit.write({ kind: "grant", app: appKey(touch.app), name: grant.name, detail: `${detail} (${claimed.today} of ${fresh.perDay} today)` })) {
           await giveBack();
           return null;
         }
