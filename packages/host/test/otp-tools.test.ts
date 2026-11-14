@@ -412,6 +412,50 @@ describe("the code is asked for only after the host's own gates (PR T186C findin
     expect(everythingIn(logDir)).not.toContain(FAKE_CODE);
   });
 
+  it("a person's input still queued after the idle time: the fetched code is dropped, nothing typed (PR 15 Codex cycle 4)", async () => {
+    const control = new ControlQueue({ idleMs: 50 });
+    const order: string[] = [];
+    const { tools, daemon, typed } = await setup({}, true, { duringReal: () => order.push("typed") }, CAPABILITIES, { control });
+    let person: Promise<void> | undefined;
+    afterFetch = async () => {
+      afterFetch = undefined;
+      person = control.runPerson(async () => {
+        order.push("person");
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    };
+    const answer = await callTool(tools, "type_text", { target: { id: "code" }, text });
+    await person;
+    expect(fetches(daemon)).toBe(1);
+    expect(typed).toHaveLength(0);
+    expect(answer.isError).toBe(true);
+    expect(order).toEqual(["person"]);
+  });
+
+  it("a person's input queued behind another action for longer than the idle time: no code is asked for (PR 15 Codex cycle 4)", async () => {
+    const control = new ControlQueue({ idleMs: 50 });
+    const { tools, daemon, typed, checked } = await setup({}, true, {}, CAPABILITIES, { control });
+    let release: () => void = () => undefined;
+    const held = control.runAgent(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const call = callTool(tools, "type_text", { target: { id: "code" }, text });
+    for (let n = 0; n < 200 && checked.length === 0; n++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 30));
+    const person = control.runPerson(async () => undefined);
+    await new Promise((r) => setTimeout(r, 150));
+    release();
+    await held;
+    const answer = await call;
+    await person;
+    expect(fetches(daemon)).toBe(0);
+    expect(typed).toHaveLength(0);
+    expect(answer.isError).toBe(true);
+  });
+
   it("a paused queue refuses the type before any code is asked for", async () => {
     const control = new ControlQueue();
     control.setPaused(true);

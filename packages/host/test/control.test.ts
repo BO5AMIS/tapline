@@ -16,6 +16,30 @@ function fakeTime() {
   };
 }
 
+describe("ControlQueue.personRecent", () => {
+  it("stays true while a person's input waits in the queue, however long; the idle time counts from when it ran", async () => {
+    let now = 0;
+    const control = new ControlQueue({ idleMs: 3000, now: () => now });
+    let release: () => void = () => undefined;
+    const held = control.runAgent(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await Promise.resolve();
+    const person = control.runPerson(async () => undefined);
+    now = 10_000;
+    expect(control.personRecent()).toBe(true);
+    release();
+    await held;
+    await person;
+    expect(control.personRecent()).toBe(true);
+    now = 13_001;
+    expect(control.personRecent()).toBe(false);
+  });
+});
+
 describe("ControlQueue", () => {
   it("runs one action at a time, in order", async () => {
     const queue = new ControlQueue();

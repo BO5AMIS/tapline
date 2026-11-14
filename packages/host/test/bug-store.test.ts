@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -271,6 +271,21 @@ describe("the folder (§29.2)", () => {
     const later = new BugStore(store.base, 1);
     later.pruneAll();
     expect(later.list(app).map((row) => row.id)).toEqual([ids[2]]);
+  });
+
+  it("a malformed record is unreadable, never a throw: read, list, lookup and pruneAll go on (PR 15 Codex cycle 4)", () => {
+    const store = new BugStore(tmp());
+    const made = makeBug(context(store), args(crash()));
+    const id = "bug_0123456789abcdef";
+    for (const body of ['{"bug":{}}', '{"bug":{"id":"bug_0123456789abcdef"},"app":"com.example.wayfare"}', '{"bug":null,"app":"com.example.wayfare"}', "[]"]) {
+      const dir = join(store.appDir("com.example.wayfare"), id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "finding.json"), body);
+      expect(store.read("com.example.wayfare", id)).toBeNull();
+      expect(store.list().map((row) => row.id)).toEqual([made.meta.id]);
+      expect(store.lookup(id)).toBeNull();
+      expect(() => store.pruneAll()).not.toThrow();
+    }
   });
 
   it("a bug in a folder that isn't its app's own (a 1.8.5 folder, or a planted one) is not listed or found", () => {

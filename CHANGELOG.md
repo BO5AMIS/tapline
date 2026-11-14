@@ -14,6 +14,10 @@ Tapwright, sha256 ef8e7b63) now states them.
   - A code that can't be typed after it arrived is dropped, never asked for again: a call whose code was dropped isn't
     run again for a person's moment (a single call or a `run` resumed at that step), and no reflex retries it.
   - Another app selected while the step is checked: no code is asked for (`not_connected`).
+  - The checks are made again in the queue's turn right before the fetch and again before the send: the lease, the run's
+    rules, the pause, a person's input (one that waits in the queue counts however long it waits), the app still selected,
+    connected and in front, and a fresh dry run. A failed check a reflex can clear gets the reflex, then one more check.
+- **Bug store.** A kept bug whose `finding.json` is malformed is skipped as unreadable instead of failing a lookup or list.
   - An app whose SDK can't dry-run a step gets no code (`unsupported`).
   - The whole exchange with the daemon may take 12 s (was 5 s). Tapwright's daemon waits up to 8 s for a notification
     banner over the app to go before it reads the app, and a 5 s limit gave up first.

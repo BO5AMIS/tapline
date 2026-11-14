@@ -20,6 +20,19 @@ export const SOURCES_KEPT = 50;
 export { appFolderName };
 
 const BUG_ID = /^bug_[0-9a-f]{16}(?:_\d+)?$/;
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((v) => typeof v === "string");
+
+/** What the store reads of a kept record: the finding's app and kind, and the bug's id, signature, sightings and check. */
+function storedShape(bug: unknown, finding: Record<string, unknown>, id: string): bug is BugMeta {
+  if (typeof finding["app"] !== "string" || finding["app"] === "" || typeof finding["kind"] !== "string") return false;
+  if (!isObject(bug) || bug["id"] !== id || typeof bug["signature"] !== "string") return false;
+  const seen = bug["seen"];
+  if (!isObject(seen) || typeof seen["first"] !== "string" || typeof seen["last"] !== "string" || typeof seen["count"] !== "number") return false;
+  if (!isStrings(seen["builds"]) || !isStrings(seen["sources"])) return false;
+  return isObject(bug["reproduced"]) && isObject(bug["source"]);
+}
 export const isBugId = (text: string): boolean => BUG_ID.test(text);
 
 /** A file of a bug folder holds a vault value, a code or a typed value: nothing is written (§29.6). */
@@ -232,7 +245,9 @@ export class BugStore {
     try {
       const parsed: unknown = JSON.parse(readContainedText(dir, join(dir, "finding.json")));
       if (typeof parsed !== "object" || parsed === null || !("bug" in parsed)) return null;
-      const { bug, ...finding } = parsed as { bug: BugMeta } & Record<string, unknown>;
+      const { bug, ...finding } = parsed as { bug: unknown } & Record<string, unknown>;
+      // A record without what the store reads (its app, its id, its sightings) is unreadable, never a throw (PR 15 Codex cycle 4).
+      if (!storedShape(bug, finding, id)) return null;
       return { finding: finding as unknown as BugFinding, meta: bug, dir };
     } catch {
       return null;
