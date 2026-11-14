@@ -209,6 +209,9 @@ export async function exportBug(deps: BugExportDeps, app: string, id: string, ta
       ...Object.entries(parcel.files).map(([name, text]) => ({ name: `${id}/${name}`, data: Buffer.from(text, "utf8") })),
       ...(parcel.picture !== null ? [{ name: `${id}/picture.jpg`, data: parcel.picture }] : []),
     ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // The values are read again, live, right before the zip is written: one registered since the first check still counts.
+    const lateZip = gateFiles(parcel.files, deps.redact, deps.gateValues ?? []);
+    if (lateZip !== null) return refuse("not_allowed", `export refused: a vault value was found in ${lateZip}. Nothing was written.`);
     try {
       mkdirSync(dirname(zipPath), { recursive: true });
       // A name nobody chose, made exclusively: a file or link already at `<zip>.part` is never written through.
@@ -276,6 +279,13 @@ async function exportIssue(deps: BugExportDeps, stored: NonNullable<ReturnType<B
       const orphan = (await git(["checkout", "--orphan", QA_BRANCH], "git checkout --orphan")) ?? (await git(["rm", "-rf", "-q", "--ignore-unmatch", "."], "git rm"));
       if (orphan !== null) return refuse("internal", orphan);
     }
+    // A value can be registered while the runner awaited (gh auth, the clone ...): every file that goes out is checked again, against the live values,
+    // immediately before the push; the title and the body again immediately before the issue is created.
+    const beforePush = gateFiles({ ...parcel.files, "the issue title": title, "the issue body": body }, deps.redact, deps.gateValues ?? []);
+    if (beforePush !== null) {
+      audited(deps, app, line("refused (redaction check)"));
+      return refuse("not_allowed", `export refused: a vault value was found in ${beforePush}. Nothing was sent.`);
+    }
     // Only the script and an allowed picture go to the branch; the page is the issue's body (§29.7).
     const staged = join(tmp, "stage");
     mkdirSync(staged, { recursive: true });
@@ -292,6 +302,11 @@ async function exportIssue(deps: BugExportDeps, stored: NonNullable<ReturnType<B
       else if ((await run("git", ["diff", "--cached", "--quiet"], { cwd: clone })).code !== 0) failure = committed;
     }
     if (failure !== null) return refuse("internal", failure);
+    const beforeCreate = gateFiles({ "the issue title": title, "the issue body": body }, deps.redact, deps.gateValues ?? []);
+    if (beforeCreate !== null) {
+      audited(deps, app, line("refused (redaction check)"));
+      return refuse("not_allowed", `export refused: a vault value was found in ${beforeCreate}. No issue was opened.`);
+    }
     const bodyFile = join(tmp, "issue.md");
     writeFileSync(bodyFile, body, "utf8");
     const created = await run("gh", ["issue", "create", "--repo", repo, "--title", title, "--body-file", bodyFile]);
