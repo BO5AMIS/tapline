@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { mentionsVault, type AccountStore } from "./accounts.js";
 import { insideDir, loadMap, readRouteSync, saveMap, saveRouteFile } from "./mapfile.js";
@@ -179,7 +179,18 @@ export async function saveRoute(dir: string, script: SharedScriptV2, map?: AppMa
   const name = routeSlug(script.name);
   if (name === null) throw new Error(`"${script.name}" can't name a route; use letters, digits, '.', '_' and '-'.`);
   const relative = relativeOf(name);
-  await saveRouteFile(dir, relative, `${JSON.stringify({ ...script, name }, null, 2)}\n`);
+  // Saving over a route never weakens its security metadata: drafts-only stays, and only a person editing the file lifts it.
+  const lift = `a person must edit the route file (${relative}) to lift it.`;
+  const full = routeFileIn(dir, relative);
+  let keepDrafts = false;
+  if (full !== null && existsSync(full)) {
+    const old = readRouteSync(dir, relative);
+    if (old === null) throw new Error(`the existing route "${name}" can't be read, so it isn't overwritten (it may be drafts-only); ${lift}`);
+    keepDrafts = old["draftsOnly"] === true;
+  }
+  if (keepDrafts && script.draftsOnly === false) throw new Error(`the route "${name}" is drafts-only, and a save can't remove that; ${lift}`);
+  const saved: SharedScriptV2 = { ...script, name, ...(keepDrafts ? { draftsOnly: true } : {}) };
+  await saveRouteFile(dir, relative, `${JSON.stringify(saved, null, 2)}\n`);
   if (map !== undefined) {
     map.addRoute(name, relative);
     await map.flush();
