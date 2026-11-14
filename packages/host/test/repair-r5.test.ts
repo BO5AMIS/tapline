@@ -86,7 +86,7 @@ describe("R5: a repair never writes or answers a value the replay typed", () => 
     const answer = textOf(await r.s.tools.replay({ name: "signin", repair: "apply" }));
     expect(answer).toContain("with 1 repair");
     expect(answer).toContain("${typed}");
-    expect(r.lines.some((line) => line.kind === "repair" && line.detail.includes("${typed}"))).toBe(true);
+    expect(r.lines.some((line) => line.kind === "repair" && (line.detail ?? "").includes("${typed}"))).toBe(true);
     expectNoLeak(r, answer, ["signin.json", "signin.repaired.json"]);
     const repaired = JSON.parse(r.read("signin.repaired.json")) as { steps: Array<Record<string, unknown>> };
     expect(JSON.stringify(repaired.steps.slice(1))).not.toContain(TYPED);
@@ -127,7 +127,7 @@ describe("R5: a repair never writes or answers a value the replay typed", () => 
     const answer = textOf(await r.s.tools.replay({ name: "signin", repair: "apply" }));
     expect(answer).toMatch(/nothing was written|none passed|Repair:/);
     expect(r.files()).toEqual(["signin.json"]);
-    expect(r.lines.some((line) => line.kind === "repair" && line.detail.includes("rejected"))).toBe(true);
+    expect(r.lines.some((line) => line.kind === "repair" && (line.detail ?? "").includes("rejected"))).toBe(true);
     expectNoLeak(r, answer, ["signin.json"]);
   });
 
