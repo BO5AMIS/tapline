@@ -391,7 +391,7 @@ describe("a file trigger's check", () => {
     r.host.call = async (): Promise<CallAnswer> => {
       throw new Error("the connection dropped mid-call");
     };
-    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(1);
+    expect((await runSchedule("daily", { checkTrigger: true }, r.deps)).code).toBe(2);
     expect(readFileSync(seen, "utf8")).not.toBe(before);
   });
 
