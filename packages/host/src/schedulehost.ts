@@ -1,14 +1,17 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { configDir } from "./config.js";
-import { loadAccounts } from "./accounts.js";
+import { readFileSync } from "node:fs";
+import { configDir, tokenFilePath } from "./config.js";
+import { loadAccounts, type GitProbe } from "./accounts.js";
+import { loadPolicy } from "./policy.js";
+import type { VaultDeps } from "./vault.js";
 import { callTool, isToolName } from "./dispatch.js";
 import { isBusyAnswer, type CallAnswer, type ScheduleHost } from "./runschedule.js";
 import type { ProcResult, SchedRunner, Schedule, TaskEntry } from "./schedule.js";
 import { canonicalPath, createRuntime, HOST_FACTS_TOOL, LEASE_TOOL, LEASE_TTL_MS, type HostFacts } from "./runtime.js";
 import { runThinCall, type ThinCallIO } from "./thincall.js";
-import { hashFile, hashMapsDir } from "./hostfacts.js";
+import { hashMapsOnDisk, policyFingerprint } from "./hostfacts.js";
 
 /**
  * The real hosts behind `tapline run-schedule` (AGENT-TOOLS 1.14 §22.2): a `tapline host` that is already running with the app
@@ -80,28 +83,55 @@ function asFacts(text: string): HostFacts | null {
     const raw: unknown = JSON.parse(text);
     if (typeof raw !== "object" || raw === null) return null;
     const { version, instance, policy, noPolicy, accounts, maps, policyHash, accountsHash, mapsHash } = raw as Record<string, unknown>;
-    if (version !== 2 || typeof instance !== "string" || !HEX.test(instance) || typeof noPolicy !== "boolean" || typeof maps !== "string" || typeof mapsHash !== "string") return null;
+    if (version !== 3 || typeof instance !== "string" || !HEX.test(instance) || typeof noPolicy !== "boolean" || typeof maps !== "string" || typeof mapsHash !== "string") return null;
     if ((policy !== null && typeof policy !== "string") || (accounts !== null && typeof accounts !== "string")) return null;
     if ((policyHash !== null && typeof policyHash !== "string") || (accountsHash !== null && typeof accountsHash !== "string")) return null;
-    return { version: 2, instance, policy, noPolicy, accounts, maps, policyHash, accountsHash, mapsHash };
+    return { version: 3, instance, policy, noPolicy, accounts, maps, policyHash, accountsHash, mapsHash };
   } catch {
     return null;
   }
 }
 
-/** What a run compares the host's loaded hashes with: the files and the maps folder as they are now. Replaced in tests. */
+/**
+ * What a run compares the host's loaded hashes with: the same hashes over what this run would load itself (the policy parsed, the vault
+ * decrypted again, the maps read). Null when it can't be loaded. Replaced in tests.
+ */
 export interface FactHasher {
-  file(path: string): string | null;
+  policy(path: string): string | null;
+  accounts(path: string): Promise<string | null>;
   maps(dir: string): string;
 }
-const realHasher: FactHasher = { file: hashFile, maps: hashMapsDir };
+
+/** The hasher of the real files. The vault's hash is an HMAC under the host token this computer holds (the thin call's own token). */
+export function factHasher(env: NodeJS.ProcessEnv = process.env, vaultDeps?: VaultDeps, gitProbe?: GitProbe): FactHasher {
+  return {
+    policy(path) {
+      try {
+        return policyFingerprint(loadPolicy(path));
+      } catch {
+        return null;
+      }
+    },
+    async accounts(path) {
+      try {
+        const token = readFileSync(tokenFilePath(env), "utf8").trim();
+        if (token === "") return null;
+        const loaded = await loadAccounts(path, gitProbe, vaultDeps);
+        return loaded.store === null || loaded.fingerprint === undefined ? null : loaded.fingerprint(token);
+      } catch {
+        return null;
+      }
+    },
+    maps: hashMapsOnDisk,
+  };
+}
 
 /**
  * Why a running host can't carry this schedule, or null when it can (fail closed): the policy must be on and the same file as the
  * schedule's (both the built-in policy when the schedule names none), the accounts file and the maps folder the same, and what the host
- * LOADED must be what the files hold now: it reads its policy and accounts once, so a block word added since is not in force there.
+ * LOADED must be what this run would load now: asked, the host reloads first, and a block word or a permission changed since is in its hashes.
  */
-export function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: NodeJS.ProcessEnv = process.env, hasher: FactHasher = realHasher): string | null {
+export async function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: NodeJS.ProcessEnv = process.env, hasher: FactHasher = factHasher(env)): Promise<string | null> {
   if (facts === null) return "its policy, accounts and maps can't be read";
   if (facts.noPolicy) return "it runs with --no-policy";
   const same = (wanted: string | null, had: string | null): boolean => (wanted === null ? had === null : had !== null && canonicalPath(wanted) === had);
@@ -110,14 +140,14 @@ export function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: 
   const maps = schedule.maps ?? join(configDir(env), "maps");
   if (canonicalPath(maps) !== facts.maps) return "it keeps its maps in another folder";
   if (schedule.policy !== null) {
-    const now = hasher.file(schedule.policy);
-    if (now === null || facts.policyHash === null || now !== facts.policyHash) return "the policy file has changed since the host loaded it";
+    const now = hasher.policy(schedule.policy);
+    if (now === null || facts.policyHash === null || now !== facts.policyHash) return "the policy the host holds is not the one in the file";
   }
   if (schedule.accounts !== null) {
-    const now = hasher.file(schedule.accounts);
-    if (now === null || facts.accountsHash === null || now !== facts.accountsHash) return "the accounts file has changed since the host loaded it";
+    const now = await hasher.accounts(schedule.accounts);
+    if (now === null || facts.accountsHash === null || now !== facts.accountsHash) return "the vault the host holds is not the one the accounts file gives";
   }
-  if (hasher.maps(maps) !== facts.mapsHash) return "the maps have changed since the host loaded them";
+  if (hasher.maps(maps) !== facts.mapsHash) return "the maps the host holds are not the ones on disk";
   return null;
 }
 
@@ -149,7 +179,7 @@ async function runningHost(
   const port = first.port;
   const asked = await thin(env, client, HOST_FACTS_TOOL, {}, { port });
   const facts = asked === null || asked.isError ? null : asFacts(asked.text);
-  const mismatch = factsMismatch(schedule, facts, env, hasher);
+  const mismatch = await factsMismatch(schedule, facts, env, hasher);
   if (mismatch !== null || facts === null) return { host: null, mismatch: mismatch ?? "its policy, accounts and maps can't be read" };
   const instance = facts.instance;
   let credential: string | undefined;
@@ -310,7 +340,7 @@ export interface ConnectDeps {
  * doesn't connect to it the run skips and says the running host differed.
  */
 export async function connectScheduleHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv = process.env, deps: ConnectDeps = {}): Promise<ScheduleHost> {
-  const running = await runningHost(env, `schedule-${name}`, schedule, deps.thin ?? thinCall, deps.hasher ?? realHasher);
+  const running = await runningHost(env, `schedule-${name}`, schedule, deps.thin ?? thinCall, deps.hasher ?? factHasher(env));
   if (running.host !== null) return running.host;
   const own = deps.own ?? ownHost;
   return running.mismatch === null ? await own(schedule, name, env) : await own(schedule, name, env, `the running host differs from the schedule: ${running.mismatch}`);

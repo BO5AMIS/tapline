@@ -7,7 +7,8 @@ import type { ApiAnswer } from "../src/api.js";
 import { LEASE_MAX_TTL_MS, PhoneLease } from "../src/control.js";
 import { createRuntime, HOST_FACTS_TOOL, LEASE_TOOL, type Runtime } from "../src/runtime.js";
 import type { TaplineHost } from "../src/server.js";
-import { hashFile } from "../src/hostfacts.js";
+import { policyFingerprint } from "../src/hostfacts.js";
+import { loadPolicy } from "../src/policy.js";
 import { TaplineTools } from "../src/tools.js";
 import { FakeApp, delay, startHost, TOKEN, type IncomingRequest, type Reply } from "./helpers.js";
 
@@ -281,7 +282,7 @@ describe("a running host's lease and facts", () => {
     expect((await call(runtime, HOST_FACTS_TOOL, {}, "x", "wrong-token")).status).toBe(401);
     const facts = JSON.parse((await call(runtime, HOST_FACTS_TOOL, {}, "x")).answer?.text ?? "{}") as Record<string, unknown>;
     expect(Object.keys(facts).sort()).toEqual(["accounts", "accountsHash", "instance", "maps", "mapsHash", "noPolicy", "policy", "policyHash", "version"]);
-    expect(facts).toMatchObject({ version: 2, policy: null, noPolicy: false, accounts: null, policyHash: null, accountsHash: null });
+    expect(facts).toMatchObject({ version: 3, policy: null, noPolicy: false, accounts: null, policyHash: null, accountsHash: null });
     expect(String(facts["instance"])).toMatch(/^[0-9a-f]{32}$/);
     expect(String(facts["mapsHash"])).toMatch(/^[0-9a-f]{64}$/);
     expect(String(facts["maps"]).toLowerCase()).toContain("maps");
@@ -356,7 +357,7 @@ describe("a running host's lease and facts", () => {
     expect(JSON.stringify(await lease(runtime, "renew", "schedule-a", credential))).not.toContain(credential);
   });
 
-  it("the facts hash the policy and accounts as LOADED: a file edited afterwards leaves them as they were", async () => {
+  it("the facts hash the policy as it is LOADED after a reload: a file edited since is loaded again (PR 12 Codex cycle 3)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tapline-facts-"));
     dirs.push(dir);
     const policy = join(dir, "policy.json");
@@ -364,11 +365,11 @@ describe("a running host's lease and facts", () => {
     const runtime = await start({ policy, maps: join(dir, "maps") });
     const read = async (): Promise<Record<string, unknown>> => JSON.parse((await call(runtime, HOST_FACTS_TOOL, {}, "x")).answer?.text ?? "{}") as Record<string, unknown>;
     const before = await read();
-    expect(before["policyHash"]).toBe(hashFile(policy));
+    expect(before["policyHash"]).toBe(policyFingerprint(loadPolicy(policy)));
     writeFileSync(policy, JSON.stringify({ version: 2, block: ["Archive", "Delete"] }));
     const after = await read();
-    expect(after["policyHash"]).toBe(before["policyHash"]);
-    expect(after["policyHash"]).not.toBe(hashFile(policy));
+    expect(after["policyHash"]).not.toBe(before["policyHash"]);
+    expect(after["policyHash"]).toBe(policyFingerprint(loadPolicy(policy)));
   });
 
   it("a call that pins another instance id is refused and runs nothing; the right one, or none, goes through", async () => {

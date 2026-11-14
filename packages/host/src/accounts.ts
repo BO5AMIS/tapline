@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 import { z } from "zod";
+import { stable } from "./mapfile.js";
 import { openProtected, peekFile, plainWarning, realVaultDeps, VaultOpenError, type VaultDeps } from "./vault.js";
 
 /**
@@ -105,7 +107,17 @@ export interface AccountStore {
 }
 
 /** What the vault file gave: its entries (and the plain file's warning), or why none were loaded. */
-export type AccountsLoad = { store: AccountStore; note?: string } | { store: null; blocked: string };
+export type AccountsLoad =
+  | {
+      store: AccountStore;
+      note?: string;
+      /**
+       * HMAC-SHA256 under `key` of the vault's canonical JSON as it was decrypted (every value and every per-app permission), so two
+       * loads of the same vault agree and a changed one differs, while nothing in it can be guessed from the hash alone.
+       */
+      fingerprint?: (key: string) => string;
+    }
+  | { store: null; blocked: string };
 
 export interface GitProbe {
   /** Whether the folder is inside a git work tree. */
@@ -712,8 +724,10 @@ export async function loadAccounts(file: string, probe: GitProbe = realGitProbe,
     const why = parsed.error.issues.map((issue) => `${issue.path.join(".") || "file"}: ${issue.message}`).join("; ");
     throw new Error(`the vault file ${path} isn't the right format: ${why}`);
   }
-  const store = storeOf(normalizedEntries(parsed.data));
-  return peek?.protected === undefined ? { store, note: plainWarning(path) } : { store };
+  const entries = normalizedEntries(parsed.data);
+  const store = storeOf(entries);
+  const fingerprint = (key: string): string => createHmac("sha256", key).update(stable(entries)).digest("hex");
+  return peek?.protected === undefined ? { store, note: plainWarning(path), fingerprint } : { store, fingerprint };
 }
 
 /**

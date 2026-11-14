@@ -1311,7 +1311,10 @@ export class TaplineTools {
   private dialogs: Dialogs | undefined;
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
   private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string }>();
-  private readonly policy: PolicyFile;
+  /** Read at each use: a host that reloads its policy (a scheduled run asks for its facts) hands every client the new one. */
+  private get policy(): PolicyFile {
+    return this.options.policy ?? DEFAULT_POLICY;
+  }
   private readonly uxRules: UxRules;
   /**
    * Hook for the journey (AGENT-TOOLS 1.12 §17): gives `ux_check` the action labels of earlier screens, and is told
@@ -1456,7 +1459,6 @@ export class TaplineTools {
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     this.confirmations = options.confirmations ?? new Confirmations();
     this.dialogs = options.dialogs;
-    this.policy = options.policy ?? DEFAULT_POLICY;
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();

@@ -16,14 +16,15 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
-import { loadAccounts, type GitProbe } from "./accounts.js";
+import { loadAccounts, type AccountsLoad, type GitProbe } from "./accounts.js";
+import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
 import { Confirmations } from "./confirm.js";
 import { ControlQueue, PhoneLease } from "./control.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ApiCredentials } from "./api.js";
 import { isToolName, callTool, TOOL_META, type ToolName } from "./dispatch.js";
-import { hashFile, hashMapsDir } from "./hostfacts.js";
+import { hashMapsLoaded, policyFingerprint } from "./hostfacts.js";
 import { realRunner } from "./journeyexport.js";
 import { MapRegistry } from "./places.js";
 import { AuditLog } from "./auditlog.js";
@@ -58,11 +59,12 @@ export function canonicalPath(path: string): string {
 }
 
 /**
- * What a running host was started with: paths and flags, and content hashes of what it loaded (never the content). The same path
- * is not the same policy: the host reads its policy and accounts once, so a run compares the hashes with the files as they are now.
+ * What a running host was started with: paths and flags, and hashes of what it has LOADED (never the content). The same path is not
+ * the same policy: asked for its facts, the host first reloads its policy, vault and maps from disk into its live state and reports
+ * hashes of that, and a run compares them with what it would load itself.
  */
 export interface HostFacts {
-  version: 2;
+  version: 3;
   /** Random, made when this host started: a run pins it and every later call must reach this very host. */
   instance: string;
   /** The policy file's canonical path; null for the built-in policy. */
@@ -70,11 +72,11 @@ export interface HostFacts {
   noPolicy: boolean;
   accounts: string | null;
   maps: string;
-  /** sha256 of the policy file as loaded; null for the built-in policy (or a file that couldn't be read). */
+  /** sha256 of the loaded policy's canonical JSON; null for the built-in policy. */
   policyHash: string | null;
-  /** sha256 of the accounts file as loaded; null when none (or it couldn't be read). */
+  /** HMAC-SHA256, keyed with the host token, of the decrypted vault's canonical JSON (values and per-app permissions); null when there is no vault. */
   accountsHash: string | null;
-  /** sha256 over the maps folder's map files (the host's own saves flushed first). */
+  /** sha256 over the canonical JSON of every map the host now holds (read from disk again). */
   mapsHash: string;
 }
 
@@ -102,6 +104,8 @@ export interface RuntimeOptions extends ResolveOptions {
   otp?: OtpService;
   /** `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). */
   brief?: boolean;
+  /** Tests: how a protected vault is opened (DPAPI, keychain). Default: this system's own. */
+  vaultDeps?: VaultDeps;
   /** `--maps DIR`: where the apps' maps live, `<DIR>/<app id>/` (AGENT-TOOLS 1.13 §18.9). Default `~/.tapline/maps`. */
   maps?: string;
   /** Serve `POST /api/<tool>`: set by a standalone `tapline host`, never by an agent's MCP server (AGENT-TOOLS 1.13 §18.10). */
@@ -127,6 +131,10 @@ export interface Runtime {
   port: number;
   viewerLinks: string[];
   remoteViewer: boolean;
+  /** The maps this host holds, one per app. */
+  maps: MapRegistry;
+  /** The policy and the vault as the host holds them now (they change when a scheduled run's facts query reloads them). */
+  live: { policy(): PolicyFile; accounts(): AccountsLoad | undefined };
   /**
    * A tools object for one client; the same object for the same id. `undefined` is the connection itself (one MCP
    * server). Other ids are dropped after 30 minutes without a call.
@@ -175,14 +183,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   // house rules (1.12 §17.3): --ux-rules FILE; a bad file stops the host with a plain message.
   screenshots = screenshotMode(options.screenshots, options.env);
   viewer = viewerMode(options.viewer, options.env);
-  // What the host loads is hashed first, so the facts it reports are those of the policy and accounts it runs under.
-  const policyHash = options.noPolicy !== true && options.policy !== undefined ? hashFile(options.policy) : null;
-  const accountsHash = options.accounts !== undefined ? hashFile(options.accounts) : null;
   const instanceId = randomBytes(16).toString("hex");
   policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
   if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
   // The test accounts (AGENT-TOOLS 1.13 §18.6). A refused file still starts the server, with no accounts and the reason.
-  const accounts = options.accounts !== undefined ? await loadAccounts(options.accounts, options.gitProbe) : undefined;
+  const accounts = options.accounts !== undefined ? await loadAccounts(options.accounts, options.gitProbe, options.vaultDeps) : undefined;
   if (accounts !== undefined) {
     const said = accounts.store === null ? accounts.blocked : accounts.note;
     if (said !== undefined) log(said);
@@ -192,10 +197,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const clients = new Map<string, { tools: TaplineTools; lastUsed: number }>();
   // One-time codes (AGENT-TOOLS 1.14 §20.4): a code typed in this session is scrubbed from everything the host passes on, as a vault value is.
   const otp = options.otp ?? createOtpService({ env: options.env });
-  const vaultRedact = accounts?.store != null ? accounts.store.redact : undefined;
+  // The policy and vault the host runs under now: a facts query reloads them from disk (reloadLive below).
+  const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts };
   const host = new TaplineHost({
-    redact: (text: string) => otp.codes.redact(vaultRedact === undefined ? text : vaultRedact(text)),
-    redactsVault: vaultRedact !== undefined,
+    redact: (text: string) => otp.codes.redact(live.accounts?.store != null ? live.accounts.store.redact(text) : text),
+    redactsVault: accounts?.store != null,
     token: config.token,
     port: config.port,
     portFallback: config.portFallback,
@@ -208,8 +214,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
               return { content: [{ type: "text", text: "Error wrong_host: this is not the host the schedule checked (another instance answers here); nothing was run." }], isError: true };
             }
             if (tool === HOST_FACTS_TOOL) {
-              await maps.flushAll().catch(() => undefined);
-              return { content: [{ type: "text", text: JSON.stringify({ ...facts, mapsHash: hashMapsDir(mapsDir) }) }] };
+              // Reload first, then report what is loaded: a vault that can't be read, or a policy that no longer loads, is an error.
+              try {
+                return { content: [{ type: "text", text: JSON.stringify({ ...facts, ...(await reloadLive()) }) }] };
+              } catch (error) {
+                const why = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error facts_unavailable: the host could not reload what it runs under (${why}); don't reuse it.` }], isError: true };
+              }
             }
             if (tool === LEASE_TOOL) return leaseCall(args, clientId, credentials.lease);
             return isToolName(tool) ? thinCall(tool, args, clientId, signal, credentials.lease) : undefined;
@@ -251,15 +262,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const control = new ControlQueue();
   const lease = new PhoneLease({ now: clock, ...(options.leaseGiveUpMs !== undefined ? { giveUpMs: options.leaseGiveUpMs } : {}) });
   const mapsDir = options.maps ?? join(configDir(options.env), "maps");
-  const facts: Omit<HostFacts, "mapsHash"> = {
-    version: 2,
+  const facts: Omit<HostFacts, "policyHash" | "accountsHash" | "mapsHash"> = {
+    version: 3,
     instance: instanceId,
     policy: options.noPolicy !== true && options.policy !== undefined ? canonicalPath(options.policy) : null,
     noPolicy: options.noPolicy === true,
     accounts: options.accounts !== undefined ? canonicalPath(options.accounts) : null,
     maps: canonicalPath(mapsDir),
-    policyHash,
-    accountsHash,
   };
   const confirmations = new Confirmations();
   let hub: ViewerHub | undefined;
@@ -277,16 +286,14 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     // Prune at start (§19.4): the uses of a grant that has ended or was revoked.
     void grants.prune().catch(() => undefined);
   }
-  const toolsOptions: ToolsOptions = {
+  const fixedOptions: Omit<ToolsOptions, "policy" | "accounts"> = {
     maps,
     audit,
     otp,
     lease,
     ...(grants !== undefined ? { grants } : {}),
     ...(options.brief === true ? { brief: true } : {}),
-    policy,
     uxRules,
-    ...(accounts !== undefined ? { accounts } : {}),
     confirmations,
     canConfirm: viewer !== "off",
     connect: { url, name: config.name },
@@ -313,8 +320,51 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
           viewerFeed: () => hub?.feed() ?? { on: false, quality: "balanced" },
         }),
   };
+  // Every tools object reads the policy and the vault through these getters, so a reload reaches the ones already made.
+  const optionsWith = (extra: Partial<ToolsOptions>): ToolsOptions => ({
+    ...fixedOptions,
+    ...extra,
+    get policy(): PolicyFile {
+      return live.policy;
+    },
+    get accounts(): AccountsLoad | undefined {
+      return live.accounts;
+    },
+  });
   // The connection's own tools: what an MCP server uses, and what the live viewer's person input goes through.
-  const primary = new TaplineTools(host, toolsOptions);
+  const primary = new TaplineTools(host, optionsWith({}));
+
+  // Serialized: two facts queries must not discard each other's freshly loaded maps.
+  let reloading: Promise<unknown> = Promise.resolve();
+  /**
+   * Reads the policy, the vault (decrypting it again) and the maps from disk into the live state, and answers hashes of what is now
+   * loaded. Rejects, changing nothing that was loaded before, when the policy or the vault can't be read.
+   */
+  function reloadLive(): Promise<Pick<HostFacts, "policyHash" | "accountsHash" | "mapsHash">> {
+    const run = async (): Promise<Pick<HostFacts, "policyHash" | "accountsHash" | "mapsHash">> => {
+      const nextPolicy = options.noPolicy !== true && options.policy !== undefined ? loadPolicy(options.policy) : null;
+      let nextAccounts: AccountsLoad | undefined;
+      let accountsHash: string | null = null;
+      if (options.accounts !== undefined) {
+        const loaded = await loadAccounts(options.accounts, options.gitProbe, options.vaultDeps);
+        if (loaded.store === null) throw new Error(loaded.blocked.replace(/[.\s]+$/, ""));
+        if (loaded.fingerprint === undefined) throw new Error("the vault can't be fingerprinted");
+        accountsHash = loaded.fingerprint(config.token);
+        nextAccounts = loaded;
+      }
+      if (nextPolicy !== null) live.policy = nextPolicy;
+      if (nextAccounts !== undefined) live.accounts = nextAccounts;
+      await maps.reload();
+      const mapsHash = hashMapsLoaded(mapsDir, (app) => {
+        const map = maps.forApp({ id: app, name: app });
+        return map === undefined ? null : { status: map.loadedStatus(), data: map.data() };
+      });
+      return { policyHash: nextPolicy === null ? null : policyFingerprint(nextPolicy), accountsHash, mapsHash };
+    };
+    const answer = reloading.then(run, run);
+    reloading = answer.catch(() => undefined);
+    return answer;
+  }
 
   /** Every call through `/api` is a thin call: the log says so, and the report flags a run of them (§16.1). */
   function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal, leaseCredential?: string): Promise<CallToolResult> {
@@ -381,7 +431,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
       return known.tools;
     }
     // The call log names the agent by this id.
-    const tools = new TaplineTools(host, { ...toolsOptions, clientId: () => clientId, confirmScope: "api" });
+    const tools = new TaplineTools(host, optionsWith({ clientId: () => clientId, confirmScope: "api" }));
     clients.set(clientId, { tools, lastUsed: now });
     return tools;
   }
@@ -438,6 +488,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     port,
     viewerLinks,
     remoteViewer,
+    maps,
+    live: { policy: () => live.policy, accounts: () => live.accounts },
     toolsFor,
     phoneInUse: () => control.driver() !== null || control.paused(),
     // The maps are written at most once a second while driving, and in full here.

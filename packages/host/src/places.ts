@@ -350,6 +350,8 @@ export class AppMap {
   private known: KnownPlaces | undefined;
   private knownFor: string | undefined;
   private dirty = false;
+  /** Set by `discard`: this copy was dropped for a fresh read of the file and never writes again. */
+  private dead = false;
   private version = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> | undefined;
@@ -706,7 +708,7 @@ export class AppMap {
   }
 
   private schedule(): void {
-    if (this.readOnly || this.timer !== undefined || this.saving !== undefined) return;
+    if (this.dead || this.readOnly || this.timer !== undefined || this.saving !== undefined) return;
     const wait = Math.max(0, this.lastWriteAt + this.gapMs - this.clock());
     this.timer = setTimeout(() => {
       this.timer = undefined;
@@ -723,7 +725,26 @@ export class AppMap {
     }
     if (this.readOnly) return;
     while (this.saving !== undefined) await this.saving;
-    if (this.dirty) await this.write();
+    if (this.dirty && !this.dead) await this.write();
+  }
+
+  /** How the file loaded: "ok", "new" (no file) or "unreadable". */
+  loadedStatus(): "ok" | "new" | "unreadable" {
+    return this.loadStatus;
+  }
+
+  /**
+   * Drops this copy without writing it: what it learned and hadn't saved is let go, and it never saves again, so a file a person has
+   * edited can't be written over (or a deleted reflex brought back) by a stale copy. A save already under way is waited for.
+   */
+  async discard(): Promise<void> {
+    this.dead = true;
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    while (this.saving !== undefined) await this.saving;
+    this.dirty = false;
   }
 
   private write(): Promise<void> {
@@ -822,6 +843,13 @@ export class MapRegistry {
 
   async flushAll(): Promise<void> {
     await Promise.all([...this.maps.values()].map((map) => map.flush()));
+  }
+
+  /** Lets go of every map held in memory unsaved; the next `forApp` reads the file again. */
+  async reload(): Promise<void> {
+    const held = [...this.maps.values()];
+    this.maps.clear();
+    await Promise.all(held.map((map) => map.discard()));
   }
 }
 

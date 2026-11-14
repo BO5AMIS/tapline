@@ -8,7 +8,9 @@ import type { Schedule } from "../src/schedule.js";
 import { schedulePath, schedulesDir } from "../src/schedule.js";
 import { canonicalPath, HOST_FACTS_TOOL, LEASE_TOOL, type HostFacts } from "../src/runtime.js";
 import { connectScheduleHost, factsMismatch, LOST_TEXT, type ThinCaller, type ThinPin } from "../src/schedulehost.js";
-import { hashFile, hashMapsDir } from "../src/hostfacts.js";
+import { createHmac } from "node:crypto";
+import { hashMapsOnDisk, policyFingerprint } from "../src/hostfacts.js";
+import { loadPolicy } from "../src/policy.js";
 
 // AGENT-TOOLS 1.14 §22.2, §22.3 (PR 12 finding 6): a running host is used only when it carries the schedule's own policy, accounts and maps.
 
@@ -30,13 +32,16 @@ interface World {
   maps: string;
 }
 
+const HOST_TOKEN = "0123456789abcdef0123456789abcdef";
+
 function world(): World {
   const home = tmp();
   const policy = join(home, "policy.json");
   const accounts = join(home, "accounts.json");
   const maps = join(home, "my-maps");
-  writeFileSync(policy, "{}");
-  writeFileSync(accounts, "{}");
+  writeFileSync(policy, JSON.stringify({ version: 2, block: ["Archive"] }));
+  writeFileSync(accounts, JSON.stringify({ version: 2, vault: {} }));
+  writeFileSync(join(home, "token"), `${HOST_TOKEN}\n`);
   mkdirSync(maps);
   return { home, env: { TAPLINE_HOME: home }, policy, accounts, maps };
 }
@@ -59,63 +64,64 @@ const CREDENTIAL = "0f".repeat(32);
 
 /** What a host started on these files reports: paths, and the hashes of the files as it loaded them (now). */
 const factsOf = (w: World, over: Partial<HostFacts> = {}): HostFacts => ({
-  version: 2,
+  version: 3,
   instance: INSTANCE,
   policy: canonicalPath(w.policy),
   noPolicy: false,
   accounts: canonicalPath(w.accounts),
   maps: canonicalPath(w.maps),
-  policyHash: hashFile(w.policy),
-  accountsHash: hashFile(w.accounts),
-  mapsHash: hashMapsDir(w.maps),
+  policyHash: policyFingerprint(loadPolicy(w.policy)),
+  // the HMAC of an empty vault's canonical JSON under the host token (what the host reports for the file `world` writes)
+  accountsHash: createHmac("sha256", HOST_TOKEN).update("{}").digest("hex"),
+  mapsHash: hashMapsOnDisk(w.maps),
   ...over,
 });
 
 describe("factsMismatch (fail closed)", () => {
-  it("a host with the schedule's policy, accounts and maps matches", () => {
+  it("a host with the schedule's policy, accounts and maps matches", async () => {
     const w = world();
-    expect(factsMismatch(scheduleOf(w), factsOf(w), w.env)).toBeNull();
+    expect(await factsMismatch(scheduleOf(w), factsOf(w), w.env)).toBeNull();
   });
 
-  it("a host started with --no-policy never matches, whatever else it says", () => {
+  it("a host started with --no-policy never matches, whatever else it says", async () => {
     const w = world();
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { noPolicy: true }), w.env)).toMatch(/--no-policy/);
-    expect(factsMismatch(scheduleOf(w, { policy: null }), factsOf(w, { noPolicy: true, policy: null }), w.env)).toMatch(/--no-policy/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { noPolicy: true }), w.env)).toMatch(/--no-policy/);
+    expect(await factsMismatch(scheduleOf(w, { policy: null }), factsOf(w, { noPolicy: true, policy: null }), w.env)).toMatch(/--no-policy/);
   });
 
-  it("another policy file, no policy file, another accounts file, another maps folder", () => {
+  it("another policy file, no policy file, another accounts file, another maps folder", async () => {
     const w = world();
     const other = join(w.home, "other.json");
     writeFileSync(other, "{}");
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policy: canonicalPath(other) }), w.env)).toMatch(/another policy/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policy: null }), w.env)).toMatch(/another policy/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { accounts: null }), w.env)).toMatch(/other accounts/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { accounts: canonicalPath(other) }), w.env)).toMatch(/other accounts/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { maps: canonicalPath(join(w.home, "elsewhere")) }), w.env)).toMatch(/maps/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policy: canonicalPath(other) }), w.env)).toMatch(/another policy/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policy: null }), w.env)).toMatch(/another policy/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { accounts: null }), w.env)).toMatch(/other accounts/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { accounts: canonicalPath(other) }), w.env)).toMatch(/other accounts/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { maps: canonicalPath(join(w.home, "elsewhere")) }), w.env)).toMatch(/maps/);
   });
 
-  it("a schedule with no policy needs a host on the built-in policy, not one with a file of its own", () => {
+  it("a schedule with no policy needs a host on the built-in policy, not one with a file of its own", async () => {
     const w = world();
-    expect(factsMismatch(scheduleOf(w, { policy: null }), factsOf(w, { policy: null }), w.env)).toBeNull();
-    expect(factsMismatch(scheduleOf(w, { policy: null }), factsOf(w), w.env)).toMatch(/another policy/);
+    expect(await factsMismatch(scheduleOf(w, { policy: null }), factsOf(w, { policy: null }), w.env)).toBeNull();
+    expect(await factsMismatch(scheduleOf(w, { policy: null }), factsOf(w), w.env)).toMatch(/another policy/);
   });
 
-  it("no maps in the schedule means the default folder of this config directory", () => {
+  it("no maps in the schedule means the default folder of this config directory", async () => {
     const w = world();
     const fallback = canonicalPath(join(w.home, "maps"));
-    expect(factsMismatch(scheduleOf(w, { maps: null }), factsOf(w, { maps: fallback }), w.env)).toBeNull();
-    expect(factsMismatch(scheduleOf(w, { maps: null }), factsOf(w), w.env)).toMatch(/maps/);
+    expect(await factsMismatch(scheduleOf(w, { maps: null }), factsOf(w, { maps: fallback }), w.env)).toBeNull();
+    expect(await factsMismatch(scheduleOf(w, { maps: null }), factsOf(w), w.env)).toMatch(/maps/);
   });
 
-  it("facts that can't be read are a mismatch", () => {
+  it("facts that can't be read are a mismatch", async () => {
     const w = world();
-    expect(factsMismatch(scheduleOf(w), null, w.env)).toMatch(/can't be read/);
+    expect(await factsMismatch(scheduleOf(w), null, w.env)).toMatch(/can't be read/);
   });
 
-  it("the same file through a different spelling matches", () => {
+  it("the same file through a different spelling matches", async () => {
     const w = world();
     const spelled = join(w.home, ".", "policy.json");
-    expect(factsMismatch(scheduleOf(w, { policy: spelled }), factsOf(w), w.env)).toBeNull();
+    expect(await factsMismatch(scheduleOf(w, { policy: spelled }), factsOf(w), w.env)).toBeNull();
   });
 });
 
@@ -394,17 +400,17 @@ describe("matching paths are not matching policy (PR 12 Codex cycle 2, finding 2
     const own = fakeOwn();
     const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: own.own });
     expect(host.via).toBe("its own host");
-    expect(own.made[0]?.note).toMatch(/the policy file has changed since the host loaded it/);
+    expect(own.made[0]?.note).toMatch(/the policy the host holds is not the one in the file/);
     expect(thin.seen.some((s) => s.tool !== "apps" && s.tool !== HOST_FACTS_TOOL)).toBe(false);
   });
 
   it("the accounts file edited after the host loaded it is not reused", async () => {
     const w = world();
     const facts = factsOf(w);
-    writeFileSync(w.accounts, JSON.stringify({ version: 2, vault: {} }));
+    writeFileSync(w.accounts, JSON.stringify({ version: 2, vault: { extra: { kind: "note", text: "another-fake-note" } } }));
     const own = fakeOwn();
     await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: fakeRunning(facts).call, own: own.own });
-    expect(own.made[0]?.note).toMatch(/the accounts file has changed since the host loaded it/);
+    expect(own.made[0]?.note).toMatch(/the vault the host holds is not the one the accounts file gives/);
   });
 
   it("a map changed after the host loaded it is not reused", async () => {
@@ -414,22 +420,22 @@ describe("matching paths are not matching policy (PR 12 Codex cycle 2, finding 2
     writeFileSync(join(w.maps, "com.example.app", "map.json"), "{}");
     const own = fakeOwn();
     await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: fakeRunning(facts).call, own: own.own });
-    expect(own.made[0]?.note).toMatch(/the maps have changed since the host loaded them/);
+    expect(own.made[0]?.note).toMatch(/the maps the host holds are not the ones on disk/);
   });
 
-  it("a host that couldn't read its policy (a null hash) never matches a schedule that names one", () => {
+  it("a host that couldn't read its policy (a null hash) never matches a schedule that names one", async () => {
     const w = world();
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: null }), w.env)).toMatch(/policy file has changed/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { accountsHash: null }), w.env)).toMatch(/accounts file has changed/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policyHash: null }), w.env)).toMatch(/policy the host holds/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { accountsHash: null }), w.env)).toMatch(/vault the host holds/);
   });
 
-  it("identical files, hashed by the injected hasher, match; any difference in any one of the three refuses", () => {
+  it("identical files, hashed by the injected hasher, match; any difference in any one of the three refuses", async () => {
     const w = world();
-    const same = { file: () => "h", maps: () => "m" };
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "h", mapsHash: "m" }), w.env, same)).toBeNull();
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "x", accountsHash: "h", mapsHash: "m" }), w.env, same)).toMatch(/policy/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "x", mapsHash: "m" }), w.env, same)).toMatch(/accounts/);
-    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "h", mapsHash: "x" }), w.env, same)).toMatch(/maps/);
+    const same = { policy: () => "h", accounts: async () => "h", maps: () => "m" };
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "h", mapsHash: "m" }), w.env, same)).toBeNull();
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "x", accountsHash: "h", mapsHash: "m" }), w.env, same)).toMatch(/policy/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "x", mapsHash: "m" }), w.env, same)).toMatch(/accounts/);
+    expect(await factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "h", mapsHash: "x" }), w.env, same)).toMatch(/maps/);
   });
 
   it("facts without an instance id or hashes (an older host) can't be read: no reuse", async () => {
@@ -561,7 +567,13 @@ describe("a lost lease stops the run (PR 12 CodeRabbit)", () => {
         now: () => new Date(Date.UTC(2026, 10, 14, 6, 0, 0)),
         clock: () => Date.now(),
         sleep: async () => undefined,
-        connect: (schedule, name) => connectScheduleHost(schedule, name, w.env, { thin: thin.call, own: fakeOwn().own }),
+        // the hasher answers at once: real file and git reads don't move with fake timers
+        connect: (schedule, name) =>
+          connectScheduleHost(schedule, name, w.env, {
+            thin: thin.call,
+            own: fakeOwn().own,
+            hasher: { policy: () => factsOf(w).policyHash, accounts: async () => factsOf(w).accountsHash, maps: () => factsOf(w).mapsHash },
+          }),
         audit: new AuditLog(join(w.home, "audit")),
         redactFor: async () => (text) => text,
         pid: 4242,

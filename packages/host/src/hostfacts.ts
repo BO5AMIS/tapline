@@ -1,31 +1,37 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { loadMap, mapDir, stable } from "./mapfile.js";
+import type { PolicyFile } from "./policy.js";
 
 /**
- * Content hashes for what a running host holds (PR 12 Codex cycle 2): a host loads its policy and accounts once, so the same path
- * is not the same policy. The host reports the hash of what it LOADED; a scheduled run hashes the files as they are now and
- * reuses the host only when they agree. Hashes only: never the content.
+ * Hashes of what a running host has LOADED (PR 12 Codex cycle 3): a host asked for its facts first reloads its policy, vault and maps
+ * from disk into its live state and reports these hashes of that state; a scheduled run computes the same over what it would load
+ * itself and reuses the host only when they agree. Hashes only: never the content. The vault's hash is an HMAC under the host's
+ * token (accounts.ts, `fingerprint`), so nothing in it can be guessed from the hash alone.
  */
 
 export function sha256(data: Buffer | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-/** The hash of a file's bytes; null when it can't be read. */
-export function hashFile(path: string): string | null {
-  try {
-    return sha256(readFileSync(path));
-  } catch {
-    return null;
-  }
+/** The hash of a policy's content (canonical JSON, so spacing and key order don't count). */
+export function policyFingerprint(policy: PolicyFile): string {
+  return sha256(stable(policy));
+}
+
+/** One app's map as loaded: how it loaded and its content. */
+export interface LoadedMap {
+  status: string;
+  data: unknown;
 }
 
 /**
- * The hash of a maps folder: each app's `map.json` (the file a host loads and saves), by folder name, in order. A folder that doesn't
- * exist hashes as empty; a map that can't be read counts as unreadable, so it never equals one that can.
+ * The hash of the maps a folder holds, each app's `map.json` as `load` gives it (the live registry for a host, a fresh read of
+ * the disk for a schedule), by folder name, in order, over the canonical JSON of each map. A folder that doesn't exist hashes as
+ * empty; a map file that can't be read or names no app counts as unreadable, so it never equals one that can.
  */
-export function hashMapsDir(dir: string): string {
+export function hashMapsLoaded(dir: string, load: (app: string) => LoadedMap | null): string {
   let names: string[];
   try {
     names = readdirSync(dir).sort();
@@ -34,15 +40,32 @@ export function hashMapsDir(dir: string): string {
   }
   const parts: string[] = [];
   for (const name of names) {
-    let text: Buffer;
+    let text: string;
     try {
-      text = readFileSync(join(dir, name, "map.json"));
+      text = readFileSync(join(dir, name, "map.json"), "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") continue;
       parts.push(`${name}\n?`);
       continue;
     }
-    parts.push(`${name}\n${sha256(text)}`);
+    let app: unknown;
+    try {
+      app = (JSON.parse(text) as { app?: unknown }).app;
+    } catch {
+      app = undefined;
+    }
+    const loaded = typeof app === "string" ? load(app) : null;
+    parts.push(loaded === null ? `${name}\n?` : `${name}\n${loaded.status}\n${sha256(stable(loaded.data))}`);
   }
   return sha256(parts.join("\n"));
+}
+
+/** The maps as a fresh read of the disk loads them (what a schedule would load). */
+export function hashMapsOnDisk(dir: string): string {
+  return hashMapsLoaded(dir, (app) => {
+    // The registry keeps no map for an app without an id of its own.
+    if (app === "" || app === "unknown") return null;
+    const loaded = loadMap(mapDir(app, { mapsDir: dir }), app);
+    return { status: loaded.status, data: loaded.map };
+  });
 }
