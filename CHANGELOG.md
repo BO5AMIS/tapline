@@ -46,6 +46,12 @@ app; the whole phone (system apps, notifications, unattended running) is Tapwrig
     `tapline schedule unlock <name>` and `tapline grants unlock` remove one when no living holder is proven.
 - **The audit log (§23).** Grant uses, revocations, approvals, vault and code uses, and scheduled runs are recorded in
   `~/.tapline/audit/`, and kept 90 days. Read them with `tapline audit-log`.
+- **Security fix for `tapline call` (in every release since 1.6.0).**
+  - Before, the thin call proved the host on one connection, then sent its token on a second connection. A program that
+    took over the host's port between the two could receive the token.
+  - The proof, its check and the call now share one connection, and nothing is sent if it closes after the proof.
+  - The host side was already right, so updating only the command line closes it. If you used `tapline call` on a computer
+    where other people's programs run, consider a new token (delete `~/.tapline/token`; phones then pair again).
 - **Also from AGENT-TOOLS 1.13.3:**
   - An alert's message shows in the `Alert:` line (`Alert: "<title>" "<message>" [Button] …`). It is redacted and cut
     like element text, and never matched against policy words.
