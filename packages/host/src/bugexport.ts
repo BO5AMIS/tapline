@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { deflateRawSync } from "node:zlib";
 import type { AuditSink } from "./auditlog.js";
 import { bugTitle, type BugMeta } from "./bug.js";
@@ -204,9 +204,15 @@ export async function exportBug(deps: BugExportDeps, app: string, id: string, ta
     ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     try {
       mkdirSync(dirname(zipPath), { recursive: true });
-      const temp = `${zipPath}.part`;
-      writeFileSync(temp, zipOf(entries), { mode: 0o600 });
-      renameSync(temp, zipPath);
+      // A name nobody chose, made exclusively: a file or link already at `<zip>.part` is never written through.
+      const temp = `${zipPath}.${randomBytes(6).toString("hex")}.part`;
+      try {
+        writeFileSync(temp, zipOf(entries), { mode: 0o600, flag: "wx" });
+        renameSync(temp, zipPath);
+      } catch (error) {
+        rmSync(temp, { force: true });
+        throw error;
+      }
     } catch (error) {
       return refuse("internal", `the zip couldn't be written: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -270,10 +276,14 @@ async function exportIssue(deps: BugExportDeps, stored: NonNullable<ReturnType<B
     if (parcel.picture !== null) writeFileSync(join(staged, "picture.jpg"), parcel.picture);
     const names = ["repro.json", ...(parcel.picture !== null ? ["picture.jpg"] : [])];
     copyReport(staged, clone, join(clone, where), names);
-    const failure =
-      (await git(["add", "-f", "--", where], "git add")) ??
-      (await git(["commit", "-m", `QA bug report: ${id}`], "git commit")) ??
-      (await git(["push", "origin", `HEAD:refs/heads/${QA_BRANCH}`], "git push"));
+    // Files that are on the branch already (a retry after a failed `gh issue create`, or the same bug again) stage no change, and git refuses an empty
+    // commit. When the commit fails and the index holds nothing, there is nothing to push: the export goes on to the issue.
+    let failure = await git(["add", "-f", "--", where], "git add");
+    if (failure === null) {
+      const committed = await git(["commit", "-m", `QA bug report: ${id}`], "git commit");
+      if (committed === null) failure = await git(["push", "origin", `HEAD:refs/heads/${QA_BRANCH}`], "git push");
+      else if ((await run("git", ["diff", "--cached", "--quiet"], { cwd: clone })).code !== 0) failure = committed;
+    }
     if (failure !== null) return refuse("internal", failure);
     const bodyFile = join(tmp, "issue.md");
     writeFileSync(bodyFile, body, "utf8");

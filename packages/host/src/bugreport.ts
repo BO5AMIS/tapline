@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { ActionLogEntry } from "./actionlog.js";
@@ -185,6 +185,15 @@ const inside = (root: string, path: string): boolean => {
   return full === base || full.startsWith(base + sep);
 };
 
+/** Whether the file's real place (links followed) is inside the folder's real place; a file that isn't there is not. */
+const insideReal = (root: string, path: string): boolean => {
+  try {
+    return inside(realpathSync(root), realpathSync(path));
+  } catch {
+    return false;
+  }
+};
+
 function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf8")) as unknown;
 }
@@ -213,7 +222,7 @@ export function readRunFinding(runDir: string, findingId: string): RunRead {
   const finding = found as unknown as BugFinding;
   let script: Record<string, unknown> | null = null;
   const repro = typeof found["repro"] === "string" ? found["repro"] : null;
-  if (repro !== null && /^repro\/[\w.-]+$/.test(repro) && inside(runDir, join(runDir, repro))) {
+  if (repro !== null && /^repro\/[\w.-]+$/.test(repro) && inside(runDir, join(runDir, repro)) && insideReal(runDir, join(runDir, repro))) {
     try {
       const parsed = readJson(join(runDir, repro));
       if (typeof parsed === "object" && parsed !== null) script = parsed as Record<string, unknown>;
@@ -222,7 +231,7 @@ export function readRunFinding(runDir: string, findingId: string): RunRead {
     }
   }
   let picture: Uint8Array | null = null;
-  if (finding.picture !== null && typeof finding.picture === "object" && /^findings\/[\w.-]+$/.test(finding.picture.file) && inside(runDir, join(runDir, finding.picture.file))) {
+  if (finding.picture !== null && typeof finding.picture === "object" && /^findings\/[\w.-]+$/.test(finding.picture.file) && inside(runDir, join(runDir, finding.picture.file)) && insideReal(runDir, join(runDir, finding.picture.file))) {
     try {
       picture = readFileSync(join(runDir, finding.picture.file));
     } catch {
