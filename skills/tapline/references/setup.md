@@ -116,7 +116,7 @@ tapline mcp
   uses), `tapline grants --policy FILE --revoke-all` (the kill switch), `tapline audit-log [--since <date>]` and
   `--delete`, and `tapline doctor --policy FILE` (a refused grant, a broken state file).
 - Scheduled runs (1.7) are for the person: `tapline schedule add <route> --at "09:00 daily"` (or `--on-file FOLDER`), `schedule list`,
-  `schedule remove NAME`, and `tapline run-schedule NAME` runs one now with the schedule's policy, accounts and maps. Set
+  `schedule remove NAME`, and `tapline run-schedule NAME` runs one now with the schedule's policy, accounts and maps (a running host carries it only when it has those same files; else the run has its own host). Set
   one up only when the user asks for it; the app must be open on the phone, or the run is skipped (`skipped: the app is not
   open`). Reports are in `~/.tapline/runs/`, lines in `tapline audit-log`.
 - `--no-dialog` keeps a person's OK to the live view (the host's own dialog is off), for a host that

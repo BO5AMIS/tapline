@@ -303,8 +303,9 @@ order, pair again (or give each agent a fixed `--port`).
   to run when a new file appears; `--at` is `HH:MM daily`, `HH:MM weekdays` or an ISO date-time for one run). On Windows
   it registers a Task Scheduler task that wakes the PC and runs `tapline run-schedule <name>`; `tapline schedule list`
   and `tapline schedule remove NAME` do the rest. The schedule file is `~/.tapline/schedules/<name>.json`, and the
-  policy, accounts and maps it names are in force: grants and their limits apply to a scheduled run as to an agent (the
-  counts are shared), the vault types by name, and a draft stops the run. A run needs the app open on the phone
+  policy, accounts and maps it names are in force (a running `tapline host` carries the run only when it runs with those same
+  files; otherwise the run starts its own host, and skips if the app doesn't connect to it): grants and their limits apply to
+  a scheduled run as to an agent (the counts are shared), the vault types by name, and a draft stops the run. A run needs the app open on the phone
   (Tapline can't open it); it waits up to 10 minutes for a phone in use, and otherwise says `skipped: the phone was in use`,
   `skipped: the previous run is still going`, `skipped: the app is not open` or `stopped: a draft is waiting for a person.`.
   Each run writes `~/.tapline/runs/<name>-<time>.json` (what was done, `Grants used:`, `Vault names used:`, never a value)
