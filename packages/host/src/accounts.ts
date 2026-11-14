@@ -857,6 +857,11 @@ export function redactAll(store: AccountStore | null | undefined, codes: CodeSou
   return redact(text);
 }
 
+/** The host's ingress scrubber: the live store, the session's codes and (given by the host per call) the active run's typed texts. */
+export function ingressRedactor(store: () => AccountStore | null | undefined, codes: CodeSource): (text: string, typed: TypedSource) => string {
+  return (text, typed) => redactAll(store(), codes, text, typed);
+}
+
 const NO_STORE: object = {};
 const SHARED_TYPED = new WeakMap<object, { bases: readonly AccountStore[]; codes: readonly string[]; typed: readonly string[]; redact: (text: string) => string }>();
 

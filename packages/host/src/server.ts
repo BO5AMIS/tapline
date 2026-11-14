@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { randomBytes } from "node:crypto";
-import { redactValue } from "./accounts.js";
+import { redactValue, type TypedSource } from "./accounts.js";
+import { TYPED } from "./findings.js";
 import { handleApi, safeEqual, type ApiHandler } from "./api.js";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { createPairCode, pairCodeExpiry, verifyPairCode } from "./pairing.js";
@@ -166,9 +167,10 @@ export interface TaplineHostOptions {
   api?: ApiHandler;
   /**
    * Scrubs the text of everything the app sends back (answers, errors, log lines, crashes) before anything else reads
-   * it: how test accounts' values stay out of every answer (AGENT-TOOLS 1.13 §18.6).
+   * it: how test accounts' values stay out of every answer (AGENT-TOOLS 1.13 §18.6). The second argument is the texts the
+   * active explore or replay has typed (`typedRun`), so they are matched in the same pass as the vault's values and codes.
    */
-  redact?: (text: string) => string;
+  redact?: (text: string, typed: TypedSource) => string;
   /**
    * Whether `redact` hides vault values (what `redacting` answers). Default: true when `redact` is given. A host that scrubs only
    * one-time codes sets false, so the vault's own handling stays off while no vault is loaded.
@@ -404,8 +406,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
   private sweeper: NodeJS.Timeout | undefined;
   private listenCalled = false;
   private closed = false;
-  private readonly redact: ((text: string) => string) | undefined;
+  private redact: ((text: string, typed: TypedSource) => string) | undefined;
   private readonly redactsVault: boolean;
+  /** The texts the active runs (an explore, a replay with its repairs) have typed. Per run: cleared when the last run ends. */
+  private readonly typedRuns = new Set<{ values: string[] }>();
+  private typedNow: TypedSource = { values: [], token: TYPED };
 
   constructor(options: TaplineHostOptions) {
     super();
@@ -843,9 +848,43 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return this.redact !== undefined && this.redactsVault;
   }
 
+  /**
+   * The ingress scrubber: vault values, one-time codes and the active runs' typed texts, matched together in one pass over the
+   * original text (so a typed text that overlaps a vault value is seen whole, before anything alters it). Undefined without `redact`.
+   */
+  private get ingress(): ((text: string) => string) | undefined {
+    const redact = this.redact;
+    return redact === undefined ? undefined : (text) => redact(text, this.typedNow);
+  }
+
+  /**
+   * Registers the texts one run types with the ingress scrubber until `end()`. Register a text BEFORE it is sent. The list is per
+   * run: it is gone when the run ends (it would hide ordinary app text afterwards), and runs that overlap share one list.
+   */
+  typedRun(): { add(value: string): void; end(): void } {
+    const run: { values: string[] } = { values: [] };
+    this.typedRuns.add(run);
+    const publish = (): void => {
+      const all: string[] = [];
+      for (const each of this.typedRuns) for (const value of each.values) if (!all.includes(value)) all.push(value);
+      this.typedNow = { values: all, token: TYPED };
+    };
+    return {
+      add: (value) => {
+        if (value === "" || run.values.includes(value)) return;
+        run.values.push(value);
+        publish();
+      },
+      end: () => {
+        if (this.typedRuns.delete(run)) publish();
+      },
+    };
+  }
+
   /** Scrubs a value (text and property names) the way every answer from an app is; for what an `internal` request gave. */
   redactOut<T>(value: T): T {
-    return this.redact === undefined ? value : (redactValue(value, this.redact) as T);
+    const redact = this.ingress;
+    return redact === undefined ? value : (redactValue(value, redact) as T);
   }
 
   /** Sends a request to an app and resolves with its `result` (or rejects with a TaplineError). */
@@ -1051,7 +1090,7 @@ export class TaplineHost extends EventEmitter<HostEvents> {
         if (pending === undefined) return;
         clearTimeout(pending.timer);
         session.pending.delete(parsed.data.id);
-        const redact = this.redact;
+        const redact = this.ingress;
         if (parsed.data.ok) {
           pending.resolve(redact === undefined || pending.internal ? (parsed.data.result ?? {}) : redactValue(parsed.data.result ?? {}, redact));
         } else {
@@ -1079,7 +1118,8 @@ export class TaplineHost extends EventEmitter<HostEvents> {
 
   private recordEvent(session: Session, event: string, raw: unknown): void {
     // Pictures are skipped: they are large, and a username may show in one anyway (§18.6).
-    const data = this.redact === undefined || event === "frame" ? raw : redactValue(raw, this.redact);
+    const ingress = this.ingress;
+    const data = ingress === undefined || event === "frame" ? raw : redactValue(raw, ingress);
     if (event === "frame") {
       const frame = appFrameSchema.safeParse(data);
       // Acknowledged on arrival, valid or not: the app counts frames in flight.

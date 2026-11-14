@@ -8,7 +8,7 @@ import type { PolicyFile } from "../src/policy.js";
 import type { TaplineHost } from "../src/server.js";
 import type { ToolsOptions } from "../src/tools.js";
 import { APP, BUILD } from "./drive-helpers.js";
-import { setupExplore, type ExWorld, type ExploreSetup } from "./explore-helpers.js";
+import { setupExplore, type ExWorld, type ExploreSetup, type ExploreSetupOptions } from "./explore-helpers.js";
 import type { FakeApp } from "./helpers.js";
 
 // A fake app whose UI changed between the recording and the replay (AGENT-TOOLS 1.15 §26): a script file, an audit sink, the maps.
@@ -40,6 +40,8 @@ export interface RigOptions {
   noAudit?: boolean;
   /** More tools options (a folder for reference pictures, say). */
   tools?: Partial<ToolsOptions>;
+  /** Options of the fake host (the ingress `redact`, say).  */
+  hostOptions?: ExploreSetupOptions["hostOptions"];
 }
 
 export async function repairRig(hosts: TaplineHost[], apps: FakeApp[], dirs: string[], options: RigOptions = {}): Promise<RepairRig> {
@@ -57,6 +59,7 @@ export async function repairRig(hosts: TaplineHost[], apps: FakeApp[], dirs: str
     ...(options.world !== undefined ? { world: options.world } : {}),
     map: options.map ?? mapWith({ home: ["home"], settings: ["settings"], language: ["settings", "language"], trips: ["trips"], trips_id: ["trips", "[id]"], form: ["form"] }, []),
     ...(options.policy !== undefined ? { policy: options.policy } : {}),
+    ...(options.hostOptions !== undefined ? { hostOptions: options.hostOptions } : {}),
     tools: { scriptsDir, ...(options.noAudit === true ? {} : { audit }), ...options.tools },
   });
   return {

@@ -16,7 +16,7 @@ import {
   type ScreenshotMode,
   type ViewerMode,
 } from "./config.js";
-import { historyStore, loadAccounts, redactAll, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
+import { historyStore, ingressRedactor, loadAccounts, type AccountsLoad, type AccountStore, type GitProbe } from "./accounts.js";
 import { bounded, ScheduleTimeout, VAULT_LOAD_TIMEOUT_MS } from "./runschedule.js";
 import type { VaultDeps } from "./vault.js";
 import { createOtpService, type OtpService } from "./otpclient.js";
@@ -221,7 +221,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   let currentRaw: AccountsLoad | undefined = accounts;
   const live: { policy: PolicyFile; accounts: AccountsLoad | undefined } = { policy, accounts: accounts === undefined ? undefined : withHistory(accounts) };
   const host = new TaplineHost({
-    redact: (text: string) => redactAll(live.accounts?.store, otp.codes, text),
+    redact: ingressRedactor(() => live.accounts?.store, otp.codes),
     redactsVault: accounts?.store != null,
     token: config.token,
     port: config.port,

@@ -1307,6 +1307,8 @@ interface ExploreRun {
   waited0: number;
   /** Every value the run typed, scrubbed from everything it writes (the same forms and minimum length as a vault value). */
   typed: string[];
+  /** The host-level registration of `typed` (the ingress scrubber knows each text from the moment it is typed, until the run ends). */
+  ingress?: { add(value: string): void; end(): void };
 }
 
 /** The scope of one move of an explore run. */
@@ -1898,6 +1900,7 @@ export class TaplineTools {
     const text = typeof params["text"] === "string" ? params["text"] : "";
     if (text !== "" && !scope.run.typed.includes(text)) {
       scope.run.typed = [...scope.run.typed, text];
+      scope.run.ingress?.add(text);
     }
     return { ...params, kind: "plain" };
   }
@@ -2371,10 +2374,15 @@ export class TaplineTools {
       ...(args.account !== undefined ? { account: args.account } : {}),
     };
     const progress = this.holdScope.getStore()?.progress;
-    const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [] };
+    const run: ExploreRun = { used: 0, steps: budget.steps, minutes: budget.minutes, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], ingress: this.host.typedRun() };
     const explorer = new Explorer(this.exploreHost(session, map, wall, progress, run), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
     // Calls inside the call add no crash note or wait of their own: the report says what happened.
-    const result = await this.noteScope.run(true, () => explorer.run());
+    let result: Awaited<ReturnType<Explorer["run"]>>;
+    try {
+      result = await this.noteScope.run(true, () => explorer.run());
+    } finally {
+      run.ingress?.end();
+    }
     if (!isOutcome(result)) return refuse(result.error);
     const reportPath = writeExploreReport(folder, result.report, (text) => this.exploreScrub(run, text), result.detail);
     const where = reportPath ?? `${folder.dir}`;
@@ -5409,23 +5417,27 @@ export class TaplineTools {
     this.rivals += 1;
     // The outermost replay owns the run's list of typed values (repair's trials and the verification replay add to it, and share it).
     const owner = this.replayTyped === null;
-    if (owner) this.replayTyped = { values: [] };
+    if (owner) this.replayTyped = { values: [], ingress: this.host.typedRun() };
     try {
       return await this.replayHeld(args, options);
     } finally {
       this.rivals -= 1;
-      if (owner) this.replayTyped = null;
+      if (owner) {
+        this.replayTyped?.ingress.end();
+        this.replayTyped = null;
+      }
     }
   }
 
   /** Every plain text a replay (with its repair trials and the check of a repaired script) has typed, and the scrubber over them. */
-  private replayTyped: { values: string[] } | null = null;
+  private replayTyped: { values: string[]; ingress: { add(value: string): void; end(): void } } | null = null;
 
   /** Registers a text a replay is about to type, before it is sent; the run's redaction knows it from then on. */
   private registerReplayTyped(value: string): void {
     const run = this.replayTyped;
     if (run === null || value === "" || run.values.includes(value)) return;
     run.values = [...run.values, value];
+    run.ingress.add(value);
   }
 
   /** Redaction for everything a repair writes or answers: the replay's typed values, the vault's values and this session's one-time codes. */
