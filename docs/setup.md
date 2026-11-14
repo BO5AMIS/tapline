@@ -137,7 +137,7 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
   [--policy FILE] [--accounts FILE] [--maps DIR]` writes `~/.tapline/schedules/<name>.json` (the files are saved as
   absolute paths, and `@file` is read when the run starts, relative to that folder) and, on Windows, registers a Task
   Scheduler task that wakes the PC (`WakeToRun`) and runs `tapline run-schedule <name>`. `--on-file FOLDER` runs when a
-  new file appears there (the task checks every minute). `tapline schedule list`, `tapline schedule remove NAME`. The
+  new file appears there (the task checks every minute and does not wake the PC). `tapline schedule list`, `tapline schedule remove NAME`. The
   phone's app must be open and connected: a running `tapline host` is used when there is one, otherwise the run starts its
   own host with the schedule's policy, accounts and maps and waits `--wait` seconds (default 60) for the app. Skips:
   `skipped: the phone was in use` (after waiting 10 minutes), `skipped: the previous run is still going`,

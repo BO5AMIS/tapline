@@ -57,9 +57,11 @@ describe("parseAt", () => {
     const once = parseAt("2026-11-20T09:00:00Z");
     expect(once?.kind).toBe("once");
     expect(parseAt("2026-11-20T09:00")?.kind).toBe("once");
+    expect(parseAt("2028-02-29T09:00")?.kind).toBe("once"); // a leap day is real
+    expect(parseAt("2026-12-31T23:59:59Z")?.kind).toBe("once");
   });
   it("refuses anything else", () => {
-    for (const bad of ["25:00 daily", "09:60 daily", "09:00", "09:00 weekly", "tomorrow", "2026-11-20", "2026-13-40T99:00"]) expect(parseAt(bad)).toBeNull();
+    for (const bad of ["25:00 daily", "09:60 daily", "09:00", "09:00 weekly", "tomorrow", "2026-11-20", "2026-13-40T99:00", "2026-02-30T09:00", "2026-04-31T09:00", "2025-02-29T09:00", "2026-11-20T24:00", "2026-11-20T09:60", "2026-11-20T09:00:60", "2026-00-10T09:00", "2026-11-00T09:00"]) expect(parseAt(bad)).toBeNull();
   });
 });
 
@@ -100,7 +102,9 @@ describe("schedule add", () => {
         TAPLINE_TASK_FULL: "Tapline schedule post_update",
       },
     });
-    expect(REGISTER_SCRIPT).toContain("-WakeToRun");
+    // time schedules wake the PC; the once-a-minute file check never does (a laptop with a file trigger could not stay asleep)
+    expect(REGISTER_SCRIPT).not.toMatch(/SettingsSet[^\n]*-WakeToRun/);
+    expect(REGISTER_SCRIPT).toContain("if ($env:TAPLINE_TASK_KIND -ne 'watch') { $settings.WakeToRun = $true }");
     expect(REGISTER_SCRIPT).toContain("Register-ScheduledTask");
   });
 

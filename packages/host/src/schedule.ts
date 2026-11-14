@@ -65,8 +65,13 @@ export function parseAt(raw: string): ParsedAt | null {
     if (hour > 23 || minute > 59) return null;
     return { kind: recurring[3] as "daily" | "weekdays", hour, minute };
   }
-  if (!ISO_TIME.test(raw.trim())) return null;
-  const date = new Date(raw.trim());
+  const text = raw.trim();
+  if (!ISO_TIME.test(text)) return null;
+  // The text is checked as a calendar date and a clock time: the Date constructor rolls 2026-02-30 over to March 2.
+  const [year, month, day, hour, minute, second] = [text.slice(0, 4), text.slice(5, 7), text.slice(8, 10), text.slice(11, 13), text.slice(14, 16), text.slice(17, 19) || "0"].map(Number) as [number, number, number, number, number, number];
+  if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const date = new Date(text);
   return Number.isNaN(date.getTime()) ? null : { kind: "once", date };
 }
 
@@ -192,8 +197,9 @@ const PS_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", 
 
 /**
  * The registration script. It is a constant: the name, the paths and the time reach it as environment variables, never as text
- * built into the script. `-WakeToRun` is what wakes the PC. A file trigger has no Task Scheduler form, so its task fires every
- * minute and `run-schedule --check-trigger` runs only when a new file has appeared.
+ * built into the script. The settings' `WakeToRun` is what wakes the PC, set for the time
+ * schedules only. A file trigger has no Task Scheduler form, so its task fires every minute and `run-schedule --check-trigger` runs
+ * only when a new file has appeared; it never wakes the PC (a laptop would never sleep).
  */
 export const REGISTER_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
@@ -206,7 +212,8 @@ export const REGISTER_SCRIPT = [
   "  'watch' { $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650) }",
   "  default { throw 'unknown trigger kind' }",
   "}",
-  "$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)",
+  "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)",
+  "if ($env:TAPLINE_TASK_KIND -ne 'watch') { $settings.WakeToRun = $true }",
   "Register-ScheduledTask -TaskName $env:TAPLINE_TASK_FULL -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null",
 ].join("\n");
 
