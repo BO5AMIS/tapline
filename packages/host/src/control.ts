@@ -142,3 +142,80 @@ export class ControlQueue {
     }
   }
 }
+
+/** Longest a lease may be asked for or kept without a renewal. */
+export const LEASE_MAX_TTL_MS = 120_000;
+
+export type LeaseRefusal = "lease" | "agent" | "person";
+
+/**
+ * AGENT-TOOLS 1.14 §22.3: a scheduled run holds the phone for its whole run. While it holds this lease, every other
+ * agent's action waits (and answers `busy` after a while, as a person's input does); the run's own actions go straight
+ * through. The control queue serializes single actions only, so without this a run's steps could interleave with
+ * another agent's route. A lease that isn't renewed expires, so a run that died never holds the phone for good.
+ */
+export class PhoneLease {
+  private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly giveUpMs: number;
+  private readonly pollMs: number;
+  private holder: { owner: string; expires: number } | null = null;
+  /** Agent actions running now, by who started them. */
+  private readonly inflight = new Map<string, number>();
+
+  constructor(options: { now?: () => number; sleep?: (ms: number) => Promise<void>; giveUpMs?: number; pollMs?: number } = {}) {
+    this.now = options.now ?? Date.now;
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.giveUpMs = options.giveUpMs ?? 30_000;
+    this.pollMs = options.pollMs ?? 200;
+  }
+
+  /** Who holds the lease now, or null (an expired lease counts as none). */
+  heldBy(): string | null {
+    if (this.holder !== null && this.holder.expires <= this.now()) this.holder = null;
+    return this.holder?.owner ?? null;
+  }
+
+  /**
+   * Takes the lease for `owner`, or says why not: another run holds it, another agent's action is running, or a person is
+   * driving (`personActive`, from the control queue). Asking again as the holder renews it.
+   */
+  acquire(owner: string, ttlMs: number, personActive: boolean): { ok: true } | { ok: false; by: LeaseRefusal } {
+    const holder = this.heldBy();
+    if (holder !== null && holder !== owner) return { ok: false, by: "lease" };
+    if (holder === null) {
+      for (const [who, count] of this.inflight) if (who !== owner && count > 0) return { ok: false, by: "agent" };
+      if (personActive) return { ok: false, by: "person" };
+    }
+    this.holder = { owner, expires: this.now() + Math.min(Math.max(ttlMs, 1000), LEASE_MAX_TTL_MS) };
+    return { ok: true };
+  }
+
+  /** Releases the lease when `owner` holds it; false when it doesn't (never another's). */
+  release(owner: string): boolean {
+    if (this.heldBy() !== owner) return false;
+    this.holder = null;
+    return true;
+  }
+
+  /** An agent action by `who`: waits while someone else's lease stands, `busy` after `giveUpMs`. */
+  async run<T>(who: string, fn: () => Promise<T>): Promise<T> {
+    const started = this.now();
+    for (;;) {
+      const holder = this.heldBy();
+      if (holder === null || holder === who) break;
+      if (this.now() - started >= this.giveUpMs) {
+        throw new TaplineError("busy", "A scheduled run is using the phone. Try again when it has finished, or ask your user.");
+      }
+      await this.sleep(this.pollMs);
+    }
+    this.inflight.set(who, (this.inflight.get(who) ?? 0) + 1);
+    try {
+      return await fn();
+    } finally {
+      const left = (this.inflight.get(who) ?? 1) - 1;
+      if (left <= 0) this.inflight.delete(who);
+      else this.inflight.set(who, left);
+    }
+  }
+}

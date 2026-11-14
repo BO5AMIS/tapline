@@ -30,8 +30,10 @@ export interface ScheduleHost {
   via: string;
   /** True when the app is connected, waiting up to `waitMs` for it. */
   appOpen(waitMs: number): Promise<boolean>;
+  /** Why the app being closed is not the whole story (a running host that differs from the schedule was passed over). */
+  closedNote?: string;
   /** True while an agent or a person is driving the phone (this host knows only its own queue). */
-  inUse(): boolean;
+  inUse(): boolean | Promise<boolean>;
   call(tool: string, args: Record<string, unknown>): Promise<CallAnswer>;
   close(): Promise<void>;
 }
@@ -298,7 +300,7 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
       const why = error instanceof Error ? error.message : String(error);
       return finishWith("failed", `couldn't start: ${why}`, `failed at step 0 (start)`, 2);
     }
-    if (!(await host.appOpen(deps.appWaitMs ?? APP_WAIT_MS))) return skip(SKIP_CLOSED, host.via);
+    if (!(await host.appOpen(deps.appWaitMs ?? APP_WAIT_MS))) return skip(host.closedNote === undefined ? SKIP_CLOSED : `${SKIP_CLOSED} (${host.closedNote})`, host.via);
 
     // The phone is busy while a person or an agent drives it: wait up to 10 minutes, then do nothing (§22.3).
     const busyMs = deps.busyWaitMs ?? BUSY_WAIT_MS;
@@ -310,7 +312,7 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
     let t0 = 0;
     let started = false;
     for (;;) {
-      if (!host.inUse()) {
+      if (!(await host.inUse())) {
         if (!started) {
           started = true;
           sinceMs = deps.now().getTime();

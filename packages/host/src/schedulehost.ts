@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { configDir } from "./config.js";
 import { loadAccounts } from "./accounts.js";
 import { callTool, isToolName } from "./dispatch.js";
-import type { CallAnswer, ScheduleHost } from "./runschedule.js";
+import { isBusyAnswer, type CallAnswer, type ScheduleHost } from "./runschedule.js";
 import type { ProcResult, SchedRunner, Schedule, TaskEntry } from "./schedule.js";
-import { createRuntime } from "./runtime.js";
+import { canonicalPath, createRuntime, HOST_FACTS_TOOL, LEASE_TOOL, LEASE_TTL_MS, type HostFacts } from "./runtime.js";
 import { runThinCall, type ThinCallIO } from "./thincall.js";
 
 /**
@@ -54,28 +55,107 @@ async function thinCall(env: NodeJS.ProcessEnv, client: string, tool: string, ar
   return { text: code === 1 ? "Error unknown_outcome: the call was sent but no answer came back." : "Error bad_params: the host refused the call.", isError: true };
 }
 
-/** A running `tapline host` the app is connected to, or null. Its policy and vault apply (they are fixed when it starts). */
-async function runningHost(env: NodeJS.ProcessEnv, client: string): Promise<ScheduleHost | null> {
-  const first = await thinCall(env, client, "apps", {});
-  if (first === null) return null;
+/** How the run talks to a running host: one thin call (null when no host could be reached). Replaced in tests. */
+export type ThinCaller = (env: NodeJS.ProcessEnv, client: string, tool: string, args: Record<string, unknown>) => Promise<CallAnswer | null>;
+
+function asFacts(text: string): HostFacts | null {
+  try {
+    const raw: unknown = JSON.parse(text);
+    if (typeof raw !== "object" || raw === null) return null;
+    const { version, policy, noPolicy, accounts, maps } = raw as Record<string, unknown>;
+    if (version !== 1 || typeof noPolicy !== "boolean" || typeof maps !== "string") return null;
+    if ((policy !== null && typeof policy !== "string") || (accounts !== null && typeof accounts !== "string")) return null;
+    return { version: 1, policy, noPolicy, accounts, maps };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why a running host can't carry this schedule, or null when it can (fail closed): the policy must be on and the same file as the
+ * schedule's (both the built-in policy when the schedule names none), the accounts file and the maps folder the same. Paths only.
+ */
+export function factsMismatch(schedule: Schedule, facts: HostFacts | null, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (facts === null) return "its policy, accounts and maps can't be read";
+  if (facts.noPolicy) return "it runs with --no-policy";
+  const same = (wanted: string | null, had: string | null): boolean => (wanted === null ? had === null : had !== null && canonicalPath(wanted) === had);
+  if (!same(schedule.policy, facts.policy)) return "it runs with another policy";
+  if (!same(schedule.accounts, facts.accounts)) return "it runs with other accounts";
+  const maps = schedule.maps ?? join(configDir(env), "maps");
+  if (canonicalPath(maps) !== facts.maps) return "it keeps its maps in another folder";
+  return null;
+}
+
+/** Every reach of the control lease and the facts goes through this. */
+const LEASE_RENEW_MS = 15_000;
+
+/**
+ * A running `tapline host` the app is connected to: used only when its settings match the schedule's (`mismatch` says what
+ * differs when they don't), and the run holds the host's lease while it drives, so no other agent's action interleaves.
+ */
+async function runningHost(
+  env: NodeJS.ProcessEnv,
+  client: string,
+  schedule: Schedule,
+  thin: ThinCaller,
+): Promise<{ host: ScheduleHost } | { host: null; mismatch: string | null }> {
+  const first = await thin(env, client, "apps", {});
+  if (first === null) return { host: null, mismatch: null };
+  const asked = await thin(env, client, HOST_FACTS_TOOL, {});
+  const mismatch = factsMismatch(schedule, asked === null || asked.isError ? null : asFacts(asked.text), env);
+  if (mismatch !== null) return { host: null, mismatch };
+  const lease = async (action: "acquire" | "renew" | "release"): Promise<boolean> => {
+    const answer = await thin(env, client, LEASE_TOOL, { action, ttl_ms: LEASE_TTL_MS });
+    if (answer === null || answer.isError) return false;
+    try {
+      return (JSON.parse(answer.text) as { ok?: unknown }).ok === true;
+    } catch {
+      return false;
+    }
+  };
+  let held = false;
+  let beat: ReturnType<typeof setInterval> | undefined;
+  const drop = async (): Promise<void> => {
+    if (beat !== undefined) clearInterval(beat);
+    beat = undefined;
+    if (!held) return;
+    held = false;
+    await lease("release");
+  };
   return {
-    via: "a running host",
-    appOpen: async (waitMs) => {
-      const until = Date.now() + waitMs;
-      for (;;) {
-        const answer = await thinCall(env, client, "apps", {});
-        if (answer !== null && answer.text.startsWith("Connected apps:")) return true;
-        if (Date.now() >= until) return false;
-        await sleep(1000);
-      }
+    host: {
+      via: "a running host",
+      appOpen: async (waitMs) => {
+        const until = Date.now() + waitMs;
+        for (;;) {
+          const answer = await thin(env, client, "apps", {});
+          if (answer !== null && answer.text.startsWith("Connected apps:")) return true;
+          if (Date.now() >= until) return false;
+          await sleep(1000);
+        }
+      },
+      // In use while another agent or a person is on the phone: the run holds the host's lease from the moment it gets it.
+      inUse: async () => {
+        if (held) return false;
+        held = await lease("acquire");
+        if (held) {
+          beat = setInterval(() => void lease("renew"), LEASE_RENEW_MS);
+          beat.unref();
+        }
+        return !held;
+      },
+      call: async (tool, args) => {
+        const answer = (await thin(env, client, tool, args)) ?? { text: "Error not_connected: the running host went away.", isError: true };
+        // A person came back: give the phone up while the run waits, so other agents aren't held out for minutes.
+        if (isBusyAnswer(answer)) await drop();
+        return answer;
+      },
+      close: drop,
     },
-    inUse: () => false, // a busy answer from its control queue ends a call with `busy`, which the run waits out
-    call: async (tool, args) => (await thinCall(env, client, tool, args)) ?? { text: "Error not_connected: the running host went away.", isError: true },
-    close: async () => undefined,
   };
 }
 
-async function ownHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv): Promise<ScheduleHost> {
+async function ownHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv, closedNote?: string): Promise<ScheduleHost> {
   const runtime = await createRuntime({
     env,
     screenshots: "file",
@@ -87,6 +167,7 @@ async function ownHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv)
   const tools = runtime.toolsFor(`schedule-${name}`);
   return {
     via: "its own host",
+    ...(closedNote !== undefined ? { closedNote } : {}),
     appOpen: async (waitMs) => {
       const until = Date.now() + waitMs;
       while (runtime.host.current() === undefined && Date.now() < until) await sleep(250);
@@ -102,10 +183,21 @@ async function ownHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv)
   };
 }
 
-/** A host the app is connected to: a running one if there is one, else one of its own. */
-export async function connectScheduleHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv = process.env): Promise<ScheduleHost> {
-  const running = await runningHost(env, `schedule-${name}`);
-  return running ?? (await ownHost(schedule, name, env));
+export interface ConnectDeps {
+  thin?: ThinCaller;
+  own?: (schedule: Schedule, name: string, env: NodeJS.ProcessEnv, closedNote?: string) => Promise<ScheduleHost>;
+}
+
+/**
+ * A host the app is connected to: a running one whose policy, accounts and maps are the schedule's; else one of its own that takes
+ * the schedule's files. A running host that differs (or can't say) is never used: the run starts its own, and when the app
+ * doesn't connect to it the run skips and says the running host differed.
+ */
+export async function connectScheduleHost(schedule: Schedule, name: string, env: NodeJS.ProcessEnv = process.env, deps: ConnectDeps = {}): Promise<ScheduleHost> {
+  const running = await runningHost(env, `schedule-${name}`, schedule, deps.thin ?? thinCall);
+  if (running.host !== null) return running.host;
+  const own = deps.own ?? ownHost;
+  return running.mismatch === null ? await own(schedule, name, env) : await own(schedule, name, env, `the running host differs from the schedule: ${running.mismatch}`);
 }
 
 /** The vault's redaction for a schedule's report: the accounts file the schedule names, else nothing to scrub. */

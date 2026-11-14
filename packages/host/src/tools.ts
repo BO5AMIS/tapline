@@ -5,7 +5,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
 import { annotateScreenshot, type ShotImage } from "./annotate.js";
-import type { ControlQueue } from "./control.js";
+import type { ControlQueue, PhoneLease } from "./control.js";
 import type { InputOutcome, OverlayRead, PersonInput, QualityPreset, Rect, ViewerAction } from "./viewer.js";
 import { agentKind, captionFor, personKind, reasonOf } from "./captions.js";
 import { clusterPercent, composeFilmstrip, diffImages, imageSize, type DiffBox, type DiffResult } from "./images.js";
@@ -628,6 +628,8 @@ export interface ToolsOptions {
   baselinesDir?: string;
   /** The live viewer's queue: agent actions wait for a person and stop while paused. */
   control?: ControlQueue;
+  /** A scheduled run's hold on the phone (§22.3): while it stands, other agents' actions wait. */
+  lease?: PhoneLease;
   /** Shows each agent action to people watching the live viewer. */
   onAction?: (action: ViewerAction) => void;
   /** The live viewer's links (with its token), for the `viewer` tool. */
@@ -1688,6 +1690,19 @@ export class TaplineTools {
     return null;
   }
 
+  /**
+   * An agent action on the phone: behind a scheduled run's lease when another holds it, then in the live viewer's queue
+   * (a person goes first; paused refuses).
+   */
+  private agentTurn<T>(run: () => Promise<T>): Promise<T> {
+    const control = this.options.control;
+    const go = control !== undefined ? () => control.runAgent(run) : run;
+    const lease = this.options.lease;
+    if (lease === undefined) return go();
+    const who = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60) ?? "";
+    return lease.run(who, go);
+  }
+
   /** The MCP server gives the dialog once it can ask its client (the client's capabilities are known after initialize). */
   setDialogs(dialogs: Dialogs | undefined): void {
     this.dialogs = dialogs;
@@ -2025,7 +2040,7 @@ export class TaplineTools {
           throw error;
         }
       };
-      raw = this.options.control ? await this.options.control.runAgent(run) : await run();
+      raw = await this.agentTurn(run);
     } catch (error) {
       await this.dropPreUse(waited);
       if (error instanceof PolicyStop) return { kind: "stop", answer: error.answer };
@@ -3620,7 +3635,7 @@ export class TaplineTools {
           }
         };
         // With the live viewer, a person watching goes first.
-        result = this.options.control ? await this.options.control.runAgent(run) : await run();
+        result = await this.agentTurn(run);
         break;
       } catch (error) {
         const failure = error instanceof PolicyStop ? parseError(answerText(error.answer)) : error instanceof TaplineError ? { code: error.code, message: error.message } : null;
@@ -4580,7 +4595,7 @@ export class TaplineTools {
         };
         let stopped: CallToolResult | null;
         try {
-          stopped = this.options.control ? await this.options.control.runAgent(turn) : await turn();
+          stopped = await this.agentTurn(turn);
         } finally {
           await this.dropPreUse(ready.waited);
         }
@@ -6398,7 +6413,7 @@ export class TaplineTools {
         };
         let outcome: { stop: CallToolResult } | { result: PerfResult };
         try {
-          outcome = tapped !== undefined && this.options.control ? await this.options.control.runAgent(window) : await window();
+          outcome = tapped !== undefined ? await this.agentTurn(window) : await window();
         } finally {
           await this.dropPreUse(ready.waited);
         }
