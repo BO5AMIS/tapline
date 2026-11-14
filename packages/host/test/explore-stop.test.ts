@@ -129,6 +129,26 @@ describe("explore: a person goes first (§25.9, §6)", () => {
     expect(readFileSync(join(lastRun(s), "report.md"), "utf8")).toContain("Stopped: the user paused it.");
   });
 
+  it("sets a toggle back even when Pause comes between the flip and the flip back: one move for a pause (§25.7)", async () => {
+    const control = new ControlQueue();
+    let paused = false;
+    const s = await setup({
+      tools: { control },
+      world: (w) => {
+        w.onPress = (id) => {
+          if (id === "notify-switch" && !paused) {
+            paused = true;
+            control.setPaused(true);
+          }
+        };
+      },
+    });
+    const answer = await s.tools.explore({});
+    expect(s.world.pressed.filter((id) => id === "notify-switch")).toHaveLength(2);
+    expect(s.world.toggles["notify-switch"]).toBe(false);
+    expect(textOf(answer)).toMatch(/^Error paused:/);
+  });
+
   it("stops with `Error busy:` after a person's input goes on, and writes the report first", async () => {
     const control = new ControlQueue({ idleMs: 60_000, giveUpMs: 60, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 10))) });
     const s = await setup({ tools: { control } });
@@ -157,6 +177,34 @@ describe("explore: a person goes first (§25.9, §6)", () => {
     expect(control.waitedMs()).toBeGreaterThanOrEqual(3000);
     expect(textOf(answer)).toContain("Stopped: the frontier is empty.");
     expect(reportOf(holder.s).used.minutes).toBe(0);
+  });
+});
+
+describe("explore: one call at a time", () => {
+  it("stops between moves when its call is cancelled, and still writes the report", async () => {
+    const abort = new AbortController();
+    let presses = 0;
+    const s = await setup({
+      world: (w) => {
+        w.onPress = () => {
+          presses += 1;
+          if (presses === 3) abort.abort();
+        };
+      },
+    });
+    const answer = await s.tools.withCall(abort.signal, () => s.tools.explore({}));
+    expect(textOf(answer)).toMatch(/^Error paused:/);
+    expect(reportOf(s).stopped).toBe("paused");
+    expect(s.world.pressed.length).toBeLessThanOrEqual(4);
+  });
+
+  it("refuses a second explore while one runs", async () => {
+    const s = await setup();
+    const first = s.tools.explore({});
+    const second = await s.tools.explore({});
+    expect(textOf(second)).toBe("Error busy: an explore is already running here; wait for it to end.");
+    expect(textOf(await first)).toContain("Stopped: the frontier is empty.");
+    expect((await s.tools.explore({})).isError).not.toBe(true);
   });
 });
 

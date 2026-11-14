@@ -123,6 +123,8 @@ export interface ExploreHost {
   waitForApp(ms: number): Promise<boolean>;
   redact(text: string): string;
   progress(line: string, steps: number): void;
+  /** The call was cancelled by its client: the run stops between moves and writes its report. */
+  cancelled(): boolean;
   rules: FloorRules;
   /** A vault entry the explorer may type from: marked `"explore": true`, its kind, and whether `field` may be typed (§25.6). */
   vaultFill(entry: string, field: string): "ok" | "no";
@@ -353,6 +355,7 @@ export class Explorer {
   }
 
   private checkBudget(): void {
+    if (this.host.cancelled()) throw new Stop("paused");
     if (this.steps >= this.args.steps) throw new Stop("budget_steps");
     if (this.minutesUsed() >= this.args.minutes) throw new Stop("budget_minutes");
   }
@@ -775,7 +778,7 @@ export class Explorer {
     }
     // The move was made. Slow? (§25.10)
     if (out.settledMs !== undefined && out.settledMs > SLOW_MS) {
-      await this.finding("slow", place, [step], { expected: `the screen settles within ${SLOW_MS / 1000} s`, got: `${(out.settledMs / 1000).toFixed(1)} s to settle`, picture: false });
+      await this.finding("slow", place, [step], { expected: `the screen settles within ${SLOW_MS / 1000} s`, got: `${(out.settledMs / 1000).toFixed(1)} s to settle`, picture: true });
     }
     // JS errors since the move began (§25.4 item 7).
     if (after.errors.length > 0) {
@@ -984,7 +987,7 @@ export class Explorer {
       }
     }
     const here = this.leftAt ?? stuckAt ?? place;
-    await this.finding("dead_end", here, [], { expected: `a way back to ${place}`, got: `no way back to ${place} except a reset`, picture: false });
+    await this.finding("dead_end", here, [], { expected: `a way back to ${place}`, got: `no way back to ${place} except a reset`, picture: true });
     return this.reset(place);
   }
 

@@ -82,6 +82,7 @@ describe("findings (§27.1): one shape for every kind", () => {
     expect(error).toMatchObject({ place: "home", path_from: "home", path: [{ tool: "tap", target: { id: "open-form" } }], expected: "no error in the app's log", got: "TypeError: form failed" });
     const slow = reportOf(s).findings.find((f) => f.kind === "slow");
     expect(slow?.got).toBe("3.5 s to settle");
+    expect(slow?.picture).toEqual({ file: `findings/${slow?.id}.jpg`, private: true });
     const refused = reportOf(s).findings.find((f) => f.kind === "refused");
     expect(refused?.got).toBe("not_actionable: covered: a sheet covers it");
     const repro = JSON.parse(readFileSync(join(lastRun(s), error?.repro as string), "utf8")) as { format: string; version: number; start: string; steps: unknown[]; name: string };

@@ -1333,7 +1333,7 @@ export class TaplineTools {
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
   private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string; progress?: (line: string, steps: number) => void }>();
   /** Set around every move and read `explore` makes (AGENT-TOOLS 1.15 §25.5): the touch check never asks and no grant is looked at; counts the requests it made. */
-  private readonly exploreScope = new AsyncLocalStorage<{ count: number; last?: { method: string; result: unknown } }>();
+  private readonly exploreScope = new AsyncLocalStorage<{ count: number; last?: { method: string; result: unknown }; restoring?: boolean }>();
   /** Read at each use: a host that reloads its policy (a scheduled run asks for its facts) hands every client the new one. */
   private get policy(): PolicyFile {
     return this.options.policy ?? DEFAULT_POLICY;
@@ -1722,7 +1722,9 @@ export class TaplineTools {
    */
   private agentTurn<T>(run: () => Promise<T>): Promise<T> {
     const control = this.options.control;
-    const go = control !== undefined ? () => control.runAgent(run) : run;
+    // The flip back of an explorer's toggle is one move with the flip: a pause between them doesn't refuse it (§25.7).
+    const restoring = this.exploreScope.getStore()?.restoring === true;
+    const go = control !== undefined ? () => control.runAgent(run, restoring ? { ignorePause: true } : {}) : run;
     return this.leaseGate(go);
   }
 
@@ -2120,6 +2122,9 @@ export class TaplineTools {
 
   // -- explore (AGENT-TOOLS 1.15 §25): the search is in explore.ts, what it may touch in explorefloor.ts
 
+  /** An explore is running in this object: a second one waits for it to end. */
+  private exploring = false;
+
   /** `explore`: drives the places nobody has driven, saves them to the map and reports what broke on the way. */
   async explore(args: Shape<"explore"> = {}): Promise<CallToolResult> {
     return (await this.exploreRun(args)).answer;
@@ -2143,6 +2148,7 @@ export class TaplineTools {
     if (this.options.maps === undefined) return refuse("Error unsupported: this server keeps no maps.");
     const map = this.mapOf(session);
     if (map === undefined) return refuse("Error unsupported: this app reports no id of its own, so it has no map.");
+    if (this.exploring) return refuse("Error busy: an explore is already running here; wait for it to end.");
     if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
     if (this.journeyRun !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
     if (this.recordingState !== null || this.replayingState) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
@@ -2171,7 +2177,13 @@ export class TaplineTools {
     const progress = this.holdScope.getStore()?.progress;
     const explorer = new Explorer(this.exploreHost(session, map, wall, progress), { args: exploreArgs, folder, graceMs: this.options.exploreGraceMs ?? 60_000 });
     // Calls inside the call add no crash note or wait of their own: the report says what happened.
-    const result = await this.noteScope.run(true, () => explorer.run());
+    this.exploring = true;
+    let result: Awaited<ReturnType<Explorer["run"]>>;
+    try {
+      result = await this.noteScope.run(true, () => explorer.run());
+    } finally {
+      this.exploring = false;
+    }
     if (!isOutcome(result)) return refuse(result.error);
     const reportPath = writeExploreReport(folder, result.report, (text) => this.host.redactOut(text), result.detail);
     const where = reportPath ?? `${folder.dir}`;
@@ -2194,8 +2206,8 @@ export class TaplineTools {
       return now !== undefined && identityOf(now) === identity ? now : undefined;
     };
     const sleepMs = (ms: number): Promise<void> => this.sleep(ms);
-    const within = async <T>(run: () => Promise<T>): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
-      const scope: { count: number; last?: { method: string; result: unknown } } = { count: 0 };
+    const within = async <T>(run: () => Promise<T>, restoring = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
+      const scope: { count: number; last?: { method: string; result: unknown }; restoring?: boolean } = { count: 0, ...(restoring ? { restoring: true } : {}) };
       const value = await this.exploreScope.run(scope, run);
       return { value, count: scope.count, last: scope.last };
     };
@@ -2270,6 +2282,7 @@ export class TaplineTools {
         };
       },
       move: async (move: ExploreMove): Promise<MoveOutcome> => {
+        const restores = move.tool === "toggle" && move.value !== undefined;
         const { value, count, last } = await within(() => {
           switch (move.tool) {
             case "tap":
@@ -2283,7 +2296,7 @@ export class TaplineTools {
             case "type":
               return this.typeText({ target: move.target, text: move.text, look: false });
           }
-        });
+        }, restores);
         return outcomeOf(value, count, last);
       },
       go: async (place, by, account) => {
@@ -2356,6 +2369,7 @@ export class TaplineTools {
       },
       redact: (text) => this.host.redactOut(text),
       progress: (line, steps) => progress?.(line, steps),
+      cancelled: () => this.holdScope.getStore()?.signal?.aborted === true,
       get rules(): FloorRules {
         return rulesNow();
       },
