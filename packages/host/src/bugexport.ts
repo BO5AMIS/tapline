@@ -7,7 +7,7 @@ import { deflateRawSync } from "node:zlib";
 import type { AuditSink } from "./auditlog.js";
 import { bugTitle, type BugMeta } from "./bug.js";
 import { shownPath } from "./bugreport.js";
-import { gateFiles, type BugStore, type BugText, type GateValues } from "./bugstore.js";
+import { appFolderName, gateFiles, type BugStore, type BugText, type GateValues } from "./bugstore.js";
 import { QA_BRANCH, REPO, copyReport, explain, rawUrl, type Runner } from "./journeyexport.js";
 
 // Export of a bug report (AGENT-TOOLS 1.16 §29.7): to a GitHub issue through the user's own `gh`, as a journey's export is (§17.5), or as a local
@@ -248,7 +248,8 @@ async function exportIssue(deps: BugExportDeps, stored: NonNullable<ReturnType<B
     return refuse("not_allowed", `export refused: ${visibility === "unknown" ? `Tapline couldn't tell whether ${repo} is public, so it counts as public` : `${repo} is a public repository`}, so the report would be visible to everyone; export again with public: true if your user wants that. Nothing was sent.`);
   }
   const title = deps.redact(bugTitle(stored.finding));
-  const where = `.tapline/bugs/${id}`;
+  // The app is part of the path, as of the bug's own folder: two apps can hold the same bug id (AGENT-TOOLS 1.16.2 §29.7).
+  const where = `.tapline/bugs/${appFolderName(app)}/${id}`;
   // The page's picture is a file of the folder: in an issue it is the one on the branch, or it isn't there at all (§29.7).
   const shot = "![The screen at the moment](picture.jpg)";
   const md = (parcel.files["report.md"] ?? "").replace(shot, sent ? `![The screen at the moment](${rawUrl(repo, QA_BRANCH, `${where}/picture.jpg`)})` : "(The picture isn't part of this issue.)");

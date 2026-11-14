@@ -175,7 +175,7 @@ describe("export to an issue (§29.7)", () => {
       `gh repo clone ${REPO} <clone> -- --depth 1 --no-checkout`,
       "git checkout --orphan qa-reports",
       "git rm -rf -q --ignore-unmatch .",
-      `git add -f -- .tapline/bugs/${id}`,
+      `git add -f -- .tapline/bugs/${APP.id}/${id}`,
       `git commit -m QA bug report: ${id}`,
       "git push origin HEAD:refs/heads/qa-reports",
       `gh issue create --repo ${REPO} --title ${title} --body-file <tmp>/issue.md`,
@@ -185,12 +185,12 @@ describe("export to an issue (§29.7)", () => {
     for (const git of gh.calls.filter((c) => c.command === "git")) expect(git.cwd).toBe(clone);
     expect(existsSync(clone)).toBe(false);
     // only the script goes to the branch (no picture was asked for); the page is the body
-    expect(gh.calls.find((c) => c.args[0] === "add")?.files).toEqual([`.tapline/bugs/${id}/repro.json`]);
+    expect(gh.calls.find((c) => c.args[0] === "add")?.files).toEqual([`.tapline/bugs/${APP.id}/${id}/repro.json`]);
     const body = gh.calls.at(-1)?.body ?? "";
     expect(body.startsWith(readFileSync(join(r.bugDir(id), "report.md"), "utf8").trimEnd())).toBe(true);
-    expect(body).toContain(`https://github.com/${REPO}/raw/qa-reports/.tapline/bugs/${id}/repro.json`);
+    expect(body).toContain(`https://github.com/${REPO}/raw/qa-reports/.tapline/bugs/${APP.id}/${id}/repro.json`);
     expect(body).not.toContain("picture.jpg");
-    expect(answer).toBe(`Exported: wrote repro.json to .tapline/bugs/${id}/ on branch qa-reports of ${REPO} (made it), and opened an issue: https://github.com/${REPO}/issues/12`);
+    expect(answer).toBe(`Exported: wrote repro.json to .tapline/bugs/${APP.id}/${id}/ on branch qa-reports of ${REPO} (made it), and opened an issue: https://github.com/${REPO}/issues/12`);
   });
 
   it("a public repository is refused unless public: true; one whose visibility can't be told counts as public", async () => {
@@ -219,7 +219,7 @@ describe("export to an issue (§29.7)", () => {
     const id1 = await r1.make(false);
     expect(existsSync(join(r1.bugDir(id1), "picture.jpg"))).toBe(false);
     expect(textOf(await r1.s.tools.bugReport(ISSUE(id1, { with_picture: true })))).not.toContain("picture");
-    expect(a.calls.find((c) => c.args[0] === "add")?.files).toEqual([`.tapline/bugs/${id1}/repro.json`]);
+    expect(a.calls.find((c) => c.args[0] === "add")?.files).toEqual([`.tapline/bugs/${APP.id}/${id1}/repro.json`]);
     // in the folder (the bug said so) but the export doesn't: left out
     const b = fakeGh();
     const r2 = await rig({ tools: { exportRunner: b.run } });
@@ -227,7 +227,7 @@ describe("export to an issue (§29.7)", () => {
     expect(existsSync(join(r2.bugDir(id2), "picture.jpg"))).toBe(true);
     const left = textOf(await r2.s.tools.bugReport(ISSUE(id2)));
     expect(left).toContain("The private picture was left out.");
-    expect(b.calls.find((c) => c.args[0] === "add")?.files).toEqual([`.tapline/bugs/${id2}/repro.json`]);
+    expect(b.calls.find((c) => c.args[0] === "add")?.files).toEqual([`.tapline/bugs/${APP.id}/${id2}/repro.json`]);
     expect(b.calls.at(-1)?.body).not.toContain("picture.jpg");
     expect(r2.lines().map((l) => l["detail"])).toEqual([`issue ${REPO}: ${id2}, picture not sent`]);
     // both asked: it goes, and the body links it
@@ -235,8 +235,8 @@ describe("export to an issue (§29.7)", () => {
     const r3 = await rig({ tools: { exportRunner: c.run } });
     const id3 = await r3.make(true);
     expect(textOf(await r3.s.tools.bugReport(ISSUE(id3, { with_picture: true })))).toContain("wrote repro.json and picture.jpg to");
-    expect([...(c.calls.find((x) => x.args[0] === "add")?.files ?? [])].sort()).toEqual([`.tapline/bugs/${id3}/picture.jpg`, `.tapline/bugs/${id3}/repro.json`]);
-    expect(c.calls.at(-1)?.body).toContain(`/raw/qa-reports/.tapline/bugs/${id3}/picture.jpg`);
+    expect([...(c.calls.find((x) => x.args[0] === "add")?.files ?? [])].sort()).toEqual([`.tapline/bugs/${APP.id}/${id3}/picture.jpg`, `.tapline/bugs/${APP.id}/${id3}/repro.json`]);
+    expect(c.calls.at(-1)?.body).toContain(`/raw/qa-reports/.tapline/bugs/${APP.id}/${id3}/picture.jpg`);
     expect(r3.lines().map((l) => l["detail"])).toEqual([`issue ${REPO}: ${id3}, picture sent`]);
   });
 
@@ -251,7 +251,7 @@ describe("export to an issue (§29.7)", () => {
     stored.bug.picture_file.private = false;
     writeFileSync(path, JSON.stringify(stored));
     await r.s.tools.bugReport(ISSUE(id));
-    expect([...(gh.calls.find((x) => x.args[0] === "add")?.files ?? [])].sort()).toEqual([`.tapline/bugs/${id}/picture.jpg`, `.tapline/bugs/${id}/repro.json`]);
+    expect([...(gh.calls.find((x) => x.args[0] === "add")?.files ?? [])].sort()).toEqual([`.tapline/bugs/${APP.id}/${id}/picture.jpg`, `.tapline/bugs/${APP.id}/${id}/repro.json`]);
   });
 
   it("an @name in the page can't ping anyone; the bad repo, a missing gh and an unknown bug are said, not sent", async () => {
