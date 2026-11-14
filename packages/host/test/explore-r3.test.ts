@@ -26,3 +26,58 @@ describe("R3: an error line is redacted before it is cut", () => {
     expect(line).toContain("<hidden>");
   });
 });
+
+import { rmSync } from "node:fs";
+import { afterEach } from "vitest";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { TaplineHost } from "../src/server.js";
+import { flushExploreMaps, setupExplore } from "./explore-helpers.js";
+import type { FakeApp } from "./helpers.js";
+
+const hosts: TaplineHost[] = [];
+const apps: FakeApp[] = [];
+const dirs: string[] = [];
+afterEach(async () => {
+  await flushExploreMaps();
+  for (const app of apps.splice(0)) app.ws.terminate();
+  await Promise.all(hosts.splice(0).map((h) => h.close()));
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+const textOf = (result: CallToolResult): string => result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+
+describe("R3: a saved back road leads the next run to the parent's frontier", () => {
+  it("a run started on the child, whose back was tried before, still explores the parent", async () => {
+    const s = await setupExplore(hosts, apps, dirs, {});
+    s.world.screen = "settings";
+    // Run 1 is cut at depth 1: settings is explored (its back road to home is saved), home is not.
+    await s.tools.explore({ depth: 1 });
+    expect(s.world.pressed).not.toContain("open-trips");
+    s.world.screen = "settings";
+    s.world.pressed.length = 0;
+    const second = await s.tools.explore({});
+    expect(textOf(second)).toMatch(/Stopped: the frontier is empty\./);
+    expect(s.world.pressed).toContain("open-trips");
+  });
+});
+
+describe("R3: a toggle is restored after an alert recovery", () => {
+  it("the alert that opens on a flip is cleared by a reload that keeps data; the toggle is flipped back", async () => {
+    const s = await setupExplore(hosts, apps, dirs, {});
+    s.world.onPress = (id) => {
+      if (id === "notify-switch" && s.world.toggles["notify-switch"] === false) s.world.alertOpen = true;
+    };
+    await s.tools.explore({});
+    expect(s.world.reloads).toBeGreaterThanOrEqual(1);
+    expect(s.world.toggles["notify-switch"]).toBe(false);
+  });
+
+  it("when it can't be flipped back after the recovery, the run stops with toggle_not_restored", async () => {
+    const s = await setupExplore(hosts, apps, dirs, {});
+    s.world.stuckToggles.add("notify-switch");
+    s.world.onPress = (id) => {
+      if (id === "notify-switch" && s.world.toggles["notify-switch"] === false) s.world.alertOpen = true;
+    };
+    const out = textOf(await s.tools.explore({}));
+    expect(out).toMatch(/Stopped: .*toggle/i);
+  });
+});

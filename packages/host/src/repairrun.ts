@@ -473,7 +473,8 @@ async function backAtStart(host: RepairHost, startPlace: string | null, startScr
   const moved = async (): Promise<boolean> => {
     const now = await host.place();
     if (startPlace !== null && now !== null) return now !== startPlace;
-    return startScreen !== "" && screenKey(await host.tree()) !== startScreen;
+    // A start screen that was never known can't be verified: that counts as moved, so the way back is tried and the repair stops when it still can't be told.
+    return startScreen === "" || screenKey(await host.tree()) !== startScreen;
   };
   if (!(await moved())) return true;
   if (startPlace !== null && (await host.returnTo(startPlace)) && !(await moved())) return true;

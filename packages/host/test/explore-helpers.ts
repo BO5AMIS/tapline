@@ -476,7 +476,7 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
     const old = current;
     world.screen = world.initial;
     world.away = false;
-    world.toggles["notify-switch"] = false;
+    // A reload or a reopened app keeps its data (§25.8); only the app's own reset command clears it.
     const next = await FakeApp.connect(port, hello, handle);
     apps.push(next.app);
     current = next.app;

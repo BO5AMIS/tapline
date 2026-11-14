@@ -336,7 +336,7 @@ describe("the limits (§26.4)", () => {
   it("at most 3 candidates are tried per step, in score order", async () => {
     // Four candidates, the one that would pass is the lowest.
     const ids = ["go-alpha-beta-gamma-x", "go-alpha-beta-x", "go-alpha-x", "go-x"];
-    const s = stub({ elements: ids.map((id, i) => el(`e${i + 1}`, id, undefined)), valid: new Set(["go-x"]) });
+    const s = stub({ elements: ids.map((id, i) => el(`e${i + 1}`, id, undefined)), valid: new Set(["go-x"]), place: "start" });
     const run = await runWithRepair(s.host, [tapStep("go-alpha-beta-gamma")]);
     expect(run.ok).toBe(false);
     // The first run, then the three trials; the fourth candidate is never tried.
@@ -478,5 +478,21 @@ describe("the surfaces", () => {
     const text = JSON.stringify({ format: "agent-tools-script", version: 1, name: "s", fresh: false, repaired: { from: "s.json", count: 1 }, steps: [{ tool: "tap", target: { id: "go" }, place: "home", repaired: { was: { id: "g" }, score: 0.9 } }] });
     const read = readScript(text);
     expect(read?.steps[0]).toMatchObject({ place: "home", repaired: { score: 0.9 } });
+  });
+});
+
+describe("PR 13 CodeRabbit (R3): an unverifiable start is not recovered", () => {
+  it("after a rejected trial with no known place and no route, the repair stops instead of trying the next candidate on an unknown screen", async () => {
+    const elements = [el("e1", "go-alpha", undefined), el("e2", "go-alpha-x", undefined)];
+    const s = stub({ elements, valid: new Set(["nothing"]) });
+    let trials = 0;
+    s.host.runSteps = (steps) => {
+      trials++;
+      return Promise.resolve({ isError: true, content: [{ type: "text", text: `Error not_found: Ran 0 of ${steps.length} steps; stopped at step 1 (tap id=x): No element matches` }] });
+    };
+    const run = await runWithRepair(s.host, [tapStep("go-alp")]);
+    expect(run.ok).toBe(false);
+    expect(trials).toBe(2);
+    expect(run.notes.join("\n")).toContain("couldn't be taken back");
   });
 });

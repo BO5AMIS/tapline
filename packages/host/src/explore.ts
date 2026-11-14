@@ -495,7 +495,8 @@ export class Explorer {
       }
       if (!done.has("back")) {
         done.add("back");
-        if (!map.isTried(place, "back") && !(await this.tryBack(place))) return;
+        if (map.isTried(place, "back")) this.enqueueKnown(place, "back");
+        else if (!(await this.tryBack(place))) return;
         continue;
       }
       return;
@@ -872,6 +873,8 @@ export class Explorer {
     const kept = await this.afterMove(place, action.sig, action.step, mark, out, "toggle");
     if (!flipped) return kept;
     if (!kept) {
+      // The branch ended (an alert, a crash, the app gone) after the flip: a reload keeps the data, so the flip may still be there.
+      await this.restoreAfterBreak(place, action, old);
       return false;
     }
     let here = await this.read();
@@ -895,6 +898,22 @@ export class Explorer {
     if (!back.ok || after === undefined || readToggle(after) !== old) throw new Stop("toggle_not_restored", toggleName(action.el));
     map.markTried(place, action.sig, { result: "same", role });
     return true;
+  }
+
+  /** After a recovery that ended a toggle's branch: the toggle is read again, and flipped back when it kept the flip. It never ends unverified. */
+  private async restoreAfterBreak(place: string, action: Action, old: boolean): Promise<void> {
+    const lost = (): Stop => new Stop("toggle_not_restored", toggleName(action.el));
+    if (!(await this.ensureAt(place))) throw lost();
+    const here = await this.read();
+    const found = this.findBySig(here, action.sig);
+    const now = found === undefined ? undefined : readToggle(found);
+    if (found === undefined || now === undefined) throw lost();
+    if (now === old) return;
+    const back = await this.host.move({ tool: "toggle", target: this.targetOf(found, action.sig, here, 0), value: old });
+    this.steps += back.used;
+    const check = await this.read();
+    const after = this.findBySig(check, action.sig);
+    if (!back.ok || after === undefined || readToggle(after) !== old) throw lost();
   }
 
   private findBySig(tree: TreeResult, sig: string): TreeElement | undefined {
