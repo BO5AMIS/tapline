@@ -57,8 +57,8 @@ export interface ExportInput {
 export type ExportOutcome = { ok: true; lines: string[] } | { ok: false; message: string };
 
 /** owner/name as GitHub allows them: no leading dash or dot, no `..` (1.5 review, finding 7). */
-const REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$/;
-const QA_BRANCH = "qa-reports";
+export const REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+export const QA_BRANCH = "qa-reports";
 
 /** Tokens never reach a message. */
 function plain(text: string): string {
@@ -66,7 +66,7 @@ function plain(text: string): string {
   return line.replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "***").replace(/(https?:\/\/)[^/@\s]+@/g, "$1").slice(0, 240);
 }
 
-function explain(result: RunResult, what: string, repo: string): string {
+export function explain(result: RunResult, what: string, repo: string): string {
   if (result.missing === true) {
     return "the GitHub CLI (gh) isn't installed or isn't on the PATH; install it from https://cli.github.com and sign in with `gh auth login`";
   }
@@ -86,7 +86,7 @@ function explain(result: RunResult, what: string, repo: string): string {
 }
 
 /** `https://github.com/owner/name/raw/branch/path`: opens for people signed in to GitHub, private repositories too. */
-function rawUrl(repo: string, branch: string, path: string): string {
+export function rawUrl(repo: string, branch: string, path: string): string {
   const encode = (value: string): string => value.split("/").map(encodeURIComponent).join("/");
   return `https://github.com/${repo}/raw/${encode(branch)}/${encode(path)}`;
 }
@@ -160,7 +160,7 @@ function isLink(path: string): boolean {
  * The files, and only them, into `into` (made if need be), keeping their folders. Both ends are checked: a source is
  * a plain file inside the report folder, and every folder and file written is inside the clone, with no link on the way.
  */
-function copyReport(folder: string, clone: string, into: string, files: readonly string[]): void {
+export function copyReport(folder: string, clone: string, into: string, files: readonly string[]): void {
   const root = realpathSync(resolve(folder));
   const cloneRoot = realpathSync(resolve(clone));
   const target = resolve(into);

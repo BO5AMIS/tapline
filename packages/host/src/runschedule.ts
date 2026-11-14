@@ -95,8 +95,8 @@ export interface RunDeps extends PidLockDeps {
   redactFor: (schedule: Schedule, signal?: AbortSignal) => Promise<(text: string) => string>;
   pid: number;
   alive: (pid: number) => boolean;
-  /** When a process started, as text that is the same each time for one process (null: unknown). A lock keeps it so a reused process id is not taken for the holder. */
-  startOf?: (pid: number) => string | null;
+  /** When a process started: milliseconds since 1970-01-01 UTC (null: unknown). A lock keeps it so a reused process id is not taken for the holder. */
+  startOf?: (pid: number) => number | null;
   appWaitMs?: number;
   busyWaitMs?: number;
   /** For tests: runs after a run found a leftover lock and before it takes the lock over (another run may get in between). */

@@ -20,6 +20,11 @@ import { formatDoctor, needsAPerson, runDoctor } from "./doctor.js";
 import { formatLogs } from "./format.js";
 import { runAuditLog, runGrants } from "./grantscmd.js";
 import { ownExploreHost, runExplore } from "./explorecmd.js";
+import { BUG_USAGE, runBug, type BugCliDeps } from "./bugcmd.js";
+import { loadAccounts, redactAll, vaultValues } from "./accounts.js";
+import { OtpCodes } from "./otpclient.js";
+import { DEFAULT_POLICY, loadPolicy } from "./policy.js";
+import { loadMap, mapDir } from "./mapfile.js";
 import { runInit } from "./init.js";
 import { scheduleAdd, scheduleList, scheduleRemove, type ScheduleDeps } from "./schedule.js";
 import { runReport } from "./report.js";
@@ -31,6 +36,8 @@ import { MapRegistry } from "./places.js";
 import { TaplineHost } from "./server.js";
 import { APP_WAIT_MS, processStartTime, runSchedule } from "./runschedule.js";
 import { AuditLog } from "./auditlog.js";
+import { realRunner } from "./journeyexport.js";
+import { createInterface } from "node:readline";
 import { ownLockDeps } from "./pidlock.js";
 import { grantsUnlock, scheduleUnlock } from "./unlockcmd.js";
 import { connectScheduleHost, realTaskEntry, redactorFor, spawnSchedRunner } from "./schedulehost.js";
@@ -74,6 +81,14 @@ Commands:
            tapline explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue]
            [--account NAME] [--policy FILE] [--accounts FILE] [--maps DIR]  (exit 0: nothing found, 1: findings, a crash included,
            2: it couldn't start, or a person or a pause stopped it; the report is still written)
+  bug      Make a one-page bug report from a finding of an explore report, with no phone, or list the bugs kept (~/.tapline/bugs/<app>/<bug id>/):
+           tapline bug <report folder> <finding id> [--with-picture]; tapline bug list [--app ID]; tapline bug <bug id> shows one
+           (exit 0: a bug was made or updated, 1: it didn't reproduce, 2: it couldn't be made or was refused;
+           the report folder and the folders above it must be trusted: your own explore output under ~/.tapline, or a folder only you can
+           write; a folder others can write is not supported;
+           from "now" and from "failure" need the live session: tapline call bug_report '{...}';
+           tapline bug <report folder> <finding id> --verify N and tapline bug verify <bug id> run the reproduction check on the phone;
+           tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes] | --zip <path>)
   run-schedule  Run one schedule now: tapline run-schedule NAME [--wait <s>]. Needs the app open on the phone
            (exit 0: it held, 1: it stopped, 2: it was skipped or couldn't start). Report: ~/.tapline/runs/
   vault    \`tapline vault protect FILE\` turns a plain vault file into this system's protected form
@@ -124,7 +139,7 @@ Options:
   --stop             For dev: stop serving Metro
   --minutes <n>, --steps <n>, --depth <n>  For explore: the budget (default 10 minutes, 500 steps, 8 places deep)
   --from <place>, --focus <place>  For explore: where it starts, and the place whose subtree it keeps to
-  --fill <none|test-data>  For explore: type nothing (default), or only into fields the app marks as safe for tests
+  --fill <none|test-data|fixture:NAME.FIELD>  For explore: type nothing (default), or only into fields the app marks as safe for tests (a fixture from the vault gives the field marked by its id that value)
   --continue         For explore: go on after a crash, when the app can be opened again
   --account <name>   For explore: a vault account marked "explore": true, for the way back after a reset
   --wait <s>         For replay, run-schedule and explore: how long to wait for the app to connect (default 60)
@@ -383,12 +398,149 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
   };
 }
 
+/** A line from the terminal, typed visibly (a yes or no) or hidden (a value for `${typed}`); null when there is no terminal (§29.4, §29.7). */
+function terminalAsk(question: string, hidden: boolean): Promise<string | null> {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return Promise.resolve(null);
+  if (!hidden) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolve) => rl.question(`${question} `, (answer) => (rl.close(), resolve(answer))));
+  }
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    process.stdout.write(`${question} `);
+    let value = "";
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    const onData = (chunk: string): void => {
+      for (const char of chunk) {
+        if (char === "\r" || char === "\n" || char === "\u0004") {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.off("data", onData);
+          process.stdout.write("\n");
+          return resolve(value);
+        }
+        if (char === "\u0003") {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.off("data", onData);
+          process.stdout.write("\n");
+          return resolve(null);
+        }
+        value = char === "\u007f" || char === "\b" ? value.slice(0, -1) : value + char;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+/** `tapline bug ...` (AGENT-TOOLS 1.16 §29.3): its own flags (`--app` takes an app id here). Only the reproduction check starts a host of its own, for the phone. */
+async function runBugCommand(args: string[]): Promise<number> {
+  let parsed: ReturnType<typeof parseBugArgs>;
+  try {
+    parsed = parseBugArgs(args);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n${BUG_USAGE}\n`);
+    return 2;
+  }
+  const { values, positionals } = parsed;
+  let redact = (text: string): string => text;
+  let redactTyped: BugCliDeps["redactTyped"];
+  let gateValues: BugCliDeps["gateValues"];
+  if (values.accounts !== undefined) {
+    try {
+      const loaded = await loadAccounts(values.accounts);
+      if (loaded.store === null) {
+        process.stderr.write(`${loaded.blocked}\n`);
+        return 2;
+      }
+      const store = loaded.store;
+      redact = (text) => store.redact(text);
+      // The vault's values and the ones a person types at a prompt are matched in one pass; the gate gets the vault's values from this memory only.
+      const noCodes = new OtpCodes();
+      redactTyped = (text, typed) => redactAll(store, noCodes, text, typed);
+      gateValues = () => vaultValues(store);
+    } catch (error) {
+      process.stderr.write(`the vault couldn't be read: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
+  let policy = DEFAULT_POLICY;
+  if (values.policy !== undefined) {
+    try {
+      policy = loadPolicy(values.policy);
+    } catch (error) {
+      process.stderr.write(`the policy file couldn't be read: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
+  const mapsDir = values.maps ?? join(configDir(), "maps");
+  // The check needs the phone: a host of its own, started only when a check is asked for and closed at the end (as `explore` does).
+  let own: Runtime | undefined;
+  const bugRuntime: RuntimeOptions = { ...(values.policy !== undefined ? { policy: values.policy } : {}), ...(values.accounts !== undefined ? { accounts: values.accounts } : {}), ...(values.maps !== undefined ? { maps: values.maps } : {}) };
+  const deps: BugCliDeps = {
+    bugsDir: join(configDir(), "bugs"),
+    redact,
+    ...(redactTyped !== undefined ? { redactTyped } : {}),
+    ...(gateValues !== undefined ? { gateValues } : {}),
+    audit: new AuditLog(join(configDir(), "audit")),
+    runner: realRunner,
+    askYes: async (question) => {
+      const said = await terminalAsk(question, false);
+      return said === null ? null : /^y(es)?$/i.test(said.trim());
+    },
+    askValue: (question) => terminalAsk(question, true),
+    check: async (bug, n, options) => {
+      own ??= await createRuntime({ ...bugRuntime, screenshots: "file", log: () => undefined });
+      const runtime = own;
+      const until = Date.now() + APP_WAIT_MS;
+      while (runtime.host.current() === undefined && Date.now() < until) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      if (runtime.host.current() === undefined) return { checked: false, why: "no phone connected" };
+      if (runtime.phoneInUse()) return { checked: false, why: "stopped (busy)" };
+      const tools = runtime.toolsFor("bug");
+      return tools.withCall(undefined, () => tools.runBugCheck(bug, n, options));
+    },
+    close: async () => {
+      await own?.close();
+    },
+    map: (app) => {
+      const loaded = loadMap(mapDir(app, { mapsDir }), app);
+      return loaded.status === "ok" ? loaded.map : undefined;
+    },
+    policy,
+    out: (text) => process.stdout.write(`${text}\n`),
+    err: (text) => process.stderr.write(`${text}\n`),
+  };
+  return runBug(positionals, values, deps);
+}
+
+function parseBugArgs(args: string[]) {
+  return parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      verify: { type: "string" },
+      "with-picture": { type: "boolean" },
+      app: { type: "string" },
+      issue: { type: "string" },
+      zip: { type: "string" },
+      public: { type: "boolean" },
+      yes: { type: "boolean" },
+      accounts: { type: "string" },
+      maps: { type: "string" },
+      policy: { type: "string" },
+    },
+  });
+}
+
 export async function main(argv: string[]): Promise<number> {
   // The thin call has its own light entry (bin.ts); this keeps "node dist/cli.js call" working too.
   if (argv[0] === "call") {
     const { runThinCall } = await import("./thincall.js");
     return runThinCall(argv.slice(1));
   }
+  if (argv[0] === "bug") return runBugCommand(argv.slice(1));
   const { values, positionals } = parseCli(argv);
   const command = positionals[0];
   if (values.help === true || command === undefined || command === "help") {

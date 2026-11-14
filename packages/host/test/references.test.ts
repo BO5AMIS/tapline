@@ -86,6 +86,14 @@ function textOf(result: CallToolResult): string {
 
 const tap = { target: { id: "save" }, look: false, screenshot: false } as const;
 
+/** The steps without their `seen` (1.16): a step's facts have their own tests; these ones are about the rest of the step. */
+function withoutSeen<T>(steps: T[] | undefined): unknown[] | undefined {
+  return steps?.map((step) => {
+    const { seen: _seen, ...rest } = step as Record<string, unknown>;
+    return rest;
+  });
+}
+
 describe("record carries references", () => {
   it("folds a compare_screen after a tap into expect.matches and copies the reference", async () => {
     const { tools, scriptsDir, store } = await setup(picture());
@@ -94,7 +102,7 @@ describe("record carries references", () => {
     await tools.compareScreen({ name: "home" }); // first call saves the reference
     const stop = await tools.record({ stop: true });
     const script = readScript(readFileSync(join(scriptsDir, "flow.json"), "utf8"));
-    expect(script?.steps).toEqual([{ tool: "tap", target: { id: "save" }, expect: { matches: "home" } }]);
+    expect(withoutSeen(script?.steps)).toEqual([{ tool: "tap", target: { id: "save" }, expect: { matches: "home" } }]);
     const folder = join(scriptsDir, "flow.references");
     expect(textOf(stop).split("\n")[0]).toBe(`Saved 1 step to ${join(scriptsDir, "flow.json")}, and 1 reference picture to ${folder}.`);
     expect(readFileSync(join(folder, "home.jpg")).equals(readFileSync(join(store, "home.jpg")))).toBe(true);
@@ -120,7 +128,7 @@ describe("record carries references", () => {
     await tools.compareScreen({ name: "third" }); // the tap already has an expectation
     const stop = await tools.record({ stop: true });
     const script = readScript(readFileSync(join(scriptsDir, "flow.json"), "utf8"));
-    expect(script?.steps).toEqual([
+    expect(withoutSeen(script?.steps)).toEqual([
       { tool: "compare_screen", name: "first" },
       { tool: "tap", target: { id: "save" }, expect: { matches: "second", threshold: 1 } },
       { tool: "compare_screen", name: "third" },
@@ -149,7 +157,7 @@ describe("record carries references", () => {
     expect(textOf(result)).toMatch(/^Error bad_params: ignore .*e4.* has no id, label or text/);
     const stop = await tools.record({ stop: true });
     const script = readScript(readFileSync(join(scriptsDir, "flow.json"), "utf8"));
-    expect(script?.steps).toEqual([{ tool: "tap", target: { id: "save" } }]);
+    expect(withoutSeen(script?.steps)).toEqual([{ tool: "tap", target: { id: "save" } }]);
     expect(textOf(stop).split("\n")[0]).toBe(`Saved 1 step to ${join(scriptsDir, "flow.json")}.`);
   });
 

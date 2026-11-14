@@ -17,19 +17,20 @@ import { openProtected, peekFile, plainWarning, realVaultDeps, VaultOpenError, t
 const ACCOUNT_NAME = /^[\w.-]{1,60}$/;
 const ENTRY_NAME = /^[A-Za-z0-9_]{1,60}$/;
 
-// Fail closed: a secret field (password, username, card number, expiry, cvc, a note's text, an identity's phone, email and
-// birthday) shorter than 3 characters is refused at load, because a value that short is not scrubbed. The message quotes no value.
-const SHORT = "must be at least 3 characters, because a shorter secret can't be scrubbed from answers without garbling other text";
 /**
  * A value shorter than this is held and typed, but not scrubbed: a country code such as `QA` would garble every answer. Only
- * non-secret fields (an address's street, city, postcode and country, an identity's name) may be that short; every secret
- * field is refused below this length at load.
+ * the plain fields (an address's fields, an identity's name, the passcode, every fixture field) may be that short; every secret
+ * field is refused below this length at load (the limits below, AGENT-TOOLS 1.16.1 section 20.1).
  */
 const MIN_SCRUB = 3;
+/** The vault's limits (AGENT-TOOLS 1.16.1 §20.1): characters in a value as written, values in a version 2 file, accounts in a version 1 file. */
+export const MAX_VALUE_CHARS = 256;
+export const MAX_VAULT_VALUES = 64;
+export const MAX_V1_ACCOUNTS = 32;
 
 // -- kinds and fields (§20.1)
 
-export const VAULT_KINDS = ["account", "card", "address", "identity", "note", "phone"] as const;
+export const VAULT_KINDS = ["account", "card", "address", "identity", "note", "phone", "fixture"] as const;
 export type VaultKind = (typeof VAULT_KINDS)[number];
 
 /** The fields each kind has. `phone` is Tapwright's: Tapline holds it and never types it. */
@@ -40,10 +41,14 @@ export const KIND_FIELDS: Record<VaultKind, readonly string[]> = {
   identity: ["name", "phone", "email", "birthday"],
   note: ["text"],
   phone: ["passcode"],
+  // A fixture has any fields (§20.1, v1.16): their names are checked at load, and a reference to one is checked against the entry.
+  fixture: [],
 };
 
-const secret = z.string().min(3, SHORT);
-const plain = z.string().min(1);
+// The schema checks the shape only; every limit on a value (empty, 256, escaped, 3 once decoded, the counts) is `vaultLimitProblem`'s,
+// so one message names the entry and the field the same way whatever kind it is.
+const secret = z.string();
+const plain = z.string();
 const apps = z.array(z.string().min(1)).optional();
 /** `"explore": true` marks an entry the explorer may type or sign in with (AGENT-TOOLS 1.15 §25.6). Never a password, a card or a phone. */
 const explore = z.boolean().optional();
@@ -55,30 +60,113 @@ const entrySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps, explore }),
   z.object({ kind: z.literal("note"), text: secret.optional(), apps, explore }),
   z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps, explore }),
+  // Plain test data with any fields, string values (§20.1, v1.16). It is scrubbed like every vault value.
+  z.object({ kind: z.literal("fixture"), apps, explore }).catchall(plain),
 ]);
 
-/** Version 2 (§20.1). A top-level `otp` key is Tapwright's and is ignored here. */
-export const vaultFileSchema = z.object({
-  version: z.literal(2),
-  vault: z.record(z.string().regex(ENTRY_NAME, "entry names use ASCII letters, digits and '_'"), entrySchema),
+/** A fixture's field names are ASCII letters, digits and `_` (§20.1, v1.16), and can't be the entry's own keys. */
+const FIXTURE_FIELD = /^[A-Za-z0-9_]+$/;
+const ENTRY_KEYS: ReadonlySet<string> = new Set(["kind", "apps", "explore"]);
+
+/**
+ * Version 2 (§20.1). A top-level `otp` key is Tapwright's and is ignored here. `vaultShapeSchema` checks the shape only; the schema
+ * most callers want adds the limits of 1.16.1 (`vaultLimitProblem`).
+ */
+export const vaultShapeSchema = z
+  .object({
+    version: z.literal(2),
+    vault: z.record(z.string().regex(ENTRY_NAME, "entry names use ASCII letters, digits and '_'"), entrySchema),
+  })
+  .superRefine((file, ctx) => {
+    for (const [name, entry] of Object.entries(file.vault)) {
+      if (entry.kind !== "fixture") continue;
+      for (const field of Object.keys(entry)) {
+        if (!ENTRY_KEYS.has(field) && !FIXTURE_FIELD.test(field)) {
+          ctx.addIssue({ code: "custom", path: ["vault", name], message: `a fixture's field names use ASCII letters, digits and '_'` });
+        }
+      }
+    }
+  });
+export type VaultFile = z.infer<typeof vaultShapeSchema>;
+export const vaultFileSchema = vaultShapeSchema.superRefine((file, ctx) => {
+  const problem = vaultLimitProblem(file);
+  if (problem !== null) ctx.addIssue({ code: "custom", path: [], message: problem });
 });
-export type VaultFile = z.infer<typeof vaultFileSchema>;
 
 const accountSchema = z.object({
   username: secret.optional(),
   password: secret.optional(),
   /** Tapwright's: the phone's passcode. Tapline loads it without complaint and never types it. */
-  passcode: z.string().min(1).optional(),
+  passcode: z.string().optional(),
   apps,
   explore,
 });
 
 /** Version 1 (§18.6). */
-export const accountsFileSchema = z.object({
+export const accountsShapeSchema = z.object({
   version: z.literal(1),
   accounts: z.record(z.string().regex(ACCOUNT_NAME, "account names use letters, digits, '.', '_' and '-'"), accountSchema),
 });
-export type AccountsFile = z.infer<typeof accountsFileSchema>;
+export type AccountsFile = z.infer<typeof accountsShapeSchema>;
+export const accountsFileSchema = accountsShapeSchema.superRefine((file, ctx) => {
+  const problem = vaultLimitProblem(file);
+  if (problem !== null) ctx.addIssue({ code: "custom", path: [], message: problem });
+});
+
+// -- the limits (AGENT-TOOLS 1.16.1 §20.1)
+
+/** The number of characters of a text (code points, as a Python `len` counts them, so both tools agree at the boundary). */
+const charCount = (text: string): number => [...text].length;
+
+/** Whether a field is plain (§20.1): it may be shorter than 3 characters, and then it is typed but not redacted. */
+function isPlainField(kind: VaultKind, field: string): boolean {
+  if (kind === "address" || kind === "phone" || kind === "fixture") return true;
+  if (kind === "identity") return field === "name";
+  // A version 1 account's passcode moves into a phone entry of its own (the protect command): it is the phone's, and plain.
+  return kind === "account" && field === "passcode";
+}
+
+/** What a value reads as once decoded, or null when it is still escaped after the decoding work limit (the last pass still decodes). */
+function decodedOf(value: string): { text: string; marks: boolean } | null {
+  const views = viewsOf(value);
+  const last = views[views.length - 1] as View;
+  if (decodePass(last) !== null) return null;
+  // direction marks and zero-width characters at any layer: an escaped one decodes to the mark and is dropped by the next pass
+  const marks = views.some((view) => INVISIBLE_ANY.test(view.text));
+  return { text: last.text, marks };
+}
+
+/**
+ * Every limit of AGENT-TOOLS 1.16.1 §20.1, in file order. The first breach as words that name the entry and the field (or the count)
+ * and never a value; null when the file is within the limits. A breach loads nothing.
+ */
+export function vaultLimitProblem(file: AccountsFile | VaultFile): string | null {
+  const entries = rawEntries(file);
+  if (file.version === 1) {
+    const count = Object.keys(entries).length;
+    if (count > MAX_V1_ACCOUNTS) return `it holds more than ${MAX_V1_ACCOUNTS} accounts; a version 1 vault file holds at most ${MAX_V1_ACCOUNTS} (split it)`;
+  }
+  let values = 0;
+  for (const [name, entry] of Object.entries(entries)) {
+    for (const [field, value] of Object.entries(entry.values)) {
+      const who = `${name}'s ${field}`;
+      if (value === "") return `${who} is empty; a vault value is at least 1 character`;
+      if (charCount(value) > MAX_VALUE_CHARS) return `${who} is longer than ${MAX_VALUE_CHARS} characters; a vault value is at most ${MAX_VALUE_CHARS}`;
+      const decoded = decodedOf(value);
+      if (decoded === null) return `${who} is still escaped after the decoding work limit; a vault value is refused then`;
+      const plain = isPlainField(entry.kind, field);
+      if (!plain) {
+        if (decoded.marks || INVISIBLE_ANY.test(value)) return `${who} must not hold direction marks`;
+        if (/^\\|\\$/.test(value) || /^\\|\\$/.test(decoded.text)) return `${who} must not start or end with a backslash`;
+        if (value.trim() !== value || decoded.text.trim() !== decoded.text) return `${who} must not start or end with whitespace`;
+        if (charCount(decoded.text) < MIN_SCRUB) return `${who} must have at least ${MIN_SCRUB} characters once decoded`;
+      }
+      if (entry.kind !== "phone" && !(file.version === 1 && field === "passcode") && charCount(decoded.text) >= MIN_SCRUB) values++;
+    }
+  }
+  if (file.version === 2 && values > MAX_VAULT_VALUES) return `it holds more than ${MAX_VAULT_VALUES} values; a vault file holds at most ${MAX_VAULT_VALUES} (split it)`;
+  return null;
+}
 
 /** An entry as the store holds it, whatever file version it came from. */
 export interface VaultEntry {
@@ -87,6 +175,8 @@ export interface VaultEntry {
   apps?: string[];
   /** Marked `"explore": true` in the file (§25.6): `explore` may type its safe fields and sign in with it. */
   explore?: true;
+  /** Fields whose value is under 3 characters once decoded (plain fields only): typed, but not redacted (§20.1, 1.16.1). */
+  unredacted?: string[];
 }
 
 /** Where `value=` and the other answers name a value: `<home's street>`. */
@@ -216,6 +306,13 @@ export function safeEncode(text: string): string {
   return encodeURIComponent(wellFormed(text));
 }
 
+/** A complete text as it is, with direction marks and zero-width characters stripped, with whitespace collapsed, and both. Never cut: a window of any of them is a window of the whole. */
+export function normalizedBases(text: string): string[] {
+  const collapse = (t: string): string => t.replace(/\s+/g, " ").trim();
+  const stripped = text.replace(INVISIBLE, "");
+  return [...new Set<string>([text, stripped, collapse(text), collapse(stripped)])];
+}
+
 /**
  * The shapes a value can take on its way back: as it is, with direction marks and zero-width characters stripped, with
  * whitespace collapsed (as the app's `normalizeText` leaves it), each of those inside a JSON string (also twice, and with
@@ -224,8 +321,7 @@ export function safeEncode(text: string): string {
  */
 export function variantsOf(value: string): string[] {
   const collapse = (text: string): string => text.replace(/\s+/g, " ").trim();
-  const stripped = value.replace(INVISIBLE, "");
-  const bases = new Set<string>([value, stripped, collapse(value), collapse(stripped)]);
+  const bases = new Set<string>(normalizedBases(value));
   for (const base of [...bases]) {
     if (base.length <= CUT) continue;
     bases.add(safeHead(base, CUT));
@@ -465,6 +561,19 @@ function viewsOf(text: string): View[] {
     views.push(next);
   }
   return views;
+}
+
+/**
+ * A text as the redactor reads it: every stage of its layered decoding (JSON escapes, percent, HTML entities, direction marks and zero-width
+ * characters dropped, to a fixpoint), each also with a form plus read as a space, and each normalized (as it is, stripped, whitespace collapsed,
+ * both). The text itself is the first stage, so the raw reading is never lost. For a grep gate that looks at windows of a text.
+ */
+export function decodedBases(text: string): string[] {
+  const out = new Set<string>();
+  for (const view of viewsOf(text)) {
+    for (const reading of new Set([view.text, view.text.replace(/\+/g, " ")])) for (const base of normalizedBases(reading)) out.add(base);
+  }
+  return [...out];
 }
 
 /** The view without invisible characters, each whitespace run as one space. */
@@ -739,7 +848,8 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
     // A value with a lone surrogate reaches the host from the app as U+FFFD (UTF-8 has no lone surrogate): both readings are scrubbed.
     const readings = Object.entries(entry.values).flatMap(([field, raw]): Array<[string, string]> => (wellFormed(raw) === raw ? [[field, raw]] : [[field, raw], [field, wellFormed(raw)]]));
     for (const [field, value] of readings) {
-      if (value.length < MIN_SCRUB) continue;
+      // A plain value under 3 characters once decoded is typed but never redacted (§20.1, 1.16.1): it would erase ordinary words.
+      if (value.length < MIN_SCRUB || entry.unredacted?.includes(field) === true) continue;
       const token = tokenOf(name, field);
       for (const form of variantsOf(value)) if (!literals.has(form)) literals.set(form, token);
       const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
@@ -820,7 +930,20 @@ export function looseScrubber(values: readonly string[], token: string): (text: 
   return scrubber(entries, () => token);
 }
 
+/** Marks each field whose value is under 3 characters once decoded: typed, but never redacted (§20.1, 1.16.1). */
+function markUnredacted(entries: Record<string, VaultEntry>): Record<string, VaultEntry> {
+  for (const entry of Object.values(entries)) {
+    const short = Object.entries(entry.values).filter(([, value]) => charCount(decodedOf(value)?.text ?? value) < MIN_SCRUB).map(([field]) => field);
+    if (short.length > 0) entry.unredacted = short;
+  }
+  return entries;
+}
+
 function normalizedEntries(file: AccountsFile | VaultFile): Record<string, VaultEntry> {
+  return markUnredacted(rawEntries(file));
+}
+
+function rawEntries(file: AccountsFile | VaultFile): Record<string, VaultEntry> {
   const out: Record<string, VaultEntry> = {};
   if (file.version === 1) {
     for (const [name, account] of Object.entries(file.accounts)) {
@@ -939,6 +1062,25 @@ export function redactAll(store: AccountStore | null | undefined, codes: CodeSou
   return redact(text);
 }
 
+/**
+ * Every value a store scrubs (the current vault and each retired one, fixtures included), as plain strings for a gate that greps files for them
+ * (the bug report's, §29.6). Read from the live store in memory, never written anywhere. A field under the scrubbing minimum is left out; a
+ * value with a lone surrogate is given in both readings. A store this module did not make has none to give.
+ */
+export function vaultValues(store: AccountStore | null | undefined): string[] {
+  if (store === null || store === undefined) return [];
+  const out = new Set<string>();
+  for (const base of BASES_OF.get(store)?.() ?? [store]) {
+    for (const entry of Object.values(ENTRIES_OF.get(base) ?? {})) {
+      for (const [field, value] of Object.entries(entry.values)) {
+        if (entry.unredacted?.includes(field) === true) continue;
+        for (const reading of new Set([value, wellFormed(value)])) if (reading.length >= MIN_SCRUB) out.add(reading);
+      }
+    }
+  }
+  return [...out];
+}
+
 /** The host's ingress scrubber: the live store, the session's codes and (given by the host per call) the active run's typed texts. */
 export function ingressRedactor(store: () => AccountStore | null | undefined, codes: CodeSource): (text: string, typed: TypedSource) => string {
   return (text, typed) => redactAll(store(), codes, text, typed);
@@ -991,13 +1133,17 @@ function storeOf(entries: Record<string, VaultEntry>): AccountStore {
       const entry = has(entries, name);
       if (entry === undefined) return { ok: false, code: "not_found", message: `no vault entry "${name}"; ${list("entries")}.` };
       if (entry.kind === "phone") return { ok: false, code: "bad_params", message: PASSCODE_NOTE };
-      if (!KIND_FIELDS[entry.kind].includes(field)) {
+      if (entry.kind !== "fixture" && !KIND_FIELDS[entry.kind].includes(field)) {
         return { ok: false, code: "bad_params", message: `vault entry "${name}" is ${entry.kind === "address" ? "an" : "a"} ${entry.kind}; its fields are ${KIND_FIELDS[entry.kind].join(", ")}.` };
       }
       const wrong = forApp(entry, appId);
       if (wrong !== null) return { ok: false, code: "bad_params", message: `vault entry "${name}" ${wrong}` };
       const value = entry.values[field];
-      if (value === undefined) return { ok: false, code: "bad_params", message: `vault entry "${name}" has no ${field}.` };
+      if (value === undefined) {
+        // A fixture has any fields: the message names the ones it has (never a value).
+        const has = entry.kind === "fixture" ? `; its fields are ${Object.keys(entry.values).join(", ") || "none"}` : "";
+        return { ok: false, code: "bad_params", message: `vault entry "${name}" has no ${field}${has}.` };
+      }
       return { ok: true, value };
     },
   };
@@ -1059,14 +1205,17 @@ export async function loadAccounts(file: string, probe: GitProbe = realGitProbe,
     }
   }
   const version = typeof json === "object" && json !== null ? (json as { version?: unknown }).version : undefined;
-  const parsed = version === 2 ? vaultFileSchema.safeParse(json) : accountsFileSchema.safeParse(json);
+  const parsed = version === 2 ? vaultShapeSchema.safeParse(json) : accountsShapeSchema.safeParse(json);
   if (!parsed.success) {
     const why = parsed.error.issues.map((issue) => `${issue.path.join(".") || "file"}: ${issue.message}`).join("; ");
     throw new Error(`the vault file ${path} isn't the right format: ${why}`);
   }
+  // A file that breaks a limit loads nothing (§20.1, 1.16.1); the words name the entry and the field, or the count, never a value.
+  const breach = vaultLimitProblem(parsed.data);
+  if (breach !== null) throw new Error(`the vault file ${path} breaks a limit, so none of it is used: ${breach}`);
   const entries = normalizedEntries(parsed.data);
   const store = storeOf(entries);
-  const fingerprint = (key: string): string => createHmac("sha256", key).update(stable(entries)).digest("hex");
+  const fingerprint = (key: string): string => createHmac("sha256", key).update(stable(Object.fromEntries(Object.entries(entries).map(([name, { unredacted: _kept, ...entry }]) => [name, entry])))).digest("hex");
   return peek?.protected === undefined ? { store, note: plainWarning(path), fingerprint } : { store, fingerprint };
 }
 

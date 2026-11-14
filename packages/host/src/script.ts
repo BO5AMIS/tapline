@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { stepSchema, type Step } from "./run.js";
+import type { Seen } from "./seen.js";
 
 /**
  * AGENT-TOOLS 1.8 §9.4: the shared script file, a saved batch both tools write and replay.
@@ -60,6 +61,8 @@ export interface MethodStep {
   route?: string[];
   /** The place where the step ran (AGENT-TOOLS 1.15 §26.6), a step field and not a parameter. */
   place?: string;
+  /** The element's facts when the step was recorded (AGENT-TOOLS 1.16 §9.4): a step field, never a parameter, never text. */
+  seen?: Seen;
 }
 
 const TOOL_OF: Record<string, string> = {
@@ -113,7 +116,7 @@ export function toToolStep(step: MethodStep): Step | null {
     params["id"] = params["testID"];
     delete params["testID"];
   }
-  return { tool, ...params, ...(step.route !== undefined && step.route.length > 0 ? { route: step.route } : {}), ...(step.place !== undefined && step.place !== "" ? { place: step.place } : {}) } as Step;
+  return { tool, ...params, ...(step.route !== undefined && step.route.length > 0 ? { route: step.route } : {}), ...(step.place !== undefined && step.place !== "" ? { place: step.place } : {}), ...(step.seen !== undefined ? { seen: step.seen } : {}) } as Step;
 }
 
 /**

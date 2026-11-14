@@ -1,3 +1,4 @@
+import { HOST_VERSION } from "../src/version.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,7 +60,7 @@ describe("findings (§27.1): one shape for every kind", () => {
     for (const f of report.findings) {
       expect(FINDING_KINDS).toContain(f.kind);
       expect(Object.keys(f).sort()).toEqual(expect.arrayContaining(["id", "kind", "app", "app_version", "build", "tool", "tool_version", "when", "device", "place", "path_from", "path", "expected", "got", "picture", "logs", "repro", "count"]));
-      expect(f).toMatchObject({ app: APP.id, app_version: "1.5.0", build: "220", tool: "tapline", tool_version: "1.8.0", device: { model: "iPhone18,2", os: "iOS 26.1" }, count: 1 });
+      expect(f).toMatchObject({ app: APP.id, app_version: "1.5.0", build: "220", tool: "tapline", tool_version: HOST_VERSION, device: { model: "iPhone18,2", os: "iOS 26.1" }, count: 1 });
       expect(f.when).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
       expect(f.id).toMatch(/^f\d+$/);
       expect(f.expected.includes("\n")).toBe(false);

@@ -442,9 +442,13 @@ export function repairedScript(
     }
     if (item.repaired?.was === undefined && item.repaired?.score === undefined) return raw;
     const target = (item.step as Record<string, unknown>)["target"];
+    // The repaired step carries the accepted element's `seen`, not the old element's (§26.6, v1.16).
+    const { seen: _oldSeen, ...bare } = raw;
+    const seen = (item.step as Record<string, unknown>)["seen"];
     return {
-      ...raw,
+      ...bare,
       ...(target !== undefined ? { target } : {}),
+      ...(seen !== undefined ? { seen } : {}),
       repaired: { ...(item.repaired.was !== undefined && item.repaired.was !== null ? { was: item.repaired.was } : {}), ...(item.repaired.score !== undefined ? { score: Number(item.repaired.score.toFixed(2)) } : {}) },
     };
   });

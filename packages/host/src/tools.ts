@@ -1,7 +1,7 @@
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toBuffer as qrPng } from "qrcode";
 import { z } from "zod";
@@ -19,12 +19,12 @@ import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
-import { reportFor } from "./report.js";
+import { readLogEntries, reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
-import { mentionsVault, redactAll, redactContent, substituteAccount, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
+import { mentionsVault, redactAll, redactContent, substituteAccount, vaultValues, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
   EYES,
   IDS_HIDDEN,
@@ -54,14 +54,28 @@ import { Dialogs, askDone, draftCaption, okCaption, plainText, type MomentOutcom
 import type { AuditSink } from "./auditlog.js";
 import { createOtpService, otpReference, type OtpFetch, type OtpService } from "./otpclient.js";
 import { GrantBook, REACH_WORDS, elementNeverGrantable, grantCaption, grantNameBase, neverGrantable, reachesPeople, type GrantDecision, type GrantSpec } from "./grants.js";
-import { DEFAULT_POLICY, UNREADABLE_LINK, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
+import { DEFAULT_POLICY, UNREADABLE_LINK, asWords, elementKey, linkReadable, linkWords, listsFor, matchWord, type PolicyFile } from "./policy.js";
 import { NO_UX_RULES, formatUxCheck, uxResultSchema, type UxJourneyHook, type UxRules } from "./uxcheck.js";
 import { CONFIRM_ERROR, MediaState, mediaShape, runMedia } from "./media.js";
 import { WIRE_TEXT_MAX, conditionsOf, holdsIn, waitParams } from "./conditions.js";
 import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type SharedScript } from "./script.js";
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
+import { seenOf, type Seen } from "./seen.js";
+import { readContained, readContainedText } from "./safefile.js";
+import { type BugMade, BugGateError, BugStore, appFolderName, isBugId, type BugCheck, type BugCheckOptions } from "./bugstore.js";
+import { CHECK_TOOLS, RUN_LIMIT_MS, VERIFY_DEFAULT, runCheck, stepsProblem, type CheckHost, type StepResult } from "./bugcheck.js";
+import { bugTitle, cutDownLink, type BugFinding, type BugMeta } from "./bug.js";
+import { exportBug, type BugExportTarget } from "./bugexport.js";
+import { bugAnswer, makeBug, newestRun, observedFinding, readRunFinding, reproducedAnswer, shownPath, writablePath, type BugContext } from "./bugreport.js";
+
+/** A bug just made, and whether its answer says why it wasn't checked. */
+interface Built {
+  made: BugMade;
+  reasonShown: boolean;
+}
+const isBuilt = (value: Built | CallToolResult): value is Built => "made" in value && "reasonShown" in value && Array.isArray((value as { content?: unknown }).content) === false;
 import { namedTarget } from "./signature.js";
-import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
+import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, crashFacts, errorLine, fixtureRef, isOutcome, type ExploreArgs, type ExploreFill, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
@@ -397,10 +411,36 @@ export const toolShapes = {
     depth: z.number().optional().describe("How many places deep from the start it expands, 1 to 20 (default 8); a deeper place is saved, not expanded"),
     from: z.string().optional().describe("A place's name to start at; the tool drives there first (default: where the app is)"),
     focus: z.string().optional().describe("A place's name: it expands only places below it (default: the whole app)"),
-    fill: z.enum(["none", "test-data"]).optional().describe("\"none\" (default) types nothing; \"test-data\" types only into fields the app marks as safe for tests"),
+    fill: z
+      .union([z.enum(["none", "test-data"]), z.string().regex(/^fixture:[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/, 'fill is "none", "test-data" or "fixture:<name>.<field>"')])
+      .optional()
+      .describe("\"none\" (default) types nothing; \"test-data\" types only into fields the app marks as safe for tests; \"fixture:<name>.<field>\" does too, and gives a field marked only by its id the field of a vault fixture marked \"explore\": true"),
     continue: z.boolean().optional().describe("Go on after a crash, when the app can be opened again (default false: stop at the first crash)"),
     account: z.string().optional().describe("A vault account marked \"explore\": true in the vault file, for the way back after a reset"),
     guide: z.string().optional().describe("Reserved; only \"none\" is offered in this version"),
+  },
+  bug_report: {
+    finding: z.string().optional().describe("A finding's id in the report of run (f3): makes a one-page bug report from it"),
+    run: z.string().optional().describe("With finding: an explore report folder, or \"last\" (default): the newest explore report of this app"),
+    from: z.enum(["now", "failure"]).optional().describe("\"failure\": the last failed replay or run of this session; \"now\": what you saw while driving, with note, built from the last touches of the action log"),
+    note: z.string().optional().describe("With from \"now\": what is wrong, one line, at most 300 characters (required)"),
+    expected: z.string().optional().describe("With from \"now\": what should have happened, one line, at most 300 characters"),
+    verify: z.union([z.boolean(), z.number()]).optional().describe("How many reproduction runs from a fresh start, 1 to 10 (true: 3; a bug from a finding or a failed run is checked 3 times when you say nothing, false or 0: not at all). A step that needs a person stops the check; a `${typed}` value can only be given by a person at the command line"),
+    reset: z.enum(["own", "app"]).optional().describe("With verify: \"own\" (default) reloads the app and keeps its data; \"app\" also runs the app's standard reset command, which clears its data"),
+    account: z.string().optional().describe("With verify: a vault account marked \"explore\": true, for the way back after a reset"),
+    bug: z.string().optional().describe("A bug id kept earlier (bug_7bc2e91c152d416e): shows it, or with with_picture adds its picture"),
+    with_picture: z.boolean().optional().describe("true: a private picture may go into the bug's folder. Say so only when your user asked"),
+    export: z
+      .object({
+        to: z.enum(["issue", "zip"]),
+        repo: z.string().optional(),
+        confirm: z.boolean().optional(),
+        public: z.boolean().optional(),
+        with_picture: z.boolean().optional(),
+        path: z.string().optional(),
+      })
+      .optional()
+      .describe("With bug: send it out of the bugs folder, to a GitHub issue ({to: \"issue\", repo, confirm: true, public?, with_picture?}: confirm only when your user asked) or a local zip ({to: \"zip\", with_picture?, path? (inside the bugs folder; default <bug id>.zip next to the bug)}); every file is checked again and each export is logged"),
   },
   journey: {
     start: z.boolean().optional().describe("Start a journey (needs goal); one journey at a time"),
@@ -690,6 +730,10 @@ export interface ToolsOptions {
   gifMaxBytes?: number;
   /** Where `explore` keeps its report folders (e.g. ~/.tapline/explore): `<app id>/<UTC time>/` (AGENT-TOOLS 1.15 §25.10). Unset: explore answers that it can't keep a report. */
   exploreDir?: string;
+  /** Where `bug_report` keeps its bugs (e.g. ~/.tapline/bugs): `<app id>/<bug id>/` (AGENT-TOOLS 1.16 §29.2). Unset: bug_report answers that it can't keep one. */
+  bugsDir?: string;
+  /** The reproduction check (§29.4) replaced by a hook (tests). Unset: the tool's own check (bugcheck.ts). */
+  bugCheck?: BugCheck;
   /** Wall-clock time in ms for the times in a finding and a report (tests pass their own). Default: Date.now. */
   wallClock?: () => number;
   /** How long `explore` waits for the app to be in front or connected again (a crash with `continue`, a move that left the app). Default 60 000 ms. */
@@ -728,6 +772,8 @@ interface ScriptStep {
   route?: string[];
   /** The name of the place where the step ran, when the host has a map (AGENT-TOOLS 1.15 §26.6). */
   place?: string;
+  /** The recorded element's facts (AGENT-TOOLS 1.16 §9.4); never text. */
+  seen?: Seen;
   fragile?: boolean;
   /** Typed into a password field: its text wasn't saved (never written to the file). */
   secret?: boolean;
@@ -786,7 +832,7 @@ function isAccountStep(step: ScriptStep): boolean {
  * which kind the field is). The answer says it in the words of AGENT-TOOLS 1.13 §18.6, with the field's ref and
  * never anything the app wrote about its text.
  */
-function kindRefusal(error: unknown, kind: unknown): string | null {
+function kindRefusal(error: unknown, kind: unknown, fixture = false): string | null {
   if (kind !== "secure" && kind !== "plain") return null;
   if (!(error instanceof TaplineError) || error.code !== "bad_params") return null;
   const details = error.details;
@@ -795,6 +841,8 @@ function kindRefusal(error: unknown, kind: unknown): string | null {
   if (typeof secure !== "boolean") return null;
   const ref = /^(e\d+)\b/.exec(error.message)?.[1] ?? "the field";
   const is = secure ? "a password field" : "a text field";
+  // A fixture is plain test data: it goes only into a text field, never a password field (§20.1, v1.16).
+  if (fixture) return `Error bad_params: a fixture goes only into a text field; ${ref} is ${is}.`;
   return kind === "secure"
     ? `Error bad_params: an account's password goes only into a password field; ${ref} is ${is}.`
     : `Error bad_params: an account's username goes only into a text field; ${ref} is ${is}.`;
@@ -1196,7 +1244,7 @@ const CALL_TOOLS: Readonly<Record<string, string>> = {
   uxCheck: "ux_check", media: "media", checkLayout: "check_layout", viewer: "viewer", compareScreen: "compare_screen", filmstrip: "filmstrip", record: "record",
   replay: "replay", tap: "tap", longPress: "long_press", typeText: "type_text", scroll: "scroll", toggle: "toggle",
   appCommand: "app_command", waitFor: "wait_for", swipe: "swipe", back: "back", openUrl: "open_url", logs: "logs",
-  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive", explore: "explore",
+  crash: "crash", reload: "reload", performance: "performance", wait: "wait", sessionReport: "session_report", journey: "journey", map: "map", drive: "drive", explore: "explore", bugReport: "bug_report",
 };
 /** The calls a journey counts and measures (AGENT-TOOLS 1.12 §17.1): the agent's looks and actions. */
 const JOURNEY_TOOLS: ReadonlySet<string> = new Set([
@@ -1223,7 +1271,7 @@ const FRAME_TOOLS: ReadonlySet<string> = new Set([
 /** Calls logged with `"kind": "read"` when they logged no action of their own. */
 const READ_TOOLS: ReadonlySet<string> = new Set([
   "apps", "open_app", "pair", "look", "inspect", "audit", "ux_check", "check_layout", "viewer", "compare_screen", "filmstrip", "record",
-  "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report",
+  "replay", "wait_for", "logs", "crash", "reload", "performance", "wait", "session_report", "bug_report",
 ]);
 /** A look's picture arguments for the call log: booleans and numbers only; undefined when it gave none. */
 function pictureArgs(input: Record<string, unknown>): { screenshot?: boolean; width?: number; labels?: boolean } | undefined {
@@ -1290,6 +1338,10 @@ interface PreUse {
 }
 
 /** What a grant offer asks for: the counts and days of a grant a person may create after allowing a touch (§19.6). */
+/** The scrubber's minimum length: a typed text shorter than this is never registered (it would erase ordinary words). */
+const TYPED_MIN = 3;
+/** The fake texts explore types (§25.6): public, never redacted. */
+const PUBLIC_TYPED: ReadonlySet<string> = new Set(["Test", "test@example.com"]);
 export const GRANT_OFFER_PER_DAY = 3;
 export const GRANT_OFFER_DAYS = 7;
 
@@ -1309,6 +1361,10 @@ interface ExploreRun {
   typed: string[];
   /** The host-level registration of `typed` (the ingress scrubber knows each text from the moment it is typed, until the run ends). */
   ingress?: { add(value: string): void; end(): void };
+  /** The reproduction check's deadline: once it is aborted nothing more is sent (§29.4). */
+  signal?: AbortSignal;
+  /** The identity of the one app this run may talk to (the reproduction check): a request sent while another app is current is refused, never sent (§29.4). */
+  pin?: string;
 }
 
 /** The scope of one move of an explore run. */
@@ -1517,6 +1573,12 @@ export class TaplineTools {
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly otp: OtpService;
+  /** The bug report's folders (AGENT-TOOLS 1.16 §29.2); null when this server keeps none. */
+  private readonly bugStore: BugStore | null = null;
+  /** The finding of the last failed `run` or `replay` of this session, while it is still the last one (§29.3 `from: "failure"`). */
+  private lastFailure: Finding | null = null;
+  /** The recorded origin place of each step of a failure's path (null when unknown). */
+  private readonly failureOrigins = new WeakMap<Finding, Array<string | null>>();
 
   constructor(
     private readonly host: TaplineHost,
@@ -1530,6 +1592,11 @@ export class TaplineTools {
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
+    if (options.bugsDir !== undefined) {
+      this.bugStore = new BugStore(options.bugsDir);
+      // At start an app's bugs beyond the newest 100 are removed (§29.2).
+      this.bugStore.pruneAll();
+    }
     this.otp = options.otp ?? createOtpService();
     this.actionLog?.setBackstop((value) => this.backstop(value));
     this.reloadSettleMs = options.reloadSettleMs ?? 1500;
@@ -1797,10 +1864,22 @@ export class TaplineTools {
     // Inside an explore run every request that is not a read is held to the run's rules, whoever sent it: the explorer's own move,
     // a saved route's step, a drive leg, a recovery or a reset (§25.5). Nothing can reach the app around this one gate.
     const scope = this.exploreScope.getStore();
+    const refused = this.runRefusal(scope);
+    if (refused !== null) return Promise.reject(refused);
     const [method, params, options] = args;
     const dry = typeof params === "object" && params !== null && (params as { dryRun?: unknown }).dryRun === true;
     if (scope === undefined || options?.internal === true || dry || EXPLORE_READS.has(method)) return this.host.request(...args);
     return this.exploreSend(scope, args);
+  }
+
+  /** Why a request of a pinned or timed run must not go out now (another app is in front, or the deadline passed), or null. Checked again right before a send that follows awaited checks. */
+  private runRefusal(scope: ExploreScope | undefined): TaplineError | null {
+    if (scope?.run.pin !== undefined) {
+      const now = this.host.current();
+      if (now === undefined || identityOf(now) !== scope.run.pin) return new TaplineError("not_connected", "the app the check runs on is no longer the one in front, so nothing more is sent.");
+    }
+    if (scope?.run.signal?.aborted === true) return new TaplineError("timeout", "the check ran out of time, so nothing more is sent.");
+    return null;
   }
 
   /** The explore gate: the budget, then the typing rules; counts the request it lets through. */
@@ -1819,6 +1898,9 @@ export class TaplineTools {
       if (method !== "type") throw new TaplineError("not_allowed", "explore types only through its own fill, never inside a drive (explore skip: policy).");
       params = await this.exploreTyping(scope, rawParams, options?.sessionId);
     }
+    // The touch floor and the typing rules awaited requests of their own: the pin and the deadline are checked again immediately before the send.
+    const refused = this.runRefusal(scope);
+    if (refused !== null) throw refused;
     run.used += 1;
     return this.host.request(method, params, options);
   }
@@ -1914,7 +1996,15 @@ export class TaplineTools {
 
   /** Redaction for everything an explore run writes: the vault's values, every text the run typed, and this session's one-time codes. */
   private exploreScrub(run: ExploreRun, text: string): string {
-    return this.host.redactOut(this.scrubSecrets(text, { values: run.typed, token: TYPED }));
+    // One pass over the session's typed texts (the run's are among them, registered as they were typed), never a second scrubber after the first.
+    return this.scrubSecrets(text, this.typedWith(run.typed));
+  }
+
+  /** The session's typed texts and, when it holds one the session doesn't know yet, those too: one source for one pass. The session's own list is returned as it is (the matcher is cached by it). */
+  private typedWith(extra: readonly string[]): TypedSource {
+    const session = this.host.typedSource();
+    const missing = extra.filter((value) => !session.values.includes(value));
+    return missing.length === 0 ? session : { values: [...session.values, ...missing], token: session.token };
   }
 
   /** Whether the screen as it is now has a text input (read without changing anything). Unreadable counts as yes: the strict side. */
@@ -2351,6 +2441,17 @@ export class TaplineTools {
     if (this.options.exploreDir === undefined) return refuse("Error unsupported: this server keeps no explore reports.");
     if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return refuse("Error bad_params: explore can't run during a journey; stop the journey first.");
     if (this.recordingState !== null || this.replayingState || this.rivals > 0) return refuse("Error bad_params: explore can't run while a script is recorded or replayed; finish that first.");
+    const fixtureFill = fixtureRef(args.fill ?? "none");
+    if (fixtureFill !== null) {
+      // `fill: "fixture:<name>.<field>"` (§25.2, v1.16): a vault fixture marked `"explore": true` that has the field.
+      const store = this.options.accounts?.store ?? null;
+      if (store === null || store.kindOf(fixtureFill.name) !== "fixture") return refuse(`Error bad_params: no fixture "${fixtureFill.name}" in the vault.`);
+      if (store.exploreMarked?.(fixtureFill.name) !== true) {
+        return refuse(`Error bad_params: fixture "${fixtureFill.name}" isn't marked "explore": true in the vault file, so explore doesn't type it.`);
+      }
+      const resolved = store.resolveEntry(fixtureFill.name, fixtureFill.field, session.app.id ?? session.app.name);
+      if (!resolved.ok) return refuse(`Error bad_params: ${resolved.message}`);
+    }
     if (args.account !== undefined) {
       const store = this.options.accounts?.store ?? null;
       if (store === null || !store.names().includes(args.account)) return refuse(`Error bad_params: no account "${args.account}" in the vault.`);
@@ -2367,7 +2468,7 @@ export class TaplineTools {
     }
     const exploreArgs: ExploreArgs = {
       ...budget,
-      fill: args.fill ?? EXPLORE_DEFAULTS.fill,
+      fill: (args.fill ?? EXPLORE_DEFAULTS.fill) as ExploreFill,
       continue: args.continue ?? EXPLORE_DEFAULTS.continue,
       ...(args.from !== undefined ? { from: args.from } : {}),
       ...(args.focus !== undefined ? { focus: args.focus } : {}),
@@ -2397,6 +2498,17 @@ export class TaplineTools {
     return { answer: text(lines.join("\n")), outcome: result, ...(reportPath !== null ? { reportPath } : {}) };
   }
 
+  /** Runs one move inside the explore scope: the one gate every touch goes through (§25.1, §25.5). Used by the explorer and by the reproduction check. */
+  private exploreWithin(run: ExploreRun) {
+    return async <T>(go: () => Promise<T>, restoring = false, mayType = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
+      const scope: ExploreScope = { count: 0, run, ...(restoring ? { restoring: true } : {}), ...(mayType ? { mayType: true } : {}) };
+      const before = run.used;
+      const value = await this.exploreScope.run(scope, go);
+      // The steps a move cost are the requests the gate let through, successful or not: the same count the budget holds.
+      return { value, count: run.used - before, last: scope.last };
+    };
+  }
+
   /** What the explorer needs from this host. Every move is an ordinary action of this tool, inside the explorer's scope (§25.1, §25.5). */
   private exploreHost(session: SessionInfo, map: AppMap, wall: () => number, progress: ((line: string, steps: number) => void) | undefined, run: ExploreRun): ExploreHost {
     const identity = identityOf(session);
@@ -2405,13 +2517,7 @@ export class TaplineTools {
       return now !== undefined && identityOf(now) === identity ? now : undefined;
     };
     const sleepMs = (ms: number): Promise<void> => this.sleep(ms);
-    const within = async <T>(go: () => Promise<T>, restoring = false, mayType = false): Promise<{ value: T; count: number; last: { method: string; result: unknown } | undefined }> => {
-      const scope: ExploreScope = { count: 0, run, ...(restoring ? { restoring: true } : {}), ...(mayType ? { mayType: true } : {}) };
-      const before = run.used;
-      const value = await this.exploreScope.run(scope, go);
-      // The steps a move cost are the requests the gate let through, successful or not: the same count the budget holds.
-      return { value, count: run.used - before, last: scope.last };
-    };
+    const within = this.exploreWithin(run);
     const refusal = (answer: CallToolResult): { code: string; message: string; text: string } => {
       const said = answerText(answer);
       const m = /^Error (\w+):\s*([\s\S]*)$/.exec(said);
@@ -2584,12 +2690,462 @@ export class TaplineTools {
         const store = this.options.accounts?.store ?? null;
         if (store === null || store.exploreMarked?.(entry) !== true) return "no";
         const kind = store.kindOf(entry);
-        // Never a password, a card or the phone's passcode (§25.6): an identity, an address, a note, or an account's username.
+        // Never a password, a card or the phone's passcode (§25.6): an identity, an address, a note, an account's username, or a fixture's field (v1.16).
+        if (kind === "fixture") {
+          const app = this.host.current()?.app;
+          return app !== undefined && store.resolveEntry(entry, field, app.id ?? app.name).ok ? "ok" : "no";
+        }
         const allowed = kind === "identity" ? field !== "phone" : kind === "address" || kind === "note" ? true : kind === "account" ? field === "username" : false;
         return allowed ? "ok" : "no";
       },
     };
     return host;
+  }
+
+  // -- the bug report (AGENT-TOOLS 1.16 §29)
+
+  /** What a scroll, a swipe or a link did, for the log (§29.3): directions and points; a link cut down to its plain words; never typed text. */
+  private loggedArgs(tool: string, params: unknown): { args?: NonNullable<ActionLogEntry["args"]> } {
+    if (typeof params !== "object" || params === null) return {};
+    const p = params as Record<string, unknown>;
+    const args: NonNullable<ActionLogEntry["args"]> = {};
+    if (tool === "scroll") {
+      if (typeof p["direction"] === "string") args.direction = p["direction"];
+      if (typeof p["to"] === "string") args.to = p["to"];
+    } else if (tool === "swipe") {
+      for (const key of ["x0", "y0", "x1", "y1"] as const) if (typeof p[key] === "number") args[key] = p[key];
+    } else if (tool === "open_url" && typeof p["url"] === "string") args.url = cutDownLink(p["url"]);
+    return Object.keys(args).length > 0 ? { args } : {};
+  }
+
+  /**
+   * Redaction at every sink of a bug report: the vault's values (current and retired), this session's codes and every value typed in the
+   * session, matched together in ONE pass against the original text, the longest match first (§29.6). Never one scrubber after another: a
+   * typed text that holds a vault value must not be cut by the vault's replacement before its own match is seen.
+   */
+  private bugScrub(text: string): string {
+    return this.scrubSecrets(text, this.host.typedSource());
+  }
+
+  /** Every value the bug report must never hold, from the live stores in memory only (§29.6): the vault's (current, retired, fixtures), the codes, the typed ones. */
+  private bugGateValues(): readonly string[] {
+    return [...vaultValues(this.options.accounts?.store), ...this.otp.codes.values(), ...this.host.typedSource().values];
+  }
+
+  /** The map of an app: the live one when it is the app in front, else the one this server holds. */
+  private bugMap(appId: string): ReturnType<AppMap["data"]> | undefined {
+    const live = this.host.current();
+    if (live !== undefined && (live.app.id ?? live.app.name) === appId) return this.mapOf(live)?.data();
+    return this.options.maps?.forApp({ id: appId, name: appId })?.data();
+  }
+
+  private bugContext(store: BugStore): BugContext {
+    return {
+      store,
+      redact: (text) => this.bugScrub(text),
+      gateValues: () => this.bugGateValues(),
+      placeKey: (app, place) => (place === null ? null : (this.bugMap(app)?.places[place]?.key ?? null)),
+      roads: (app) => this.bugMap(app)?.roads ?? [],
+      needsPerson: (app, step) => {
+        const target = step.target;
+        if (target === undefined) return false;
+        const subject = target.label ?? target.text ?? (target.id !== undefined ? asWords(target.id) : undefined);
+        if (subject === undefined) return false;
+        const lists = exploreLists(this.policy, { id: app, name: app });
+        return matchWord([...FLOOR_WORDS, ...lists.confirm, ...lists.block], { label: subject }) !== null;
+      },
+    };
+  }
+
+  /** `bug_report` (AGENT-TOOLS 1.16 §29.3): one page for whoever fixes it, from a finding, the last failed check, or what was just seen. */
+  async bugReport(args: Shape<"bug_report"> = {}): Promise<CallToolResult> {
+    const store = this.bugStore;
+    if (store === null) return fail("Error unsupported: this server keeps no bug reports.");
+    const given = [args.finding !== undefined, args.from !== undefined, args.bug !== undefined].filter(Boolean).length;
+    if (given !== 1) return fail("Error bad_params: give exactly one of finding, from and bug.");
+    if (args.run !== undefined && args.finding === undefined) return fail("Error bad_params: run goes with finding.");
+    if ((args.note !== undefined || args.expected !== undefined) && args.from !== "now") return fail('Error bad_params: note and expected go with from: "now".');
+    if (args.export !== undefined) {
+      if (args.bug === undefined) return fail("Error bad_params: export goes with bug (the id of a kept bug).");
+      if (args.finding !== undefined || args.from !== undefined || args.verify !== undefined || args.with_picture !== undefined) return fail("Error bad_params: export is a call of its own: give bug and export, and with_picture inside export.");
+      return this.bugExport(store, args.bug, args.export);
+    }
+    const verify = args.verify === undefined || args.verify === false || args.verify === 0 ? 0 : args.verify === true ? 3 : args.verify;
+    if (!Number.isInteger(verify) || verify < 0 || verify > 10) return fail("Error bad_params: verify is true, false or a whole number from 0 to 10.");
+    // Without `verify` a bug from a finding or a failure is checked 3 times; one from `now` is not checked (§29.3, §29.4).
+    const runs = args.verify === undefined && args.from !== "now" && args.bug === undefined ? VERIFY_DEFAULT : verify;
+    try {
+      if (args.bug !== undefined) return await this.bugShow(store, args.bug, args.with_picture === true, runs, args);
+      const built =
+        args.finding !== undefined
+          ? await this.bugFromRun(store, args.finding, args.run, args.with_picture === true)
+          : args.from === "failure"
+            ? this.bugFromFailure(store)
+            : await this.bugFromNow(store, args);
+      if (!isBuilt(built)) return built;
+      return text(bugAnswer(await this.bugChecked(store, built.made, runs, args), (t) => this.bugScrub(t), { reasonShown: built.reasonShown }));
+    } catch (error) {
+      if (error instanceof BugGateError) return fail(`Error not_allowed: bug report refused: ${error.message} Nothing was written.`);
+      return fail(`Error internal: the bug report couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** The check this server runs unless a hook replaces it (tests). */
+  private readonly ownCheck: BugCheck = (bug, n, options) => this.runBugCheck(bug, n, options);
+
+  /**
+   * The reproduction check (AGENT-TOOLS 1.16 §29.4): `n` runs of the bug's `repro.json`, each from a fresh start, every move through the one
+   * explore gate (§25.5: the floor on the real recipient, no dialog, no grant). A step that needs a person stops the check with no move of it.
+   */
+  async runBugCheck(bug: Parameters<BugCheck>[0], n: number, options: BugCheckOptions): Promise<BugMeta["reproduced"]> {
+    const not = (why: string): BugMeta["reproduced"] => ({ checked: false, why });
+    const session = this.host.current();
+    if (session === undefined) return not("no phone connected");
+    // The check goes to a connected session of the bug's own app, and to no other (§29.4): with another app in front it makes no move.
+    const appOf = (s: SessionInfo): string => s.app.id ?? s.app.name;
+    if (appOf(session) !== bug.app) return not(`the app in front isn't ${bug.app} (it is ${appOf(session)}); open ${bug.app} on the phone first`);
+    const identity = identityOf(session);
+    if (this.exploring) return not("an explore or another check is running here");
+    if (this.journeyRun !== undefined || this.journeyBusy !== undefined) return not("a journey is running");
+    if (this.recordingState !== null || this.replayingState || this.rivals > 0) return not("a script is being recorded or replayed");
+    const map = this.mapOf(session);
+    if (map === undefined) return not("this app reports no id of its own, so it has no map");
+    let script: { start: string | null; steps: PathStep[] };
+    try {
+      const parsed: unknown = JSON.parse(readContainedText(bug.dir, join(bug.dir, "repro.json")));
+      const o = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+      script = { start: typeof o["start"] === "string" ? o["start"] : null, steps: Array.isArray(o["steps"]) ? (o["steps"] as PathStep[]) : [] };
+    } catch {
+      return not("repro.json can't be read");
+    }
+    this.exploring = true;
+    const keptFailure = this.lastFailure;
+    let run: ExploreRun | undefined;
+    let eh: ExploreHost | undefined;
+    const wall = this.options.wallClock ?? Date.now;
+    const fresh = (): { run: ExploreRun; eh: ExploreHost } => {
+      run?.ingress?.end();
+      // A run lasts at most a minute (§29.4); the budget of the gate holds it to that.
+      const made: ExploreRun = { used: 0, steps: 300, minutes: RUN_LIMIT_MS / 60_000, startedAt: this.clock(), waited0: this.options.control?.waitedMs() ?? 0, typed: [], ingress: this.host.typedRun(), pin: identity };
+      run = made;
+      eh = this.exploreHost(session, map, wall, undefined, made);
+      return { run: made, eh };
+    };
+    const current = (): { run: ExploreRun; eh: ExploreHost } => (run !== undefined && eh !== undefined ? { run, eh } : fresh());
+    const resultOf = (answer: CallToolResult, last: { method: string; result: unknown } | undefined, unwrap?: string): StepResult => {
+      if (answer.isError !== true) {
+        const result = last?.result;
+        const settled = typeof result === "object" && result !== null && "settledMs" in result ? (result as { settledMs: unknown }).settledMs : undefined;
+        return { kind: "ok", ...(typeof settled === "number" && Number.isFinite(settled) ? { settledMs: settled } : {}) };
+      }
+      let said = answerText(answer);
+      if (unwrap !== undefined) {
+        // `run` says `Error <code>: Ran 0 of 1 steps; stopped at step 1 (<step>): <message>`; the step's own answer is what the finding holds.
+        const head = /^Error (\w+): Ran \d+ of \d+ steps; stopped at step \d+ \(/.exec(said);
+        if (head !== null) {
+          const rest = said.slice(head[0].length);
+          said = `Error ${head[1] ?? "internal"}: ${rest.startsWith(`${unwrap}): `) ? rest.slice(unwrap.length + 3) : rest}`;
+        }
+      }
+      const m = /^Error (\w+):\s*([\s\S]*)$/.exec(said);
+      const code = m?.[1] ?? "internal";
+      const message = m?.[2] ?? said;
+      if (code === "busy" || code === "paused" || code === "locked") return { kind: "stop", code };
+      if (code === "not_allowed" && /explore budget/.test(message)) return { kind: "error", code: "budget", message: firstLine(message) };
+      if (code === "not_allowed" && /needs_confirmation|blocked|explore skip|policy word|explore touches nothing|explore won't/.test(message)) {
+        const word = /policy word "([^"]+)"/.exec(message)?.[1];
+        const why = /explore skip: (\w+)/.exec(message)?.[1];
+        return { kind: "person", why: word !== undefined ? `the policy word "${this.host.redactOut(word)}"` : why !== undefined ? `the skip floor: ${why}` : "a policy word" };
+      }
+      return { kind: "error", code, message: firstLine(message) };
+    };
+    const frontNow = (): boolean => {
+      const now = this.host.current();
+      return now !== undefined && identityOf(now) === identity && appOf(now) === bug.app;
+    };
+    const host: CheckHost = {
+      clock: () => this.clock(),
+      wall: () => new Date(wall()),
+      build: () => {
+        const now = this.host.current();
+        if (now === undefined) return null;
+        const build = now.app.build ?? "";
+        return `${now.app.version ?? ""} (${/\((.*)\)\s*$/.exec(build)?.[1] ?? build})`;
+      },
+      away: () => {
+        const now = this.host.current();
+        if (now === undefined) return `stopped (the app disconnected)`;
+        return identityOf(now) === identity && appOf(now) === bug.app ? null : `stopped (${appOf(now)} is in front now, not ${bug.app})`;
+      },
+      reset: async (mode, signal) => {
+        const { run: fresher, eh: h } = fresh();
+        if (signal !== undefined) fresher.signal = signal;
+        const reloaded = await h.reload();
+        let wiped = false;
+        // The standard `app_command reset` clears the app's data: only when it was asked for (§29.4).
+        // The app is checked again after every awaited read, immediately before the next send, and the run's pin refuses any request made while another app is current.
+        if (mode === "app") {
+          const offered = frontNow() ? await h.commands() : [];
+          if (offered.includes("reset") && frontNow()) wiped = (await h.runCommand("reset")).ok;
+        }
+        if (!reloaded.ok && !wiped) return { ok: false };
+        // A reset that brought the app to no readable place isn't one (§29.4).
+        if ((await h.tree()) === null) return { ok: false };
+        const words = wiped ? (reloaded.ok ? "reload and the app's reset command, data cleared" : "the app's reset command, data cleared") : "reload only, data kept";
+        return { ok: true, words };
+      },
+      start: async (place, signal) => {
+        const now = current();
+        if (signal !== undefined) now.run.signal = signal;
+        return (await now.eh.go(place, "any", options.account)).ok;
+      },
+      step: async (step, typed, signal) => {
+        // Defence in depth: the engine checked every step before the run; a step outside the allowlist is refused before any branch (§29.4).
+        const wrong = stepsProblem([step]);
+        if (wrong !== null) return { kind: "error", code: "bad_params", message: wrong.replace(/^step 1 /, "the step ") };
+        const now = current();
+        if (signal !== undefined) now.run.signal = signal;
+        const within = this.exploreWithin(now.run);
+        const { tool, expect, ...rest } = step as PathStep & { expect?: unknown };
+        const params: Record<string, unknown> = { ...rest, look: false };
+        const asShape = <T extends keyof typeof toolShapes>(): Shape<T> => params as unknown as Shape<T>;
+        if (tool === "type_text") {
+          if (typed === null) return { kind: "person", why: "a typed value" };
+          params["text"] = typed;
+          const { value, last } = await within(() => this.typeText(asShape<"type_text">()), false, true);
+          const typedResult = resultOf(value, last);
+          if (typedResult.kind !== "ok" || expect === undefined) return typedResult;
+          // The step's own expect is evaluated after the typing, by the same check the other steps' expects use (`run`'s).
+          const checked = await within(async () => {
+            const missed = await this.expectMissed(expect as Expect);
+            return missed === null ? text("ok") : fail(`Error expect_failed: its action ran, but ${missed}`);
+          });
+          return checked.value.isError === true ? resultOf(checked.value, checked.last) : typedResult;
+        }
+        if (expect !== undefined) {
+          const runStep: Record<string, unknown> = { tool, ...rest, expect };
+          const { value, last } = await within(() => this.run({ steps: [runStep], look: false } as unknown as Shape<"run">));
+          return resultOf(value, last, describeRunStep(runStep as unknown as Step));
+        }
+        const call = (): Promise<CallToolResult> | null => {
+          switch (tool) {
+            case "tap":
+              return this.tap(asShape<"tap">());
+            case "long_press":
+              return this.longPress(asShape<"long_press">());
+            case "toggle":
+              return this.toggle(asShape<"toggle">());
+            case "scroll":
+              return this.scroll(asShape<"scroll">());
+            case "swipe":
+              return this.swipe(asShape<"swipe">());
+            case "back":
+              return this.back(asShape<"back">());
+            case "open_url":
+              return this.openUrl(asShape<"open_url">());
+            default:
+              return null;
+          }
+        };
+        if (!CHECK_TOOLS.includes(tool)) return { kind: "error", code: "bad_params", message: `the check doesn't run a "${String(tool)}" step` };
+        const { value, last } = await within(() => call() as Promise<CallToolResult>);
+        return resultOf(value, last);
+      },
+      mark: () => current().eh.mark(),
+      since: async (raw) => {
+        const { eh: h } = current();
+        const after = h.since(raw);
+        return {
+          crash: after.crash === null ? null : (({ line, crash }) => ({ line, crash }))(crashFacts(after.crash)),
+          disconnected: after.disconnected,
+          errors: after.errors.map((entry) => errorLine(entry, (t) => h.redact(t))),
+        };
+      },
+      placeKey: async () => {
+        const tree = await current().eh.tree();
+        return tree === null ? null : map.observe(tree).place.key;
+      },
+      issues: async (kind) => (kind === "a11y" ? await current().eh.audit() : await current().eh.ux()),
+      inFront: () => current().eh.frontState() === "front",
+      redact: (t) => current().eh.redact(t),
+    };
+    try {
+      return await this.noteScope.run(true, () => runCheck(host, { finding: bug.finding, meta: bug.meta, script }, n, { reset: options.reset, ...(options.typed !== undefined ? { typed: options.typed } : {}) }));
+    } finally {
+      run?.ingress?.end();
+      this.exploring = false;
+      this.lastFailure = keptFailure;
+    }
+  }
+
+  /** Runs the reproduction check on a bug just made, when there is one and it was asked for; the page and `finding.json` take its result (§29.4). */
+  private async bugChecked(store: BugStore, made: BugMade, runs: number, args: Shape<"bug_report">): Promise<BugMade> {
+    if (runs <= 0) return made;
+    const check = this.options.bugCheck ?? this.ownCheck;
+    const app = made.finding.app;
+    const reproduced = await check({ app, id: made.meta.id, dir: made.dir, finding: made.finding, meta: made.meta }, runs, { reset: args.reset ?? "own", ...(args.account !== undefined ? { account: args.account } : {}) });
+    const meta = store.recordCheck(app, made.meta.id, reproduced, (t) => this.bugScrub(t), () => this.bugGateValues());
+    return meta === null ? made : { ...made, meta };
+  }
+
+  /** `{finding, run}`: a finding of an explore report folder (or `"last"`, the newest of the app in front). */
+  private async bugFromRun(store: BugStore, findingId: string, run: string | undefined, withPicture: boolean): Promise<Built | CallToolResult> {
+    const exploreDir = this.options.exploreDir;
+    if (exploreDir === undefined) return fail("Error unsupported: this server keeps no explore reports.");
+    let runDir: string | null;
+    if (run === undefined || run === "last") {
+      const session = this.host.current();
+      if (session === undefined) return this.notConnected();
+      runDir = newestRun(exploreDir, session.app.id ?? session.app.name);
+      if (runDir === null) return fail("Error not_found: no explore report for this app yet; run explore first.");
+    } else {
+      const asked = run.startsWith("~") ? join(homedir(), run.slice(1)) : run;
+      const full = resolve(asked);
+      const roots = [exploreDir, ...(this.options.journeysDir !== undefined ? [this.options.journeysDir] : [])].map((root) => resolve(root));
+      if (!roots.some((root) => full === root || full.startsWith(root + sep))) return fail("Error bad_params: run is an explore report folder of this server, or \"last\".");
+      runDir = full;
+    }
+    const read = readRunFinding(runDir, findingId);
+    if (!read.ok) return fail(`Error ${read.code}: ${read.message}`);
+    const made = makeBug(this.bugContext(store), {
+      finding: read.finding,
+      how: "explore",
+      sourceKey: `${read.run}/${read.finding.id}`,
+      run: read.run,
+      script: read.script,
+      picture: read.picture,
+      withPicture,
+      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : "no check was asked for",
+    });
+    return { made, reasonShown: true };
+  }
+
+  /** `{from: "failure"}`: the last failed `run` or `replay` of this session, while it is still the last one. */
+  private bugFromFailure(store: BugStore): Built | CallToolResult {
+    const failure = this.lastFailure;
+    if (failure === null) return fail("Error not_found: there is no failed replay or run in this session to make a bug of (a later run or replay that held clears it).");
+    const { steps, cut, dropped } = writablePath(failure.path);
+    // When steps were dropped the path starts at the first kept step, so the script starts where that step started: its recorded origin, else unknown.
+    const pathFrom = dropped > 0 ? (this.failureOrigins.get(failure)?.[dropped] ?? null) : failure.path_from;
+    const finding: BugFinding = { ...failure, path: steps, path_from: pathFrom };
+    const made = makeBug(this.bugContext(store), {
+      finding,
+      how: "failure",
+      sourceKey: `failure/${failure.when}`,
+      stepsCut: cut,
+      notChecked: "no check was asked for",
+    });
+    return { made, reasonShown: true };
+  }
+
+  /** `{from: "now", note}`: a finding of the kind `observed`, built from the last touches of the action log (§29.3). */
+  private async bugFromNow(store: BugStore, args: Shape<"bug_report">): Promise<Built | CallToolResult> {
+    const note = args.note?.trim() ?? "";
+    if (note === "") return fail('Error bad_params: from: "now" needs a note (what is wrong, one line).');
+    for (const [name, value] of [["note", note], ["expected", args.expected?.trim() ?? ""]] as const) {
+      if (/[\r\n]/.test(value)) return fail(`Error bad_params: ${name} is one line.`);
+      if ([...value].length > 300) return fail(`Error bad_params: ${name} is at most 300 characters.`);
+    }
+    const logDir = this.options.logDir;
+    if (logDir === undefined) return fail("Error unsupported: the action log is off (--no-log), so there is nothing to make a bug of.");
+    const session = this.host.current();
+    if (session === undefined) return this.notConnected();
+    const appId = session.app.id ?? session.app.name;
+    const platform = session.device.platform === "ios" ? "iOS" : session.device.platform === "android" ? "Android" : session.device.platform;
+    const wall = this.options.wallClock ?? Date.now;
+    // The place now, saved as a look would save it (§18.1).
+    let place: string | null = null;
+    const map = this.mapOf(session);
+    if (map !== undefined) {
+      const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true }).catch(() => null));
+      if (tree.success) place = map.observe(tree.data).place.name;
+    }
+    let picture: Uint8Array | null = null;
+    if (session.capabilities.includes("screenshot") && !this.noScreenshot.has(session.id) && !this.secureWindow()) {
+      try {
+        picture = Buffer.from((await this.takeShot(session.id, 300, 0.6)).data, "base64");
+      } catch {
+        picture = null;
+      }
+    }
+    const build = session.app.build ?? "";
+    const observed = observedFinding({
+      entries: readLogEntries(logDir, this.startedAt),
+      app: appId,
+      note: this.bugScrub(note),
+      ...(args.expected !== undefined ? { expected: this.bugScrub(args.expected.trim()) } : {}),
+      info: { appVersion: session.app.version ?? "", build: /\((.*)\)\s*$/.exec(build)?.[1] ?? build, device: { model: session.device.model ?? session.device.name ?? "unknown", os: `${platform}${session.device.osVersion !== undefined ? ` ${session.device.osVersion}` : ""}` }, toolVersion: EXPLORE_TOOL_VERSION },
+      when: new Date(wall()),
+      place,
+      logs: formatLogs(this.sessionLogs(session.id).slice(-20)).split("\n").filter((line) => line !== ""),
+      // Any app the user didn't mark as a test app may show personal data: this tool can't know one, so the picture is private (§27.2).
+      picture: picture === null ? null : { file: "findings/f1.jpg", private: true },
+    });
+    if (observed === null) return fail("Error not_found: there is no touch in the action log to make a bug of; drive the app first.");
+    const made = makeBug(this.bugContext(store), {
+      finding: observed.finding,
+      how: "now",
+      sourceKey: `now/${observed.finding.when}`,
+      picture,
+      withPicture: args.with_picture === true,
+      stepsCut: observed.stepsCut,
+      others: observed.others,
+      notChecked: "no check was asked for",
+    });
+    return { made, reasonShown: false };
+  }
+
+  /** `{bug, export}`: sends a kept bug out of the tool's folder, to a GitHub issue or a zip (§29.7). */
+  private async bugExport(store: BugStore, id: string, target: BugExportTarget): Promise<CallToolResult> {
+    if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
+    const session = this.host.current();
+    const looked = store.lookup(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined, true);
+    if (looked === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return fail(`Error ambiguous: ${looked.ambiguous}`);
+    const found = looked.found;
+    try {
+      const done = await exportBug({ store, redact: (t) => this.bugScrub(t), gateValues: () => this.bugGateValues(), audit: this.options.audit, run: this.options.exportRunner }, found.app, id, target);
+      return done.ok ? text(this.bugScrub(done.lines.join("\n"))) : fail(`Error ${done.code}: ${this.bugScrub(done.message)}`);
+    } catch (error) {
+      return fail(`Error internal: the export couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** `{bug}`: shows a kept bug; with `with_picture` adds its private picture while the explore report still holds it. */
+  private async bugShow(store: BugStore, id: string, withPicture: boolean, runs: number, args: Shape<"bug_report">): Promise<CallToolResult> {
+    if (!isBugId(id)) return fail(`Error bad_params: "${id}" is not a bug id (bug_ and 16 hex digits).`);
+    const session = this.host.current();
+    const looked = store.lookup(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined, true);
+    if (looked === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return fail(`Error ambiguous: ${looked.ambiguous}`);
+    const found = looked.found;
+    const { app, stored } = found;
+    let note = "";
+    if (withPicture) {
+      let bytes: Uint8Array | null = null;
+      const source = stored.meta.source;
+      const file = stored.finding.picture?.file;
+      if (source.how === "explore" && source.run !== undefined && file !== undefined && this.options.exploreDir !== undefined && /^findings\/[\w.-]+$/.test(file) && /^\d{8}T\d{6}Z(?:-\d+)?$/.test(source.run)) {
+        try {
+          const runFolder = join(this.options.exploreDir, appFolderName(app), source.run);
+          bytes = readContained(runFolder, join(runFolder, file));
+        } catch {
+          bytes = null;
+        }
+      }
+      const done = store.addPicture(app, id, bytes, (t) => this.bugScrub(t), () => this.bugGateValues());
+      note =
+        done === "added" ? "The picture is in the folder now." : done === "has" ? "The picture is in the folder already." : "The picture can't be added: its file is gone (it is kept only while the explore report holds it).";
+      if (done === "gone") return fail(`Error not_found: ${note}`);
+    }
+    // A later check of a kept bug replaces `reproduced` and its line (§29.4).
+    if (runs > 0) {
+      const made: BugMade = { meta: stored.meta, dir: stored.dir, isNew: false, title: bugTitle(stored.finding), finding: stored.finding };
+      const meta = (await this.bugChecked(store, made, runs, args)).meta;
+      note = `${note}${note === "" ? "" : "\n"}${reproducedAnswer({ meta }, true)}`;
+    }
+    const page = readContainedText(stored.dir, join(stored.dir, "report.md"));
+    return text(this.bugScrub([...(note !== "" ? [note] : []), page.trimEnd(), "", `Folder: ${shownPath(stored.dir)}`].join("\n")));
   }
 
   /** `session_report` (AGENT-TOOLS 1.11 §16.1): where this session's calls went, and the waste in them. */
@@ -3277,7 +3833,7 @@ export class TaplineTools {
         return fail(`Error bad_params: step ${i + 1}: "${step.tool}" can't be a step (steps act; use it on its own call). Steps can be: ${RUN_TOOLS.join(", ")}.`);
       }
       const shape = toolShapes[step.tool as RunTool];
-      const { tool: _tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+      const { tool: _tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, if: given_if, optional: _optional, ...given } = step as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
       // §9.1: `if` needs exactly one of text, id or label.
       if (given_if !== undefined && (typeof given_if !== "object" || given_if === null || Array.isArray(given_if))) {
         return fail(`Error bad_params: step ${i + 1} (${describeRunStep(step)}): if is an object with one of text, id or label (and gone), not ${JSON.stringify(given_if)}.`);
@@ -3486,6 +4042,8 @@ export class TaplineTools {
     else this.unlistedActions.delete(session.id);
     const total = steps.length;
     const failed = stop !== null;
+    // The last failed run or replay is what `bug_report {from: "failure"}` makes a bug of, while it is still the last one (§29.3).
+    this.lastFailure = stop !== null ? this.expectFailedFinding(session, steps, stop) : null;
     const head = stop === null
       ? `Ran ${total} of ${total} steps in ${((Date.now() - started) / 1000).toFixed(1)} s.`
       : `Error ${stop.code}: Ran ${ran} of ${total} steps; stopped at step ${stop.index + 1} (${describeRunStep(steps[stop.index] as Step)}): ${stop.message}`;
@@ -3601,7 +4159,7 @@ export class TaplineTools {
   }
 
   private runStepNow(step: Step): Promise<CallToolResult> {
-    const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+    const { tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, if: _if, optional: _optional, ...rest } = step as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
     const quiet = { ...rest, look: false, screenshot: false, brief: false };
     switch (tool as RunTool) {
       case "tap":
@@ -4144,7 +4702,7 @@ export class TaplineTools {
     /** A touch that may change nothing: the note after `No visible change.` is made for it (AGENT-TOOLS 1.13 §3). */
     touch?: NoChangeAction,
     /** What goes only to the app: a test account's value and the kind of field it may go into. Nothing else sees it (§18.6). */
-    wire?: { values: Record<string, unknown>; sessionId: string },
+    wire?: { values: Record<string, unknown>; sessionId: string; /** A fixture's value: its refusal names a fixture. */ fixture?: true },
   ): Promise<CallToolResult> {
     const session = this.host.current();
     if (session === undefined) return this.notConnected();
@@ -4160,6 +4718,8 @@ export class TaplineTools {
     const stale = this.staleRef(params);
     if (stale !== null) return stale;
     let result: unknown;
+    // While recording, the screen as it is before the move: a step's `seen` is about the element on that screen (1.16 §9.4).
+    const screenBefore = this.recording !== null && !this.replaying ? await this.screenBeforeStep(params, session.id) : null;
     // Where the app is before the move; the road is saved after it (AGENT-TOOLS 1.13 §18.2).
     const road = this.roadStart(session, method);
     this.observedPlace = undefined;
@@ -4209,7 +4769,7 @@ export class TaplineTools {
           error instanceof TaplineError ? error.code : "internal",
           error instanceof TaplineError ? reasonOf(error.code, error.message) : undefined,
         );
-        return fail(kindRefusal(error, wire?.values["kind"]) ?? describeError(error));
+        return fail(kindRefusal(error, wire?.values["kind"], wire?.fixture === true) ?? describeError(error));
       }
     }
     const captured = this.exploreScope.getStore();
@@ -4335,10 +4895,34 @@ export class TaplineTools {
       if (typed?.account === true) this.recording.route?.variables.add("account");
       if (this.lastLookRoute !== undefined) step.route = this.lastLookRoute;
       if (road !== null && road.from !== null) step.place = road.from.name;
+      const seen = this.seenFor(result, screenBefore);
+      if (seen !== null) step.seen = seen;
       if (fragile) step.fragile = true;
       this.recording.steps.push(step);
     }
     return response;
+  }
+
+  /**
+   * The screen before a recorded step that targets an element (not a point), for its `seen` (AGENT-TOOLS 1.16 §9.4): one extra read
+   * of the tree, a peek that changes no ref, only while recording. Null when it can't be read; no bucket is written then.
+   */
+  private async screenBeforeStep(params: unknown, sessionId: string): Promise<TreeResult | null> {
+    const target = typeof params === "object" && params !== null ? (params as { target?: unknown }).target : undefined;
+    if (typeof target !== "object" || target === null || "x" in target) return null;
+    const tree = treeResultSchema.safeParse(await this.sendRequest("tree", { peek: true }, { sessionId }).catch(() => null));
+    return tree.success ? tree.data : null;
+  }
+
+  /**
+   * The step's `seen`: the role, the 3 by 3 bucket (none inside a scroll view), the component and the id stem of the element the step
+   * acted on, never text. Only for a step that acted on an element; `before` is the screen it was on.
+   */
+  private seenFor(result: unknown, before: TreeResult | null): Seen | null {
+    const element =
+      typeof result === "object" && result !== null && "element" in result ? elementSchema.safeParse((result as { element: unknown }).element) : null;
+    if (!element?.success) return null;
+    return seenOf(element.data, before?.elements ?? null, before?.screen);
   }
 
   /**
@@ -4416,6 +5000,7 @@ export class TaplineTools {
       by,
       tool,
       ...loggedTarget(params),
+      ...this.loggedArgs(tool, params),
       // typed text never reaches the log, not even as the field's value (§12)
       ...(element?.success ? { element: formatElement({ ...element.data, ref: "", value: null, placeholder: null }, { actions: false }) } : {}),
       ok: code === undefined,
@@ -5440,9 +6025,20 @@ export class TaplineTools {
     run.ingress.add(value);
   }
 
+  /**
+   * Registers a plain text about to be typed with the session's ingress redaction (cumulative until the process ends), so every sink, the bug
+   * report's included, scrubs it. The public fakes of explore (§25.6) and anything under the scrubber's minimum length are left alone.
+   */
+  private registerTyped(value: string): void {
+    this.registerReplayTyped(value);
+    if (value.length < TYPED_MIN || PUBLIC_TYPED.has(value)) return;
+    this.host.typedRun().add(value);
+  }
+
   /** Redaction for everything a repair writes or answers: the replay's typed values, the vault's values and this session's one-time codes. */
   private replayScrub(text: string): string {
-    return this.host.redactOut(this.scrubSecrets(text, this.replayTyped === null ? null : { values: this.replayTyped.values, token: TYPED }));
+    // One pass over the session's typed texts (the replay's are among them, registered before they were sent).
+    return this.scrubSecrets(text, this.typedWith(this.replayTyped?.values ?? []));
   }
 
   /** Recordings, replays and journeys in progress (counted from their first line): explore refuses to start while any is held. */
@@ -5646,9 +6242,17 @@ export class TaplineTools {
 
   /** The §27 finding of an `expect` that failed: a line that reports it and the finding as one JSON line. It is never repaired. */
   private expectFinding(session: SessionInfo, script: SharedScript, steps: Step[], brk: { index: number; code: string; message: string }): string[] {
-    if (brk.code !== "expect_failed") return [];
+    const safe = this.expectFailedFinding(session, steps, brk);
+    if (safe === null) return [];
+    this.lastFailure = safe;
+    return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
+  }
+
+  /** The finding of a step whose `expect` didn't hold (§26.2, §27.1), redacted; null for any other failure. */
+  private expectFailedFinding(session: SessionInfo, steps: Step[], brk: { index: number; code: string; message: string }): Finding | null {
+    if (brk.code !== "expect_failed") return null;
     const step = steps[brk.index];
-    if (step === undefined) return [];
+    if (step === undefined) return null;
     const platform = session.device.platform === "ios" ? "iOS" : session.device.platform === "android" ? "Android" : session.device.platform;
     const build = session.app.build ?? "";
     const place = (step as Record<string, unknown>)["place"];
@@ -5664,9 +6268,10 @@ export class TaplineTools {
       when: new Date(wall()).toISOString(),
       device: { model: session.device.model ?? session.device.name ?? "unknown", os: `${platform}${session.device.osVersion !== undefined ? ` ${session.device.osVersion}` : ""}` },
       place: typeof place === "string" ? place : null,
-      path_from: typeof place === "string" ? place : null,
+      // The path starts at the first step; its place, when the script recorded it, else unknown (never the failed step's).
+      path_from: typeof (steps[0] as Record<string, unknown> | undefined)?.["place"] === "string" ? ((steps[0] as Record<string, unknown>)["place"] as string) : null,
       path: steps.slice(0, brk.index + 1).map((item): PathStep => {
-        const { tool, expect: _expect, route: _route, place: _place, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; repaired?: unknown };
+        const { tool, expect: _expect, route: _route, place: _place, seen: _seen, repaired: _repaired, ...rest } = item as Step & { route?: unknown; place?: unknown; seen?: unknown; repaired?: unknown };
         // A typed value is never kept (§27.1).
         if (tool !== "type_text") return { tool, ...rest };
         const { text: _text, ...kept } = rest as Record<string, unknown>;
@@ -5680,7 +6285,9 @@ export class TaplineTools {
       count: 1,
     };
     const safe = redactFinding(finding, (value) => this.replayScrub(value));
-    return [`Finding f1 (expect_failed) at step ${brk.index + 1} of "${script.name}": ${safe.got} Not repaired: an expect that fails is a finding.`, `Finding: ${JSON.stringify(safe)}`];
+    // The place each step of the path starts from, when the script recorded it: a bug made of a cut path starts at its first kept step's.
+    this.failureOrigins.set(safe, steps.slice(0, brk.index + 1).map((item) => (typeof (item as Record<string, unknown>)["place"] === "string" ? ((item as Record<string, unknown>)["place"] as string) : null)));
+    return safe;
   }
 
   /** `apply` ended: a failure adds its notes (and an expect's finding); a pass with repairs writes the two files and learns the roads (§26.5). */
@@ -6719,7 +7326,7 @@ export class TaplineTools {
     if (args.force === true) params["force"] = true;
     const wire =
       account !== null && account.ok && session !== undefined
-        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id }
+        ? { values: { text: account.value, kind: account.kind }, sessionId: otp?.sessionId ?? session.id, ...(account.use?.kind === "fixture" ? { fixture: true as const } : {}) }
         : undefined;
     // Typing isn't guarded by the policy (§11.1: the form's button is); a dry run still checks the field.
     if (args.dry_run === true) {
@@ -6732,8 +7339,9 @@ export class TaplineTools {
       return this.dryRun("type_text", "type", { ...plain, text: "", ...(wire.values["kind"] !== undefined ? { kind: wire.values["kind"] } : {}) });
     }
     const use = account !== null && account.ok ? account.use : undefined;
-    // A plain text typed during a replay is registered for redaction before it is sent (a vault, account or code value is covered already).
-    if (wire === undefined && !mentionsVault(args.text)) this.registerReplayTyped(args.text);
+    // A plain text typed in this session (an agent's call, a run step, a replay, a check) is registered for redaction before it is sent: for the
+    // rest of the session no reply, log line or bug file shows it. A vault, account, one-time code or fixture value is covered already.
+    if (wire === undefined && !mentionsVault(args.text)) this.registerTyped(args.text);
     // What the audit line says about the field the value went into (§23): the app's own answer says whether it was secure.
     let secureField: boolean | undefined;
     const typed = this.act(
@@ -6899,13 +7507,15 @@ export class TaplineTools {
     const substituted = substituteAccount(text, loaded.store, named ?? this.runAccount, session.app.id ?? session.app.name);
     if (!substituted.ok) return substituted;
     if (substituted.field === null) return null;
+    const fixture = substituted.use?.kind === "fixture";
     // An older app ignores the kind and would type a password into any field.
-    if ((substituted.field === "password" || substituted.field === "username") && !session.capabilities.includes("typeKind")) {
+    if ((substituted.field === "password" || substituted.field === "username" || fixture) && !session.capabilities.includes("typeKind")) {
       return { ok: false, code: "unsupported", message: "this app's Tapline is too old to type an account's value safely; update react-native-tapline." };
     }
     // Only a password and a username are held to a kind of field (§18.6); the rest of the vault goes where the app lets it.
     const field = substituted.field;
-    return { ok: true, value: substituted.text, kind: field === "password" ? "secure" : field === "username" ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
+    // A fixture goes only into a plain text field, never a password field (§20.1, v1.16).
+    return { ok: true, value: substituted.text, kind: fixture ? "plain" : field === "password" ? "secure" : field === "username" ? "plain" : undefined, use: substituted.use ?? { name: named ?? this.runAccount ?? "", kind: "account", field } };
   }
 
   scroll(args: Shape<"scroll">): Promise<CallToolResult> {

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { vaultFileSchema } from "./accounts.js";
+import { accountsShapeSchema, vaultLimitProblem, vaultShapeSchema } from "./accounts.js";
 
 /**
  * AGENT-TOOLS 1.14 §20.2: where the vault is kept. One format for both tools:
@@ -368,11 +368,19 @@ export async function protectVaultFile(path: string, deps: VaultDeps = realVault
     return { ok: false, message: `the vault file ${file} isn't a version 1 or 2 vault.` };
   }
   // What will be written must load: a file that doesn't would replace the plain one and leave the vault unusable (there is no unprotect).
-  const valid = vaultFileSchema.safeParse(payload);
+  // A version 1 file is held to the limits of its own version (32 accounts) before it is converted (AGENT-TOOLS 1.16.1 §20.1).
+  const original = top["version"] === 1 ? accountsShapeSchema.safeParse(top) : null;
+  if (original?.success === true) {
+    const breach = vaultLimitProblem(original.data);
+    if (breach !== null) return { ok: false, message: `the vault file ${file} breaks a limit and can't be protected as it is (${breach}); fix it first. The file stays plain.` };
+  }
+  const valid = vaultShapeSchema.safeParse(payload);
   if (!valid.success) {
     const why = valid.error.issues.map((issue) => `${issue.path.join(".") || "file"}: ${issue.message}`).join("; ");
     return { ok: false, message: `the vault file ${file} can't be protected as it is (${why}); fix it first. The file stays plain.` };
   }
+  const breach = vaultLimitProblem(valid.data);
+  if (breach !== null) return { ok: false, message: `the vault file ${file} breaks a limit and can't be protected as it is (${breach}); fix it first. The file stays plain.` };
   const json = JSON.stringify(payload);
   try {
     let out: string;

@@ -42,7 +42,18 @@ import { signaturesOf, type NamedElement } from "./signature.js";
 /** The tool version a finding and a report carry (§27.1, §25.10): the host's own package version (1.8.0 is the first to explore). */
 export const EXPLORE_TOOL_VERSION: string = HOST_VERSION;
 
-export const EXPLORE_DEFAULTS = { minutes: 10, steps: 500, depth: 8, fill: "none" as "none" | "test-data", continue: false };
+export const EXPLORE_DEFAULTS = { minutes: 10, steps: 500, depth: 8, fill: "none" as ExploreFill, continue: false };
+
+/** `fill` (§25.2): `none`, `test-data`, or `fixture:<name>.<field>` (v1.16): test data, and that fixture field for a field marked by the id marker only. */
+export type ExploreFill = "none" | "test-data" | `fixture:${string}.${string}`;
+
+const FIXTURE_FILL = /^fixture:([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/;
+
+/** The `<name>` and `<field>` of a `fixture:<name>.<field>` fill (or of an SDK prop of that form), else null. */
+export function fixtureRef(fill: string): { name: string; field: string } | null {
+  const m = FIXTURE_FILL.exec(fill);
+  return m === null ? null : { name: m[1] as string, field: m[2] as string };
+}
 export const EXPLORE_LIMITS = { minutes: [1, 60], steps: [1, 5000], depth: [1, 20] } as const;
 
 /** The rows of a list the explorer tries (§25.4 item 3). */
@@ -64,7 +75,7 @@ export interface ExploreArgs {
   depth: number;
   from?: string | undefined;
   focus?: string | undefined;
-  fill: "none" | "test-data";
+  fill: ExploreFill;
   continue: boolean;
   account?: string | undefined;
 }
@@ -129,7 +140,7 @@ export interface ExploreHost {
   /** The call was cancelled by its client: the run stops between moves and writes its report. */
   cancelled(): boolean;
   rules: FloorRules;
-  /** A vault entry the explorer may type from: marked `"explore": true`, its kind, and whether `field` may be typed (§25.6). */
+  /** A vault entry the explorer may type from: marked `"explore": true`, its kind (a fixture too, v1.16), and whether `field` may be typed (§25.6). */
   vaultFill(entry: string, field: string): "ok" | "no";
 }
 
@@ -490,7 +501,7 @@ export class Explorer {
         if (scrollSig !== null) map.markTried(place, scrollSig, { result: "same" });
         continue;
       }
-      if (this.args.fill === "test-data" && !typed && plan.inputs.length > 0) {
+      if (this.typing() && !typed && plan.inputs.length > 0) {
         typed = true;
         if (!(await this.fillInputs(place, plan))) return;
         continue;
@@ -652,12 +663,12 @@ export class Explorer {
       if (el.disabled === true) return;
       if (isInput(el)) {
         // The floor applies to inputs too (§25.5): a skip mark (inherited ones included), a policy or skip-list word, a card word.
-        const barred = this.args.fill === "test-data" ? floorVerdict(el, this.host.rules) : null;
+        const barred = this.typing() ? floorVerdict(el, this.host.rules) : null;
         if (barred !== null) {
           this.skip(place, sig, barred);
           return;
         }
-        if (this.args.fill === "test-data" && this.fillFor(el) !== null) {
+        if (this.typing() && this.fillFor(el) !== null) {
           inputs.push({ sig, el, target: this.targetOf(el, sig, tree, i), step: this.stepOf(el, sig, tree, "type_text") });
           seen.push(sig);
         }
@@ -683,7 +694,7 @@ export class Explorer {
         target: this.targetOf(el, sig, tree, i),
         step: this.stepOf(el, sig, tree, isToggle(el) ? "toggle" : "tap"),
         skip: hit,
-        afterTyping: listed && this.args.fill === "test-data" && tree.elements.some((other) => isInput(other) && this.fillFor(other) !== null),
+        afterTyping: listed && this.typing() && tree.elements.some((other) => isInput(other) && this.fillFor(other) !== null),
         mayList: submitWord(el) !== null,
       });
       seen.push(sig);
@@ -973,20 +984,38 @@ export class Explorer {
     return this.reachPlace(place);
   }
 
-  /** What `fill: "test-data"` types into a field, or null: only a field the app marks as safe, never a password or a card (§25.6). */
+  /** Whether the run types at all: `fill` is `test-data` or `fixture:<name>.<field>` (§25.2). */
+  private typing(): boolean {
+    return this.args.fill !== "none";
+  }
+
+  /** The reference of a vault entry's field, as typed: the entry's value is resolved (and scrubbed) by the ordinary action path (§20.1). */
+  private reference(entry: string, field: string): string {
+    return `\${vault.${entry}.${field}}`;
+  }
+
+  /**
+   * What `fill: "test-data"` or `"fixture:…"` types into a field, or null: only a field the app marks as safe, never a password or a
+   * card (§25.6). A fixture (v1.16) is typed only when it is marked `"explore": true`, never into a secure field, and by reference.
+   */
   private fillFor(el: TreeElement): { text: string } | null {
-    if (this.args.fill !== "test-data") return null;
+    if (!this.typing()) return null;
     if (isSecretField(el)) return null;
     const fake = (): { text: string } => ({ text: /email/i.test(`${el.testID ?? ""} ${el.label ?? ""}`) ? "test@example.com" : "Test" });
     const mark = el.exploreFill;
     if (typeof mark === "string") {
       const vault = /^vault:([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/.exec(mark);
-      if (vault !== null) return this.host.vaultFill(vault[1] as string, vault[2] as string) === "ok" ? { text: `\${vault.${vault[1]}.${vault[2]}}` } : null;
-      // `fixture:<name>`: an app command's fixture; Tapline doesn't type fixtures yet.
-      return null;
+      if (vault !== null) return this.host.vaultFill(vault[1] as string, vault[2] as string) === "ok" ? { text: this.reference(vault[1] as string, vault[2] as string) } : null;
+      // `fixture:<name>.<field>` (v1.16): a vault entry of the kind fixture. The old `fixture:<name>` has no field, so it is unusable.
+      const fixture = fixtureRef(mark);
+      return fixture !== null && this.host.vaultFill(fixture.name, fixture.field) === "ok" ? { text: this.reference(fixture.name, fixture.field) } : null;
     }
     if (mark === true) return fake();
-    if (filled(el.testID) && /-test-safe$/.test(el.testID)) return fake();
+    if (filled(el.testID) && /-test-safe$/.test(el.testID)) {
+      // The id marker names no entry: with `fill: "fixture:<name>.<field>"` the field gets that fixture field, else a fake value (§25.6).
+      const fixture = fixtureRef(this.args.fill);
+      return fixture !== null && this.host.vaultFill(fixture.name, fixture.field) === "ok" ? { text: this.reference(fixture.name, fixture.field) } : fake();
+    }
     return null;
   }
 

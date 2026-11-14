@@ -10,8 +10,9 @@ import { grantsUnlock, quote, scheduleLockPath, scheduleUnlock } from "../src/un
 
 const LIVE = 4242;
 const DEAD = 999_999;
-const deps: PidLockDeps = { pid: 1, alive: (pid) => pid === LIVE, startOf: (pid) => (pid === LIVE ? "T1" : null) };
-const holder = (pid: number, started: string | null = "T1"): string => `${JSON.stringify({ owner: "tok", pid, started })}\n`;
+const T1 = 1_700_000_000_000;
+const deps: PidLockDeps = { pid: 1, alive: (pid) => pid === LIVE, startOf: (pid) => (pid === LIVE ? T1 : null) };
+const holder = (pid: number, started: number | string | null = T1): string => `${JSON.stringify({ owner: "tok", pid, started })}\n`;
 
 let dir: string;
 let audit: AuditLog;
@@ -51,7 +52,7 @@ describe("tapline schedule unlock", () => {
     writeFileSync(lock(), holder(DEAD));
     expect(run().text).toContain(`held by a process that is gone (pid ${DEAD})`);
     expect(existsSync(lock())).toBe(false);
-    writeFileSync(lock(), holder(LIVE, "OLD"));
+    writeFileSync(lock(), holder(LIVE, T1 - 60_000));
     expect(run().code).toBe(0);
     expect(existsSync(lock())).toBe(false);
   });

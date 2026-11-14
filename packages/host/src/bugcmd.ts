@@ -1,0 +1,245 @@
+import { readFileSync } from "node:fs";
+import { TYPED } from "./findings.js";
+import type { TypedSource } from "./accounts.js";
+import { join } from "node:path";
+import { asWords, matchWord, type PolicyFile } from "./policy.js";
+import type { BugMeta } from "./bug.js";
+import { bugAnswer, makeBug, readRunFinding, reproducedAnswer, shownPath, type BugContext } from "./bugreport.js";
+import type { AuditSink } from "./auditlog.js";
+import { exportBug, type BugExportTarget } from "./bugexport.js";
+import { BugGateError, BugStore, isBugId, type BugCheck, type GateValues } from "./bugstore.js";
+import type { Runner } from "./journeyexport.js";
+import { FLOOR_WORDS, exploreLists } from "./explorefloor.js";
+import type { MapFile } from "./mapfile.js";
+
+// `tapline bug ...` (AGENT-TOOLS 1.16 §29.3, "The CLI"): the bug report from a terminal. It needs no phone and no host.
+//   tapline bug <report folder> <finding id> [--verify N] [--with-picture]
+//   tapline bug list [--app ID]
+//   tapline bug <bug id>                       shows one
+//   tapline bug verify <bug id> [--verify N]   the reproduction check (§29.4): it needs the phone, and asks for a `${typed}` value at a prompt
+//   tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes] | --zip <path> [--with-picture]   the export (§29.7)
+// `from: "now"` and `from: "failure"` need the live session: use the thin call, `tapline call bug_report '{…}'`.
+// Exit codes: 0 a bug was made or updated and it reproduced or wasn't checked, or an export was done; 1 it was made and didn't reproduce
+// (`0 of N`); 2 it couldn't be made or exported, or a person, a pause or a refusal stopped it.
+
+export interface BugFlags {
+  verify?: string | undefined;
+  "with-picture"?: boolean | undefined;
+  app?: string | undefined;
+  issue?: string | undefined;
+  zip?: string | undefined;
+  public?: boolean | undefined;
+  yes?: boolean | undefined;
+}
+
+export interface BugCliDeps {
+  /** The reproduction check (§29.4): it needs the phone, so the command line builds one with a host of its own. Unset: `--verify` and `bug verify` are refused. */
+  check?: BugCheck;
+  /** Asks a person for a value at a prompt, hidden; null when there is no terminal. The only way a `${typed}` value reaches a check (§29.4). */
+  askValue?: (question: string) => Promise<string | null>;
+  /** Asks a yes or no question (`Send to GitHub? [y/N]`); null when there is no terminal (§29.7). */
+  askYes?: (question: string) => Promise<boolean | null>;
+  /** The audit log (§23): an export needs its line. */
+  audit?: AuditSink;
+  /** The user's own gh and git. */
+  runner?: Runner;
+  /** Closes what `check` started (the host of its own). */
+  close?: () => Promise<void>;
+  /** `~/.tapline/bugs`, or a folder of a test. */
+  bugsDir: string;
+  /** The vault's redaction (the accounts file), else none (§29.6). */
+  redact: (text: string) => string;
+  /**
+   * The vault's redaction with the values a person typed at a prompt as one more source of the same single pass (§29.6): a typed value that holds a
+   * vault value is matched whole against the original text. Unset: `redact` alone, then the typed values one after the other.
+   */
+  redactTyped?: (text: string, typed: TypedSource) => string;
+  /** Every value the gate greps for (the vault's, current and retired), read from the live store; the values a person typed are added here. */
+  gateValues?: GateValues;
+  /** The app's map from the maps folder, or undefined. */
+  map: (app: string) => MapFile | undefined;
+  policy: PolicyFile;
+  out(text: string): void;
+  err(text: string): void;
+}
+
+export const BUG_USAGE = [
+  "Usage: tapline bug <report folder> <finding id> [--verify N] [--with-picture]",
+  "       tapline bug list [--app ID]",
+  "       tapline bug <bug id>",
+  "       tapline bug verify <bug id> [--verify N]",
+  "       tapline bug export <bug id> --issue owner/name [--public] [--with-picture] [--yes] | --zip <path> [--with-picture]",
+].join("\n");
+
+const NO_VERIFY = "verify (the reproduction check) needs the phone: this command line has no way to reach one.";
+
+/** `--verify N`: a whole number from 0 to 10; absent is 0 here (a check needs a phone). */
+function verifyCount(raw: string | undefined): number | { error: string } {
+  if (raw === undefined) return 0;
+  const n = raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 10 ? n : { error: `--verify is a whole number from 0 to 10, not "${raw}"` };
+}
+
+function contextOf(deps: BugCliDeps, store: BugStore): BugContext {
+  return {
+    store,
+    redact: deps.redact,
+    ...(deps.gateValues !== undefined ? { gateValues: deps.gateValues } : {}),
+    placeKey: (app, place) => (place === null ? null : (deps.map(app)?.places[place]?.key ?? null)),
+    roads: (app) => deps.map(app)?.roads ?? [],
+    needsPerson: (app, step) => {
+      const target = step.target;
+      const subject = target?.label ?? target?.text ?? (target?.id !== undefined ? asWords(target.id) : undefined);
+      if (subject === undefined) return false;
+      const lists = exploreLists(deps.policy, { id: app, name: app });
+      return matchWord([...FLOOR_WORDS, ...lists.confirm, ...lists.block], { label: subject }) !== null;
+    },
+  };
+}
+
+/** The list of §29.3: per app, newest first, with counts. */
+export function bugListText(store: BugStore, redact: (text: string) => string, app?: string): string {
+  const rows = store.list(app);
+  if (rows.length === 0) return "No bugs kept.";
+  const lines: string[] = [];
+  let current: string | null = null;
+  for (const row of rows) {
+    if (row.app !== current) {
+      lines.push(row.app);
+      current = row.app;
+    }
+    lines.push(`  ${row.id}  ${row.title}   seen ${row.count}, last ${row.last.slice(0, 10)}, ${row.reproduced}`);
+  }
+  return redact(lines.join("\n"));
+}
+
+/** 0: it reproduced or wasn't checked; 1: it didn't reproduce (`0 of N`) (§29.3). */
+function exitOf(meta: BugMeta): number {
+  const r = meta.reproduced;
+  return !("checked" in r) && r.n === 0 ? 1 : 0;
+}
+
+/** Runs `tapline bug`. Everything it needs comes in `deps`, so each case runs without a phone. */
+export async function runBug(positionals: string[], flags: BugFlags, rawDeps: BugCliDeps): Promise<number> {
+  try {
+    return await runBugOnce(positionals, flags, rawDeps);
+  } finally {
+    await rawDeps.close?.().catch(() => undefined);
+  }
+}
+
+async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCliDeps): Promise<number> {
+  const [first, second, third] = positionals;
+  // A value a person typed at a prompt is kept only in this process and scrubbed from everything it says (§29.4).
+  const given: string[] = [];
+  // A new list whenever a value is added: the matcher is cached by it.
+  let typed: TypedSource = { values: [], token: TYPED };
+  const deps: BugCliDeps = {
+    ...rawDeps,
+    redact: (text) =>
+      rawDeps.redactTyped !== undefined
+        ? rawDeps.redactTyped(text, typed)
+        : given.reduce((t, value) => (value === "" ? t : t.split(value).join("[typed]")), rawDeps.redact(text)),
+    gateValues: () => [...(typeof rawDeps.gateValues === "function" ? rawDeps.gateValues() : (rawDeps.gateValues ?? [])), ...given],
+  };
+  const asked = async (name: string): Promise<string | null> => {
+    const value = (await rawDeps.askValue?.(`Value for "${name}" (not shown):`)) ?? null;
+    if (value !== null && value !== "" && !given.includes(value)) {
+      given.push(value);
+      typed = { values: [...given], token: TYPED };
+    }
+    return value;
+  };
+  const checkOptions = { reset: "own" as const, typed: asked };
+  const refuse = (message: string): number => {
+    deps.err(deps.redact(message));
+    return 2;
+  };
+  if (first === undefined) return refuse(BUG_USAGE);
+  const verify = verifyCount(flags.verify);
+  if (typeof verify === "object") return refuse(verify.error);
+  const store = new BugStore(deps.bugsDir);
+
+  if (first === "list") {
+    deps.out(bugListText(store, deps.redact, flags.app));
+    return 0;
+  }
+  if (first === "verify") {
+    if (second === undefined || !isBugId(second)) return refuse(BUG_USAGE);
+    if (deps.check === undefined) return refuse(NO_VERIFY);
+    const looked = store.lookup(second, flags.app);
+    if (looked === null) return refuse(`no bug ${second}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return refuse(looked.ambiguous);
+    const found = looked.found;
+    const reproduced = await deps.check({ app: found.app, id: second, dir: found.stored.dir, finding: found.stored.finding, meta: found.stored.meta }, verify > 0 ? verify : 3, checkOptions);
+    const meta = store.recordCheck(found.app, second, reproduced, deps.redact, deps.gateValues) ?? found.stored.meta;
+    deps.out(deps.redact(reproducedAnswer({ meta }, true)));
+    return exitOf(meta);
+  }
+  if (first === "export") {
+    if (second === undefined || !isBugId(second)) return refuse(BUG_USAGE);
+    return exportCommand(second, flags, deps, store, refuse);
+  }
+  if (isBugId(first) && second === undefined) {
+    const looked = store.lookup(first, flags.app);
+    if (looked === null) return refuse(`no bug ${first}; the bugs kept are in ${shownPath(store.base)}.`);
+    if ("ambiguous" in looked) return refuse(looked.ambiguous);
+    const found = looked.found;
+    deps.out(deps.redact([readFileSync(join(found.stored.dir, "report.md"), "utf8").trimEnd(), "", `Folder: ${shownPath(found.stored.dir)}`].join("\n")));
+    return 0;
+  }
+  if (second === undefined || third !== undefined) return refuse(BUG_USAGE);
+  if (verify > 0 && deps.check === undefined) return refuse(NO_VERIFY);
+
+  const read = readRunFinding(first, second);
+  if (!read.ok) return refuse(`${read.code}: ${read.message}`);
+  try {
+    const made = makeBug(contextOf(deps, store), {
+      finding: read.finding,
+      how: "explore",
+      sourceKey: `${read.run}/${read.finding.id}`,
+      run: read.run,
+      script: read.script,
+      picture: read.picture,
+      withPicture: flags["with-picture"] === true,
+      notChecked: read.finding.kind === "unreachable" ? "an unreachable place has no steps" : "no check was asked for",
+    });
+    let meta = made.meta;
+    if (verify > 0 && deps.check !== undefined) {
+      const reproduced = await deps.check({ app: made.finding.app, id: meta.id, dir: made.dir, finding: made.finding, meta }, verify, checkOptions);
+      meta = store.recordCheck(made.finding.app, meta.id, reproduced, deps.redact, deps.gateValues) ?? meta;
+    }
+    deps.out(bugAnswer({ ...made, meta }, deps.redact, { reasonShown: true }));
+    return exitOf(meta);
+  } catch (error) {
+    if (error instanceof BugGateError) return refuse(`bug report refused: ${error.message} Nothing was written.`);
+    return refuse(`the bug report couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** `tapline bug export <bug id> --issue owner/name | --zip <path>` (§29.7): the person is asked `Send to GitHub? [y/N]`; with no terminal `--yes` answers. */
+async function exportCommand(id: string, flags: BugFlags, deps: BugCliDeps, store: BugStore, refuse: (message: string) => number): Promise<number> {
+  if ((flags.issue === undefined) === (flags.zip === undefined)) return refuse("give exactly one of --issue owner/name and --zip <path>.\n" + BUG_USAGE);
+  const looked = store.lookup(id, flags.app);
+  if (looked === null) return refuse(`no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
+  if ("ambiguous" in looked) return refuse(looked.ambiguous);
+  const found = looked.found;
+  const withPicture = flags["with-picture"] === true;
+  let target: BugExportTarget;
+  if (flags.issue !== undefined) {
+    let confirm = flags.yes === true;
+    if (!confirm) {
+      const said = (await deps.askYes?.("Send to GitHub? [y/N]")) ?? null;
+      if (said === null) return refuse("export refused: needs_confirmation: there is no terminal to ask `Send to GitHub? [y/N]`; give --yes if you mean it.");
+      confirm = said;
+      if (!confirm) return refuse("export refused: not sent: the answer was no.");
+    }
+    target = { to: "issue", repo: flags.issue, confirm, ...(flags.public === true ? { public: true } : {}), ...(withPicture ? { with_picture: true } : {}) };
+  } else {
+    target = { to: "zip", ...(flags.zip !== undefined ? { path: flags.zip } : {}), ...(withPicture ? { with_picture: true } : {}) };
+  }
+  const done = await exportBug({ store, redact: deps.redact, ...(deps.gateValues !== undefined ? { gateValues: deps.gateValues } : {}), audit: deps.audit, run: deps.runner, anyPath: true }, found.app, id, target);
+  if (!done.ok) return refuse(`${done.code}: ${done.message}`);
+  deps.out(deps.redact(done.lines.join("\n")));
+  return 0;
+}
