@@ -6,6 +6,9 @@ import { join } from "node:path";
  * schema as Tapwright's. Typed text is never logged, only its length; a secure field only ever its length.
  */
 
+/** Fields whose values are fixed words of the schema, never content: a vault value equal to one must not rewrite it. */
+const STRUCTURAL = ["confirmed_by", "via", "animations", "v", "kind"] as const;
+
 export interface ActionLogEntry {
   /** ISO 8601 UTC with milliseconds. */
   t: string;
@@ -105,12 +108,21 @@ export class ActionLog {
     this.scrub = scrub;
   }
 
+  /** The backstop's result with the structural fields (fixed words, never content) put back: `isEntry` and the report read them. */
+  private scrubbed(made: ActionLogEntry): ActionLogEntry {
+    const out = { ...(this.scrub?.(made) as ActionLogEntry), by: made.by };
+    for (const key of STRUCTURAL) {
+      if (made[key] !== undefined) Object.assign(out, { [key]: made[key] });
+    }
+    return out;
+  }
+
   /** Appends one line. A log that can't be written never fails the action. */
   write(entry: Omit<ActionLogEntry, "t" | "source">, when?: Date): void {
     if (!this.ready) return;
     const at = when ?? this.now();
     const made: ActionLogEntry = { t: at.toISOString(), source: "tapline", ...entry };
-    const line = this.scrub === undefined ? made : (this.scrub(made) as ActionLogEntry);
+    const line = this.scrub === undefined ? made : this.scrubbed(made);
     try {
       appendFileSync(join(this.dir, `actions-${at.toISOString().slice(0, 10)}.jsonl`), `${JSON.stringify(line)}\n`, { mode: 0o600 });
     } catch {

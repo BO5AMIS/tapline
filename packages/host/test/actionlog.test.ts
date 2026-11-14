@@ -90,3 +90,21 @@ describe("the action log", () => {
     expect(loggedTarget(undefined)).toEqual({});
   });
 });
+
+describe("the action-log backstop leaves the structural fields alone (PR 12 review)", () => {
+  it("a vault value equal to agent, chat or call doesn't turn by, confirmed_by or via into a placeholder", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tapline-log-"));
+    dirs.push(dir);
+    const log = new ActionLog(dir);
+    log.open();
+    const swap = (value: unknown): unknown => {
+      if (typeof value === "string") return value === "agent" || value === "chat" || value === "call" || value === "fast" ? "<vault>" : value;
+      if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, swap(v)]));
+      return value;
+    };
+    log.setBackstop(swap);
+    log.write({ by: "agent", tool: "tap", ok: true, confirmed_by: "chat", via: "call", animations: "fast", reason: "agent" });
+    const [entry] = lines(dir);
+    expect(entry).toMatchObject({ by: "agent", confirmed_by: "chat", via: "call", animations: "fast", reason: "<vault>" });
+  });
+});
