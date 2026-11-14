@@ -801,7 +801,7 @@ export class Explorer {
     }
     // JS errors since the move began (§25.4 item 7).
     if (after.errors.length > 0) {
-      await this.finding("js_error", place, [step], { expected: "no error in the app's log", got: errorLine(after.errors[0] as LogEntry), logs: after.errors, picture: true });
+      await this.finding("js_error", place, [step], { expected: "no error in the app's log", got: errorLine(after.errors[0] as LogEntry, (text) => this.host.redact(text)), logs: after.errors, picture: true });
     }
     // Did it leave the app?
     if (this.host.frontState() !== "front") {
@@ -1276,8 +1276,10 @@ function stepOfRoad(road: MapRoad): PathStep {
   return { tool: move.tool };
 }
 
-function errorLine(entry: LogEntry): string {
-  return (entry.message.split("\n")[0] ?? entry.message).slice(0, 300);
+/** The first line of an error, redacted whole and cut after (a value cut in two would no longer match the redaction). */
+export function errorLine(entry: LogEntry, redact: (text: string) => string): string {
+  const clean = redact(entry.message);
+  return (clean.split("\n")[0] ?? clean).slice(0, 300);
 }
 
 /** `HH:MM:SS.mmm error text`, as `logs` shows a line (§15.1). */

@@ -53,7 +53,8 @@ export const firstLine = (text: string): string => text.split("\n")[0] ?? "";
  * and is cut only after that. `${…}` pieces (the typed placeholder) are syntax and stay.
  */
 export function redactFinding<T>(value: T, redact: (text: string) => string): T {
-  return redactContent(value, redact) as T;
+  // A finding's texts are app content, not validated syntax: only the typed placeholder is kept, any other `${…}` is checked like any text.
+  return redactContent(value, redact, (piece) => piece === TYPED) as T;
 }
 
 /** What a finding is before it has its id: the rest of the shape, as the engine knows it. */

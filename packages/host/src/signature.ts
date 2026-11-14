@@ -147,9 +147,23 @@ export function signaturesOf(
   } = {},
 ): Array<string | null> {
   const { rowOf, frameOf, ...rest } = options;
-  return elements.map((element) => {
-    const frame = frameOf?.(element);
-    const index = sharedIndex(element, elements, rest.screen);
-    return signatureOf(element, { ...rest, frame, index, row: rowOf?.(element) });
+  // Collisions are judged on the signature as it is kept (cut, redacted, with the frame the caller supplies), so two
+  // elements that end up with the same base always get an index, whatever their original text or current frames were.
+  const bases = elements.map((element) => signatureOf(element, { ...rest, frame: frameOf?.(element), row: rowOf?.(element) }));
+  const groups = new Map<string, NamedElement[]>();
+  elements.forEach((element, i) => {
+    const base = bases[i];
+    if (base === null || base === undefined || element.row === true) return;
+    const group = groups.get(base);
+    if (group === undefined) groups.set(base, [element]);
+    else group.push(element);
+  });
+  return elements.map((element, i) => {
+    const base = bases[i];
+    if (base === null || base === undefined) return null;
+    if (element.row === true) return base;
+    const group = groups.get(base) as NamedElement[];
+    const index = group.length >= 2 ? group.indexOf(element) : sharedIndex(element, elements, rest.screen);
+    return signatureOf(element, { ...rest, frame: frameOf?.(element), index, row: rowOf?.(element) });
   });
 }

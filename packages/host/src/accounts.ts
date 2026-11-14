@@ -971,20 +971,22 @@ export function redactValue(value: unknown, redact: (text: string) => string): u
  * The backstop at a writer of files (§20.3): scrubs the content values of a JSON value, never its keys, so a script keeps
  * its tool names and its `${vault.home.street}` placeholders.
  */
-export function redactContent(value: unknown, redact: (text: string) => string): unknown {
+export function redactContent(value: unknown, redact: (text: string) => string, isSyntax: (piece: string) => boolean = isPlaceholder): unknown {
   if (typeof value === "string") {
-    // `${…}` is syntax (a placeholder, a variable): only the text between is content.
+    // `${…}` is syntax (a placeholder, a variable): only the text between is content. `isSyntax` says which pieces are kept as they are.
     return value
       .split(/(\$\{[^}]*\})/)
-      .map((piece) => (piece.startsWith("${") && piece.endsWith("}") ? piece : redact(piece)))
+      .map((piece) => (piece.startsWith("${") && piece.endsWith("}") && isSyntax(piece) ? piece : redact(piece)))
       .join("");
   }
-  if (Array.isArray(value)) return value.map((item) => redactContent(item, redact));
+  if (Array.isArray(value)) return value.map((item) => redactContent(item, redact, isSyntax));
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactContent(item, redact)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, CONTENT_FREE.has(key) ? item : redactContent(item, redact, isSyntax)]));
   }
   return value;
 }
+
+const isPlaceholder = (): boolean => true;
 
 /** Keys whose values are the tool's own words (a tool or method name, a time, a format), never a typed or shown value. */
 const CONTENT_FREE = new Set(["t", "tool", "source", "method", "format", "version", "kind", "app", "name", "start", "end", "route", "variables"]);

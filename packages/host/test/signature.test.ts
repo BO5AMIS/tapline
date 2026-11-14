@@ -119,3 +119,34 @@ describe("namedTarget (what record saves)", () => {
     expect(namedTarget({ testID: null, label: "", text: null })).toBeNull();
   });
 });
+
+describe("PR 13 CodeRabbit: indexes follow the signature as it is kept", () => {
+  it("two labels that share their first 80 characters get indexes", () => {
+    const prefix = "x".repeat(80);
+    const a: NamedElement = { label: `${prefix} one`, role: "button" };
+    const b: NamedElement = { label: `${prefix} two`, role: "button" };
+    const sigs = signaturesOf([a, b], { screen });
+    expect(sigs[0]).not.toBeNull();
+    expect(sigs[0]).not.toBe(sigs[1]);
+  });
+
+  it("two role-only elements whose supplied frames share a bucket but whose own frames differ get indexes", () => {
+    const a: NamedElement = { role: "button", frame: at(0, 0) };
+    const b: NamedElement = { role: "button", frame: at(300, 700) };
+    const same = at(10, 10);
+    const sigs = signaturesOf([a, b], { screen, frameOf: () => same });
+    expect(sigs[0]).not.toBe(sigs[1]);
+  });
+
+  it("a redacted text that collapses two texts gets indexes", () => {
+    const a: NamedElement = { text: "secret-1", role: "text" };
+    const b: NamedElement = { text: "secret-2", role: "text" };
+    const sigs = signaturesOf([a, b], { screen, redact: () => "hidden" });
+    expect(sigs[0]).not.toBe(sigs[1]);
+  });
+
+  it("an element with a name of its own still has none appended", () => {
+    const sigs = signaturesOf([{ label: "Save", role: "button" }, { label: "Cancel", role: "button" }], { screen });
+    expect(sigs).toEqual(["label:Save", "label:Cancel"]);
+  });
+});
