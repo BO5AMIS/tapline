@@ -3,7 +3,7 @@
 ## 1.7.0, "the Control Update" (unreleased)
 
 Standing permissions, personal data by name, safety for text written by strangers, scheduled runs, and a record of
-all of it, as AGENT-TOOLS 1.14 (agreed with Tapwright, sha256 0dddf352) defines them. Tapline works inside the user's own
+all of it, as AGENT-TOOLS 1.14.1 (agreed with Tapwright, sha256 6bc2d5bb) defines them. Tapline works inside the user's own
 app; the whole phone (system apps, notifications, unattended running) is Tapwright's.
 
 - **Grants (§19).**
@@ -12,7 +12,8 @@ app; the whole phone (system apps, notifications, unattended running) is Tapwrig
   - A grant names its words, and optionally a route, counts per day and per hour, an end at most 30 days away, quiet
     hours, and drafts only.
   - A covered touch goes through with `Note: allowed by grant "…" (2 of 3 today).`
-  - Counts live next to the policy file, so two tools sharing it share them.
+  - Each use claims its own slot file next to the policy file (`<policy>.uses/`), with an exclusive create, so two
+    tools sharing the file share the counts and no stalled process can count a use twice.
   - Some touches can never be granted: payments, account deletion, cards, and the block list.
   - After a person's "Allow once" in the chat dialog, the host may offer a grant. Only the person's answer creates it.
   - The live view's Pause stops every grant, and `tapline grants --revoke-all` revokes them all.
@@ -33,9 +34,12 @@ app; the whole phone (system apps, notifications, unattended running) is Tapwrig
   - **Drafts only:** Send, Post, Publish, Reply and Comment under a drafts-only grant or route stop before the touch.
     The draft is shown to a person to send or not.
 - **Scheduled runs (§22).**
-  - `tapline schedule add|list|remove` writes a schedule and registers a Windows task (a time schedule wakes the PC; a file trigger's once-a-minute check does not).
+  - `tapline schedule add|list|remove` writes a schedule and registers a Windows task. A time schedule wakes the PC; a
+    file trigger's once-a-minute check does not.
   - `tapline run-schedule` runs the route with grants, the vault and drafts only in force. It skips, with the exact
     reason, when the phone is in use, the app isn't open, or a run is still going.
+  - A run reuses a running `tapline host` only when that host's policy, accounts and maps match the schedule's, by
+    content. It stays pinned to that host instance, and holds the phone with a lease that other agents can't spoof.
 - **The audit log (§23).** Grant uses, revocations, approvals, vault and code uses, and scheduled runs are recorded in
   `~/.tapline/audit/`, and kept 90 days. Read them with `tapline audit-log`.
 - **Also from AGENT-TOOLS 1.13.3:**
