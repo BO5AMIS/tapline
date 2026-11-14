@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { vaultFileSchema } from "./accounts.js";
 
 /**
  * AGENT-TOOLS 1.14 §20.2: where the vault is kept. One format for both tools:
@@ -287,12 +288,29 @@ export async function protectVaultFile(path: string, deps: VaultDeps = realVault
     const vault: Record<string, unknown> = {};
     for (const [name, entry] of Object.entries(accounts as Record<string, unknown>)) {
       const fields = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
-      const onlyPasscode = fields["passcode"] !== undefined && fields["username"] === undefined && fields["password"] === undefined;
-      vault[name] = { kind: onlyPasscode ? "phone" : "account", ...fields };
+      const { passcode, ...others } = fields;
+      const onlyPasscode = passcode !== undefined && fields["username"] === undefined && fields["password"] === undefined;
+      if (onlyPasscode) {
+        vault[name] = { kind: "phone", ...fields };
+        continue;
+      }
+      vault[name] = { kind: "account", ...others };
+      // A version 2 account has no passcode field: it moves into a phone entry of its own, so it stays stored and scrubbed.
+      if (passcode !== undefined) {
+        let phone = `${name.slice(0, 52)}_phone`;
+        for (let n = 2; Object.prototype.hasOwnProperty.call(accounts, phone) || Object.prototype.hasOwnProperty.call(vault, phone); n++) phone = `${name.slice(0, 50)}_phone${n}`;
+        vault[phone] = { kind: "phone", passcode };
+      }
     }
     payload = { version: 2, vault, ...rest };
   } else {
     return { ok: false, message: `the vault file ${file} isn't a version 1 or 2 vault.` };
+  }
+  // What will be written must load: a file that doesn't would replace the plain one and leave the vault unusable (there is no unprotect).
+  const valid = vaultFileSchema.safeParse(payload);
+  if (!valid.success) {
+    const why = valid.error.issues.map((issue) => `${issue.path.join(".") || "file"}: ${issue.message}`).join("; ");
+    return { ok: false, message: `the vault file ${file} can't be protected as it is (${why}); fix it first. The file stays plain.` };
   }
   const json = JSON.stringify(payload);
   try {
