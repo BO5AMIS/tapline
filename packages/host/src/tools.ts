@@ -2724,6 +2724,7 @@ export class TaplineTools {
     return {
       store,
       redact: (text) => this.bugScrub(text),
+      gateValues: () => this.bugGateValues(),
       placeKey: (app, place) => (place === null ? null : (this.bugMap(app)?.places[place]?.key ?? null)),
       roads: (app) => this.bugMap(app)?.roads ?? [],
       needsPerson: (app, step) => {
@@ -2949,7 +2950,7 @@ export class TaplineTools {
     const check = this.options.bugCheck ?? this.ownCheck;
     const app = made.finding.app;
     const reproduced = await check({ app, id: made.meta.id, dir: made.dir, finding: made.finding, meta: made.meta }, runs, { reset: args.reset ?? "own", ...(args.account !== undefined ? { account: args.account } : {}) });
-    const meta = store.recordCheck(app, made.meta.id, reproduced, (t) => this.bugScrub(t));
+    const meta = store.recordCheck(app, made.meta.id, reproduced, (t) => this.bugScrub(t), () => this.bugGateValues());
     return meta === null ? made : { ...made, meta };
   }
 
@@ -3065,7 +3066,7 @@ export class TaplineTools {
     const found = store.locate(id, session !== undefined ? (session.app.id ?? session.app.name) : undefined) ?? store.locate(id);
     if (found === null) return fail(`Error not_found: no bug ${id}; the bugs kept are in ${shownPath(store.base)}.`);
     try {
-      const done = await exportBug({ store, redact: (t) => this.bugScrub(t), audit: this.options.audit, run: this.options.exportRunner }, found.app, id, target);
+      const done = await exportBug({ store, redact: (t) => this.bugScrub(t), gateValues: () => this.bugGateValues(), audit: this.options.audit, run: this.options.exportRunner }, found.app, id, target);
       return done.ok ? text(this.bugScrub(done.lines.join("\n"))) : fail(`Error ${done.code}: ${this.bugScrub(done.message)}`);
     } catch (error) {
       return fail(`Error internal: the export couldn't be made: ${error instanceof Error ? error.message : String(error)}`);
@@ -3091,7 +3092,7 @@ export class TaplineTools {
           bytes = null;
         }
       }
-      const done = store.addPicture(app, id, bytes, (t) => this.bugScrub(t));
+      const done = store.addPicture(app, id, bytes, (t) => this.bugScrub(t), () => this.bugGateValues());
       note =
         done === "added" ? "The picture is in the folder now." : done === "has" ? "The picture is in the folder already." : "The picture can't be added: its file is gone (it is kept only while the explore report holds it).";
       if (done === "gone") return fail(`Error not_found: ${note}`);

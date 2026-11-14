@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
 import { deflateRawSync } from "node:zlib";
 import type { AuditSink } from "./auditlog.js";
-import { bugTitle } from "./bug.js";
+import { bugTitle, type BugMeta } from "./bug.js";
 import { shownPath } from "./bugreport.js";
-import { gateFiles, type BugStore, type BugText } from "./bugstore.js";
+import { gateFiles, type BugStore, type BugText, type GateValues } from "./bugstore.js";
 import { QA_BRANCH, REPO, copyReport, explain, rawUrl, type Runner } from "./journeyexport.js";
 
 // Export of a bug report (AGENT-TOOLS 1.16 §29.7): to a GitHub issue through the user's own `gh`, as a journey's export is (§17.5), or as a local
@@ -27,7 +28,7 @@ export interface BugExportDeps {
   /** The single-pass redactor (§29.6). */
   redact: BugText;
   /** Values the gate also looks for by their forms (tests; the production gate is the redactor itself). */
-  gateValues?: readonly string[];
+  gateValues?: GateValues;
   /** The audit log. None: nothing is sent (§23: a line that can't be written means nothing is sent). */
   audit: AuditSink | undefined;
   /** The user's own gh and git. None: an issue can't be opened. */
@@ -126,7 +127,7 @@ interface Parcel {
 }
 
 /** The folder's files as they go out: every text file, and the picture only when it isn't private or the export itself asked (§29.2, §29.7). */
-function parcelOf(dir: string, privatePicture: boolean, withPicture: boolean, names: readonly string[]): Parcel {
+function parcelOf(dir: string, record: BugMeta["picture_file"], withPicture: boolean, names: readonly string[]): Parcel {
   const files: Record<string, string> = {};
   for (const name of names) {
     try {
@@ -136,8 +137,13 @@ function parcelOf(dir: string, privatePicture: boolean, withPicture: boolean, na
     }
   }
   const has = existsSync(join(dir, "picture.jpg"));
-  const send = has && (!privatePicture || withPicture);
-  return { files, picture: send ? readFileSync(join(dir, "picture.jpg")) : null, withheld: has && !send };
+  if (!has) return { files, picture: null, withheld: false };
+  // The privacy of the picture is the record of these exact bytes: bytes that have no record, or don't match it, count as private (§29.2).
+  const bytes = readFileSync(join(dir, "picture.jpg"));
+  const verified = record !== undefined && record.sha256 === createHash("sha256").update(bytes).digest("hex");
+  const privatePicture = verified ? record.private : true;
+  const send = !privatePicture || withPicture;
+  return { files, picture: send ? bytes : null, withheld: !send };
 }
 
 const audited = (deps: BugExportDeps, app: string, detail: string): boolean => deps.audit?.write({ kind: "export", app, name: "bug_report", detail }) === true;
@@ -165,7 +171,6 @@ export async function exportBug(deps: BugExportDeps, app: string, id: string, ta
   const stored = deps.store.read(app, id);
   if (stored === null) return refuse("not_found", `no bug ${id}; the bugs kept are in ${shownPath(deps.store.base)}.`);
   const dir = stored.dir;
-  const privatePicture = stored.finding.picture?.private !== false;
   const withPicture = target.with_picture === true;
   const label = target.to === "issue" ? `issue ${target.repo ?? ""}` : "zip";
   const zipPath = target.to === "zip" ? resolve(target.path ?? join(deps.store.appDir(app), `${id}.zip`)) : "";
@@ -186,7 +191,7 @@ export async function exportBug(deps: BugExportDeps, app: string, id: string, ta
 
   if (target.to === "issue" && target.confirm !== true) return refused("not_allowed", "needs_confirmation: an export to a GitHub issue needs confirm: true (your user asked for it).", "needs confirmation");
 
-  const parcel = parcelOf(dir, privatePicture, withPicture, target.to === "zip" ? TEXT_FILES : ["report.md", "repro.json"]);
+  const parcel = parcelOf(dir, stored.meta.picture_file, withPicture, target.to === "zip" ? TEXT_FILES : ["report.md", "repro.json"]);
   // E1: every file about to be sent is read again, against every vault value, code and typed value in every form (§29.6).
   const failed = gateFiles(parcel.files, deps.redact, deps.gateValues ?? []);
   if (failed !== null) return refused("not_allowed", `export refused: a vault value was found in ${failed}.`, "redaction check");

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { ActionLogEntry } from "./actionlog.js";
 import { SYSTEM_SHEETS, stripPaths, type BugFinding, type BugHow } from "./bug.js";
-import { appFolderName, type BugMade, type BugStore, type BugText } from "./bugstore.js";
+import { appFolderName, type BugMade, type BugStore, type BugText, type GateValues } from "./bugstore.js";
 import { FINDING_KINDS, LOG_LINES_MAX, LOG_LINE_MAX, TYPED, cutText, redactFinding, reproScript, type Finding, type PathStep } from "./findings.js";
 import type { MapRoad, PlaceKey } from "./mapfile.js";
 
@@ -22,7 +22,7 @@ export interface BugContext {
   /** A step whose target carries a policy word (§11.1, §25.5). */
   needsPerson(app: string, step: PathStep): boolean;
   /** Values the gate also looks for by their forms (tests). */
-  gateValues?: readonly string[];
+  gateValues?: GateValues;
 }
 
 const home = (): string => homedir();

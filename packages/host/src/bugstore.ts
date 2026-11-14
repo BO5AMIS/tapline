@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { variantsOf } from "./accounts.js";
@@ -41,15 +42,62 @@ export function forbiddenForms(values: readonly string[]): string[] {
   return [...out].filter((form) => form !== "");
 }
 
+/** The values the gate greps for: a list, or a function that reads them from the live stores at the moment of the check (production). */
+export type GateValues = readonly string[] | (() => readonly string[]);
+
+/** The width of the pieces the gate looks for (§29.6, §20.3). */
+const PIECE = 12;
+/** A value longer than this is looked for by its first and last characters of this length (a typed paste can be any size). */
+const PIECE_SOURCE_MAX = 2000;
+
+const htmlEscaped = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+/** Every form of a value that a file could hold: itself, its encodings and its escaped markup. */
+function formsOfValue(value: string): string[] {
+  const base = [...value].length > PIECE_SOURCE_MAX ? [value.slice(0, PIECE_SOURCE_MAX), value.slice(-PIECE_SOURCE_MAX)] : [value];
+  const out = new Set<string>();
+  for (const part of base) {
+    for (const form of variantsOf(part)) out.add(form);
+    out.add(part);
+    out.add(htmlEscaped(part));
+  }
+  return [...out].filter((form) => form !== "");
+}
+
+/**
+ * Looks for a value in a text by any of its forms, whole or by ANY 12-character piece of a form (not only its start): the pieces of the text
+ * are collected once and the values' pieces are checked against them one by one, so nothing big is kept and the work stays near the sum of the lengths.
+ */
+function probeOf(values: readonly string[]): (text: string) => boolean {
+  const whole = new Set<string>();
+  const long: string[] = [];
+  for (const value of values) {
+    if ([...value].length < 3) continue;
+    for (const form of formsOfValue(value)) {
+      whole.add(form);
+      if (form.length >= PIECE) long.push(form);
+    }
+  }
+  return (text) => {
+    for (const form of whole) if (text.includes(form)) return true;
+    if (text.length < PIECE || long.length === 0) return false;
+    const pieces = new Set<string>();
+    for (let i = 0; i + PIECE <= text.length; i++) pieces.add(text.slice(i, i + PIECE));
+    for (const form of long) for (let i = 0; i + PIECE <= form.length; i++) if (pieces.has(form.slice(i, i + PIECE))) return true;
+    return false;
+  };
+}
+
 /**
  * The grep gate: every text file against the redactor (a text it would still change holds a value) and, when values are given, against every
- * form of each and every 12-character piece of it. Answers the first file that fails, or null.
+ * form of each and every 12-character piece of each form. Answers the first file that fails, or null.
  */
-export function gateFiles(files: Record<string, string>, redact: BugText, values: readonly string[] = []): string | null {
-  const forms = forbiddenForms(values);
+export function gateFiles(files: Record<string, string>, redact: BugText, values: GateValues = []): string | null {
+  const list = typeof values === "function" ? values() : values;
+  const holds = list.length > 0 ? probeOf(list) : null;
   for (const [name, text] of Object.entries(files)) {
     if (redact(text) !== text) return name;
-    if (forms.some((form) => text.includes(form))) return name;
+    if (holds !== null && holds(text)) return name;
   }
   return null;
 }
@@ -70,7 +118,7 @@ export interface BugMakeInput {
   notChecked: string;
   redact: BugText;
   /** Values the gate also looks for by their forms (tests; the production gate is the redactor itself). */
-  gateValues?: readonly string[];
+  gateValues?: GateValues;
 }
 
 export interface BugMade {
@@ -236,6 +284,7 @@ export class BugStore {
       seen: { first: finding.when, last: finding.when, count: Math.max(1, finding.count), builds: [build], sources: [input.source.key] },
       reproduced: input.reproduced ?? { checked: false, why: input.notChecked },
       picture_included: includePicture,
+      ...(includePicture && input.picture !== null && finding.picture !== null ? { picture_file: pictureRecord(input.picture, finding.picture.private, input.withPicture) } : {}),
       ...(input.extras?.steps_cut === true ? { steps_cut: true } : {}),
       ...(input.extras?.others !== undefined && input.extras.others.length > 0 ? { others: input.extras.others } : {}),
       ...(input.extras?.names !== undefined ? { names: input.extras.names } : {}),
@@ -269,9 +318,12 @@ export class BugStore {
     if (input.reproduced !== undefined && !("checked" in input.reproduced)) meta.reproduced = input.reproduced;
     let picture: Uint8Array | null = null;
     const hadPicture = meta.picture_included;
-    if (!hadPicture && input.picture !== null && stored.picture !== null && (!stored.picture.private || input.withPicture)) {
+    // The first finding keeps its picture and its source (§29.5). A later sighting fills in the missing bytes only when they are of the same privacy
+    // as that picture: never a private picture under a public one's flag (or the other way). The privacy and the consent go with the bytes.
+    if (!hadPicture && input.picture !== null && stored.picture !== null && seenNow.picture !== null && seenNow.picture.private === stored.picture.private && (!stored.picture.private || input.withPicture)) {
       picture = input.picture;
       meta.picture_included = true;
+      meta.picture_file = pictureRecord(input.picture, seenNow.picture.private, input.withPicture);
     }
     const dir = existing.dir;
     const old = readOrEmpty(join(dir, "report.md"));
@@ -291,25 +343,26 @@ export class BugStore {
   }
 
   /** A later check replaces `reproduced` and its lines of the page, and keeps the first finding (§29.4). The page is written again from the finding and its `bug` key. */
-  recordCheck(app: string, id: string, reproduced: BugMeta["reproduced"], redact: BugText): BugMeta | null {
+  recordCheck(app: string, id: string, reproduced: BugMeta["reproduced"], redact: BugText, gateValues?: GateValues): BugMeta | null {
     const stored = this.read(app, id);
     if (stored === null) return null;
     const meta: BugMeta = { ...stored.meta, reproduced };
     const md = bugPageMarkdown({ finding: stored.finding, meta, pictureFile: meta.picture_included ? "picture.jpg" : null });
-    const files = this.finish({ redact }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
+    const files = this.finish({ redact, ...(gateValues !== undefined ? { gateValues } : {}) }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
     for (const [name, text] of Object.entries(files)) writeFileSync(join(stored.dir, name), text, { mode: 0o600 });
     return meta;
   }
 
   /** Adds a private picture to a kept bug, because a person asked (§29.2). False when there is no bug, it has one already, or the source is gone. */
-  addPicture(app: string, id: string, bytes: Uint8Array | null, redact: BugText): "added" | "has" | "gone" | "none" {
+  addPicture(app: string, id: string, bytes: Uint8Array | null, redact: BugText, gateValues?: GateValues): "added" | "has" | "gone" | "none" {
     const stored = this.read(app, id);
     if (stored === null) return "none";
     if (stored.meta.picture_included) return "has";
     if (bytes === null || stored.finding.picture === null) return "gone";
-    const meta: BugMeta = { ...stored.meta, picture_included: true };
+    // The bytes are the first finding's own (the explore report's file); a person asked for them, so the record says so.
+    const meta: BugMeta = { ...stored.meta, picture_included: true, picture_file: pictureRecord(bytes, stored.finding.picture.private, true) };
     const md = replaceSection(readOrEmpty(join(stored.dir, "report.md")), "Picture", pictureLines(stored.finding, meta, "picture.jpg"));
-    const files = this.finish({ redact }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
+    const files = this.finish({ redact, ...(gateValues !== undefined ? { gateValues } : {}) }, md, { "finding.json": `${JSON.stringify({ ...stored.finding, bug: meta }, null, 2)}\n` });
     for (const [name, text] of Object.entries(files)) writeFileSync(join(stored.dir, name), text, { mode: 0o600 });
     writeFileSync(join(stored.dir, "picture.jpg"), bytes, { mode: 0o600 });
     return "added";
@@ -331,6 +384,11 @@ export class BugStore {
   exists(app: string, id: string): boolean {
     return existsSync(this.bugDir(app, id));
   }
+}
+
+/** What a stored picture file says about itself: the privacy it was admitted under, whether a person asked, and its hash. */
+export function pictureRecord(bytes: Uint8Array, isPrivate: boolean, consent: boolean): NonNullable<BugMeta["picture_file"]> {
+  return { private: isPrivate, consent, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 function readOrEmpty(path: string): string {

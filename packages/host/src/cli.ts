@@ -21,7 +21,8 @@ import { formatLogs } from "./format.js";
 import { runAuditLog, runGrants } from "./grantscmd.js";
 import { ownExploreHost, runExplore } from "./explorecmd.js";
 import { BUG_USAGE, runBug, type BugCliDeps } from "./bugcmd.js";
-import { loadAccounts } from "./accounts.js";
+import { loadAccounts, redactAll, vaultValues } from "./accounts.js";
+import { OtpCodes } from "./otpclient.js";
 import { DEFAULT_POLICY, loadPolicy } from "./policy.js";
 import { loadMap, mapDir } from "./mapfile.js";
 import { runInit } from "./init.js";
@@ -443,6 +444,8 @@ async function runBugCommand(args: string[]): Promise<number> {
   }
   const { values, positionals } = parsed;
   let redact = (text: string): string => text;
+  let redactTyped: BugCliDeps["redactTyped"];
+  let gateValues: BugCliDeps["gateValues"];
   if (values.accounts !== undefined) {
     try {
       const loaded = await loadAccounts(values.accounts);
@@ -452,6 +455,10 @@ async function runBugCommand(args: string[]): Promise<number> {
       }
       const store = loaded.store;
       redact = (text) => store.redact(text);
+      // The vault's values and the ones a person types at a prompt are matched in one pass; the gate gets the vault's values from this memory only.
+      const noCodes = new OtpCodes();
+      redactTyped = (text, typed) => redactAll(store, noCodes, text, typed);
+      gateValues = () => vaultValues(store);
     } catch (error) {
       process.stderr.write(`the vault couldn't be read: ${error instanceof Error ? error.message : String(error)}\n`);
       return 2;
@@ -473,6 +480,8 @@ async function runBugCommand(args: string[]): Promise<number> {
   const deps: BugCliDeps = {
     bugsDir: join(configDir(), "bugs"),
     redact,
+    ...(redactTyped !== undefined ? { redactTyped } : {}),
+    ...(gateValues !== undefined ? { gateValues } : {}),
     audit: new AuditLog(join(configDir(), "audit")),
     runner: realRunner,
     askYes: async (question) => {

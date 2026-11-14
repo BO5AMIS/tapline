@@ -27,6 +27,11 @@ export interface BugMeta {
   seen: { first: string; last: string; count: number; builds: string[]; sources: string[] };
   reproduced: { n: number; of: number; build: string; when: string; reset: string } | { checked: false; why: string };
   picture_included: boolean;
+  /**
+   * The record of the exact bytes of `picture.jpg` (§29.2, §29.5): their privacy and whether a person asked for them, and their SHA-256. An
+   * export decides from this record of the bytes it sends, never from another finding's flag; bytes that don't match it count as private.
+   */
+  picture_file?: { private: boolean; consent: boolean; sha256: string };
   /** Earlier steps of the path couldn't be written down (§29.3): the page says so. */
   steps_cut?: boolean;
   /** The 0-based path steps whose text the app says others wrote (§27.2): the page quotes them as data. */

@@ -245,8 +245,10 @@ describe("export to an issue (§29.7)", () => {
     const r = await rig({ tools: { exportRunner: gh.run } });
     const id = await r.make(true);
     const path = join(r.bugDir(id), "finding.json");
-    const stored = JSON.parse(readFileSync(path, "utf8")) as { picture: { file: string; private: boolean } };
+    // The privacy of the picture is the record of its exact bytes (picture_file), not the finding's flag (PR 14, R1-5).
+    const stored = JSON.parse(readFileSync(path, "utf8")) as { picture: { file: string; private: boolean }; bug: { picture_file: { private: boolean } } };
     stored.picture.private = false;
+    stored.bug.picture_file.private = false;
     writeFileSync(path, JSON.stringify(stored));
     await r.s.tools.bugReport(ISSUE(id));
     expect([...(gh.calls.find((x) => x.args[0] === "add")?.files ?? [])].sort()).toEqual([`.tapline/bugs/${id}/picture.jpg`, `.tapline/bugs/${id}/repro.json`]);

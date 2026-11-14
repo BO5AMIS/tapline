@@ -211,7 +211,8 @@ describe("R1-4: the production export gate checks every 12-character piece of th
     expect(ok).toMatch(/^Exported/);
     await r.s.tools.typeText({ target: { id: "email-field" }, text: "synthetic-typed-value-4417", look: false });
     const file = join(r.bugDir(id), "finding.json");
-    writeFileSync(file, `${readFileSync(file, "utf8").trimEnd()}\n"x: ic-typed-val"\n`);
+    const stored = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    writeFileSync(file, JSON.stringify({ ...stored, got: "saw ic-typed-val in it" }));
     expect(textOf(await r.s.tools.bugReport({ bug: id, export: { to: "zip" } }))).toMatch(/^Error not_allowed: export refused: a vault value was found in finding\.json/);
   });
 
@@ -228,6 +229,9 @@ describe("R1-4: the production export gate checks every 12-character piece of th
 });
 
 // -- 5. a picture's privacy belongs to its bytes
+
+/** Whether the zip holds a picture entry (entry names are stored plain). */
+const hasPicture = (zip: string): boolean => readFileSync(zip).includes(Buffer.from("/picture.jpg"));
 
 describe("R1-5: a later sighting never admits bytes of another privacy", () => {
   const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
@@ -266,7 +270,7 @@ describe("R1-5: a later sighting never admits bytes of another privacy", () => {
     const out = join(tmp("tapline-r1-zip-"), "x.zip");
     const done = await exportBug({ store, redact: (t) => t, audit: new AuditLog(tmp("tapline-r1-audit-")), run: undefined, anyPath: true }, "com.example.wayfare", first.meta.id, { to: "zip", path: out });
     expect(done.ok).toBe(true);
-    expect(readFileSync(out).includes(Buffer.from(JPEG))).toBe(false);
+    expect(hasPicture(out)).toBe(false);
   });
 
   it("the export decides from the record of the exact bytes, not from the finding's flag", async () => {
@@ -280,15 +284,15 @@ describe("R1-5: a later sighting never admits bytes of another privacy", () => {
     const out = join(tmp("tapline-r1-zip-"), "y.zip");
     const deps = { store, redact: (t: string) => t, audit: new AuditLog(tmp("tapline-r1-audit-")), run: undefined, anyPath: true };
     await exportBug(deps, "com.example.wayfare", made.meta.id, { to: "zip", path: out });
-    expect(readFileSync(out).includes(Buffer.from(JPEG))).toBe(false);
+    expect(hasPicture(out)).toBe(false);
     const asked = join(tmp("tapline-r1-zip-"), "z.zip");
     await exportBug(deps, "com.example.wayfare", made.meta.id, { to: "zip", path: asked, with_picture: true });
-    expect(readFileSync(asked).includes(Buffer.from(JPEG))).toBe(true);
+    expect(hasPicture(asked)).toBe(true);
     // swapped bytes no longer match the record: still private
     writeFileSync(join(made.dir, "picture.jpg"), new Uint8Array([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9]));
     const swapped = join(tmp("tapline-r1-zip-"), "w.zip");
     await exportBug(deps, "com.example.wayfare", made.meta.id, { to: "zip", path: swapped });
-    expect(readFileSync(swapped).includes(Buffer.from([0x01, 0x02]))).toBe(false);
+    expect(hasPicture(swapped)).toBe(false);
   });
 });
 
@@ -308,20 +312,29 @@ describe("R1-6: the check runs only on a connected session of the bug's own app"
     expect(r.s.world.resets).toBe(0);
   });
 
-  it("stops with a reason when the app is replaced by another one mid-run", async () => {
-    const r = await rig();
-    const id = await makeJsBug(r);
-    const moved: string[] = [];
-    let swapped = false;
-    r.s.world.onPress = (pressed) => {
-      moved.push(pressed);
-      if (swapped) return;
-      swapped = true;
-      void FakeApp.connect(r.s.port, { app: { name: "Other", id: "com.example.other", version: "2.0.0", build: "9" }, capabilities: ["tree", "press"] }, () => ({ ok: true, result: {} })).then((o) => apps.push(o.app));
-    };
-    const answer = textOf(await r.s.tools.bugReport({ bug: id, verify: 3 }));
-    expect(answer).toMatch(/Reproduced: not checked|Reproduced: \d of \d/);
-    expect(moved.length).toBeGreaterThanOrEqual(0);
+  it("the engine stops before the next action when the session is gone, and says why", async () => {
+    const moves: string[] = [];
+    let gone: string | null = null;
+    const host = {
+      clock: () => 0,
+      wall: () => new Date(0),
+      build: () => "1.0 (1)",
+      away: () => gone,
+      reset: async () => ({ ok: true as const, words: "reload only, data kept" }),
+      start: async () => true,
+      step: async (step: { tool: string }) => (moves.push(step.tool), (gone = "stopped (com.example.other is in front now, not a)"), { kind: "ok" as const }),
+      mark: () => 0,
+      since: async () => ({ crash: null, disconnected: false, errors: [] }),
+      placeKey: async () => null,
+      issues: async () => null,
+      inFront: () => true,
+      redact: (t: string) => t,
+    } as unknown as CheckHost;
+    const finding = { kind: "js_error", app: "a", expected: "", got: "x" } as unknown as BugFinding;
+    const steps = [{ tool: "tap", target: { id: "a" } }, { tool: "back" }, { tool: "back" }];
+    const out = await runCheck(host, { finding, meta: { place_key: null, signature: "s" } as never, script: { start: null, steps } }, 1, { reset: "own" });
+    expect(moves).toEqual(["tap"]);
+    expect(out).toEqual({ checked: false, why: "stopped (com.example.other is in front now, not a)" });
   });
 });
 

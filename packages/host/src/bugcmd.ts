@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
+import { TYPED } from "./findings.js";
+import type { TypedSource } from "./accounts.js";
 import { join } from "node:path";
 import { asWords, matchWord, type PolicyFile } from "./policy.js";
 import type { BugMeta } from "./bug.js";
 import { bugAnswer, makeBug, readRunFinding, reproducedAnswer, shownPath, type BugContext } from "./bugreport.js";
 import type { AuditSink } from "./auditlog.js";
 import { exportBug, type BugExportTarget } from "./bugexport.js";
-import { BugGateError, BugStore, isBugId, type BugCheck } from "./bugstore.js";
+import { BugGateError, BugStore, isBugId, type BugCheck, type GateValues } from "./bugstore.js";
 import type { Runner } from "./journeyexport.js";
 import { FLOOR_WORDS, exploreLists } from "./explorefloor.js";
 import type { MapFile } from "./mapfile.js";
@@ -47,6 +49,13 @@ export interface BugCliDeps {
   bugsDir: string;
   /** The vault's redaction (the accounts file), else none (§29.6). */
   redact: (text: string) => string;
+  /**
+   * The vault's redaction with the values a person typed at a prompt as one more source of the same single pass (§29.6): a typed value that holds a
+   * vault value is matched whole against the original text. Unset: `redact` alone, then the typed values one after the other.
+   */
+  redactTyped?: (text: string, typed: TypedSource) => string;
+  /** Every value the gate greps for (the vault's, current and retired), read from the live store; the values a person typed are added here. */
+  gateValues?: GateValues;
   /** The app's map from the maps folder, or undefined. */
   map: (app: string) => MapFile | undefined;
   policy: PolicyFile;
@@ -75,6 +84,7 @@ function contextOf(deps: BugCliDeps, store: BugStore): BugContext {
   return {
     store,
     redact: deps.redact,
+    ...(deps.gateValues !== undefined ? { gateValues: deps.gateValues } : {}),
     placeKey: (app, place) => (place === null ? null : (deps.map(app)?.places[place]?.key ?? null)),
     roads: (app) => deps.map(app)?.roads ?? [],
     needsPerson: (app, step) => {
@@ -122,10 +132,22 @@ async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCl
   const [first, second, third] = positionals;
   // A value a person typed at a prompt is kept only in this process and scrubbed from everything it says (§29.4).
   const given: string[] = [];
-  const deps: BugCliDeps = { ...rawDeps, redact: (text) => given.reduce((t, value) => (value === "" ? t : t.split(value).join("[typed]")), rawDeps.redact(text)) };
+  // A new list whenever a value is added: the matcher is cached by it.
+  let typed: TypedSource = { values: [], token: TYPED };
+  const deps: BugCliDeps = {
+    ...rawDeps,
+    redact: (text) =>
+      rawDeps.redactTyped !== undefined
+        ? rawDeps.redactTyped(text, typed)
+        : given.reduce((t, value) => (value === "" ? t : t.split(value).join("[typed]")), rawDeps.redact(text)),
+    gateValues: () => [...(typeof rawDeps.gateValues === "function" ? rawDeps.gateValues() : (rawDeps.gateValues ?? [])), ...given],
+  };
   const asked = async (name: string): Promise<string | null> => {
     const value = (await rawDeps.askValue?.(`Value for "${name}" (not shown):`)) ?? null;
-    if (value !== null) given.push(value);
+    if (value !== null && value !== "" && !given.includes(value)) {
+      given.push(value);
+      typed = { values: [...given], token: TYPED };
+    }
     return value;
   };
   const checkOptions = { reset: "own" as const, typed: asked };
@@ -148,7 +170,7 @@ async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCl
     const found = store.locate(second);
     if (found === null) return refuse(`no bug ${second}; the bugs kept are in ${shownPath(store.base)}.`);
     const reproduced = await deps.check({ app: found.app, id: second, dir: found.stored.dir, finding: found.stored.finding, meta: found.stored.meta }, verify > 0 ? verify : 3, checkOptions);
-    const meta = store.recordCheck(found.app, second, reproduced, deps.redact) ?? found.stored.meta;
+    const meta = store.recordCheck(found.app, second, reproduced, deps.redact, deps.gateValues) ?? found.stored.meta;
     deps.out(deps.redact(reproducedAnswer({ meta }, true)));
     return exitOf(meta);
   }
@@ -181,7 +203,7 @@ async function runBugOnce(positionals: string[], flags: BugFlags, rawDeps: BugCl
     let meta = made.meta;
     if (verify > 0 && deps.check !== undefined) {
       const reproduced = await deps.check({ app: made.finding.app, id: meta.id, dir: made.dir, finding: made.finding, meta }, verify, checkOptions);
-      meta = store.recordCheck(made.finding.app, meta.id, reproduced, deps.redact) ?? meta;
+      meta = store.recordCheck(made.finding.app, meta.id, reproduced, deps.redact, deps.gateValues) ?? meta;
     }
     deps.out(bugAnswer({ ...made, meta }, deps.redact, { reasonShown: true }));
     return exitOf(meta);
@@ -210,7 +232,7 @@ async function exportCommand(id: string, flags: BugFlags, deps: BugCliDeps, stor
   } else {
     target = { to: "zip", ...(flags.zip !== undefined ? { path: flags.zip } : {}), ...(withPicture ? { with_picture: true } : {}) };
   }
-  const done = await exportBug({ store, redact: deps.redact, audit: deps.audit, run: deps.runner, anyPath: true }, found.app, id, target);
+  const done = await exportBug({ store, redact: deps.redact, ...(deps.gateValues !== undefined ? { gateValues: deps.gateValues } : {}), audit: deps.audit, run: deps.runner, anyPath: true }, found.app, id, target);
   if (!done.ok) return refuse(`${done.code}: ${done.message}`);
   deps.out(deps.redact(done.lines.join("\n")));
   return 0;
