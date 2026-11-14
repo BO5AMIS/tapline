@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { vaultFileSchema } from "./accounts.js";
@@ -98,34 +98,31 @@ function securityQuote(text: string): string {
 
 /**
  * `security -i` reads at most 4095 bytes per input line, and a line is the whole command with its hex data: about 1.9 KB of vault
- * JSON at most. Anything that fits is stored as one entry, the form the spec fixes (§20.2). A larger vault is stored in chunks
- * under other accounts and a small manifest under the file's own account (a Tapline layout: Tapwright reads a vault that fits in
- * one entry until the spec says how it reads this).
+ * JSON at most. A vault that fits is ONE item holding the plain vault JSON (§20.2, single form). A larger one is the chunked form
+ * (AGENT-TOOLS 1.14.1): chunk items at account `<realpath>#1`, `#2`, … hold consecutive pieces of the JSON, and the main item
+ * (account = the realpath) holds the manifest `{"chunks": n, "sha256": "<hex of the whole JSON>"}`. A reader tells the forms apart
+ * by the `chunks` key. The chunk size is the writer's own choice; the reader joins whatever is there.
  */
 const LINE_BUDGET = 3900;
 const MIN_CHUNK = 64;
-const CHUNK_TEXT = "c:";
-const MANIFEST_KEY = "tapline_chunks";
 
-interface Manifest {
-  id: string;
-  n: number;
-  bytes: number;
-}
+/** A chunked vault that can't be put back together: a chunk is missing or the checksum differs. Never a partial vault. */
+export class VaultIncompleteError extends Error {}
 
-function manifestOf(text: string | null): Manifest | null {
-  if (text === null || !text.startsWith(`{"${MANIFEST_KEY}":`)) return null;
+/** The chunk count of a manifest, or null when the text is a plain vault (no `chunks` key) or not JSON. */
+function manifestOf(text: string | null): { chunks: number; sha256: string | null } | null {
+  if (text === null || !text.startsWith("{")) return null;
   try {
-    const found = (JSON.parse(text) as Record<string, unknown>)[MANIFEST_KEY];
-    if (typeof found !== "object" || found === null) return null;
-    const { id, n, bytes } = found as { id?: unknown; n?: unknown; bytes?: unknown };
-    return typeof id === "string" && /^[0-9a-f]{12}$/.test(id) && typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 100_000 && typeof bytes === "number" ? { id, n, bytes } : null;
+    const top: unknown = JSON.parse(text);
+    if (typeof top !== "object" || top === null || Array.isArray(top) || !("chunks" in top)) return null;
+    const { chunks, sha256 } = top as { chunks?: unknown; sha256?: unknown };
+    return { chunks: typeof chunks === "number" && Number.isInteger(chunks) && chunks >= 1 && chunks <= 100_000 ? chunks : 0, sha256: typeof sha256 === "string" ? sha256 : null };
   } catch {
     return null;
   }
 }
 
-const chunkAccount = (account: string, id: string, index: number): string => `${account}#${id}.${index}`;
+const chunkAccount = (account: string, index: number): string => `${account}#${index}`;
 
 /** Through the `security` CLI. The data goes in on stdin (`security -i`), so it is never in the process list. */
 export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
@@ -135,64 +132,69 @@ export function securityKeychain(run: ProcRunner = spawnRunner): Keychain {
     if (out.code !== 0) return null;
     const text = out.stdout.replace(/\r?\n$/, "");
     if (text === "") return null;
-    return text.startsWith("{") || text.startsWith(CHUNK_TEXT) ? text : /^[0-9a-fA-F]+$/.test(text) ? Buffer.from(text, "hex").toString("utf8") : null;
+    if (text.startsWith("{") || !/^[0-9a-fA-F]+$/.test(text) || text.length % 2 !== 0) return text;
+    // all hex digits: either data `security` printed as hex, or a plain piece that happens to look like hex. Real hex decodes to UTF-8.
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(text, "hex"));
+    } catch {
+      return text;
+    }
   };
   const read = async (account: string): Promise<string | null> => {
     const text = await readText(account);
     const manifest = manifestOf(text);
     if (manifest === null) return text;
+    if (manifest.chunks === 0 || manifest.sha256 === null) throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunk list is unreadable)");
     const parts: Buffer[] = [];
-    for (let i = 0; i < manifest.n; i++) {
-      const chunk = await readText(chunkAccount(account, manifest.id, i));
-      if (chunk === null || !chunk.startsWith(CHUNK_TEXT) || !/^[0-9a-f]*$/.test(chunk.slice(CHUNK_TEXT.length))) return null;
-      parts.push(Buffer.from(chunk.slice(CHUNK_TEXT.length), "hex"));
+    for (let i = 1; i <= manifest.chunks; i++) {
+      const chunk = await readText(chunkAccount(account, i));
+      if (chunk === null) throw new VaultIncompleteError(`the vault in the keychain is incomplete (chunk ${i} of ${manifest.chunks} is missing)`);
+      parts.push(Buffer.from(chunk, "utf8"));
     }
     const whole = Buffer.concat(parts);
-    return whole.length === manifest.bytes ? whole.toString("utf8") : null;
+    if (createHash("sha256").update(whole).digest("hex") !== manifest.sha256.toLowerCase()) {
+      throw new VaultIncompleteError("the vault in the keychain is incomplete (its chunks don't match their checksum)");
+    }
+    return whole.toString("utf8");
   };
   const addLine = (account: string, data: Buffer): string => `add-generic-password -U -s ${securityQuote(KEYCHAIN_SERVICE)} -a ${securityQuote(account)} -X ${data.toString("hex")}`;
   /** Stores one entry. The interactive mode doesn't always set the exit code, so the caller reads back what mattered. */
   const store = async (account: string, data: Buffer): Promise<void> => {
     await run("security", ["-i"], `${addLine(account, data)}\n`);
   };
-  const drop = async (account: string, manifest: Manifest | null): Promise<void> => {
-    if (manifest === null) return;
-    for (let i = 0; i < manifest.n; i++) await run("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", chunkAccount(account, manifest.id, i)], "").catch(() => undefined);
+  /** Deletes the chunk items `from` to `to` (stale ones of an earlier, longer vault). */
+  const dropChunks = async (account: string, from: number, to: number): Promise<void> => {
+    for (let i = from; i <= to; i++) await run("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", chunkAccount(account, i)], "").catch(() => undefined);
   };
   return {
     read,
     async write(account, json) {
-      const previous = manifestOf(await readText(account));
+      const previous = manifestOf(await readText(account))?.chunks ?? 0;
       const data = Buffer.from(json, "utf8");
       if (Buffer.byteLength(addLine(account, data)) <= LINE_BUDGET) {
         await store(account, data);
         if ((await read(account)) !== json) throw new Error("the keychain didn't keep the entry");
-        await drop(account, previous);
+        await dropChunks(account, 1, previous);
         return;
       }
-      const id = randomBytes(6).toString("hex");
-      const room = Math.floor((LINE_BUDGET - Buffer.byteLength(addLine(chunkAccount(account, id, 999_999), Buffer.alloc(0)))) / 2);
-      const size = Math.floor((room - CHUNK_TEXT.length) / 2);
+      const size = Math.floor((LINE_BUDGET - Buffer.byteLength(addLine(chunkAccount(account, 999_999), Buffer.alloc(0)))) / 2) - 3;
       if (size < MIN_CHUNK) throw new Error("the vault file's path is too long to store in the macOS keychain");
-      const count = Math.ceil(data.length / size);
-      const fresh: Manifest = { id, n: count, bytes: data.length };
-      // The chunks first, under a fresh id, then the manifest: until the manifest is replaced the old vault is intact.
-      for (let i = 0; i < count; i++) {
-        const text = `${CHUNK_TEXT}${data.subarray(i * size, (i + 1) * size).toString("hex")}`;
-        await store(chunkAccount(account, id, i), Buffer.from(text, "utf8"));
-        // a chunk that wasn't kept stops the write before the manifest points to it
-        if ((await readText(chunkAccount(account, id, i))) !== text) {
-          await drop(account, { id, n: i + 1, bytes: 0 });
-          throw new Error("the keychain didn't keep the entry");
-        }
+      // pieces are cut at character boundaries, so every chunk is valid UTF-8 text on its own
+      const pieces: Buffer[] = [];
+      for (let at = 0; at < data.length; ) {
+        let end = Math.min(at + size, data.length);
+        while (end < data.length && end > at && ((data[end] ?? 0) & 0xc0) === 0x80) end--;
+        pieces.push(data.subarray(at, end));
+        at = end;
       }
-      await store(account, Buffer.from(JSON.stringify({ [MANIFEST_KEY]: fresh }), "utf8"));
-      if ((await read(account)) !== json) {
-        // the manifest wasn't kept: the old entry still holds the old vault, and the new chunks are of no use
-        await drop(account, fresh);
-        throw new Error("the keychain didn't keep the entry");
+      // chunks #1…#n first, then the manifest, then the stale chunks of an earlier, longer vault
+      for (const [i, piece] of pieces.entries()) {
+        await store(chunkAccount(account, i + 1), piece);
+        if ((await readText(chunkAccount(account, i + 1))) !== piece.toString("utf8")) throw new Error("the keychain didn't keep the entry");
       }
-      await drop(account, previous);
+      await store(account, Buffer.from(JSON.stringify({ chunks: pieces.length, sha256: createHash("sha256").update(data).digest("hex") }), "utf8"));
+      if ((await read(account)) !== json) throw new Error("the keychain didn't keep the entry");
+      await dropChunks(account, pieces.length + 1, previous);
     },
   };
 }
@@ -247,7 +249,14 @@ export async function openProtected(path: string, file: { protected?: string; da
   }
   if (file.protected === "keychain") {
     if (deps.platform !== "darwin") throw new VaultOpenError("the file is protected with the macOS keychain and can only be opened on a Mac");
-    const found = await deps.keychain.read(realPathOf(path)).catch(() => null);
+    let found: string | null;
+    try {
+      found = await deps.keychain.read(realPathOf(path));
+    } catch (error) {
+      // a chunked vault with a missing chunk or a wrong checksum: fail closed, and say why (§20.2)
+      if (error instanceof VaultIncompleteError) throw new VaultOpenError(error.message);
+      found = null;
+    }
     if (found === null) throw new VaultOpenError("the keychain has no entry for this file's path (the file was moved, or it was protected by another user)");
     return found;
   }
