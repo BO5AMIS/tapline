@@ -35,7 +35,13 @@ afterEach(async () => {
 
 const textOf = (result: CallToolResult): string => result.content.map((c) => (c.type === "text" ? c.text : `<${c.type}>`)).join("\n");
 
-async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true) {
+/** What the fake app answers to a `type`: `dry` refuses the check, `real` refuses only the real type (after the code was fetched). */
+interface TypeRefusal {
+  dry?: { code: string; message: string };
+  real?: { code: string; message: string };
+}
+
+async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refusal: TypeRefusal = {}) {
   const daemon = await startFakeTapwright(behavior);
   if (daemonUp) daemons.push(daemon);
   else await daemon.close();
@@ -46,6 +52,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true) {
   const { host, port } = await startHost({ redact: otp.codes.redact });
   hosts.push(host);
   const typed: Array<Record<string, unknown>> = [];
+  const checked: Array<Record<string, unknown>> = [];
   let showCode = false;
   const handler = (req: IncomingRequest): Reply => {
     switch (req.method) {
@@ -53,7 +60,9 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true) {
         return { ok: true, result: { screen: SCREEN, elements: [{ ...CODE_FIELD, value: showCode ? `last code ${FAKE_CODE}` : "" }] } };
       case "type": {
         const params = req.params as Record<string, unknown>;
-        typed.push(params);
+        (params["dryRun"] === true ? checked : typed).push(params);
+        const refused = params["dryRun"] === true ? refusal.dry : refusal.real;
+        if (refused !== undefined) return { ok: false, error: refused };
         const value = String(params["text"]);
         return { ok: true, result: { element: { ...CODE_FIELD, value }, value, settledMs: 40 } };
       }
@@ -72,7 +81,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true) {
   };
   const logDir = tmp();
   const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, otp, audit: sink, logDir });
-  return { tools, daemon, typed, audit, logDir, showCodeInTree: () => (showCode = true) };
+  return { tools, daemon, typed, checked, audit, logDir, showCodeInTree: () => (showCode = true) };
 }
 
 function everythingIn(dir: string): string {
@@ -166,12 +175,14 @@ describe("type_text with ${otp.<app>}", () => {
   });
 
   it("a dry run checks the field and asks for nothing", async () => {
-    const { tools, daemon, typed } = await setup();
+    const { tools, daemon, typed, checked } = await setup();
     const answer = await tools.typeText({ target: { id: "code" }, text: `\${otp.${APP}}`, dry_run: true });
     expect(answer.isError).not.toBe(true);
     expect(daemon.connections).toBe(0);
     // the app was asked about the field only: empty text, marked as a dry run
-    expect(typed.every((p) => p["dryRun"] === true && p["text"] === "")).toBe(true);
+    expect(typed).toHaveLength(0);
+    expect(checked.length).toBeGreaterThan(0);
+    expect(checked.every((p) => p["text"] === "")).toBe(true);
     expect(textOf(answer)).not.toContain(FAKE_CODE);
   });
 
@@ -182,6 +193,76 @@ describe("type_text with ${otp.<app>}", () => {
     const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, otp });
     const answer = await tools.typeText({ target: { id: "code" }, text: `\${otp.${APP}}` });
     expect(textOf(answer)).toMatch(/^Error not_connected/);
+  });
+});
+
+describe("the code is asked for only right before typing (AGENT-TOOLS 1.16.2 §18.11)", () => {
+  const text = `\${otp.${APP}}`;
+  const realTypes = (typed: Array<Record<string, unknown>>) => typed;
+  const alert = { code: "not_actionable", message: "behind_alert: an alert is showing" };
+
+  it("a type refused behind_alert asks the daemon for nothing", async () => {
+    const { tools, daemon, typed, audit } = await setup({}, true, { dry: alert });
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("behind_alert");
+    expect(daemon.requests).toHaveLength(0);
+    expect(daemon.connections).toBe(0);
+    expect(realTypes(typed)).toHaveLength(0);
+    expect(audit).toHaveLength(0);
+  });
+
+  it("a target that is not found asks the daemon for nothing", async () => {
+    const { tools, daemon, typed } = await setup({}, true, { dry: { code: "not_found", message: "nothing on screen matches that target." } });
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("not_found");
+    expect(daemon.requests).toHaveLength(0);
+    expect(realTypes(typed)).toHaveLength(0);
+  });
+
+  it("when every check passes there is exactly one /otp request, then the type; no answer holds the digits", async () => {
+    const { tools, daemon, typed, checked, logDir } = await setup();
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).not.toBe(true);
+    expect(daemon.requests.map((r) => r.url)).toEqual(["/api/prove", "/otp"]);
+    expect(realTypes(typed)).toHaveLength(1);
+    expect(realTypes(typed)[0]).toMatchObject({ text: FAKE_CODE });
+    expect(checked.length).toBeGreaterThan(0);
+    expect(checked.every((p) => p["text"] === "")).toBe(true);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+    expect(everythingIn(logDir)).not.toContain(FAKE_CODE);
+  });
+
+  it("a real type that fails after the fetch drops the code: one /otp request, no retry, no digits", async () => {
+    const { tools, daemon, typed } = await setup({}, true, { real: { code: "not_actionable", message: `behind_alert: an alert came up (${FAKE_CODE})` } });
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(daemon.requests.filter((r) => r.url === "/otp")).toHaveLength(1);
+    expect(realTypes(typed)).toHaveLength(1);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+  });
+
+  it("run: a refused step asks for nothing; a passing step fetches once", async () => {
+    const refused = await setup({}, true, { dry: alert });
+    const bad = await refused.tools.run({ steps: [{ tool: "type_text", target: { id: "code" }, text }], look: false });
+    expect(bad.isError).toBe(true);
+    expect(textOf(bad)).toContain("behind_alert");
+    expect(refused.daemon.requests).toHaveLength(0);
+    const ok = await setup();
+    const done = await ok.tools.run({ steps: [{ tool: "type_text", target: { id: "code" }, text }], look: false });
+    expect(done.isError).not.toBe(true);
+    expect(ok.daemon.requests.filter((r) => r.url === "/otp")).toHaveLength(1);
+    expect(textOf(done)).not.toContain(FAKE_CODE);
+  });
+
+  it("run: a real type that fails after the fetch is not retried", async () => {
+    const { tools, daemon, typed } = await setup({}, true, { real: { code: "internal", message: "the field went away" } });
+    const answer = await tools.run({ steps: [{ tool: "type_text", target: { id: "code" }, text }], look: false });
+    expect(answer.isError).toBe(true);
+    expect(daemon.requests.filter((r) => r.url === "/otp")).toHaveLength(1);
+    expect(realTypes(typed)).toHaveLength(1);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
   });
 });
 

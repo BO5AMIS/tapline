@@ -7283,10 +7283,19 @@ export class TaplineTools {
     const app = session.app.id ?? session.app.name;
     // A dry run checks the field and asks for nothing: no code is fetched, and none is spent.
     if (args.dry_run === true) return this.typeTextWith(args, { value: "", source: undefined, sessionId: session.id });
-    return this.otp.fetch(app).then((got: OtpFetch) =>
-      got.ok
-        ? this.typeTextWith(args, { value: got.code, source: got.source, sessionId: session.id })
-        : fail(`Error ${got.reason === "none" ? "not_found" : "unsupported"}: ${got.message}`),
+    const fetchAndType = (): Promise<CallToolResult> =>
+      this.otp.fetch(app).then((got: OtpFetch) =>
+        got.ok
+          ? // One try: a code that can't be typed now is dropped, never asked for again (§18.11).
+            this.typeTextWith(args, { value: got.code, source: got.source, sessionId: session.id })
+          : fail(`Error ${got.reason === "none" ? "not_found" : "unsupported"}: ${got.message}`),
+      );
+    // The code is asked for only right before typing, after every check of the step (§18.11): the same step as a dry run
+    // first (target found, reachable, not behind an alert, the field's kind). A refusal is the answer, nothing fetched.
+    // An app without dry runs can't be checked ahead, and the code is fetched as before.
+    if (!session.capabilities.includes("dryRun")) return fetchAndType();
+    return this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id }).then((checked) =>
+      checked.isError === true ? checked : fetchAndType(),
     );
   }
 
