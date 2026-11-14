@@ -79,7 +79,7 @@ import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, crash
 import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
-import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
+import { answerLines, migrateExploreFolders, openRunFolder, writeExploreReport } from "./explorereport.js";
 import { escapeParams, loadRoute, routePathOf, reachStart, routeRunner, routeScript, routeSlug, routeTyped, saveRoute, substituteSteps, variableProblem, type RouteContext } from "./routes.js";
 import { badUnderKeys, checkUnder, formatPerfLines, perfFirstLine, perfResultSchema, type PerfMeasure, type PerfResult } from "./perf.js";
 import {
@@ -1610,8 +1610,11 @@ export class TaplineTools {
     this.uxRules = options.uxRules ?? NO_UX_RULES;
     this.actionLog = options.logDir !== undefined ? new ActionLog(options.logDir) : null;
     this.actionLog?.open();
+    // At start, runs and bugs that 1.8.5 kept under another folder name for their app move into their app's folder (1.8.6).
+    if (options.exploreDir !== undefined) migrateExploreFolders(options.exploreDir);
     if (options.bugsDir !== undefined) {
       this.bugStore = new BugStore(options.bugsDir);
+      this.bugStore.migrateFolders();
       // At start an app's bugs beyond the newest 100 are removed (§29.2).
       this.bugStore.pruneAll();
     }

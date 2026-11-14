@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
 import { appFolderName } from "./appfolder.js";
@@ -27,6 +27,9 @@ const isStrings = (value: unknown): value is string[] => Array.isArray(value) &&
 /** What the store reads of a kept record: the finding's app and kind, and the bug's id, signature, sightings and check. */
 function storedShape(bug: unknown, finding: Record<string, unknown>, id: string): bug is BugMeta {
   if (typeof finding["app"] !== "string" || finding["app"] === "" || typeof finding["kind"] !== "string") return false;
+  // The picture is null or `{file, private}`: a later sighting reads `picture.private` (§29.5).
+  const picture = finding["picture"];
+  if (picture !== null && !(isObject(picture) && typeof picture["file"] === "string" && typeof picture["private"] === "boolean")) return false;
   if (!isObject(bug) || bug["id"] !== id || typeof bug["signature"] !== "string") return false;
   const seen = bug["seen"];
   if (!isObject(seen) || typeof seen["first"] !== "string" || typeof seen["last"] !== "string" || typeof seen["count"] !== "number") return false;
@@ -349,6 +352,38 @@ export class BugStore {
       }
     } catch {
       // a folder that can't be removed stays
+    }
+  }
+
+  /**
+   * At start, before anything is listed or pruned: a bug kept in a folder that isn't its own app's (1.8.5 named the folder of an id
+   * with capitals or other characters differently) moves, with its zip, into its app's folder. Bug by bug, from what its own
+   * `finding.json` says, and never over a bug already there; one that can't move stays where it is.
+   */
+  migrateFolders(): void {
+    for (const folder of this.appFolders()) {
+      for (const id of this.bugIdsIn(folder)) {
+        try {
+          const stored = this.readAt(join(this.base, folder, id), id);
+          if (stored === null) continue;
+          const target = appFolderName(stored.finding.app);
+          if (target === folder) continue;
+          const dest = join(this.base, target, id);
+          if (existsSync(dest)) continue;
+          mkdirSync(join(this.base, target), { recursive: true, mode: 0o700 });
+          renameSync(join(this.base, folder, id), dest);
+          const zip = join(this.base, folder, `${id}.zip`);
+          const zipDest = join(this.base, target, `${id}.zip`);
+          if (existsSync(zip) && !existsSync(zipDest)) renameSync(zip, zipDest);
+        } catch {
+          // a bug that can't move stays, and isn't listed from the wrong folder
+        }
+      }
+      try {
+        if (readdirSync(join(this.base, folder)).length === 0) rmdirSync(join(this.base, folder));
+      } catch {
+        // a folder that can't be removed stays
+      }
     }
   }
 

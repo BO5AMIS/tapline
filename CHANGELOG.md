@@ -34,9 +34,10 @@ Tapwright, sha256 ef8e7b63) now states them.
   `~/.tapline/bugs/` and `~/.tapline/explore/`, as in 1.8.5. Any other id now gets `_`, a cleaned lowercase part and a
   hash of the id. Two ids that cleaned to the same name (`com.example/a`, `com.example_a`), or that differ only in case
   (`com.example.Demo`, `com.example.demo`, one folder on Windows and macOS), no longer share one.
-  - Bugs and explore runs that 1.8.5 kept for an id with capitals or other characters stay in the old folder, and 1.8.6
-    doesn't find them. To keep them, move the old folder's contents into the new one (`tapline bug list` shows the
-    bugs 1.8.6 finds; the new folder's name is in the `Folder:` line of a bug made with 1.8.6).
+  - Bugs and explore runs that 1.8.5 kept for such an id move into their app's folder when the host starts: each bug
+    (with its zip) by the app its own `finding.json` names, and each run by the app its own `report.json` names, so a
+    1.8.5 folder that held two ids' bugs is split between them. Nothing moves over a bug or run already there; one that
+    can't be read or moved stays where it was, and isn't listed from the wrong folder.
 - **Shared spec.** `docs/AGENT-TOOLS.md` is 1.16.2.
 - **Known limits.** The reload fix and the dry-run-first order have run in tests only; the joint check on the phone ran
   with the 12 s limit and passed.

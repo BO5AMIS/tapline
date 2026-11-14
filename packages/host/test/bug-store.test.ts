@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -271,6 +271,49 @@ describe("the folder (§29.2)", () => {
     const later = new BugStore(store.base, 1);
     later.pruneAll();
     expect(later.list(app).map((row) => row.id)).toEqual([ids[2]]);
+  });
+
+  it("at start, bugs 1.8.5 kept under another folder name move into their own app's folder, bug by bug, with their zips", () => {
+    const base = tmp();
+    const maker = new BugStore(base);
+    const demo = makeBug(context(maker), args(crash({ app: "com.example.Demo" })));
+    const slash = makeBug(context(maker), args(crash({ app: "com.example/a", kind: "slow", got: "3.5 s to settle" })));
+    const plain = makeBug(context(maker), args(crash({ app: "com.example_a", got: "the app crashed: Error: other", crash: { reason: "Error: other", frames: ["*B.tsx:2 g"] } })));
+    // As 1.8.5 kept them: "com.example.Demo" in a folder of that name, and both "com.example/a" and "com.example_a" in "com.example_a"
+    const legacy = (app: string, id: string, folder: string): void => {
+      mkdirSync(join(base, folder), { recursive: true });
+      renameSync(maker.bugDir(app, id), join(base, folder, id));
+    };
+    legacy("com.example.Demo", demo.meta.id, "com.example.Demo");
+    writeFileSync(join(base, "com.example.Demo", `${demo.meta.id}.zip`), "zip");
+    legacy("com.example/a", slash.meta.id, "com.example_a");
+    const before = new BugStore(base);
+    expect(before.list().map((row) => row.app).sort()).toEqual(["com.example_a"]);
+    before.migrateFolders();
+    const after = new BugStore(base);
+    expect(after.list().map((row) => [row.app, row.id]).sort()).toEqual(
+      [["com.example.Demo", demo.meta.id], ["com.example/a", slash.meta.id], ["com.example_a", plain.meta.id]].sort(),
+    );
+    expect(existsSync(join(after.appDir("com.example.Demo"), `${demo.meta.id}.zip`))).toBe(true);
+    expect(existsSync(join(base, "com.example.Demo"))).toBe(false);
+    expect(readdirSync(after.appDir("com.example_a"))).toEqual([plain.meta.id]);
+    // again: nothing moves, nothing is lost
+    after.migrateFolders();
+    expect(after.list()).toHaveLength(3);
+  });
+
+  it("a finding whose picture isn't null or {file, private} is unreadable (PR 15 CodeRabbit)", () => {
+    const store = new BugStore(tmp());
+    const made = makeBug(context(store), args(crash()));
+    const file = join(store.bugDir("com.example.wayfare", made.meta.id), "finding.json");
+    const record = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    for (const picture of [undefined, "x", { file: "picture.jpg" }, { private: true }]) {
+      const copy = { ...record };
+      if (picture === undefined) delete copy["picture"];
+      else copy["picture"] = picture;
+      writeFileSync(file, JSON.stringify(copy));
+      expect(store.read("com.example.wayfare", made.meta.id)).toBeNull();
+    }
   });
 
   it("a malformed record is unreadable, never a throw: read, list, lookup and pruneAll go on (PR 15 Codex cycle 4)", () => {
