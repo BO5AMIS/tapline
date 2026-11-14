@@ -601,6 +601,25 @@ function formIndexOf(bases: ReadonlyMap<string, string>): FormIndex {
   return { heads, shorts };
 }
 
+/** How many characters a fragment of an encoded form reads as once decoded (`https%253A%252F%252Fp` is `https://p`: 9). */
+function decodedLength(fragment: string): number {
+  const views = viewsOf(fragment);
+  return [...(views[views.length - 1] as View).text].length;
+}
+
+/**
+ * Whether a prefix of an encoded form, which carries fewer than 12 decoded characters, is a text really cut there: it ends the text,
+ * a cut marker (`…`, `...`, `…(+N)`) follows, or what follows is not a character that could carry the value on (a delimiter such as
+ * `]`, a space or a quote that the form itself never holds). A letter, a digit or one of the form's own characters that differs from the
+ * form's next one says the text goes on as something else: not a truncation.
+ */
+function reallyCut(text: string, end: number, form: string): boolean {
+  if (end >= text.length) return true;
+  const next = text[end] as string;
+  if (next === "\u2026" || text.startsWith("...", end)) return true;
+  return !/[A-Za-z0-9]/.test(next) && !form.includes(next);
+}
+
 /**
  * Every place the text holds an encoded form of a value, or a prefix of 12 or more characters of one. The text is searched as it
  * stands and in each decoded view, so a form that decoding would damage is found at the stage where it still reads literally.
@@ -621,6 +640,8 @@ function formSpans(views: readonly View[], index: FormIndex, out: Span[]): void 
       for (const { form, token } of list) {
         let len = PREFIX_MIN;
         while (len < form.length && i + len < text.length && text.charCodeAt(i + len) === form.charCodeAt(len)) len++;
+        // 12 encoded characters can hold far fewer decoded ones: such a prefix is a match only where the text is really cut.
+        if (len < form.length && decodedLength(text.slice(i, i + len)) < PREFIX_MIN && !reallyCut(text, i + len, form)) continue;
         out.push({ start: view.start[i] as number, end: view.end[i + len - 1] as number, token });
       }
     }
