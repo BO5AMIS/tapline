@@ -258,11 +258,6 @@ interface View {
   end: number[];
 }
 
-interface Step {
-  out: string;
-  used: number;
-}
-
 function plainView(text: string): View {
   const start: number[] = [];
   const end: number[] = [];
@@ -273,34 +268,16 @@ function plainView(text: string): View {
   return { text, start, end };
 }
 
-/** Rewrites a view: `step(text, i)` says what replaces the units from `i` and how many it covers, or null to keep the unit. */
-function transform(view: View, step: (text: string, i: number) => Step | null): View {
-  let text = "";
-  const start: number[] = [];
-  const end: number[] = [];
-  let i = 0;
-  while (i < view.text.length) {
-    const hit = step(view.text, i);
-    if (hit === null || hit.used <= 0) {
-      text += view.text[i] as string;
-      start.push(view.start[i] as number);
-      end.push(view.end[i] as number);
-      i += 1;
-      continue;
-    }
-    const from = view.start[i] as number;
-    const to = view.end[i + hit.used - 1] as number;
-    for (let k = 0; k < hit.out.length; k++) {
-      start.push(from);
-      end.push(to);
-    }
-    text += hit.out;
-    i += hit.used;
-  }
-  return { text, start, end };
+const HEX2 = /^[0-9a-fA-F]{2}$/;
+
+function isHexCode(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
 }
 
-const HEX2 = /^[0-9a-fA-F]{2}$/;
+/** The direction marks and zero-width characters of INVISIBLE_CLASS, by code. */
+function isInvisibleCode(code: number): boolean {
+  return code === 0x200e || code === 0x200f || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069) || (code >= 0x200b && code <= 0x200d) || code === 0x2060 || code === 0xfeff;
+}
 
 /** How many bytes the UTF-8 sequence opened by `lead` has (1 for a byte that opens none). */
 function sequenceLength(lead: number): number {
@@ -311,103 +288,160 @@ function sequenceLength(lead: number): number {
   return 1;
 }
 
-/** Percent-decoding: a run of %XX bytes becomes its UTF-8 characters; a sequence that doesn't finish stays escaped. */
-function percentStep(text: string, i: number): Step | null {
-  if (text[i] !== "%") return null;
-  const bytes: number[] = [];
-  let j = i;
-  while (text[j] === "%" && HEX2.test(text.slice(j + 1, j + 3))) {
-    bytes.push(parseInt(text.slice(j + 1, j + 3), 16));
-    j += 3;
-  }
-  let out = "";
-  let taken = 0;
-  while (taken < bytes.length) {
-    const need = sequenceLength(bytes[taken] as number);
-    if (taken + need > bytes.length) break;
-    const piece = Buffer.from(bytes.slice(taken, taken + need)).toString("utf8");
-    if (piece.includes("�")) break;
-    out += piece;
-    taken += need;
-  }
-  return taken === 0 ? null : { out, used: taken * 3 };
-}
-
 const SIMPLE_ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", "\\": "\\", '"': '"', "/": "/", "'": "'" };
+const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", sol: "/", bsol: "\\", num: "#", percnt: "%", plus: "+", equals: "=" };
+const ENTITY = /^&(?:#([0-9]+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));/;
 
-/** JSON string escapes: `\uXXXX` (either case), `\n`, `\\`, `\"` and the rest. */
-function jsonStep(text: string, i: number): Step | null {
-  if (text[i] !== "\\") return null;
-  const next = text[i + 1];
-  if (next === undefined) return null;
-  if (next === "u" && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) return { out: String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16)), used: 6 };
-  const hit = SIMPLE_ESCAPES[next];
-  return hit === undefined ? null : { out: hit, used: 2 };
-}
-
-const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", sol: "/", bsol: "\\", num: "#", percnt: "%", plus: "+", equals: "=" };
-
-/** HTML entities: numeric (decimal or hex, any padding) and the common named ones. */
-function entityStep(text: string, i: number): Step | null {
-  if (text[i] !== "&") return null;
-  const m = /^&(?:#([0-9]+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));/.exec(text.slice(i, i + 16));
-  if (m === null) return null;
-  let out: string | undefined;
-  if (m[1] !== undefined || m[2] !== undefined) {
-    const cp = m[1] !== undefined ? parseInt(m[1], 10) : parseInt(m[2] as string, 16);
-    out = cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : undefined;
-  } else out = NAMED_ENTITIES[(m[3] as string).toLowerCase()];
-  return out === undefined ? null : { out, used: m[0].length };
-}
-
-const plusStep = (text: string, i: number): Step | null => (text[i] === "+" ? { out: " ", used: 1 } : null);
-
-const STEPS = [percentStep, jsonStep, entityStep, plusStep];
-const MAX_VIEWS = 48;
-
-/** The text and each of its decodings (up to three layers, in any order), so an escape of any kind reads as the characters it stands for. */
-function viewsOf(text: string): View[] {
-  const first = plainView(text);
-  const seen = new Set<string>([first.text]);
-  const all: View[] = [first];
-  let layer: View[] = [first];
-  for (let depth = 0; depth < 3; depth++) {
-    const next: View[] = [];
-    for (const view of layer) {
-      for (const step of STEPS) {
-        if (all.length >= MAX_VIEWS) return all;
-        const moved = transform(view, step);
-        if (seen.has(moved.text)) continue;
-        seen.add(moved.text);
-        all.push(moved);
-        next.push(moved);
-      }
+/**
+ * One pass over a view that decodes every escape in it at once, each in a single left-to-right sweep (so the work is linear):
+ * a percent run (`%XX` bytes as UTF-8, a byte that is no sequence of its own stays escaped), JSON escapes (`\uXXXX` either hex
+ * case, `\n`, `\\`, `\"` ...), HTML entities (numeric of any padding, and the common named ones) and invisible characters (dropped).
+ * Every decoded character keeps the span of the bytes it was written with, and only those. `+` is not touched: it can be a form
+ * space or a plus, and the matcher accepts either. Null when nothing changed.
+ */
+function decodePass(view: View): View | null {
+  const src = view.text;
+  const n = src.length;
+  const parts: string[] = [];
+  const start: number[] = [];
+  const end: number[] = [];
+  let changed = false;
+  const put = (piece: string, from: number, to: number): void => {
+    parts.push(piece);
+    for (let k = 0; k < piece.length; k++) {
+      start.push(from);
+      end.push(to);
     }
-    layer = next;
+  };
+  let i = 0;
+  while (i < n) {
+    const code = src.charCodeAt(i);
+    if (isInvisibleCode(code)) {
+      changed = true;
+      i += 1;
+    } else if (code === 37) {
+      // a run of %XX is read once, whole: a byte that decodes to nothing is kept and the sweep goes on past it
+      let j = i;
+      const bytes: number[] = [];
+      while (src.charCodeAt(j) === 37 && isHexCode(src.charCodeAt(j + 1)) && isHexCode(src.charCodeAt(j + 2))) {
+        bytes.push(parseInt(src.slice(j + 1, j + 3), 16));
+        j += 3;
+      }
+      if (bytes.length === 0) {
+        put("%", view.start[i] as number, view.end[i] as number);
+        i += 1;
+        continue;
+      }
+      let b = 0;
+      while (b < bytes.length) {
+        const at = i + b * 3;
+        const lead = bytes[b] as number;
+        const need = sequenceLength(lead);
+        let piece: string | null = null;
+        if (need === 1 && lead < 0x80) piece = String.fromCharCode(lead);
+        else if (need > 1 && b + need <= bytes.length) {
+          const decoded = Buffer.from(bytes.slice(b, b + need)).toString("utf8");
+          if (!decoded.includes("�")) piece = decoded;
+        }
+        if (piece === null) {
+          for (let k = 0; k < 3; k++) put(src[at + k] as string, view.start[at + k] as number, view.end[at + k] as number);
+          b += 1;
+        } else {
+          put(piece, view.start[at] as number, view.end[at + need * 3 - 1] as number);
+          changed = true;
+          b += need;
+        }
+      }
+      i = j;
+    } else if (code === 92) {
+      const next = src[i + 1];
+      let piece: string | null = null;
+      let used = 0;
+      if (next === "u" && i + 6 <= n && isHexCode(src.charCodeAt(i + 2)) && isHexCode(src.charCodeAt(i + 3)) && isHexCode(src.charCodeAt(i + 4)) && isHexCode(src.charCodeAt(i + 5))) {
+        piece = String.fromCharCode(parseInt(src.slice(i + 2, i + 6), 16));
+        used = 6;
+      } else if (next !== undefined && Object.prototype.hasOwnProperty.call(SIMPLE_ESCAPES, next)) {
+        piece = SIMPLE_ESCAPES[next] as string;
+        used = 2;
+      }
+      if (piece === null) {
+        put("\\", view.start[i] as number, view.end[i] as number);
+        i += 1;
+      } else {
+        put(piece, view.start[i] as number, view.end[i + used - 1] as number);
+        changed = true;
+        i += used;
+      }
+    } else if (code === 38) {
+      const m = ENTITY.exec(src.slice(i, i + 16));
+      let piece: string | undefined;
+      if (m !== null) {
+        if (m[1] !== undefined || m[2] !== undefined) {
+          const cp = m[1] !== undefined ? parseInt(m[1], 10) : parseInt(m[2] as string, 16);
+          piece = cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : undefined;
+        } else {
+          const name = (m[3] as string).toLowerCase();
+          piece = Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : undefined;
+        }
+      }
+      if (m === null || piece === undefined) {
+        put("&", view.start[i] as number, view.end[i] as number);
+        i += 1;
+      } else {
+        put(piece, view.start[i] as number, view.end[i + m[0].length - 1] as number);
+        changed = true;
+        i += m[0].length;
+      }
+    } else {
+      parts.push(src[i] as string);
+      start.push(view.start[i] as number);
+      end.push(view.end[i] as number);
+      i += 1;
+    }
   }
-  return all;
+  return changed ? { text: parts.join(""), start, end } : null;
+}
+
+/** How many decoding passes at most: each layer of encoding takes one, and a text with more is not one a person wrote. */
+const MAX_LAYERS = 8;
+const ESCAPE_HINT = new RegExp(`[%\\\\&${INVISIBLE_CLASS}]`);
+
+/**
+ * The text and what it decodes to, pass after pass, until nothing more decodes (at most MAX_LAYERS passes, each linear in the
+ * text). Every layer in any nesting order (HTML, JSON, percent) is undone by the passes together; the stages are all kept, so
+ * a text that was only partly encoded is read as it stands at each stage too.
+ */
+function viewsOf(text: string): View[] {
+  const views: View[] = [plainView(text)];
+  if (!ESCAPE_HINT.test(text)) return views;
+  for (let layer = 0; layer < MAX_LAYERS; layer++) {
+    const next = decodePass(views[views.length - 1] as View);
+    if (next === null || next.text === (views[views.length - 1] as View).text) break;
+    views.push(next);
+  }
+  return views;
 }
 
 /** The view without invisible characters, each whitespace run as one space. */
 function normalizedView(view: View): View {
-  let text = "";
+  const parts: string[] = [];
   const start: number[] = [];
   const end: number[] = [];
   let inSpace = false;
   for (let i = 0; i < view.text.length; i++) {
     const c = view.text[i] as string;
-    if (INVISIBLE_ANY.test(c)) continue;
+    if (isInvisibleCode(view.text.charCodeAt(i))) continue;
     const space = /\s/.test(c);
     if (space && inSpace) {
       end[end.length - 1] = view.end[i] as number;
       continue;
     }
     inSpace = space;
-    text += space ? " " : c;
+    parts.push(space ? " " : c);
     start.push(view.start[i] as number);
     end.push(view.end[i] as number);
   }
-  return { text, start, end };
+  return { text: parts.join(""), start, end };
 }
 
 /** How much of a half-written escape (a cut in the middle of `%C3%A`, `\u00`, `&#x`) follows `at`: it belongs to the fragment. */
@@ -439,19 +473,38 @@ interface Span {
   token: string;
 }
 
-/** Every place the text holds a prefix of 12 or more characters of `base` in any encoding: its first 12 and as many more as the text goes on to match. */
-function prefixSpans(text: string, views: readonly View[], base: string, token: string, out: Span[]): void {
+/** A value as the decoded views search for it: its first 12 characters (all of it when shorter), a space also matching a form plus. */
+interface Probe {
+  base: string;
+  token: string;
+  head: RegExp;
+}
+
+function probeOf(base: string, token: string): Probe {
   const head = base.slice(0, PREFIX_MIN);
-  for (const raw of views) {
-    if (raw.text.length < PREFIX_MIN) continue;
-    const view = normalizedView(raw);
-    let from = view.text.indexOf(head);
-    while (from !== -1) {
-      let len = PREFIX_MIN;
-      while (len < base.length && view.text[from + len] === base[len]) len++;
-      const end = view.end[from + len - 1] as number;
-      out.push({ start: view.start[from] as number, end: end + dangling(text, end), token });
-      from = view.text.indexOf(head, from + 1);
+  return { base, token, head: new RegExp([...head].map((c) => (c === " " ? "[ +]" : escapeRegExp(c))).join(""), "g") };
+}
+
+const sameChar = (seen: string | undefined, wanted: string | undefined): boolean => seen === wanted || (wanted === " " && seen === "+");
+
+/**
+ * Every place a decoded view holds a value (all of it, when it is shorter than 12 characters) or a prefix of 12 or more of its
+ * characters: the first 12 and as many more as the text goes on to match. The span is the original text of those characters.
+ */
+function probeSpans(views: readonly View[], probe: Probe, out: Span[]): void {
+  const { base, head, token } = probe;
+  const need = Math.min(PREFIX_MIN, base.length);
+  for (const view of views) {
+    if (view.text.length < need) continue;
+    head.lastIndex = 0;
+    for (let m = head.exec(view.text); m !== null; m = head.exec(view.text)) {
+      const from = m.index;
+      head.lastIndex = from + 1;
+      let len = need;
+      while (len < base.length && sameChar(view.text[from + len], base[len])) len++;
+      const last = from + len - 1;
+      const extra = dangling(view.text, last + 1);
+      out.push({ start: view.start[from] as number, end: view.end[last + extra] as number, token });
     }
   }
 }
@@ -476,14 +529,14 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
       };
       if (value.length <= 500) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(fuzzySource(base));
       if (value.length <= 2000) for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) addPattern(escapedSource(base));
-      // What an app's cut leaves of a value: a prefix of 12 or more characters, in any of the encodings.
-      if (collapsed.length >= PREFIX_MIN && !bases.has(collapsed)) bases.set(collapsed, token);
+      // The value whole, and what an app's cut leaves of it (a prefix of 12 or more characters), in every layer of encoding.
+      if (collapsed.length >= MIN_SCRUB && !bases.has(collapsed)) bases.set(collapsed, token);
     }
   }
   const regexes = [...patterns].map(([source, token]) => ({ re: new RegExp(`(?=(${source}))`, "g"), token }));
   const forms = [...literals];
-  const prefixes = [...bases];
-  if (forms.length === 0 && regexes.length === 0 && prefixes.length === 0) return (text) => text;
+  const probes = [...bases].map(([base, token]) => probeOf(base, token));
+  if (forms.length === 0 && regexes.length === 0 && probes.length === 0) return (text) => text;
   return (text) => {
     if (text.length < MIN_SCRUB) return text;
     const spans: Span[] = [];
@@ -501,9 +554,9 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
         if (got > 0) spans.push({ start: m.index, end: m.index + got, token });
       }
     }
-    if (prefixes.length > 0 && text.length >= PREFIX_MIN) {
-      const views = viewsOf(text);
-      for (const [base, token] of prefixes) prefixSpans(text, views, base, token, spans);
+    if (probes.length > 0) {
+      const views = viewsOf(text).map(normalizedView);
+      for (const probe of probes) probeSpans(views, probe, spans);
     }
     if (spans.length === 0) return text;
     spans.sort((a, b) => a.start - b.start || b.end - a.end);
