@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -8,6 +8,7 @@ import { ControlQueue } from "../src/control.js";
 import { callTool } from "../src/dispatch.js";
 import { DONE, DONE_FIELD, Dialogs, type ElicitAnswer, type ElicitClient, type ElicitSchema } from "../src/elicit.js";
 import { createOtpService } from "../src/otpclient.js";
+import { MapRegistry } from "../src/places.js";
 import { substituteVariables } from "../src/routes.js";
 import type { TaplineHost } from "../src/server.js";
 import { TaplineTools, type ToolsOptions } from "../src/tools.js";
@@ -49,7 +50,14 @@ interface TypeRefusal {
   duringDry?: () => void;
   /** Runs while the real type is being answered (to send the app to the background, say). */
   duringReal?: () => void;
+  /** A dialog covers the field until its "Not now" button is pressed. */
+  dialog?: boolean;
 }
+
+const DIALOG = [
+  { ref: "e20", type: "Text", role: "text", text: "Rate this app", frame: { x: 24, y: 100, width: 354, height: 30 }, actions: [] },
+  { ref: "e21", type: "Pressable", role: "button", testID: "not-now", label: "Not now", text: "Not now", frame: { x: 24, y: 140, width: 354, height: 48 }, actions: ["press"] },
+];
 
 const CAPABILITIES = ["tree", "press", "type", "logs", "dryRun"];
 
@@ -70,9 +78,18 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
   const handler = (req: IncomingRequest): Reply => {
     switch (req.method) {
       case "tree":
-        return { ok: true, result: { screen: SCREEN, elements: [{ ...CODE_FIELD, value: showCode ? `last code ${FAKE_CODE}` : "" }] } };
+        return {
+          ok: true,
+          result: { screen: SCREEN, elements: [{ ...CODE_FIELD, value: showCode ? `last code ${FAKE_CODE}` : "" }, ...(refusal.dialog === true ? DIALOG : [])] },
+        };
+      case "press": {
+        const params = req.params as Record<string, unknown>;
+        if (params["dryRun"] !== true) refusal.dialog = false;
+        return { ok: true, result: { element: DIALOG[1], settledMs: 10 } };
+      }
       case "type": {
         const params = req.params as Record<string, unknown>;
+        if (refusal.dialog === true) return { ok: false, error: { code: "not_actionable", message: "covered: a dialog is over the field" } };
         (params["dryRun"] === true ? checked : typed).push(params);
         if (params["dryRun"] === true) refusal.duringDry?.();
         else refusal.duringReal?.();
@@ -404,6 +421,121 @@ describe("the code is asked for only after the host's own gates (PR T186C findin
     expect(textOf(answer)).toContain("not run again");
     expect(textOf(answer)).not.toContain(FAKE_CODE);
     expect(audit).toHaveLength(0);
+  });
+});
+
+describe("the checks are made again inside the queue turn, right before the fetch (PR 15 Codex cycle 2)", () => {
+  const text = `\${otp.${APP}}`;
+  const fetches = (daemon: FakeDaemon): number => daemon.requests.filter((r) => r.url === "/otp").length;
+  const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  /** Holds the agent queue, starts the call, and returns once its early dry run is done and the real type waits in the queue. */
+  async function queued(extra: { control: ControlQueue }, refusal: TypeRefusal = {}) {
+    const s = await setup({}, true, refusal, CAPABILITIES, extra);
+    let release: () => void = () => undefined;
+    const held = extra.control.runAgent(() => new Promise<void>((resolve) => (release = resolve)));
+    const call = s.tools.typeText({ target: { id: "code" }, text });
+    for (let i = 0; i < 200 && s.checked.length < 1; i++) await wait(5);
+    await wait(30);
+    expect(s.checked.length).toBeGreaterThan(0);
+    const finish = async (): Promise<CallToolResult> => {
+      release();
+      await held;
+      return call;
+    };
+    return { ...s, finish };
+  }
+
+  it("paused while it waited: no code is asked for, nothing is typed", async () => {
+    const control = new ControlQueue();
+    const s = await queued({ control });
+    control.setPaused(true);
+    const answer = await s.finish();
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/paused/);
+    expect(fetches(s.daemon)).toBe(0);
+    expect(s.typed).toHaveLength(0);
+    expect(s.audit).toHaveLength(0);
+  });
+
+  it("another app selected while it waited: no code is asked for, nothing reaches the first app", async () => {
+    const control = new ControlQueue();
+    const s = await queued({ control });
+    const { app: other } = await FakeApp.connect(s.port, { capabilities: CAPABILITIES, app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } }, () => ({ ok: true, result: {} }));
+    apps.push(other);
+    const second = s.host.sessions().find((x) => x.app.id === "com.example.other");
+    if (second === undefined) throw new Error("the second app should be connected");
+    s.host.select(second.id);
+    const answer = await s.finish();
+    expect(answer.isError).toBe(true);
+    expect(fetches(s.daemon)).toBe(0);
+    expect(s.typed).toHaveLength(0);
+  });
+
+  it("the field got covered while it waited: the fresh dry run refuses, no code is asked for", async () => {
+    const control = new ControlQueue();
+    const refusal: TypeRefusal = {};
+    const s = await queued({ control }, refusal);
+    refusal.dry = { code: "not_actionable", message: "covered: a sheet is over the field" };
+    const answer = await s.finish();
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toContain("covered");
+    expect(fetches(s.daemon)).toBe(0);
+    expect(s.typed).toHaveLength(0);
+  });
+
+  it("paused while the fetch waits: the code is dropped, nothing is typed, no digits in the answer", async () => {
+    const control = new ControlQueue();
+    const s = await setup({}, true, {}, CAPABILITIES, { control });
+    afterFetch = async () => {
+      afterFetch = undefined;
+      control.setPaused(true);
+    };
+    const answer = await s.tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/paused/);
+    expect(fetches(s.daemon)).toBe(1);
+    expect(s.typed).toHaveLength(0);
+    expect(s.audit).toHaveLength(0);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+  });
+
+  it("a reflex that closes a dialog over the field gets its turn before the check is made again, then one fetch and one type", async () => {
+    const mapsDir = tmp();
+    mkdirSync(join(mapsDir, APP), { recursive: true });
+    const map = {
+      format: "agent-tools-map",
+      version: 1,
+      app: APP,
+      places: {},
+      roads: [],
+      routes: {},
+      reflexes: [{ name: "rate", when: { text: "Rate this app" }, do: { tool: "tap", target: { text: "Not now" } }, max: 2 }],
+    };
+    writeFileSync(join(mapsDir, APP, "map.json"), JSON.stringify(map));
+    const registry = new MapRegistry({ mapsDir });
+    const s = await setup({}, true, { dialog: true }, CAPABILITIES, { maps: registry });
+    const answer = await callTool(s.tools, "type_text", { target: { id: "code" }, text });
+    await registry.flushAll();
+    expect(textOf(answer)).not.toContain("Error");
+    expect(fetches(s.daemon)).toBe(1);
+    expect(s.typed).toHaveLength(1);
+    expect(textOf(answer)).not.toContain(FAKE_CODE);
+  });
+
+  it("the app went to the background as its first dry run was answered: no code is asked for", async () => {
+    const refusal: TypeRefusal = {};
+    const s = await setup({}, true, refusal);
+    refusal.duringDry = () => {
+      refusal.duringDry = undefined;
+      s.app()?.send({ type: "event", event: "appState", data: { state: "background" } });
+    };
+    const answer = await s.tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/in_background/);
+    expect(fetches(s.daemon)).toBe(0);
+    expect(s.typed).toHaveLength(0);
+    expect(s.audit).toHaveLength(0);
   });
 });
 

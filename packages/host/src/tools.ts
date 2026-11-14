@@ -1093,7 +1093,8 @@ interface OtpTyping {
 
 /** A one-time code to be typed (§20.4): fetched by `fetch` at the last moment, at most once per call; `asked` says it was. */
 interface OtpLate {
-  fetch: () => Promise<string>;
+  /** `given` is the request's params as they stand at the last moment: the checks are made again on them first. */
+  fetch: (given: Record<string, unknown>) => Promise<string>;
   asked: boolean;
 }
 
@@ -4798,7 +4799,10 @@ export class TaplineTools {
             if (otp === undefined) return await this.sendRequest(method, sent, options);
             return await this.sendWith(
               [method, sent, options],
-              async (given) => ({ ...(typeof given === "object" && given !== null ? given : {}), text: await otp.fetch() }),
+              async (given) => {
+                const base: Record<string, unknown> = typeof given === "object" && given !== null ? { ...given } : {};
+                return { ...base, text: await otp.fetch(base) };
+              },
             );
           } catch (error) {
             if (delivery !== undefined && notDelivered(error)) delivery.sent = false;
@@ -7347,12 +7351,37 @@ export class TaplineTools {
     const typing: OtpTyping = { value: "", source: undefined, sessionId: session.id };
     const late: OtpLate = {
       asked: false,
-      fetch: async (): Promise<string> => {
+      fetch: async (given): Promise<string> => {
         if (late.asked) throw new TaplineError("not_allowed", "a one-time code was already asked for in this call and is not asked for again.");
+        // The queue turn may have waited a long time since the checks before it: they are made again here, in the turn, and a refusal
+        // is the answer with no code asked for (§18.11). Paused, then a person's input, then the selected app, then the app's own dry run
+        // of these same params (which also refuses a lost connection or an app in the background as the send would).
+        const stillHolds = (): void => {
+          const control = this.options.control;
+          if (control?.paused() === true && this.exploreScope.getStore()?.restoring !== true) {
+            throw new TaplineError("paused", "The user paused the agent in the live viewer. Wait until they resume it.");
+          }
+          if (control?.personRecent() === true) throw new TaplineError("busy", "A person is using the app in the live viewer. Try again when they stop, or ask them.");
+          if (this.host.current()?.id !== session.id) {
+            throw new TaplineError("not_connected", "the app changed while the step waited its turn; no one-time code was asked for, and nothing was typed.");
+          }
+          // The same refusals the send would give: the app's link is gone, or iOS paused the app.
+          const live = this.host.sessions().find((s) => s.id === session.id);
+          if (live === undefined) throw new TaplineError("not_connected", `No connected session "${session.id}"; no one-time code is typed.`);
+          if (live.appState?.state === "background") {
+            throw new TaplineError("in_background", `${live.app.name} is in the background (the user switched apps or locked the phone, so iOS paused it). Ask the user to open the app again; it carries on by itself.`);
+          }
+        };
+        stillHolds();
+        await this.sendRequest("type", { ...given, text: "", dryRun: true }, { sessionId: session.id });
+        stillHolds();
         late.asked = true;
         if (call !== undefined) call.asked = true;
         const got: OtpFetch = await this.otp.fetch(app);
         if (!got.ok) throw new TaplineError(got.reason === "none" ? "not_found" : "unsupported", got.message);
+        // The fetch took time: a pause, a person's input, another app or the background since is a refusal now, and the code is dropped
+        // (the caller marks the call dropped: asked and not typed).
+        stillHolds();
         typing.source = got.source;
         return got.code;
       },
@@ -7363,7 +7392,16 @@ export class TaplineTools {
     if (!session.capabilities.includes("dryRun")) {
       return Promise.resolve(fail(`Error unsupported: this version of the app's Tapline SDK can't check a step before it runs, so no one-time code is asked for it (a code is asked for only after the step's checks pass). Update react-native-tapline in the app.`));
     }
-    return this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id }).then((checked) => {
+    const precheck = (): Promise<CallToolResult> => this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id });
+    // A failure a reflex can close (a dialog over the field) gets the recovery the real type would have had: the reflex runs, and the
+    // precheck is made once more. A code is asked for only after a precheck passes.
+    const checking = precheck().then(async (first) => {
+      if (first.isError !== true) return first;
+      const failure = parseError(answerText(first));
+      if (failure === null || !isReflexFailure(failure.code, failure.message)) return first;
+      return (await this.checkReflexes(session)) > 0 ? precheck() : first;
+    });
+    return checking.then((checked) => {
       if (checked.isError === true) return checked;
       // Another app selected while the step was checked: its code would be fetched for a type that can't happen.
       if (this.host.current()?.id !== session.id) return fail("Error not_connected: the app changed while the step was checked; no one-time code was asked for, and nothing was typed.");

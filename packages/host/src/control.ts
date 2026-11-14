@@ -55,6 +55,11 @@ export class ControlQueue {
     return this.isPaused;
   }
 
+  /** True while a person's input is recent (they go first): an agent action already in its turn checks this again before a step it can't take back. */
+  personRecent(): boolean {
+    return this.now() - this.lastPersonAt < this.idleMs;
+  }
+
   /** The time agent actions have waited for a person so far (it only grows). */
   waitedMs(): number {
     return this.waitedTotal;
