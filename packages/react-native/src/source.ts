@@ -1,6 +1,16 @@
 import { isCompositeTag, propsOf, type Fiber } from './fiber';
 import { isRecord } from './types';
 
+/** The most of a string prop sent to the host, which redacts first and cuts for display (AGENT-TOOLS §20.3). */
+const MAX_PROP_CHARS = 2000;
+
+/** The first `max` UTF-16 units, one fewer when that would cut an emoji in half. */
+function wholeSlice(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
 /**
  * Source locations (Tapline 1.1, development builds): which component draws an element and which line of
  * the app's code wrote it. React 19 keeps, on every fiber, the stack captured where its JSX element was
@@ -166,7 +176,8 @@ function shortProps(fiber: Fiber): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(propsOf(fiber))) {
     if (key === 'children' || key === 'style' || Object.keys(out).length >= 8) continue;
-    if (typeof value === 'string') out[key] = JSON.stringify(value.length > 40 ? `${value.slice(0, 40)}…` : value);
+    // Uncut (up to the usual cap): the host redacts vault values first and cuts for display afterwards (AGENT-TOOLS §20.3).
+    if (typeof value === 'string') out[key] = JSON.stringify(wholeSlice(value, MAX_PROP_CHARS));
     else if (typeof value === 'number' || typeof value === 'boolean') out[key] = String(value);
     else if (typeof value === 'function') out[key] = `${(value as { name?: string }).name || 'function'}()`;
   }

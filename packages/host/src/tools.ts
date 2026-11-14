@@ -3148,7 +3148,7 @@ export class TaplineTools {
     }
     const parsed = inspectResultSchema.safeParse(raw);
     if (!parsed.success) return fail("Error internal: the app returned an inspect answer the host could not read.");
-    return text(formatInspect(parsed.data));
+    return text(formatInspect(parsed.data, undefined, (t) => this.scrubSecrets(t)));
   }
 
   // -- audit (AGENT-TOOLS 1.8 §10)

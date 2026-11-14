@@ -450,6 +450,16 @@ function gateForms(value: string): string[] {
     forms.push(encodeURIComponent(base), encodeURIComponent(base).replace(/%20/g, "+"), new URLSearchParams({ k: base }).toString().slice(2));
     forms.push(JSON.stringify(JSON.stringify(base)).slice(1, -1), encodeURIComponent(JSON.stringify(base).slice(1, -1)));
   }
+  // PR 12 round 2: equivalent escapes, in either case of hex, for every character (ASCII letters too) and for the non-ASCII only.
+  for (const base of [value, collapsed]) {
+    const units = [...base].map((c) => c.charCodeAt(0));
+    const unicode = (upper: boolean, all: boolean): string =>
+      [...base].map((c) => (all || c.charCodeAt(0) > 127 ? `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")[upper ? "toUpperCase" : "toLowerCase"]()}` : c)).join("");
+    forms.push(unicode(false, true), unicode(true, true), unicode(false, false), unicode(true, false));
+    const bytes = [...Buffer.from(base, "utf8")];
+    forms.push(bytes.map((b) => `%${b.toString(16).padStart(2, "0")}`).join(""), bytes.map((b) => `%${b.toString(16).padStart(2, "0").toUpperCase()}`).join(""));
+    forms.push(units.map((u) => `&#${u};`).join(""), units.map((u) => `&#x${u.toString(16)};`).join(""), units.map((u) => `&#x${u.toString(16).toUpperCase()};`).join(""));
+  }
   return [...new Set(forms)];
 }
 

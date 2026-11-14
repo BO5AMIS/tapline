@@ -15,9 +15,14 @@ import { openProtected, peekFile, plainWarning, realVaultDeps, VaultOpenError, t
 const ACCOUNT_NAME = /^[\w.-]{1,60}$/;
 const ENTRY_NAME = /^[A-Za-z0-9_]{1,60}$/;
 
-// A shorter secret would be scrubbed out of unrelated text. The message quotes no value.
-const SHORT = "must be at least 3 characters, so scrubbing it can't garble other text";
-/** A value shorter than this is held and typed, but not scrubbed: a country code such as `QA` would garble every answer. */
+// Fail closed: a secret field (password, username, card number, expiry, cvc, a note's text, an identity's phone, email and
+// birthday) shorter than 3 characters is refused at load, because a value that short is not scrubbed. The message quotes no value.
+const SHORT = "must be at least 3 characters, because a shorter secret can't be scrubbed from answers without garbling other text";
+/**
+ * A value shorter than this is held and typed, but not scrubbed: a country code such as `QA` would garble every answer. Only
+ * non-secret fields (an address's street, city, postcode and country, an identity's name) may be that short; every secret
+ * field is refused below this length at load.
+ */
 const MIN_SCRUB = 3;
 
 // -- kinds and fields (§20.1)
@@ -41,10 +46,10 @@ const apps = z.array(z.string().min(1)).optional();
 
 const entrySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("account"), username: secret.optional(), password: secret.optional(), apps }),
-  z.object({ kind: z.literal("card"), number: secret.optional(), expiry: plain.optional(), cvc: secret.optional(), apps }),
+  z.object({ kind: z.literal("card"), number: secret.optional(), expiry: secret.optional(), cvc: secret.optional(), apps }),
   z.object({ kind: z.literal("address"), street: plain.optional(), city: plain.optional(), postcode: plain.optional(), country: plain.optional(), apps }),
-  z.object({ kind: z.literal("identity"), name: plain.optional(), phone: plain.optional(), email: plain.optional(), birthday: plain.optional(), apps }),
-  z.object({ kind: z.literal("note"), text: plain.optional(), apps }),
+  z.object({ kind: z.literal("identity"), name: plain.optional(), phone: secret.optional(), email: secret.optional(), birthday: secret.optional(), apps }),
+  z.object({ kind: z.literal("note"), text: secret.optional(), apps }),
   z.object({ kind: z.literal("phone"), passcode: plain.optional(), apps }),
 ]);
 
@@ -209,6 +214,54 @@ function fuzzySource(value: string): string {
   return parts.join(gap);
 }
 
+/** A hex number as a pattern that takes either case of its letters (`e9` matches `E9`). */
+function hexSource(digits: string): string {
+  return [...digits].map((d) => (/[a-f]/i.test(d) ? `[${d.toLowerCase()}${d.toUpperCase()}]` : d)).join("");
+}
+
+/** What a run of whitespace can come back as: itself, a percent or plus sign, a numeric entity, or a JSON escape. */
+const SPACE_SOURCE = `(?:[\\s${INVISIBLE_CLASS}]|%(?:09|0[aA]|0[dD]|20)|\\+|&#0*(?:9|10|13|32);|&#[xX]0*(?:9|a|A|d|D|20);|\\\\{1,2}(?:[nrt]|u00(?:0[9aAdD]|20)))+`;
+
+/** Every way one character can be written: raw, JSON `\uXXXX` (either case, once or twice escaped), percent-encoded, an HTML numeric entity. */
+function charSource(ch: string): string {
+  const cp = ch.codePointAt(0) ?? 0;
+  const alts = [escapeRegExp(ch)];
+  const units = [...ch].flatMap((c) => {
+    const out: string[] = [];
+    for (let i = 0; i < c.length; i++) out.push(c.charCodeAt(i).toString(16).padStart(4, "0"));
+    return out;
+  });
+  alts.push(units.map((u) => `\\\\{1,2}u${hexSource(u)}`).join(""));
+  alts.push([...Buffer.from(ch, "utf8")].map((b) => `%${hexSource(b.toString(16).padStart(2, "0"))}`).join(""));
+  alts.push(`&#0*${cp};`, `&#[xX]0*${hexSource(cp.toString(16))};`);
+  return `(?:${alts.join("|")})`;
+}
+
+/** The value in any of its escape forms, character by character, with invisible characters allowed between (§20.3). */
+function escapedSource(value: string): string {
+  const gap = `[${INVISIBLE_CLASS}]*`;
+  const parts: string[] = [];
+  for (const piece of value.split(/(\s+)/)) {
+    if (piece === "") continue;
+    parts.push(/^\s+$/.test(piece) ? SPACE_SOURCE : [...piece].map(charSource).join(gap));
+  }
+  return parts.join(gap);
+}
+
+/** The shortest prefix of a value that is scrubbed alone: what an app's cut leaves of it (§20.3, a fragment of 12 or more). */
+const PREFIX_MIN = 12;
+/** The longest prefix chain, the app's own cap on kept text. */
+const PREFIX_MAX = 2000;
+
+/** The first 12 characters of a value and as many of the following ones as the text goes on to match (a cut leaves a prefix). */
+function prefixSource(base: string): string | null {
+  const chars = [...base].slice(0, PREFIX_MAX);
+  if (chars.length <= PREFIX_MIN) return null;
+  let tail = "";
+  for (let i = chars.length - 1; i >= PREFIX_MIN; i--) tail = `(?:${escapeRegExp(chars[i] as string)}${tail})?`;
+  return `${chars.slice(0, PREFIX_MIN).map((c) => escapeRegExp(c)).join("")}${tail}`;
+}
+
 interface Rule {
   source: string;
   weight: number;
@@ -234,6 +287,18 @@ function scrubber(entries: Record<string, VaultEntry>, tokenOf: (name: string, f
       if (value.length <= 500) {
         const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
         for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) add(fuzzySource(base), base.length + 0.5, token);
+      }
+      if (value.length <= 2000) {
+        const collapsed = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
+        for (const base of new Set([value, collapsed])) if (base.length >= MIN_SCRUB) add(escapedSource(base), base.length + 0.6, token);
+      }
+      // What an app's cut leaves of a long value: a prefix of 12 or more characters, raw or JSON-escaped.
+      const collapsedAll = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
+      for (const base of new Set([value, collapsedAll])) {
+        for (const form of new Set([base, JSON.stringify(base).slice(1, -1)])) {
+          const source = prefixSource(form);
+          if (source !== null) add(source, PREFIX_MIN, token);
+        }
       }
     }
   }

@@ -311,12 +311,12 @@ export function currentRoute(routes: RouteFound[]): RouteFound | null {
   return best;
 }
 
-/** Route params that read well in a line: top-level strings (cut to 80), numbers, booleans, null. */
+/** Route params that read well in a line: top-level strings (whole: the host redacts, then cuts for display), numbers, booleans, null. */
 function simpleParams(params: unknown): Record<string, string | number | boolean | null> | undefined {
   if (!isRecord(params)) return undefined;
   const out: Record<string, string | number | boolean | null> = {};
   for (const [key, value] of Object.entries(params)) {
-    if (typeof value === 'string') out[key] = value.length > 80 ? `${value.slice(0, 80)}…` : value;
+    if (typeof value === 'string') out[key] = value.length > MAX_KEPT_TEXT ? sliceWhole(value, MAX_KEPT_TEXT) : value;
     else if (typeof value === 'number' || typeof value === 'boolean' || value === null) out[key] = value;
   }
   return Object.keys(out).length > 0 ? out : undefined;

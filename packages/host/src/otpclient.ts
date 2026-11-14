@@ -26,7 +26,8 @@ const PROOF_LABEL = "tapwright-proof-v2";
 export const OTP_PLACEHOLDER = "<one-time code>";
 const MAX_RESPONSE = 64 * 1024;
 /** How many codes the redaction keeps for the session. */
-const KEEP_CODES = 20;
+/** A session never forgets a code; past this many distinct codes a new one is refused rather than an old one dropped. */
+const MAX_CODES = 1000;
 
 /** `${otp.<app>}` as the whole text of a step: the app's id (reverse-domain names, so letters, digits, '.', '_' and '-'). */
 const OTP_WHOLE = /^\$\{otp\.([A-Za-z0-9._-]+)\}$/;
@@ -321,16 +322,27 @@ export async function fetchOtp(app: string, deps: OtpDeps = {}): Promise<OtpFetc
 /** The codes this session typed. Each one is scrubbed from everything shown or kept, for the rest of the session (§20.3). */
 export class OtpCodes {
   private codes: string[] = [];
-  private scrub: (text: string) => string = (text) => text;
+  /** Built on first use after a code is added, so a burst of codes compiles once. */
+  private scrub: ((text: string) => string) | null = null;
 
-  register(code: string): void {
-    if (this.codes.includes(code)) return;
-    this.codes = [...this.codes, code].slice(-KEEP_CODES);
-    this.scrub = looseScrubber(this.codes, OTP_PLACEHOLDER);
+  /**
+   * Keeps scrubbing a code for the rest of the session: none is ever dropped (§20.3). Codes are short-lived and few; past a
+   * large cap a new code is refused (false) instead of an old one being forgotten.
+   */
+  register(code: string): boolean {
+    if (this.codes.includes(code)) return true;
+    if (this.codes.length >= MAX_CODES) return false;
+    this.codes = [...this.codes, code];
+    this.scrub = null;
+    return true;
   }
 
   /** Arrow, so it can be handed on as a plain function. */
-  readonly redact = (text: string): string => this.scrub(text);
+  readonly redact = (text: string): string => {
+    if (this.codes.length === 0) return text;
+    this.scrub ??= looseScrubber(this.codes, OTP_PLACEHOLDER);
+    return this.scrub(text);
+  };
 }
 
 /** What the tools use: the redaction shared with the host's sinks, and the way a code comes in. */
@@ -345,7 +357,10 @@ export function createOtpService(deps: OtpDeps = {}, codes: OtpCodes = new OtpCo
     codes,
     async fetch(app) {
       const result = await fetchOtp(app, deps);
-      if (result.ok) codes.register(result.code);
+      if (result.ok && !codes.register(result.code)) {
+        // Never hand on a code that couldn't be registered for scrubbing.
+        return { ok: false, reason: "refused", message: "this session has used too many one-time codes to scrub them all; restart Tapline to type another." };
+      }
       return result;
     },
   };
