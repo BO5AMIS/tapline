@@ -7296,9 +7296,12 @@ export class TaplineTools {
     if (!session.capabilities.includes("dryRun")) {
       return Promise.resolve(fail(`Error unsupported: this version of the app's Tapline SDK can't check a step before it runs, so no one-time code is asked for it (a code is asked for only after the step's checks pass). Update react-native-tapline in the app.`));
     }
-    return this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id }).then((checked) =>
-      checked.isError === true ? checked : fetchAndType(),
-    );
+    return this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id }).then((checked) => {
+      if (checked.isError === true) return checked;
+      // Another app selected while the step was checked: its code would be fetched for a type that can't happen.
+      if (this.host.current()?.id !== session.id) return fail("Error not_connected: the app changed while the step was checked; no one-time code was asked for, and nothing was typed.");
+      return fetchAndType();
+    });
   }
 
   /** Why `${otp.<app>}` can't be typed for the connected app, or null: the id must be the connected app's own. */

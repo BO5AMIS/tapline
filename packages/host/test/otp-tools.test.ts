@@ -39,6 +39,8 @@ const textOf = (result: CallToolResult): string => result.content.map((c) => (c.
 interface TypeRefusal {
   dry?: { code: string; message: string };
   real?: { code: string; message: string };
+  /** Runs while the dry run is being answered (to change the app the host has selected, say). */
+  duringDry?: () => void;
 }
 
 const CAPABILITIES = ["tree", "press", "type", "logs", "dryRun"];
@@ -63,6 +65,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
       case "type": {
         const params = req.params as Record<string, unknown>;
         (params["dryRun"] === true ? checked : typed).push(params);
+        if (params["dryRun"] === true) refusal.duringDry?.();
         const refused = params["dryRun"] === true ? refusal.dry : refusal.real;
         if (refused !== undefined) return { ok: false, error: refused };
         const value = String(params["text"]);
@@ -83,7 +86,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
   };
   const logDir = tmp();
   const tools = new TaplineTools(host, { connect: { url: "", name: "Dev PC" }, otp, audit: sink, logDir });
-  return { tools, daemon, typed, checked, audit, logDir, showCodeInTree: () => (showCode = true) };
+  return { tools, daemon, typed, checked, audit, logDir, host, port, showCodeInTree: () => (showCode = true) };
 }
 
 function everythingIn(dir: string): string {
@@ -219,6 +222,26 @@ describe("the code is asked for only right before typing (AGENT-TOOLS 1.16.2 §1
     const answer = await tools.typeText({ target: { id: "code" }, text });
     expect(answer.isError).toBe(true);
     expect(textOf(answer)).toMatch(/^Error unsupported: /);
+    expect(daemon.requests).toHaveLength(0);
+    expect(daemon.connections).toBe(0);
+    expect(realTypes(typed)).toHaveLength(0);
+  });
+
+  it("another app selected during the check: no code is asked for, nothing is typed", async () => {
+    const refusal: TypeRefusal = {};
+    const { tools, daemon, typed, host, port } = await setup({}, true, refusal);
+    const { app: other } = await FakeApp.connect(port, { capabilities: CAPABILITIES, app: { name: "Other", id: "com.example.other", version: "1.0.0", build: "1" } }, () => ({ ok: true, result: {} }));
+    apps.push(other);
+    const first = host.sessions().find((s) => s.app.id === APP);
+    const second = host.sessions().find((s) => s.app.id === "com.example.other");
+    if (first === undefined || second === undefined) throw new Error("two apps should be connected");
+    host.select(first.id);
+    refusal.duringDry = () => {
+      host.select(second.id);
+    };
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error not_connected: the app changed/);
     expect(daemon.requests).toHaveLength(0);
     expect(daemon.connections).toBe(0);
     expect(realTypes(typed)).toHaveLength(0);
