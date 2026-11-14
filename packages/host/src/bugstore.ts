@@ -379,6 +379,32 @@ export class BugStore {
           // a bug that can't move stays, and isn't listed from the wrong folder
         }
       }
+    }
+    // A zip left behind (its move failed, or a run stopped between the bug and its zip): it follows its bug, found by id in the
+    // folder of the bug's own app, when exactly one app holds that id and that folder has no zip of it yet. Retried at every start.
+    for (const folder of this.appFolders()) {
+      let zips: string[];
+      try {
+        zips = readdirSync(join(this.base, folder)).filter((name) => name.endsWith(".zip") && BUG_ID.test(name.slice(0, -4)));
+      } catch {
+        continue;
+      }
+      for (const zip of zips) {
+        const id = zip.slice(0, -4);
+        if (existsSync(join(this.base, folder, id))) continue;
+        try {
+          const owners = this.found(id);
+          if (owners.length !== 1) continue;
+          const target = appFolderName((owners[0] as { app: string }).app);
+          const dest = join(this.base, target, zip);
+          if (target === folder || existsSync(dest)) continue;
+          renameSync(join(this.base, folder, zip), dest);
+        } catch {
+          // a zip that can't move stays
+        }
+      }
+    }
+    for (const folder of this.appFolders()) {
       try {
         if (readdirSync(join(this.base, folder)).length === 0) rmdirSync(join(this.base, folder));
       } catch {

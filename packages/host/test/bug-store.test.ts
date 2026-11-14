@@ -302,6 +302,24 @@ describe("the folder (§29.2)", () => {
     expect(after.list()).toHaveLength(3);
   });
 
+  it("a zip left behind by a partial move follows its bug at the next start; one whose bug has a zip already stays (PR 15 CodeRabbit)", () => {
+    const base = tmp();
+    const store = new BugStore(base);
+    const demo = makeBug(context(store), args(crash({ app: "com.example.Demo" })));
+    const other = makeBug(context(store), args(crash({ app: "com.example.Other", kind: "slow", got: "3.5 s to settle" })));
+    // the bugs already moved, their zips still in the 1.8.5 folders
+    mkdirSync(join(base, "com.example.Demo"), { recursive: true });
+    writeFileSync(join(base, "com.example.Demo", `${demo.meta.id}.zip`), "zip of demo");
+    mkdirSync(join(base, "com.example.Other"), { recursive: true });
+    writeFileSync(join(base, "com.example.Other", `${other.meta.id}.zip`), "old zip");
+    writeFileSync(join(store.appDir("com.example.Other"), `${other.meta.id}.zip`), "new zip");
+    store.migrateFolders();
+    expect(readFileSync(join(store.appDir("com.example.Demo"), `${demo.meta.id}.zip`), "utf8")).toBe("zip of demo");
+    expect(existsSync(join(base, "com.example.Demo"))).toBe(false);
+    expect(readFileSync(join(store.appDir("com.example.Other"), `${other.meta.id}.zip`), "utf8")).toBe("new zip");
+    expect(existsSync(join(base, "com.example.Other", `${other.meta.id}.zip`))).toBe(true);
+  });
+
   it("a finding whose picture isn't null or {file, private} is unreadable (PR 15 CodeRabbit)", () => {
     const store = new BugStore(tmp());
     const made = makeBug(context(store), args(crash()));
