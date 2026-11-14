@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.0, "the Control Update" (unreleased)
+## 1.7.0, "the Control Update" (2026-11-14)
 
 Standing permissions, personal data by name, safety for text written by strangers, scheduled runs, and a record of
 all of it, as AGENT-TOOLS 1.14.2 (agreed with Tapwright, sha256 3faca1e4) defines them. Tapline works inside the user's own
