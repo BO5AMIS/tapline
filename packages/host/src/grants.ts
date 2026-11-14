@@ -634,7 +634,16 @@ export class GrantBook {
       // this very moment (no await between this read and the return).
       const at = this.now();
       if (!this.holds(grant, touch, at)) return false;
-      if (this.inCurrentBuckets(use.slots, at) && this.fits(grant, use.slots)) return true;
+      if (this.inCurrentBuckets(use.slots, at) && this.fits(grant, use.slots)) {
+        // The refreshed limits count the WHOLE bucket (higher slots and garbage too), not only this use's own slot number.
+        const over = await this.overLimit(grant, use.slots);
+        // The clock again after that await, as the last thing before answering true.
+        const later = this.now();
+        if (over === "") return this.holds(grant, touch, later) && this.inCurrentBuckets(use.slots, later);
+        // Over the limit: this use is given back and the touch asks a person (the bucket is already full under the new limit).
+        if (over !== null) await this.dropSlots(use.name, use.owner, use.slots);
+        return false;
+      }
       await this.dropSlots(use.name, use.owner, use.slots);
       const claimed = await this.claimBuckets(grant, grant.route ?? touch.routes[0]);
       if (claimed === null || typeof claimed === "string") return false;
@@ -665,6 +674,24 @@ export class GrantBook {
       days += 1;
     }
     return days === 1 && (grant.perHour === undefined ? hours === 0 : hours === 1);
+  }
+
+  /**
+   * Under the grant as it is now, the whole bucket (every entry of the day folder, and of the hour folder with a perHour; garbage counts
+   * as section 19.4 says) must hold at most the limit, this use's own slot included. "" means within the limits; otherwise the limit
+   * that is exceeded in words; null, a bucket that can't be read (any doubt asks a person).
+   */
+  private async overLimit(grant: Grant, slots: string[]): Promise<string | null> {
+    for (const slot of slots) {
+      const parts = slot.split("/");
+      const names = await listDir(join(this.usesRoot, parts[0] ?? "", parts[1] ?? ""));
+      if (names === null) return null;
+      const hourSlot = /^h\d+$/.test(parts[2] ?? "");
+      const limit = hourSlot ? grant.perHour : grant.perDay;
+      if (limit === undefined) return null;
+      if (names.length > limit) return names.length + " of " + limit + (hourSlot ? " this hour" : " today");
+    }
+    return "";
   }
 
   /** Whether every slot of a use is in the day (or hour) folder of `at`: a use from an earlier day or hour is not counted against the current one. */
@@ -850,6 +877,18 @@ export class GrantBook {
           await giveBack();
           current = fresh;
           continue;
+        }
+        // The refreshed limits count the whole bucket: a claim in a bucket that holds more than the new limit is given back, not reclaimed.
+        const over = await this.overLimit(fresh, claimed.slots);
+        if (over !== "") {
+          await giveBack();
+          return over;
+        }
+        // The clock again after that await.
+        const after = this.now();
+        if (!this.holds(fresh, touch, after) || !this.inCurrentBuckets(claimed.slots, after)) {
+          await giveBack();
+          return null;
         }
         if (!audit.write({ kind: "grant", app: appKey(touch.app), name: grant.name, detail: `${detail} (${claimed.today} of ${fresh.perDay} today)` })) {
           await giveBack();
