@@ -7292,8 +7292,10 @@ export class TaplineTools {
       );
     // The code is asked for only right before typing, after every check of the step (§18.11): the same step as a dry run
     // first (target found, reachable, not behind an alert, the field's kind). A refusal is the answer, nothing fetched.
-    // An app without dry runs can't be checked ahead, and the code is fetched as before.
-    if (!session.capabilities.includes("dryRun")) return fetchAndType();
+    // An app without dry runs can't be checked ahead, so no code is asked for it.
+    if (!session.capabilities.includes("dryRun")) {
+      return Promise.resolve(fail(`Error unsupported: this version of the app's Tapline SDK can't check a step before it runs, so no one-time code is asked for it (a code is asked for only after the step's checks pass). Update react-native-tapline in the app.`));
+    }
     return this.typeTextWith({ ...args, dry_run: true }, { value: "", source: undefined, sessionId: session.id }).then((checked) =>
       checked.isError === true ? checked : fetchAndType(),
     );

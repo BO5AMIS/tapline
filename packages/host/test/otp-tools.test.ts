@@ -41,7 +41,9 @@ interface TypeRefusal {
   real?: { code: string; message: string };
 }
 
-async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refusal: TypeRefusal = {}) {
+const CAPABILITIES = ["tree", "press", "type", "logs", "dryRun"];
+
+async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refusal: TypeRefusal = {}, capabilities: string[] = CAPABILITIES) {
   const daemon = await startFakeTapwright(behavior);
   if (daemonUp) daemons.push(daemon);
   else await daemon.close();
@@ -70,7 +72,7 @@ async function setup(behavior: Partial<FakeBehavior> = {}, daemonUp = true, refu
         return { ok: true, result: {} };
     }
   };
-  const { app } = await FakeApp.connect(port, { capabilities: ["tree", "press", "type", "logs", "dryRun"] }, handler);
+  const { app } = await FakeApp.connect(port, { capabilities }, handler);
   apps.push(app);
   const audit: AuditEntry[] = [];
   const sink: AuditSink = {
@@ -210,6 +212,16 @@ describe("the code is asked for only right before typing (AGENT-TOOLS 1.16.2 §1
     expect(daemon.connections).toBe(0);
     expect(realTypes(typed)).toHaveLength(0);
     expect(audit).toHaveLength(0);
+  });
+
+  it("an app that can't check a step ahead (no dryRun) is refused, and the daemon is asked nothing", async () => {
+    const { tools, daemon, typed } = await setup({}, true, {}, CAPABILITIES.filter((c) => c !== "dryRun"));
+    const answer = await tools.typeText({ target: { id: "code" }, text });
+    expect(answer.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/^Error unsupported: /);
+    expect(daemon.requests).toHaveLength(0);
+    expect(daemon.connections).toBe(0);
+    expect(realTypes(typed)).toHaveLength(0);
   });
 
   it("a target that is not found asks the daemon for nothing", async () => {
