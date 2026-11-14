@@ -320,6 +320,18 @@ describe("the folder (§29.2)", () => {
     expect(existsSync(join(base, "com.example.Other", `${other.meta.id}.zip`))).toBe(true);
   });
 
+  it("a leftover zip whose own app's bug is gone stays put, even when another app holds the same id (PR 15 CodeRabbit)", () => {
+    const base = tmp();
+    const store = new BugStore(base);
+    // App B holds the bug; app A's zip of the same id was left in A's 1.8.5 folder and A's bug was pruned since.
+    const beta = makeBug(context(store), args(crash({ app: "com.example.Beta" })));
+    mkdirSync(join(base, "com.example.Alpha"), { recursive: true });
+    writeFileSync(join(base, "com.example.Alpha", `${beta.meta.id}.zip`), "zip of alpha");
+    store.migrateFolders();
+    expect(existsSync(join(store.appDir("com.example.Beta"), `${beta.meta.id}.zip`))).toBe(false);
+    expect(readFileSync(join(base, "com.example.Alpha", `${beta.meta.id}.zip`), "utf8")).toBe("zip of alpha");
+  });
+
   it("a finding whose picture isn't null or {file, private} is unreadable (PR 15 CodeRabbit)", () => {
     const store = new BugStore(tmp());
     const made = makeBug(context(store), args(crash()));

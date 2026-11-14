@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readContainedText } from "./safefile.js";
-import { appFolderName } from "./appfolder.js";
+import { appFolderName, legacyFolderName } from "./appfolder.js";
 import { decodedBases, normalizedBases, variantsOf } from "./accounts.js";
 import { bugPageHtml, bugPageMarkdown, bugSignature, bugTitle, pictureLines, replaceSection, reproducedLines, seenLines, type BugFinding, type BugHow, type BugMeta } from "./bug.js";
 import { redactFinding } from "./findings.js";
@@ -381,7 +381,9 @@ export class BugStore {
       }
     }
     // A zip left behind (its move failed, or a run stopped between the bug and its zip): it follows its bug, found by id in the
-    // folder of the bug's own app, when exactly one app holds that id and that folder has no zip of it yet. Retried at every start.
+    // folder of the bug's own app, when exactly one app holds that id, the zip sits in the folder 1.8.5 made for that same app (so it
+    // is that app's zip, not one of another app whose bug of the same id is gone), and that folder has no zip of it yet. Otherwise it
+    // stays where it is. Retried at every start.
     for (const folder of this.appFolders()) {
       let zips: string[];
       try {
@@ -395,7 +397,9 @@ export class BugStore {
         try {
           const owners = this.found(id);
           if (owners.length !== 1) continue;
-          const target = appFolderName((owners[0] as { app: string }).app);
+          const owner = (owners[0] as { app: string }).app;
+          if (legacyFolderName(owner) !== folder) continue;
+          const target = appFolderName(owner);
           const dest = join(this.base, target, zip);
           if (target === folder || existsSync(dest)) continue;
           renameSync(join(this.base, folder, zip), dest);
