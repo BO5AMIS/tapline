@@ -275,7 +275,11 @@ describe("a running host's lease and facts", () => {
     expect(await lease(runtime, "renew", "schedule-a")).toEqual({ ok: false, by: "lost" });
     expect(await lease(runtime, "release", "schedule-a")).toEqual({ ok: false });
     expect(await lease(runtime, "acquire", "schedule-a")).toEqual({ ok: false, by: "lease" });
-    expect(await lease(runtime, "renew", "schedule-b", credential.replace(/^./, "e"))).toEqual({ ok: false, by: "lost" });
+    // a wrong credential: the first hex digit changed to a DIFFERENT one (replacing it with a fixed "e" was the same
+    // credential 1 time in 16, a flake seen on CI)
+    const wrong = (credential[0] === "e" ? "f" : "e") + credential.slice(1);
+    expect(wrong).not.toBe(credential);
+    expect(await lease(runtime, "renew", "schedule-b", wrong)).toEqual({ ok: false, by: "lost" });
     expect(await lease(runtime, "renew", "schedule-a", credential)).toEqual({ ok: true });
     expect(await lease(runtime, "release", "schedule-a", credential)).toEqual({ ok: true });
     expect(await lease(runtime, "acquire", "schedule-b")).toMatchObject({ ok: true });
