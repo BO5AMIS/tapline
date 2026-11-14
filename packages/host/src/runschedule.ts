@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readAuditLines, type AuditLog } from "./auditlog.js";
+import { dropPidLock, takePidLock, type PidLockDeps } from "./pidlock.js";
 import { newFilesSince, readScheduleFile, readSeen, resolveWith, schedulePath, schedulesDir, writeSeen, type Schedule } from "./schedule.js";
 
 /**
@@ -37,7 +38,7 @@ export interface ScheduleHost {
   close(): Promise<void>;
 }
 
-export interface RunDeps {
+export interface RunDeps extends PidLockDeps {
   configDir: string;
   /** Wall clock: names the report and times the audit lines. */
   now: () => Date;
@@ -115,177 +116,24 @@ function lockPath(configDir: string, name: string): string {
   return join(schedulesDir(configDir), `${name}.lock`);
 }
 
-/** What a lock file holds: the run's owner token, its process id and the process's start time (null when it can't be told). */
-interface LockHolder {
-  owner?: unknown;
-  pid?: unknown;
-  started?: unknown;
-}
-
-function parseHolder(text: string): LockHolder {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null ? (parsed as LockHolder) : {};
-  } catch {
-    return {};
-  }
-}
-
-/** What runs a program and answers its output; throws when it fails. Injectable, so the start time of a process can be tested. */
-export type RunProgram = (file: string, args: string[]) => string;
-
-const runProgram: RunProgram = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
-
-/**
- * When a process started, as text that is the same each time it is asked for the same process; null when it can't be told. A lock
- * keeps it beside the process id, so a process id that was reused by another program is not mistaken for the holder. Windows asks
- * PowerShell (`Get-Process -Id N`, about half a second, asked only for a run's own start and when a lock is found), elsewhere `ps`.
- */
-export function processStartTime(pid: number, platform: string = process.platform, run: RunProgram = runProgram): string | null {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  try {
-    const out =
-      platform === "win32"
-        ? run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`])
-        : run("ps", ["-o", "lstart=", "-p", String(pid)]);
-    const text = out.trim();
-    return text === "" ? null : text;
-  } catch {
-    return null;
-  }
-}
-
-/** A lock that can't be read as a holder (empty, cut short, garbage) is a run that is still writing it until it is this old; then a leftover. */
-const UNREADABLE_LOCK_MS = 10_000;
-
-/** Whether the run a lock names is gone: its process doesn't run, or the process that has that id started at another time. */
-function holderIsDead(deps: RunDeps, holder: LockHolder): boolean {
-  if (typeof holder.pid !== "number" || !Number.isInteger(holder.pid)) return false;
-  if (!deps.alive(holder.pid)) return true;
-  if (typeof holder.started === "string" && deps.startOf !== undefined) {
-    const now = deps.startOf(holder.pid);
-    return now !== null && now !== holder.started;
-  }
-  return false;
-}
-
-/** Whether a lock's text is a leftover: its holder is gone, or it is not a holder at all and old enough that no run is still writing it. */
-function isLeftover(deps: RunDeps, path: string, text: string): boolean {
-  const holder = parseHolder(text);
-  if (typeof holder.pid === "number" && typeof holder.owner === "string") return holderIsDead(deps, holder);
-  try {
-    return Date.now() - statSync(path).mtimeMs > UNREADABLE_LOCK_MS;
-  } catch {
-    return false; // gone meanwhile: the next round creates it
-  }
-}
-
-function readText(path: string): string | null {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-/** A unique name for a file moved aside: only the one who moved it ever touches it. */
-function tombstone(path: string): string {
-  return `${path}.${randomBytes(6).toString("hex")}.tomb`;
-}
-
-/**
- * Removes the file at `path` only when it still holds `seen`: it is moved to a name of its own (one move, so only one remover gets
- * it), and what was moved is checked; a file that changed hands in between is put back, never deleted.
- */
-function removeIfUnchanged(path: string, seen: string): boolean {
-  const tomb = tombstone(path);
-  try {
-    renameSync(path, tomb);
-  } catch {
-    return false;
-  }
-  try {
-    const moved = readFileSync(tomb, "utf8");
-    if (moved === seen) return true;
-    writeFileSync(path, moved, { flag: "wx" });
-  } catch {
-    // put back by someone else already, or unreadable: the next round decides
-  } finally {
-    rmSync(tomb, { force: true });
-  }
-  return false;
-}
+export { processStartTime, type RunProgram } from "./pidlock.js";
 
 /**
  * One run of a schedule at a time. The lock only answers "is a run of this schedule still going": it counts nothing, and a live
- * holder is never displaced, however long it takes. It is a file created exclusively (`wx`) that holds the run's owner token, its
- * process id and the process's start time. It is a leftover only when its process no longer runs, or a process with that id started at
- * another time. A leftover is taken over under `<lock>.takeover`, also created exclusively: under it the lock is read again, and
- * only if it is unchanged and its holder is dead is it deleted and a lock of the taker's own created (`wx`); then `.takeover` goes.
- * A `.takeover` whose own process is dead is cleared the same way. Returns the owner token, or null when a run holds the lock.
+ * holder is never displaced, however long it takes. It is the shared pid-liveness lock (pidlock.ts): published whole by a hard link
+ * of a temp file, holding the run's owner token, process id and the process's start time; a leftover only on proof of its holder's
+ * death; taken over under `<lock>.takeover`. Returns the owner token, or null when a run holds the lock.
  */
 export function takeLock(deps: RunDeps, name: string): string | null {
-  const path = lockPath(deps.configDir, name);
-  const takeoverPath = `${path}.takeover`;
   mkdirSync(schedulesDir(deps.configDir), { recursive: true });
-  const token = `${randomBytes(8).toString("hex")}-${deps.pid}`;
-  const mine = `${JSON.stringify({ owner: token, pid: deps.pid, started: deps.startOf?.(deps.pid) ?? null })}\n`;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    try {
-      writeFileSync(path, mine, { flag: "wx" });
-      return token;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
-    }
-    const seen = readText(path);
-    if (seen === null) continue; // released between our create and our read: try to create again
-    if (!isLeftover(deps, path, seen)) return null;
-    deps.beforeReclaim?.();
-    // Under .takeover only one contender at a time looks at a leftover.
-    try {
-      writeFileSync(takeoverPath, mine, { flag: "wx" });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
-      const other = readText(takeoverPath);
-      // Someone else is taking it over now (or was, and died): a dead taker's .takeover is cleared, a live one's is waited out.
-      if (other !== null && isLeftover(deps, takeoverPath, other)) removeIfUnchanged(takeoverPath, other);
-      continue;
-    }
-    try {
-      const now = readText(path);
-      if (now === seen && isLeftover(deps, path, now)) {
-        try {
-          unlinkSync(path);
-        } catch {
-          continue;
-        }
-        try {
-          writeFileSync(path, mine, { flag: "wx" });
-          return token;
-        } catch {
-          continue; // a run that came in first holds it now
-        }
-      }
-    } finally {
-      // only our own .takeover is removed
-      const held = readText(takeoverPath);
-      if (held === mine) removeIfUnchanged(takeoverPath, mine);
-    }
-  }
-  return null;
+  return takePidLock(deps, lockPath(deps.configDir, name));
 }
 
 /** Releases the lock only while its content is still this run's; another run's lock is never removed. */
 export function dropLock(deps: RunDeps, name: string, token: string): void {
-  const path = lockPath(deps.configDir, name);
-  const text = readText(path);
-  if (text === null || parseHolder(text).owner !== token) return;
-  try {
-    unlinkSync(path);
-  } catch {
-    // already gone
-  }
+  dropPidLock(lockPath(deps.configDir, name), token);
 }
+
 
 function writeReport(deps: RunDeps, redact: (text: string) => string, name: string, startedAt: Date, report: RunReport): string | null {
   const dir = join(deps.configDir, "runs");

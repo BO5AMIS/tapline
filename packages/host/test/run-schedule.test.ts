@@ -539,13 +539,78 @@ describe("the run lock answers only 'is a run still going' (PR 12, 1.14.1)", () 
     expect(readFileSync(lockFile(r), "utf8")).toBe(live);
   });
 
-  it("garbage in the lock is a run still writing it until it is old; then a leftover", () => {
+  it("an empty or unreadable lock is never a leftover, however old: no age rule, only proof of death (PR 12 R7 finding 4)", () => {
     const r = rig();
-    writeFileSync(lockFile(r), "garbage");
-    expect(takeLock({ ...r.deps, pid: 2222, alive: only999Dead }, "daily")).toBeNull();
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockFile(r), old, old);
-    expect(takeLock({ ...r.deps, pid: 2222, alive: only999Dead }, "daily")).not.toBeNull();
+    for (const text of ["", "garbage", '{"owner":"x-1","pi', "{}", "[]"]) {
+      writeFileSync(lockFile(r), text);
+      const old = new Date(Date.now() - 24 * 3600_000);
+      utimesSync(lockFile(r), old, old);
+      expect(takeLock({ ...r.deps, pid: 2222, alive: only999Dead }, "daily"), JSON.stringify(text)).toBeNull();
+      expect(readFileSync(lockFile(r), "utf8")).toBe(text);
+    }
+  });
+
+  it("a holder suspended between its create and its write, for over 10 s, is not displaced (fallback without hard links)", () => {
+    const r = rig();
+    const noLink = (): never => {
+      throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+    };
+    let other: string | null | undefined;
+    const holder: RunDeps = {
+      ...r.deps,
+      pid: 1111,
+      alive: () => true,
+      link: noLink,
+      // the holder has created the empty lock and is suspended before it writes its JSON; 30 s pass
+      afterCreate: () => {
+        const old = new Date(Date.now() - 30_000);
+        utimesSync(lockFile(r), old, old);
+        other = takeLock({ ...r.deps, pid: 2222, alive: () => true }, "daily");
+      },
+    };
+    const token = takeLock(holder, "daily");
+    expect(other).toBeNull();
+    expect(token).not.toBeNull();
+    expect(holderOf(r)).toMatchObject({ owner: token, pid: 1111 });
+  });
+
+  it("the lock is published whole by a hard link: another run that comes in at the pause finds no lock and takes it, and the paused one then finds a live holder", () => {
+    const r = rig();
+    let other: string | null | undefined;
+    const paused: RunDeps = {
+      ...r.deps,
+      pid: 1111,
+      alive: () => true,
+      beforePublish: (path) => {
+        // between the temp file's write and its link, the lock does not exist at all (never empty)
+        expect(existsSync(path)).toBe(false);
+        if (other === undefined) other = takeLock({ ...r.deps, pid: 2222, alive: () => true }, "daily");
+      },
+    };
+    expect(takeLock(paused, "daily")).toBeNull();
+    expect(other).not.toBeNull();
+    expect(holderOf(r)).toMatchObject({ owner: other, pid: 2222 });
+    expect(readdirSync(schedulesDir(r.dir)).filter((f) => f.endsWith(".pub"))).toEqual([]);
+  });
+
+  it("the lock never exists with less than its whole JSON, and the temp file is gone after", () => {
+    const r = rig();
+    const seen: string[] = [];
+    const deps: RunDeps = { ...r.deps, pid: 1111, alive: () => true };
+    const token = takeLock(deps, "daily");
+    seen.push(readFileSync(lockFile(r), "utf8"));
+    expect(JSON.parse(seen[0] ?? "")).toMatchObject({ owner: token, pid: 1111 });
+    expect(readdirSync(schedulesDir(r.dir)).filter((f) => f.includes(".pub"))).toEqual([]);
+  });
+
+  it("the fallback (no hard links) takes the lock whole when nobody is in the way", () => {
+    const r = rig();
+    const noLink = (): never => {
+      throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+    };
+    const token = takeLock({ ...r.deps, pid: 1111, alive: () => true, link: noLink }, "daily");
+    expect(holderOf(r)).toMatchObject({ owner: token, pid: 1111 });
+    expect(readdirSync(schedulesDir(r.dir)).filter((f) => f.includes(".pub"))).toEqual([]);
   });
 
   it("a release removes the lock only while its content is still this run's", () => {
