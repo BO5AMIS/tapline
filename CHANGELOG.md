@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.8.5, "the Bug Report" (unreleased)
+
+The one-page bug report, as AGENT-TOOLS 1.16.1 (agreed with Tapwright, sha256 88ce071f) defines it, plus three items
+both tools now share.
+
+- **The one-page bug report (§29).**
+  - `bug_report` (and `tapline bug`) turns one finding into one page for whoever fixes it: `report.md` and
+    `report.html` in `~/.tapline/bugs/<app>/<bug id>/`, with `repro.json`.
+  - The page has, in order: a title, expected and got, the steps written for a person, `Reproduced n of N`, the
+    environment, where (crash frames, the component stack, the source file and line), up to 20 redacted log lines, the
+    picture when it isn't private (or a person asked), and when it was seen before.
+  - **Where a report comes from:** an explore finding, a failed replay or run (`from: "failure"`), or ordinary use with
+    a note (`from: "now"`, the last 10 steps, marked not checked unless `verify` is given).
+  - **The reproduction check:** `verify` re-runs the steps from a fresh start, through the same gate as `explore`. It
+    stops at the first step that needs a person. `reset: "app"` (which clears the app's data) is opt-in. A report that
+    doesn't reproduce is kept and marked so.
+  - **One bug, many sightings:** a signature (the place key, the kind, the normalized result, and for a crash its type
+    and top app frame) groups later sightings into one bug, with a count and the builds it was seen in.
+  - **Export** to a GitHub issue through your own `gh` (with `confirm`, and `public: true` for a public repository) or to
+    a local `.zip`. A private picture goes only with `with_picture`. Every export checks every file it sends for a
+    vault, fixture, code or typed value first, and refuses if it finds one. Each export is in the audit log.
+- **Repair understands more relabels (§9.4, §26).** A recorded step keeps `seen` (role, place on a 3×3 grid,
+  component, id stem; never text), so a button renamed from `Skip` to `Not now` can be repaired.
+- **Fixtures (§20.1, §25).** A vault entry of kind `fixture` holds named test data. `explore` types it into fields marked
+  for it, only when the fixture has `"explore": true`, never into a secure field, and it is hidden everywhere like
+  every vault value.
+- **Vault limits shared with Tapwright (§20.1, 1.16.1).**
+  - Every value is at most 256 characters, and a secret field has at least 3 once decoded.
+  - A file holds at most 64 values (32 accounts in a version 1 file).
+  - A file that breaks a limit loads nothing, so a vault both tools read works in both or in neither.
+  - A short plain field (a country `UK`) is typed but not hidden.
+- **Lock start times (§22.3).** A lock's `started` is now an integer (milliseconds, UTC), compared in whole seconds, so
+  Tapline's and Tapwright's locks fence each other. A lock written by an older version is treated as held while its
+  process runs; `unlock` clears it.
+- **Checked between the tools.** A vault protected by Tapline opens in Tapwright 1.7, and the reverse (Windows DPAPI).
+- **Known limits.**
+  - A bug both tools find is two bugs, because each tool keys places its own way.
+  - A journey's finding can't become a bug yet.
+  - Nothing in 1.8.5 has run on a real phone yet.
+
 ## 1.8.0, "the Explorer Update" (2026-11-14)
 
 Tapline can now search an app by itself and mend its own saved tests, as AGENT-TOOLS 1.15 (agreed with Tapwright, sha256
