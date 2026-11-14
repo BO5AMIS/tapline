@@ -61,7 +61,7 @@ import { caseTwin, readScript, refStep, scriptSteps, sharedScriptSchema, type Sh
 import { LOG_LINE_MAX, TYPED, cutText, firstLine, redactFinding, type Finding, type PathStep } from "./findings.js";
 import { namedTarget } from "./signature.js";
 import { EXPLORE_DEFAULTS, EXPLORE_LIMITS, EXPLORE_TOOL_VERSION, Explorer, isOutcome, type ExploreArgs, type ExploreHost, type ExploreMove, type ExploreOutcome, type MoveOutcome, type Since } from "./explore.js";
-import { FLOOR_WORDS, exploreLists, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
+import { FLOOR_WORDS, exploreLists, protectedPlaceWord, screenTitles, exploreSettings, floorSubject, isListedSubmit, recipientVerdict, submitWord, type FloorHit, type FloorRules } from "./explorefloor.js";
 import { analyse, parseBreak, runWithRepair, suggestionText, type RepairHost, type RepairRun } from "./repairrun.js";
 import { repairMarkdown, repairPhrase, repairedScript, wireTarget } from "./repair.js";
 import { answerLines, openRunFolder, writeExploreReport } from "./explorereport.js";
@@ -1321,6 +1321,9 @@ interface ExploreScope {
 }
 
 /** Requests that only read: they cost no step and are never held back by the explore gate. */
+/** Requests that touch the app: each is made from an unprotected place (and a scroll at an unskipped view). */
+const EXPLORE_TOUCHES: ReadonlySet<string> = new Set(["press", "longPress", "toggle", "type", "scroll", "swipe"]);
+
 const EXPLORE_READS: ReadonlySet<string> = new Set(["tree", "place", "places", "logs", "commands", "audit", "uxCheck", "screenshot", "overlay", "waitFor", "inspect", "check", "feed", "perfSettle", "perfStart", "perfStop"]);
 
 export class TaplineTools {
@@ -1809,12 +1812,59 @@ export class TaplineTools {
     // A pipelined move carries the request it makes inside it.
     const inner = method === "move" && typeof rawParams === "object" && rawParams !== null ? (rawParams as { method?: unknown }).method : method;
     let params = rawParams;
+    // Every touch (a press, a scroll, typing, a swipe) is made from a place that is not protected, and a scroll aims at a view that is not skipped.
+    if (typeof inner === "string" && EXPLORE_TOUCHES.has(inner)) await this.exploreTouchGate(inner, method, rawParams, options?.sessionId);
     if (inner === "type") {
       if (method !== "type") throw new TaplineError("not_allowed", "explore types only through its own fill, never inside a drive (explore skip: policy).");
       params = await this.exploreTyping(scope, rawParams, options?.sessionId);
     }
     run.used += 1;
     return this.host.request(method, params, options);
+  }
+
+  /**
+   * The floor on where a touch is made and what a scroll moves (§25.5), for every request that goes through the gate: the place the app
+   * stands on (its stored or person-given name, its route and the live title of the screen) must not be an account, privacy or security
+   * place, and a scroll's recipient (the scroll view itself, inherited skip marks included) must pass the whole floor. `back`, links,
+   * reloads and commands are not touches: the way out of such a place is always open.
+   */
+  private async exploreTouchGate(inner: string, method: string, rawParams: unknown, sessionId: string | undefined): Promise<void> {
+    const session = (sessionId !== undefined ? this.host.sessions().find((s) => s.id === sessionId) : undefined) ?? this.host.current();
+    if (session === undefined) return;
+    let raw: unknown;
+    try {
+      raw = await this.sendRequest("tree", { peek: true }, { sessionId: session.id, internal: true });
+    } catch {
+      throw new TaplineError("not_allowed", "explore can't tell which place the app is on, so it touches nothing (explore skip: floor).");
+    }
+    const read = treeResultSchema.safeParse(raw);
+    if (!read.success) throw new TaplineError("not_allowed", "explore can't read the screen it would touch (explore skip: floor).");
+    const tree = read.data;
+    const map = this.mapOf(session);
+    const named = map === undefined ? null : await placeSeen({ capabilities: [], latest: () => undefined, request: async () => raw }, map);
+    const route = [...(tree.place?.route ?? []), ...(tree.route?.names ?? [])];
+    const word = protectedPlaceWord(named ?? "", route, screenTitles(tree.elements));
+    if (word !== null) throw new TaplineError("not_allowed", `explore touches nothing on a protected place (policy word ${JSON.stringify(word)}) (explore skip: floor).`);
+    if (inner !== "scroll") return;
+    const params = method === "move" && typeof rawParams === "object" && rawParams !== null ? (rawParams as { params?: unknown }).params : rawParams;
+    const asked: Record<string, unknown> = typeof params === "object" && params !== null ? { ...(params as Record<string, unknown>) } : {};
+    let views: TreeElement[];
+    if (session.capabilities.includes("dryRun")) {
+      const resolved = await this.resolveForPolicy(session, "scroll", asked);
+      if (resolved.kind === "error") throw new TaplineError("not_allowed", `explore won't scroll: ${resolved.text.replace(/^Error \w+:\s*/, "")} (explore skip: floor).`);
+      views = resolved.raw;
+    } else {
+      // An app with no dry runs can't say which view moves: every scroll view on the screen must pass.
+      views = tree.elements.filter((el) => roleOf(el) === "scroll");
+    }
+    const rules = this.exploreRules(session);
+    for (const view of views) {
+      const hit = recipientVerdict(view, rules, false);
+      if (hit !== null) {
+        const word = hit.word !== undefined ? ` (policy word ${JSON.stringify(this.host.redactOut(hit.word))})` : "";
+        throw new TaplineError("not_allowed", `explore won't scroll ${this.shortName(this.host.redactOut(view), false)}${word} (explore skip: ${hit.why}).`);
+      }
+    }
   }
 
   /** `steps` or `minutes` when the run's budget is used up, else null. */

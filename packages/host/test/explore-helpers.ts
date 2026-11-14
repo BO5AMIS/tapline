@@ -397,6 +397,12 @@ export async function setupExplore(hosts: TaplineHost[], apps: FakeApp[], dirs: 
       }
       case "scroll": {
         const screen = world.screens[world.screen] as ExScreen;
+        if (dry) {
+          // A dry run scrolls nothing and names the scroll view the request would move (with the app's marks on it).
+          const all = visible(world);
+          const at = all.findIndex((el) => el.role === "scroll");
+          return { ok: true, result: { element: at >= 0 ? wire(world, all[at] as ExEl, at) : { ref: "e1", type: "ScrollView", role: "scroll" } } };
+        }
         if (params["to"] === "start") {
           world.revealed[world.screen] = 0;
           return { ok: true, result: { element: { ref: "e1", type: "ScrollView", role: "scroll" }, moved: true, settledMs: 10 } };

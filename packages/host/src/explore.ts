@@ -3,6 +3,7 @@ import { isoSeconds } from "./explorereport.js";
 import { HOST_VERSION } from "./version.js";
 import {
   floorVerdict,
+  recipientVerdict,
   isListedSubmit,
   isSecretField,
   protectedPlaceWord,
@@ -701,8 +702,11 @@ export class Explorer {
     };
     actions.sort(order);
     inputs.sort(order);
-    const scroll = tree.elements.find((el) => roleOf(el) === "scroll") ?? null;
-    void place;
+    // A scroll view the floor skips (a mark, inherited ones included, or a word) is never scrolled; the host's gate checks the same again.
+    const view = tree.elements.find((el) => roleOf(el) === "scroll") ?? null;
+    const barredView = view === null ? null : recipientVerdict(view, this.host.rules, false);
+    if (barredView !== null) this.note(`${place}: a scroll view is marked skip, so it is not scrolled`);
+    const scroll = barredView === null ? view : null;
     return { actions, inputs, scroll, rowsCut, hasInput, seen: [...new Set(seen)] };
   }
 
