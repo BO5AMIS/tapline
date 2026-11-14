@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.5, "the Bug Report" (unreleased)
+## 1.8.5, "the Bug Report" (2026-11-14)
 
 The one-page bug report, as AGENT-TOOLS 1.16.1 (agreed with Tapwright, sha256 88ce071f) defines it, plus three items
 both tools now share.
@@ -38,6 +38,8 @@ both tools now share.
 - **Known limits.**
   - A bug both tools find is two bugs, because each tool keys places its own way.
   - A journey's finding can't become a bug yet.
+  - The run folder given to `tapline bug`, and every folder above it, must be one only you can write to; shared
+    writable folders aren't supported.
   - Nothing in 1.8.5 has run on a real phone yet.
 
 ## 1.8.0, "the Explorer Update" (2026-11-14)
