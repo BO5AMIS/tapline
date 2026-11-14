@@ -21,15 +21,17 @@ import { createOtpService, type OtpService } from "./otpclient.js";
 import { Confirmations } from "./confirm.js";
 import { ControlQueue, PhoneLease } from "./control.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { isToolName, callTool, type ToolName } from "./dispatch.js";
+import type { ApiCredentials } from "./api.js";
+import { isToolName, callTool, TOOL_META, type ToolName } from "./dispatch.js";
+import { hashFile, hashMapsDir } from "./hostfacts.js";
 import { realRunner } from "./journeyexport.js";
 import { MapRegistry } from "./places.js";
 import { AuditLog } from "./auditlog.js";
 import { GrantBook } from "./grants.js";
 import { DEFAULT_POLICY, NO_POLICY, loadPolicy, type PolicyFile } from "./policy.js";
-import { TaplineHost, type ListenResult } from "./server.js";
+import { TaplineError, TaplineHost, type ListenResult } from "./server.js";
 import { restoreAnimations } from "./animations.js";
-import { TaplineTools, type ToolsOptions } from "./tools.js";
+import { TaplineTools, describeError, type ToolsOptions } from "./tools.js";
 import { NO_UX_RULES, loadUxRules, type UxRules } from "./uxcheck.js";
 import { VIEWER_ACCEPTS, ViewerHub, viewerStatusForHost } from "./viewer.js";
 import { VIEWER_HTML } from "./viewer-page.js";
@@ -55,14 +57,25 @@ export function canonicalPath(path: string): string {
   return process.platform === "win32" ? full.toLowerCase() : full;
 }
 
-/** What a running host was started with, as paths and flags only (never the contents of a file). */
+/**
+ * What a running host was started with: paths and flags, and content hashes of what it loaded (never the content). The same path
+ * is not the same policy: the host reads its policy and accounts once, so a run compares the hashes with the files as they are now.
+ */
 export interface HostFacts {
-  version: 1;
+  version: 2;
+  /** Random, made when this host started: a run pins it and every later call must reach this very host. */
+  instance: string;
   /** The policy file's canonical path; null for the built-in policy. */
   policy: string | null;
   noPolicy: boolean;
   accounts: string | null;
   maps: string;
+  /** sha256 of the policy file as loaded; null for the built-in policy (or a file that couldn't be read). */
+  policyHash: string | null;
+  /** sha256 of the accounts file as loaded; null when none (or it couldn't be read). */
+  accountsHash: string | null;
+  /** sha256 over the maps folder's map files (the host's own saves flushed first). */
+  mapsHash: string;
 }
 
 /** What a queued call answers when its client left before it started (nobody reads it). */
@@ -95,6 +108,8 @@ export interface RuntimeOptions extends ResolveOptions {
   api?: boolean;
   /** Where the host's own lines go. Default: stderr with a `[tapline]` prefix (stdout is the MCP protocol's). */
   log?: (message: string) => void;
+  /** Tests: how long another client's action waits for a scheduled run's lease before it answers `busy`. Default 30 s. */
+  leaseGiveUpMs?: number;
   /** Clock for the idle sweep (tests). Default Date.now. */
   clock?: () => number;
   /** Opens the live view in a browser (tests). Default: this computer's default browser. */
@@ -160,6 +175,10 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   // house rules (1.12 §17.3): --ux-rules FILE; a bad file stops the host with a plain message.
   screenshots = screenshotMode(options.screenshots, options.env);
   viewer = viewerMode(options.viewer, options.env);
+  // What the host loads is hashed first, so the facts it reports are those of the policy and accounts it runs under.
+  const policyHash = options.noPolicy !== true && options.policy !== undefined ? hashFile(options.policy) : null;
+  const accountsHash = options.accounts !== undefined ? hashFile(options.accounts) : null;
+  const instanceId = randomBytes(16).toString("hex");
   policy = options.noPolicy === true ? NO_POLICY : options.policy !== undefined ? loadPolicy(options.policy) : DEFAULT_POLICY;
   if (options.uxRules !== undefined) uxRules = loadUxRules(options.uxRules);
   // The test accounts (AGENT-TOOLS 1.13 §18.6). A refused file still starts the server, with no accounts and the reason.
@@ -183,10 +202,17 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     hosts: config.hosts,
     ...(options.api === true
       ? {
-          api: async (tool: string, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal) => {
-            if (tool === HOST_FACTS_TOOL) return { content: [{ type: "text", text: JSON.stringify(facts) }] };
-            if (tool === LEASE_TOOL) return leaseCall(args, clientId);
-            return isToolName(tool) ? thinCall(tool, args, clientId, signal) : undefined;
+          api: async (tool: string, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal, credentials: ApiCredentials) => {
+            // A caller that pinned an instance is refused by any other host: the run never falls through to one with other settings.
+            if (credentials.instance !== undefined && credentials.instance !== instanceId) {
+              return { content: [{ type: "text", text: "Error wrong_host: this is not the host the schedule checked (another instance answers here); nothing was run." }], isError: true };
+            }
+            if (tool === HOST_FACTS_TOOL) {
+              await maps.flushAll().catch(() => undefined);
+              return { content: [{ type: "text", text: JSON.stringify({ ...facts, mapsHash: hashMapsDir(mapsDir) }) }] };
+            }
+            if (tool === LEASE_TOOL) return leaseCall(args, clientId, credentials.lease);
+            return isToolName(tool) ? thinCall(tool, args, clientId, signal, credentials.lease) : undefined;
           },
         }
       : {}),
@@ -223,13 +249,17 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     ...(remoteViewer ? [`http://${config.tailscaleIp}:${port}/viewer?token=${viewerToken} (from your own devices on Tailscale)`] : []),
   ];
   const control = new ControlQueue();
-  const lease = new PhoneLease({ now: clock });
-  const facts: HostFacts = {
-    version: 1,
+  const lease = new PhoneLease({ now: clock, ...(options.leaseGiveUpMs !== undefined ? { giveUpMs: options.leaseGiveUpMs } : {}) });
+  const mapsDir = options.maps ?? join(configDir(options.env), "maps");
+  const facts: Omit<HostFacts, "mapsHash"> = {
+    version: 2,
+    instance: instanceId,
     policy: options.noPolicy !== true && options.policy !== undefined ? canonicalPath(options.policy) : null,
     noPolicy: options.noPolicy === true,
     accounts: options.accounts !== undefined ? canonicalPath(options.accounts) : null,
-    maps: canonicalPath(options.maps ?? join(configDir(options.env), "maps")),
+    maps: canonicalPath(mapsDir),
+    policyHash,
+    accountsHash,
   };
   const confirmations = new Confirmations();
   let hub: ViewerHub | undefined;
@@ -287,32 +317,45 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
   const primary = new TaplineTools(host, toolsOptions);
 
   /** Every call through `/api` is a thin call: the log says so, and the report flags a run of them (§16.1). */
-  function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal): Promise<CallToolResult> {
+  function thinCall(tool: ToolName, args: Record<string, unknown>, clientId: string | undefined, signal: AbortSignal, leaseCredential?: string): Promise<CallToolResult> {
     // A thin call never uses the MCP server's tools: those hold its dialog and the OKs given for its calls.
     const tools = toolsFor(clientId ?? ANONYMOUS_CLIENT);
     // Calls that share a tools object run one after another: they share its per-call state (a run's account).
     const before = lanes.get(tools) ?? Promise.resolve();
     // A call whose client left while it waited in the line is dropped before it starts; a running one is told to stop waiting.
-    const answer = before.then(() => (signal.aborted ? CANCELLED : tools.withCall(signal, () => tools.asThinCall(() => callTool(tools, tool, args)))));
+    // Every tool that changes anything waits behind a scheduled run's lease (not only the touches); the holder's credential goes through.
+    const run = (): Promise<CallToolResult> => tools.asThinCall(() => callTool(tools, tool, args));
+    const mutating = !TOOL_META[tool].readOnly;
+    // A lease that stays held for the whole wait answers `busy`, as a tool does for its own refusals.
+    const gated = (): Promise<CallToolResult> =>
+      tools.leaseGate(run).catch((error: unknown): CallToolResult => {
+        if (!(error instanceof TaplineError)) throw error;
+        return { content: [{ type: "text", text: describeError(error) }], isError: true };
+      });
+    const answer = before.then(() => (signal.aborted ? CANCELLED : tools.withCall(signal, () => (mutating ? gated() : run()), leaseCredential)));
     lanes.set(tools, answer.then(() => undefined, () => undefined));
     return answer;
   }
   const lanes = new WeakMap<TaplineTools, Promise<void>>();
 
-  /** `_lease {action: "acquire" | "renew" | "release"}` for the client that sends it: a scheduled run's hold on the phone (§22.3). */
-  function leaseCall(args: Record<string, unknown>, clientId: string | undefined): CallToolResult {
+  /**
+   * `_lease {action: "acquire" | "renew" | "release"}`: a scheduled run's hold on the phone (§22.3). The first acquire answers an
+   * unguessable credential; renew and release (and every call the run makes) must present it, and a client label alone never counts.
+   */
+  function leaseCall(args: Record<string, unknown>, clientId: string | undefined, credential: string | undefined): CallToolResult {
     const owner = clientId ?? ANONYMOUS_CLIENT;
     const reply = (body: Record<string, unknown>, isError = false): CallToolResult => ({
       content: [{ type: "text", text: JSON.stringify(body) }],
       ...(isError ? { isError: true } : {}),
     });
     const action = args["action"];
-    if (action === "release") return reply({ ok: lease.release(owner) });
+    if (action === "release") return reply({ ok: lease.release(credential) });
     if (action === "acquire" || action === "renew") {
       const ttl = typeof args["ttl_ms"] === "number" ? args["ttl_ms"] : LEASE_TTL_MS;
-      if (action === "renew" && lease.heldBy() !== owner) return reply({ ok: false, by: "lost" });
-      const taken = lease.acquire(owner, ttl, control.driver() === "person" || control.paused());
-      return reply(taken.ok ? { ok: true } : { ok: false, by: taken.by });
+      if (action === "renew") return reply(lease.renew(credential, ttl) ? { ok: true } : { ok: false, by: "lost" });
+      const taken = lease.acquire(owner, ttl, control.driver() === "person" || control.paused(), credential);
+      if (!taken.ok) return reply({ ok: false, by: taken.by });
+      return reply(credential === undefined ? { ok: true, credential: taken.credential } : { ok: true });
     }
     return reply({ error: "action is acquire, renew or release" }, true);
   }

@@ -390,3 +390,47 @@ describe("tapline call", () => {
     expect(statSync(join(run.home, "shots")).mode & 0o777).toBe(0o700);
   });
 });
+
+describe("a pinned call (PR 12 Codex cycle 2, finding 3)", () => {
+  it("goes to the pinned port only, with the instance id and the lease credential in headers (never in the body), and says which port answered", async () => {
+    const a = await stub(() => answer("host A"));
+    const b = await stub(() => answer("host B"));
+    const told: number[] = [];
+    const run = io([a.port, b.port], { pin: { port: b.port, instance: "ab".repeat(16), lease: "cd".repeat(32) }, onHost: (p) => void told.push(p) });
+    expect(await runThinCall(["replay", '{"name":"r"}', "--json"], run.io)).toBe(0);
+    expect(JSON.parse(run.out.join("")).text).toBe("host B");
+    expect(a.seen).toEqual([]);
+    expect(b.seen[0]?.headers["x-tapline-instance"]).toBe("ab".repeat(16));
+    expect(b.seen[0]?.headers["x-tapline-lease"]).toBe("cd".repeat(32));
+    expect(b.seen[0]?.body).toBe('{"name":"r"}');
+    expect(told).toEqual([b.port]);
+  });
+
+  it("never falls back: when the pinned port has no host the call exits 3 and the other ports stay untouched", async () => {
+    const other = await stub(() => answer("another host"));
+    const free = await new Promise<number>((resolve) => {
+      const probe = createNetServer();
+      probe.listen(0, "127.0.0.1", () => {
+        const address = probe.address();
+        const port = typeof address === "object" && address !== null ? address.port : 0;
+        probe.close(() => resolve(port));
+      });
+    });
+    const run = io([other.port, free], { pin: { port: free, instance: "ab".repeat(16) } });
+    expect(await runThinCall(["apps", "{}"], run.io)).toBe(3);
+    expect(other.seen).toEqual([]);
+  });
+
+  it("an unpinned call sends neither header, and a signal cuts a call in flight off", async () => {
+    const s = await stub(() => answer("ok"));
+    const plain = io([s.port]);
+    await runThinCall(["apps", "{}"], plain.io);
+    expect(s.seen[0]?.headers["x-tapline-instance"]).toBeUndefined();
+    expect(s.seen[0]?.headers["x-tapline-lease"]).toBeUndefined();
+    const hang = await stub(() => ({ status: 200, body: "" }));
+    const controller = new AbortController();
+    controller.abort();
+    const cut = io([hang.port], { signal: controller.signal });
+    expect(await runThinCall(["apps", "{}"], cut.io)).toBe(1);
+  });
+});

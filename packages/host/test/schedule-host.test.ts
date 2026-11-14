@@ -1,13 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUSY_WAIT_MS, runSchedule, type CallAnswer, type RunDeps, type ScheduleHost } from "../src/runschedule.js";
 import { AuditLog } from "../src/auditlog.js";
 import type { Schedule } from "../src/schedule.js";
 import { schedulePath, schedulesDir } from "../src/schedule.js";
 import { canonicalPath, HOST_FACTS_TOOL, LEASE_TOOL, type HostFacts } from "../src/runtime.js";
-import { connectScheduleHost, factsMismatch, type ThinCaller } from "../src/schedulehost.js";
+import { connectScheduleHost, factsMismatch, LOST_TEXT, type ThinCaller, type ThinPin } from "../src/schedulehost.js";
+import { hashFile, hashMapsDir } from "../src/hostfacts.js";
 
 // AGENT-TOOLS 1.14 §22.2, §22.3 (PR 12 finding 6): a running host is used only when it carries the schedule's own policy, accounts and maps.
 
@@ -53,12 +54,20 @@ const scheduleOf = (w: World, over: Partial<Schedule> = {}): Schedule => ({
   ...over,
 });
 
+const INSTANCE = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+const CREDENTIAL = "0f".repeat(32);
+
+/** What a host started on these files reports: paths, and the hashes of the files as it loaded them (now). */
 const factsOf = (w: World, over: Partial<HostFacts> = {}): HostFacts => ({
-  version: 1,
+  version: 2,
+  instance: INSTANCE,
   policy: canonicalPath(w.policy),
   noPolicy: false,
   accounts: canonicalPath(w.accounts),
   maps: canonicalPath(w.maps),
+  policyHash: hashFile(w.policy),
+  accountsHash: hashFile(w.accounts),
+  mapsHash: hashMapsDir(w.maps),
   ...over,
 });
 
@@ -112,34 +121,60 @@ describe("factsMismatch (fail closed)", () => {
 
 interface Thin {
   call: ThinCaller;
-  seen: Array<{ tool: string; client: string; args: Record<string, unknown> }>;
+  seen: Array<{ tool: string; client: string; args: Record<string, unknown>; pin: ThinPin | undefined }>;
+  /** Another host takes over the port: its instance id differs from the one that was checked. */
+  swap(): void;
+  /** Renewals and every lease call that follows are refused, as when the host dropped the lease. */
+  failRenewals(): void;
+  /** The next call of a tool waits until the caller aborts it (a long replay). */
+  hang(tool: string): void;
 }
 
 /** A running host that answers `apps`, its facts and the lease the way the real one does. */
 function fakeRunning(facts: HostFacts | string | null | "no host", opts: { leaseFree?: () => boolean; answers?: CallAnswer[] } = {}): Thin {
   const seen: Thin["seen"] = [];
   let held = false;
-  const call: ThinCaller = async (_env, client, tool, args) => {
-    seen.push({ tool, client, args });
+  let instance = typeof facts === "object" && facts !== null ? facts.instance : INSTANCE;
+  let renewalsFail = false;
+  const hanging = new Set<string>();
+  const PORT = 7213;
+  const call: ThinCaller = async (_env, client, tool, args, pin, signal) => {
+    seen.push({ tool, client, args, pin });
     if (facts === "no host") return null;
-    if (tool === "apps") return { text: "Connected apps:\n- Demo", isError: false };
-    if (tool === HOST_FACTS_TOOL) return typeof facts === "string" ? { text: facts, isError: false } : facts === null ? { text: "Error bad_params: the host refused the call.", isError: true } : { text: JSON.stringify(facts), isError: false };
+    // A pinned call goes to its port only, and the host refuses another instance's id.
+    if (pin !== undefined && pin.port !== PORT) return null;
+    if (pin?.instance !== undefined && pin.instance !== instance) return { text: "Error wrong_host: this is not the host the schedule checked.", isError: true, port: PORT };
+    if (tool === "apps") return { text: "Connected apps:\n- Demo", isError: false, port: PORT };
+    if (tool === HOST_FACTS_TOOL) return typeof facts === "string" ? { text: facts, isError: false, port: PORT } : facts === null ? { text: "Error bad_params: the host refused the call.", isError: true, port: PORT } : { text: JSON.stringify(facts), isError: false, port: PORT };
     if (tool === LEASE_TOOL) {
       const action = args["action"];
       if (action === "acquire") {
         held = opts.leaseFree?.() ?? true;
-        return { text: JSON.stringify(held ? { ok: true } : { ok: false, by: "agent" }), isError: false };
+        return { text: JSON.stringify(held ? { ok: true, credential: CREDENTIAL } : { ok: false, by: "agent" }), isError: false, port: PORT };
       }
       if (action === "release") {
-        const was = held;
+        const was = held && pin?.lease === CREDENTIAL;
         held = false;
-        return { text: JSON.stringify({ ok: was }), isError: false };
+        return { text: JSON.stringify({ ok: was }), isError: false, port: PORT };
       }
-      return { text: JSON.stringify({ ok: held }), isError: false };
+      return { text: JSON.stringify({ ok: held && !renewalsFail && pin?.lease === CREDENTIAL }), isError: false, port: PORT };
     }
-    return opts.answers?.shift() ?? { text: "Ran 3 of 3 steps in 1.0 s.", isError: false };
+    if (hanging.delete(tool)) {
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted === true) resolve();
+        else signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { text: "Error unknown_outcome: the call was sent but no answer came back.", isError: true, port: PORT };
+    }
+    return { ...(opts.answers?.shift() ?? { text: "Ran 3 of 3 steps in 1.0 s.", isError: false }), port: PORT };
   };
-  return { call, seen };
+  return {
+    call,
+    seen,
+    swap: () => void (instance = "ffffffffffffffffffffffffffffffff"),
+    failRenewals: () => void (renewalsFail = true),
+    hang: (tool) => void hanging.add(tool),
+  };
 }
 
 function fakeOwn(): { own: (schedule: Schedule, name: string, env: NodeJS.ProcessEnv, note?: string) => Promise<ScheduleHost>; made: Array<{ note: string | undefined }> } {
@@ -336,5 +371,160 @@ describe("a reused host's lease", () => {
     expect(time.ms).toBeLessThan(BUSY_WAIT_MS);
     // The lease is given back when the run ends.
     expect(acquires(thin).at(-1)).toBe("release");
+  });
+});
+
+describe("matching paths are not matching policy (PR 12 Codex cycle 2, finding 2)", () => {
+  it("the policy file edited after the host loaded it (a block word added) is not reused, and nothing is driven through the old snapshot", async () => {
+    const w = world();
+    const facts = factsOf(w); // the host loaded the file as it was
+    writeFileSync(w.policy, JSON.stringify({ version: 2, block: ["Delete"] }));
+    const thin = fakeRunning(facts);
+    const own = fakeOwn();
+    const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: own.own });
+    expect(host.via).toBe("its own host");
+    expect(own.made[0]?.note).toMatch(/the policy file has changed since the host loaded it/);
+    expect(thin.seen.some((s) => s.tool !== "apps" && s.tool !== HOST_FACTS_TOOL)).toBe(false);
+  });
+
+  it("the accounts file edited after the host loaded it is not reused", async () => {
+    const w = world();
+    const facts = factsOf(w);
+    writeFileSync(w.accounts, JSON.stringify({ version: 2, vault: {} }));
+    const own = fakeOwn();
+    await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: fakeRunning(facts).call, own: own.own });
+    expect(own.made[0]?.note).toMatch(/the accounts file has changed since the host loaded it/);
+  });
+
+  it("a map changed after the host loaded it is not reused", async () => {
+    const w = world();
+    const facts = factsOf(w);
+    mkdirSync(join(w.maps, "com.example.app"));
+    writeFileSync(join(w.maps, "com.example.app", "map.json"), "{}");
+    const own = fakeOwn();
+    await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: fakeRunning(facts).call, own: own.own });
+    expect(own.made[0]?.note).toMatch(/the maps have changed since the host loaded them/);
+  });
+
+  it("a host that couldn't read its policy (a null hash) never matches a schedule that names one", () => {
+    const w = world();
+    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: null }), w.env)).toMatch(/policy file has changed/);
+    expect(factsMismatch(scheduleOf(w), factsOf(w, { accountsHash: null }), w.env)).toMatch(/accounts file has changed/);
+  });
+
+  it("identical files, hashed by the injected hasher, match; any difference in any one of the three refuses", () => {
+    const w = world();
+    const same = { file: () => "h", maps: () => "m" };
+    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "h", mapsHash: "m" }), w.env, same)).toBeNull();
+    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "x", accountsHash: "h", mapsHash: "m" }), w.env, same)).toMatch(/policy/);
+    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "x", mapsHash: "m" }), w.env, same)).toMatch(/accounts/);
+    expect(factsMismatch(scheduleOf(w), factsOf(w, { policyHash: "h", accountsHash: "h", mapsHash: "x" }), w.env, same)).toMatch(/maps/);
+  });
+
+  it("facts without an instance id or hashes (an older host) can't be read: no reuse", async () => {
+    const w = world();
+    const old = { version: 1, policy: canonicalPath(w.policy), noPolicy: false, accounts: canonicalPath(w.accounts), maps: canonicalPath(w.maps) };
+    const own = fakeOwn();
+    await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: fakeRunning(JSON.stringify(old)).call, own: own.own });
+    expect(own.made[0]?.note).toMatch(/can't be read/);
+  });
+});
+
+describe("the run is bound to the host it checked (PR 12 Codex cycle 2, finding 3)", () => {
+  it("after the first scan every call goes to that port with the host's instance id, and the lease calls carry the credential", async () => {
+    const w = world();
+    const thin = fakeRunning(factsOf(w));
+    const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: fakeOwn().own });
+    await host.appOpen(1000);
+    await host.inUse();
+    await host.call("replay", { name: "post_update" });
+    await host.close();
+    // the first call scans; the facts call is pinned to the port the scan found; the rest carry the instance too
+    expect(thin.seen[0]?.pin).toBeUndefined();
+    expect(thin.seen[1]?.pin).toEqual({ port: 7213 });
+    for (const call of thin.seen.slice(2)) {
+      expect(call.pin?.port, call.tool).toBe(7213);
+      expect(call.pin?.instance, call.tool).toBe(INSTANCE);
+    }
+    const leaseCalls = thin.seen.filter((s) => s.tool === LEASE_TOOL);
+    expect(leaseCalls[0]?.pin?.lease).toBeUndefined(); // nothing to show until the host gives it
+    for (const call of [...thin.seen.filter((s) => s.tool === "replay"), ...leaseCalls.slice(1)]) expect(call.pin?.lease, call.tool).toBe(CREDENTIAL);
+  });
+
+  it("host A vanishes and host B answers on the same port with other settings: the call is refused, the run stops, and nothing falls back to another port", async () => {
+    const w = world();
+    const thin = fakeRunning(factsOf(w));
+    const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: fakeOwn().own });
+    expect(await host.inUse()).toBe(false);
+    thin.swap();
+    const answer = await host.call("replay", { name: "post_update" });
+    expect(answer).toEqual({ text: LOST_TEXT, isError: true });
+    // later calls don't go out at all
+    const before = thin.seen.length;
+    expect(await host.call("replay", { name: "post_update" })).toEqual({ text: LOST_TEXT, isError: true });
+    expect(thin.seen.length).toBe(before);
+    await host.close();
+    expect(thin.seen.every((s) => s.pin === undefined || s.pin.port === 7213)).toBe(true);
+  });
+
+  it("a pinned thin call to a port with no host answers null (never scans for another)", async () => {
+    const w = world();
+    const thin = fakeRunning(factsOf(w));
+    expect(await thin.call(w.env, "c", "apps", {}, { port: 7219, instance: INSTANCE })).toBeNull();
+  });
+});
+
+describe("a lost lease stops the run (PR 12 CodeRabbit)", () => {
+  it("a renewal that fails cuts the call in flight off and every later call answers that the run lost the phone", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = world();
+      const thin = fakeRunning(factsOf(w));
+      const host = await connectScheduleHost(scheduleOf(w), "daily", w.env, { thin: thin.call, own: fakeOwn().own });
+      expect(await host.inUse()).toBe(false);
+      thin.hang("replay");
+      const running = host.call("replay", { name: "post_update" });
+      thin.failRenewals();
+      await vi.advanceTimersByTimeAsync(16_000);
+      const answer = await running;
+      expect(answer).toEqual({ text: LOST_TEXT, isError: true });
+      const sent = thin.seen.length;
+      expect(await host.call("replay", { name: "again" })).toEqual({ text: LOST_TEXT, isError: true });
+      expect(thin.seen.length).toBe(sent);
+      await host.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("run-schedule reports it as a failed run: stopped: the run lost the phone", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = world();
+      mkdirSync(schedulesDir(w.home), { recursive: true });
+      writeFileSync(schedulePath(w.home, "daily"), JSON.stringify(scheduleOf(w)));
+      const thin = fakeRunning(factsOf(w));
+      thin.hang("replay");
+      const deps: RunDeps = {
+        configDir: w.home,
+        now: () => new Date(Date.UTC(2026, 10, 14, 6, 0, 0)),
+        clock: () => Date.now(),
+        sleep: async () => undefined,
+        connect: (schedule, name) => connectScheduleHost(schedule, name, w.env, { thin: thin.call, own: fakeOwn().own }),
+        audit: new AuditLog(join(w.home, "audit")),
+        redactFor: async () => (text) => text,
+        pid: 4242,
+        alive: () => false,
+      };
+      const run = runSchedule("daily", {}, deps);
+      await vi.advanceTimersByTimeAsync(1000);
+      thin.failRenewals();
+      await vi.advanceTimersByTimeAsync(16_000);
+      const out = await run;
+      expect(out.code).toBe(1);
+      expect(out.text.split("\n")[0]).toBe('Schedule "daily" stopped: the run lost the phone.');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

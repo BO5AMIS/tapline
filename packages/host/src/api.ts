@@ -13,7 +13,14 @@ export type ApiHandler = (
   clientId: string | undefined,
   /** Aborts when the client disconnects before the answer: queued work that nobody waits for is skipped. */
   signal: AbortSignal,
+  /** What the caller proves beyond its label: the host instance it means to reach and the lease credential it holds (headers, never arguments). */
+  credentials: ApiCredentials,
 ) => Promise<CallToolResult | undefined>;
+
+export interface ApiCredentials {
+  instance?: string;
+  lease?: string;
+}
 
 /** The most a call's JSON may be. */
 export const MAX_API_BODY = 1024 * 1024;
@@ -73,6 +80,18 @@ function plain(res: ServerResponse, status: number, text: string): void {
   res.end(`${text}\n`);
 }
 
+function headerOf(req: IncomingMessage, name: string): string | undefined {
+  const raw = req.headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" && /^[0-9a-f]{16,128}$/.test(value) ? value : undefined;
+}
+
+function credentialsOf(req: IncomingMessage): ApiCredentials {
+  const instance = headerOf(req, "x-tapline-instance");
+  const lease = headerOf(req, "x-tapline-lease");
+  return { ...(instance !== undefined ? { instance } : {}), ...(lease !== undefined ? { lease } : {}) };
+}
+
 function clientOf(req: IncomingMessage): string | undefined {
   const raw = req.headers["x-agent-client"];
   const value = (Array.isArray(raw) ? raw[0] : raw)?.replace(/[^\w .@/-]/g, "").slice(0, 60);
@@ -117,6 +136,7 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
     tool = "";
   }
   const client = clientOf(req);
+  const credentials = credentialsOf(req);
   const chunks: Buffer[] = [];
   let size = 0;
   let tooLong = false;
@@ -155,7 +175,7 @@ export function handleApi(req: IncomingMessage, res: ServerResponse, context: Ap
       plain(res, 400, "Body: a JSON object of at most 1 MB.");
       return;
     }
-    handler(tool, args, client, cancel.signal).then(
+    handler(tool, args, client, cancel.signal, credentials).then(
       (result) => {
         if (cancel.signal.aborted) return; // nobody is waiting for the answer
         if (result === undefined) {

@@ -1310,7 +1310,7 @@ export class TaplineTools {
   readonly confirmations: Confirmations;
   private dialogs: Dialogs | undefined;
   /** Milliseconds this server spent waiting for a person's OK; run's 120 s doesn't count them (§9.3). */
-  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal }>();
+  private readonly holdScope = new AsyncLocalStorage<{ ms: number; signal?: AbortSignal; lease?: string }>();
   private readonly policy: PolicyFile;
   private readonly uxRules: UxRules;
   /**
@@ -1698,10 +1698,18 @@ export class TaplineTools {
   private agentTurn<T>(run: () => Promise<T>): Promise<T> {
     const control = this.options.control;
     const go = control !== undefined ? () => control.runAgent(run) : run;
+    return this.leaseGate(go);
+  }
+
+  /**
+   * Behind a scheduled run's lease: another client's call waits (then answers `busy`) while the lease stands. Only the credential the
+   * run was given gets through; the client label never does (PR 12 Codex cycle 2).
+   */
+  leaseGate<T>(run: () => Promise<T>): Promise<T> {
     const lease = this.options.lease;
-    if (lease === undefined) return go();
+    if (lease === undefined) return run();
     const who = (this.clientIdFn ?? this.options.clientId)?.()?.replace(/[^\w .@/-]/g, "").slice(0, 60) ?? "";
-    return lease.run(who, go);
+    return lease.run(who, run, this.holdScope.getStore()?.lease);
   }
 
   /** The MCP server gives the dialog once it can ask its client (the client's capabilities are known after initialize). */
@@ -5232,8 +5240,8 @@ export class TaplineTools {
    * Runs a call of the agent with its own wait counter and, when there is one, the request's abort signal, so a
    * wait for a person's OK is counted for this call only and closes when the call is cancelled.
    */
-  withCall<T>(signal: AbortSignal | undefined, run: () => T): T {
-    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}) }, run);
+  withCall<T>(signal: AbortSignal | undefined, run: () => T, leaseCredential?: string): T {
+    return this.holdScope.run({ ms: 0, ...(signal !== undefined ? { signal } : {}), ...(leaseCredential !== undefined ? { lease: leaseCredential } : {}) }, run);
   }
 
   /**

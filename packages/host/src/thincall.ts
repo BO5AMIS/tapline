@@ -33,6 +33,15 @@ export interface ThinCallIO {
   ports: number[];
   /** The address of the host. Default 127.0.0.1. */
   address: string;
+  /**
+   * A caller that already checked one host (a scheduled run): the call goes to this port only, never another, and carries the host's
+   * instance id and the lease credential in headers. The host refuses a different instance. Not reachable from the command line.
+   */
+  pin?: { port: number; instance?: string; lease?: string };
+  /** Told the port of the host that took the call (the first call of a run learns which host it is talking to). */
+  onHost?: (port: number) => void;
+  /** Aborts the request in flight (a run that lost its lease cuts its call off). */
+  signal?: AbortSignal;
 }
 
 function defaultIO(): ThinCallIO {
@@ -67,7 +76,7 @@ class PostError extends Error {
 }
 
 /** One POST; rejects with a PostError. The token goes in the header and nowhere else. */
-function post(address: string, port: number, tool: string, body: string, token: string, client: string): Promise<Reply> {
+function post(address: string, port: number, tool: string, body: string, token: string, client: string, pin?: ThinCallIO["pin"], signal?: AbortSignal): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const req = request(
       {
@@ -81,6 +90,8 @@ function post(address: string, port: number, tool: string, body: string, token: 
           "content-length": Buffer.byteLength(body),
           authorization: `Bearer ${token}`,
           "x-agent-client": client,
+          ...(pin?.instance !== undefined ? { "x-tapline-instance": pin.instance } : {}),
+          ...(pin?.lease !== undefined ? { "x-tapline-lease": pin.lease } : {}),
         },
       },
       (res) => {
@@ -91,6 +102,10 @@ function post(address: string, port: number, tool: string, body: string, token: 
       },
     );
     req.on("error", (error: NodeJS.ErrnoException) => reject(new PostError(error.code !== "ECONNREFUSED")));
+    if (signal !== undefined) {
+      if (signal.aborted) req.destroy();
+      else signal.addEventListener("abort", () => req.destroy(), { once: true });
+    }
     req.end(body);
   });
 }
@@ -252,6 +267,8 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     }
     ports = [port];
   }
+  // A pinned call has one port: nothing else is tried, so it can never reach another host.
+  if (io.pin !== undefined) ports = [io.pin.port];
   const address = values.host ?? io.address;
   // The token goes over plain http, so only this computer may be named.
   if (!LOOPBACK_NAMES.has(address.toLowerCase())) {
@@ -289,12 +306,13 @@ export async function runThinCall(argv: string[], io: ThinCallIO = defaultIO()):
     if (who === "none") continue; // nothing here, or not a Tapline host
     let reply: Reply;
     try {
-      reply = await post(address, port, tool, body, token, client);
+      reply = await post(address, port, tool, body, token, client, io.pin, io.signal);
     } catch (error) {
       if (error instanceof PostError && !error.sent) continue; // nothing listens there
       return unknownOutcome(io);
     }
     if (reply.status === 200) {
+      io.onHost?.(port);
       let answer: Answer | null = null;
       try {
         answer = asAnswer(JSON.parse(reply.body));

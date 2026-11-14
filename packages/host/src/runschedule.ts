@@ -92,6 +92,7 @@ const SKIP_USE = "skipped: the phone was in use";
 const SKIP_PREVIOUS = "skipped: the previous run is still going";
 const SKIP_CLOSED = "skipped: the app is not open";
 const STOP_DRAFT = "stopped: a draft is waiting for a person.";
+const STOP_LOST = "stopped: the run lost the phone.";
 
 /** `YYYYMMDDTHHMMSSZ`, UTC. */
 export function utcStamp(date: Date): string {
@@ -432,6 +433,8 @@ export async function runSchedule(name: string | undefined, options: RunOptions,
     const extra = { report: answer.text, via: host.via, sinceMs, seconds };
     if (!answer.isError) return finishWith("done", "done", "done", 0, extra);
     if (/a draft is waiting for a person|the draft wasn't sent/.test(answer.text)) return finishWith("stopped", STOP_DRAFT, STOP_DRAFT, 1, extra);
+    // The host's lease was lost mid-run (a failed renewal, or another host answered): nothing further ran, and the run is a failure (§22.3).
+    if (/^Error lease_lost:/.test(answer.text)) return finishWith("failed", STOP_LOST, STOP_LOST, 1, extra);
     const failure = failureOf(answer.text);
     const detail = failure.step === null ? `failed (${failure.why})` : `failed at step ${failure.step} (${failure.why})`;
     // A route that could not start (no such route, a variable with no value) is "couldn't start", as in replay.

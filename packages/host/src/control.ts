@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import { safeEqual } from "./api.js";
 import { TaplineError } from "./server.js";
 
 /**
@@ -159,7 +161,7 @@ export class PhoneLease {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly giveUpMs: number;
   private readonly pollMs: number;
-  private holder: { owner: string; expires: number } | null = null;
+  private holder: { owner: string; credential: string; expires: number } | null = null;
   /** Agent actions running now, by who started them. */
   private readonly inflight = new Map<string, number>();
 
@@ -176,34 +178,50 @@ export class PhoneLease {
     return this.holder?.owner ?? null;
   }
 
-  /**
-   * Takes the lease for `owner`, or says why not: another run holds it, another agent's action is running, or a person is
-   * driving (`personActive`, from the control queue). Asking again as the holder renews it.
-   */
-  acquire(owner: string, ttlMs: number, personActive: boolean): { ok: true } | { ok: false; by: LeaseRefusal } {
-    const holder = this.heldBy();
-    if (holder !== null && holder !== owner) return { ok: false, by: "lease" };
-    if (holder === null) {
-      for (const [who, count] of this.inflight) if (who !== owner && count > 0) return { ok: false, by: "agent" };
-      if (personActive) return { ok: false, by: "person" };
-    }
-    this.holder = { owner, expires: this.now() + Math.min(Math.max(ttlMs, 1000), LEASE_MAX_TTL_MS) };
-    return { ok: true };
+  /** True when `credential` is the standing lease's own (a label never is). */
+  holds(credential: string | undefined): boolean {
+    if (credential === undefined || this.heldBy() === null || this.holder === null) return false;
+    return safeEqual(credential, this.holder.credential);
   }
 
-  /** Releases the lease when `owner` holds it; false when it doesn't (never another's). */
-  release(owner: string): boolean {
-    if (this.heldBy() !== owner) return false;
+  /**
+   * Takes the lease for `owner`, or says why not: another run holds it, another agent's action is running, or a person is
+   * driving (`personActive`, from the control queue). The answer carries the lease credential (32 random bytes, hex): the
+   * holder presents it on every later call, and a label alone never counts as the holder. Asking again with the credential renews.
+   */
+  acquire(owner: string, ttlMs: number, personActive: boolean, credential?: string): { ok: true; credential: string } | { ok: false; by: LeaseRefusal } {
+    const ttl = Math.min(Math.max(ttlMs, 1000), LEASE_MAX_TTL_MS);
+    if (this.heldBy() !== null && this.holder !== null) {
+      if (!this.holds(credential)) return { ok: false, by: "lease" };
+      this.holder.expires = this.now() + ttl;
+      return { ok: true, credential: this.holder.credential };
+    }
+    for (const [who, count] of this.inflight) if (who !== owner && count > 0) return { ok: false, by: "agent" };
+    if (personActive) return { ok: false, by: "person" };
+    const fresh = randomBytes(32).toString("hex");
+    this.holder = { owner, credential: fresh, expires: this.now() + ttl };
+    return { ok: true, credential: fresh };
+  }
+
+  /** Renews the lease when `credential` is the holder's; false when it isn't (the lease was lost or never held). */
+  renew(credential: string | undefined, ttlMs: number): boolean {
+    if (!this.holds(credential) || this.holder === null) return false;
+    this.holder.expires = this.now() + Math.min(Math.max(ttlMs, 1000), LEASE_MAX_TTL_MS);
+    return true;
+  }
+
+  /** Releases the lease when `credential` is the holder's; false when it isn't (never another's). */
+  release(credential: string | undefined): boolean {
+    if (!this.holds(credential)) return false;
     this.holder = null;
     return true;
   }
 
-  /** An agent action by `who`: waits while someone else's lease stands, `busy` after `giveUpMs`. */
-  async run<T>(who: string, fn: () => Promise<T>): Promise<T> {
+  /** An agent action by `who`: waits while someone else's lease stands (the holder's own credential goes straight through), `busy` after `giveUpMs`. */
+  async run<T>(who: string, fn: () => Promise<T>, credential?: string): Promise<T> {
     const started = this.now();
     for (;;) {
-      const holder = this.heldBy();
-      if (holder === null || holder === who) break;
+      if (this.heldBy() === null || this.holds(credential)) break;
       if (this.now() - started >= this.giveUpMs) {
         throw new TaplineError("busy", "A scheduled run is using the phone. Try again when it has finished, or ask your user.");
       }
