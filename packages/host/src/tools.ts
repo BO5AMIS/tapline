@@ -25,7 +25,7 @@ import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animati
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
 import { knownLine, reachableNames } from "./known.js";
-import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
+import { driveArgsError, driveQuietly, routeRunnable, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { mentionsVault, redactAll, redactContent, substituteAccount, vaultValues, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
   EYES,
@@ -2103,7 +2103,7 @@ export class TaplineTools {
 
   /** A call refused before it reached its tool (an unknown argument): numbered and logged like any other, so the report counts it. */
   rejectedCall(tool: string, args: unknown, answer: CallToolResult): CallToolResult {
-    const result = this.loggedCall(tool, args, () => answer);
+    const result = this.countedCall(() => this.loggedCall(tool, args, () => answer));
     return result instanceof Promise ? answer : result;
   }
 
@@ -4684,7 +4684,7 @@ export class TaplineTools {
     try {
       const map = this.mapOf(session);
       if (map === undefined) return null;
-      const names = reachableNames(map, seen.isNew ? null : seen.place, seen.place, map.knownPlaces() ?? { source: "none", places: [] }, this.driveRoadsOnly());
+      const names = reachableNames(map, seen.isNew ? null : seen.place, seen.place, map.knownPlaces() ?? { source: "none", places: [] }, this.driveRoadsOnly(), (route) => routeRunnable(this.driveServices(session, map), this.routeServices(session, undefined, undefined), route));
       // A name a redaction would change (a vault value, a code, a typed text) is never printed.
       return knownLine(names.filter((name) => this.printable(name)));
     } catch {

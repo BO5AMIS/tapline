@@ -972,6 +972,11 @@ function prepareRoute(svc: DriveServices, rs: RouteServices, name: string, value
   return { ok: true, route, steps: filled.steps };
 }
 
+/** Whether `drive {"to"}` could run this saved route with no arguments: the check it makes before touching anything (steps, variables, account). */
+export function routeRunnable(svc: DriveServices, rs: RouteServices, name: string): boolean {
+  return prepareRoute(svc, rs, name, {}, undefined, false).ok;
+}
+
 /**
  * `drive {route}`: takes the app to the route's start place when it is elsewhere, then runs its steps with the variables
  * and the account filled in, then checks its end (18.4, 18.5). The values and the account are checked before anything is touched.

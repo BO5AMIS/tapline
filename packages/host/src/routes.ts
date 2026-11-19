@@ -260,7 +260,7 @@ export interface RouteEdge {
  * The saved routes `drive {"to"}` may plan through: those with a start and an end that differ, and no variable but the
  * test account (a plan has no value to give a variable).
  */
-export function routeEdges(map: AppMap, options: { withoutAccount?: boolean } = {}): RouteEdge[] {
+export function routeEdges(map: AppMap): RouteEdge[] {
   const edges: RouteEdge[] = [];
   for (const [route, relative] of Object.entries(map.data().routes)) {
     const file = routeFileIn(map.folder(), relative) === null ? null : readRouteSync(map.folder(), relative);
@@ -269,8 +269,6 @@ export function routeEdges(map: AppMap, options: { withoutAccount?: boolean } = 
     const { start, end, variables = [], steps } = parsed.data;
     if (start === undefined || end === undefined || start === end || steps.length === 0) continue;
     if (variables.some((variable) => variable !== "account")) continue;
-    // A caller that can give no account (the `Known:` line) takes only routes that need none.
-    if (options.withoutAccount === true && variables.length > 0) continue;
     let last = new Date(0).toISOString();
     try {
       last = statSync(join(map.folder(), relative)).mtime.toISOString();

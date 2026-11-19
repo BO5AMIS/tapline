@@ -211,3 +211,45 @@ describe("CodeRabbit: overlapping calls", () => {
     expect(hintOf(await tapped)).toBe('Hint: this way is known: `drive {"to": "settings"}` reaches settings in one call.');
   });
 });
+
+describe("cycle 2: Known: plans as drive does", () => {
+  const route = (steps: unknown[], extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ format: "agent-tools-script", version: 2, app: APP.id, name: "login", start: "settings", end: "language", steps, ...extra });
+  const typePassword = [{ tool: "type_text", target: { id: "password" }, text: "${account.password}" }];
+  const knownOf = (text: string): string => text.split("\n").find((line) => line.startsWith("Known:")) ?? "";
+
+  async function withRoute(file: string): Promise<Setup> {
+    const map = baseMap();
+    map.routes = { login: "routes/login.json" };
+    const s = await setup({ map });
+    writeFileSync(join(s.folder, "routes/login.json"), file);
+    return s;
+  }
+
+  it("1. leaves out a place whose cheaper route needs an account the agent can't give", async () => {
+    const s = await withRoute(route(typePassword, { variables: ["account"] }));
+    const known = knownOf(await look(s));
+    expect(known).toContain("general");
+    expect(known).not.toContain("language");
+    expect(textOf(await callTool(s.tools, "drive", { to: "language" }))).toMatch(/^Error bad_params:.*account/);
+  });
+
+  it("2. finds the need from the steps when variables are not declared", async () => {
+    const s = await withRoute(route(typePassword));
+    expect(knownOf(await look(s))).not.toContain("language");
+    expect(textOf(await callTool(s.tools, "drive", { to: "language" }))).toMatch(/^Error bad_params:.*account/);
+  });
+
+  it("keeps a place whose route needs nothing", async () => {
+    const s = await withRoute(route([{ tool: "tap", target: { id: "general-row" } }]));
+    expect(knownOf(await look(s))).toContain("language");
+  });
+});
+
+describe("cycle 2: rejected calls count", () => {
+  it("3. a refused call counts toward the 20", async () => {
+    const s = await setup();
+    for (let i = 0; i < 19; i++) expect(textOf(await callTool(s.tools, "look", { unknown: true }))).toMatch(/^Error bad_params/);
+    expect(hintOf(await look(s))).toContain("on a long task");
+  });
+});

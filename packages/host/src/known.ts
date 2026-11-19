@@ -15,9 +15,9 @@ const WORDS = "(one call each: drive {\"to\": ...})";
  * the map's own (a route name or one given with `map`), never screen text. Most recently reached first, then by name:
  * the map keeps no use counts for places.
  */
-export function reachableNames(map: AppMap, here: Place | null, current: Place, known: KnownPlaces, tapsOnly: boolean): string[] {
+export function reachableNames(map: AppMap, here: Place | null, current: Place, known: KnownPlaces, tapsOnly: boolean, routeRunnable: (route: string) => boolean): string[] {
   const places = map.data().places;
-  const routes = tapsOnly ? undefined : routeEdges(map, { withoutAccount: true });
+  const routes = tapsOnly ? undefined : routeEdges(map);
   const reached: Array<{ name: string; at: number }> = [];
   for (const [name, saved] of Object.entries(places)) {
     if (name === current.name) continue;
@@ -26,6 +26,8 @@ export function reachableNames(map: AppMap, here: Place | null, current: Place, 
     if ("error" in plan) continue;
     // drive refuses a link whose values aren't given; a way by link that can't be filled isn't one call.
     if (plan.by === "link" && link !== null && !fillLink(link, {}).ok) continue;
+    // The plan is the one `drive` picks; a saved route on it must run with no argument (no variable, no account `drive` can't give).
+    if (plan.moves.some((move) => move.route !== undefined && !routeRunnable(move.route.route))) continue;
     // A leg that opens a link with a value in it is not one call with no arguments.
     if (plan.moves.some((move) => move.route === undefined && !move.viaLink && move.road.move.tool === "open_url" && typeof move.road.move.url === "string" && !fillLink(move.road.move.url, {}).ok)) continue;
     const at = Date.parse(saved.last);
