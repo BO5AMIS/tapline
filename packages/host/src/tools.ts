@@ -1311,6 +1311,12 @@ const ELEMENT_ACTIONS: ReadonlySet<string> = new Set(["tap", "long_press", "type
 /** The logged touches that can take the app to another place (the known-way flag reads them). */
 const AGENT_TOUCHES: ReadonlySet<string> = new Set(["tap", "long_press", "toggle", "back", "open_url", "swipe"]);
 
+/** What the outermost call tells the `Hint:` line: where its touch led, and which error lines `logs` delivered. */
+interface HintCall {
+  way?: Way;
+  delivered?: number[];
+}
+
 /** What a call in flight collects for the call log. */
 /** What the reflexes did in one call (AGENT-TOOLS 1.13 §18.7): the limit is per call, and every line is said in its answer. */
 interface ReflexCall {
@@ -1423,7 +1429,8 @@ export class TaplineTools {
   private callCount = 0;
   /** The `Hint:` line's memory (AGENT-TOOLS 1.17 §30.3), and where the touch in flight led (set when its road is noted). */
   private readonly hints: HintBook;
-  private pendingWay: Way | undefined;
+  /** What the outermost call in flight tells the hints: where its touch led, and the error lines `logs` gave. Each call has its own, so overlapping calls never take each other's. */
+  private readonly hintScope = new AsyncLocalStorage<HintCall>();
   /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
   private readonly callScope = new AsyncLocalStorage<CallState>();
   private readonly thinScope = new AsyncLocalStorage<boolean>();
@@ -1683,14 +1690,14 @@ export class TaplineTools {
       const original: unknown = Reflect.get(this, name);
       if (typeof original !== "function") continue;
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
-      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args), name === "drive", { tool: CALL_TOOLS[name] ?? name, args: args[0] }));
+      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args), name === "drive", { tool: CALL_TOOLS[name] ?? name, args: args[0], calls: this.outerCalls }));
     }
     // Outermost: every call of the agent is numbered and logged (reads too) once its answer is known.
     for (const [name, tool] of Object.entries(CALL_TOOLS)) {
       const original: unknown = Reflect.get(this, name);
       if (typeof original !== "function") continue;
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
-      Reflect.set(this, name, (...args: unknown[]) => this.loggedCall(tool, args[0], () => method.apply(this, args)));
+      Reflect.set(this, name, (...args: unknown[]) => this.countedCall(() => this.loggedCall(tool, args[0], () => method.apply(this, args))));
     }
     // A running journey measures the agent's looks and actions, and shows its answers as a user would see them.
     for (const [name, tool] of Object.entries(CALL_TOOLS)) {
@@ -1700,6 +1707,18 @@ export class TaplineTools {
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
       Reflect.set(this, name, (...args: unknown[]) => this.journeyCall(tool, args[0], () => method.apply(this, args)));
     }
+  }
+
+  /** Counts one call of the agent, whatever the tool (the steps of a `run` are part of it). */
+  private countedCall(run: () => CallToolResult | Promise<CallToolResult>): CallToolResult | Promise<CallToolResult> {
+    if (this.outerScope.getStore() === true) return run();
+    this.outerCalls++;
+    return this.outerScope.run(true, run);
+  }
+
+  /** Whether a name may be printed: no vault value, one-time code or typed text. */
+  private printable(name: string): boolean {
+    return this.scrubSecrets(name, this.host.typedSource()) === name;
   }
 
   /** Whether fast animations are on for the app being driven now. */
@@ -3210,7 +3229,7 @@ export class TaplineTools {
    * Runs a tool call and ends its answer with a note when the app stopped (AGENT-TOOLS 15.2): during this
    * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
    */
-  private noting(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false, called?: { tool: string; args: unknown }): CallToolResult | Promise<CallToolResult> {
+  private noting(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false, called?: { tool: string; args: unknown; calls: number }): CallToolResult | Promise<CallToolResult> {
     // Nesting belongs to the call and what it awaits (not to this object), so calls running side by side each
     // count as outermost, and only a step inside a call is skipped.
     if (this.noteScope.getStore() === true) return run();
@@ -3219,12 +3238,13 @@ export class TaplineTools {
     // Reflexes fired during the call are counted for it, and said in its answer (§18.7).
     const reflexes: ReflexCall = { fired: new Map(), lines: [] };
     const grantLines: string[] = [];
-    return this.grantNotes.run(grantLines, () =>
+    const hintCall: HintCall = {};
+    return this.hintScope.run(hintCall, () => this.grantNotes.run(grantLines, () =>
       this.noteScope.run(true, () =>
         this.reflexScope.run(reflexes, () => {
           const result = this.otpCall.run({ asked: false, dropped: false }, () => this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive)));
           const finish = (answer: CallToolResult): CallToolResult =>
-            this.withHint(this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes), called);
+            this.withHint(this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes), called, hintCall);
           // The first answer of a session with grants says which grant is refused, and whether the state file is broken (§19.1, §19.4).
           if (this.options.grants !== undefined && !this.grantNoticeDone) {
             this.grantNoticeDone = true;
@@ -3234,35 +3254,34 @@ export class TaplineTools {
           return result instanceof Promise ? result.then(finish) : finish(result);
         }),
       ),
-    );
+    ));
   }
 
   /**
    * The `Hint:` line (AGENT-TOOLS 1.17 §30.3): after the notes, at most one, once per session, never with `--no-hints`. The choice is in hints.ts.
    * Only the outermost call of the agent counts; what a `run` or `drive` moved inside it is its own, so it ends a streak of taps.
    */
-  private withHint(answer: CallToolResult, called: { tool: string; args: unknown } | undefined): CallToolResult {
-    const way = this.pendingWay;
-    this.pendingWay = undefined;
-    if (this.options.noHints === true || called === undefined) return answer;
+  private withHint(answer: CallToolResult, called: { tool: string; args: unknown; calls: number } | undefined, hinted: HintCall): CallToolResult {
+    // A user's eyes see no map names, ids or shortcuts (a hint names a place, `run`, `logs` or `drive`): none there.
+    if (this.options.noHints === true || called === undefined || this.userEyes()) return answer;
     try {
       const top = answer.content[0];
       const session = this.host.current();
-      let errorSeq: number | undefined;
+      const errorSeqs: number[] = [];
       if (session !== undefined) {
-        for (const entry of this.sessionLogs(session.id)) {
-          if (logLevelOf(entry) === "error" && (errorSeq === undefined || (entry.seq ?? 0) > errorSeq)) errorSeq = entry.seq ?? 0;
-        }
+        for (const entry of this.sessionLogs(session.id)) if (logLevelOf(entry) === "error" && entry.seq !== undefined) errorSeqs.push(entry.seq);
       }
       const args = typeof called.args === "object" && called.args !== null ? (called.args as Record<string, unknown>) : {};
-      const line = this.hints.note(session?.id ?? "none", {
+      const line = this.hints.note("agent", {
         tool: called.tool,
         args,
         text: top !== undefined && top.type === "text" ? top.text : "",
         isError: answer.isError === true,
-        errorSeq,
-        way,
-        logMark: this.host.logMark(),
+        errorSeqs,
+        delivered: hinted.delivered ?? [],
+        way: hinted.way,
+        calls: called.calls,
+        printable: (name) => this.printable(name),
       });
       return line === null ? answer : appendNote(answer, line);
     } catch {
@@ -4652,18 +4671,22 @@ export class TaplineTools {
     };
   }
 
-  /** Sessions whose first app answer has had its `Known:` line (or had none to give). */
-  private readonly knownShown = new Set<string>();
+  /** Whether this agent's first app answer has had its `Known:` line (or had none to give). Per agent, not per app connection: a reconnect doesn't say it again. */
+  private knownShown = false;
+  /** The agent's outermost calls so far, for every tool (the long-task hint), and the scope that tells a step inside a call from a call. */
+  private outerCalls = 0;
+  private readonly outerScope = new AsyncLocalStorage<true>();
 
   /** The `Known:` line (AGENT-TOOLS 1.17 §30.2): once a session; null with `--no-hints`, when nothing is reachable, or once said. */
   private knownLineOnce(session: SessionInfo, seen: { place: Place; isNew: boolean }): string | null {
-    if (this.options.noHints === true || this.knownShown.has(session.id)) return null;
-    this.knownShown.add(session.id);
+    if (this.options.noHints === true || this.knownShown) return null;
+    this.knownShown = true;
     try {
       const map = this.mapOf(session);
       if (map === undefined) return null;
       const names = reachableNames(map, seen.isNew ? null : seen.place, seen.place, map.knownPlaces() ?? { source: "none", places: [] }, this.driveRoadsOnly());
-      return knownLine(names);
+      // A name a redaction would change (a vault value, a code, a typed text) is never printed.
+      return knownLine(names.filter((name) => this.printable(name)));
     } catch {
       return null;
     }
@@ -4745,7 +4768,8 @@ export class TaplineTools {
         const known = map.data().roads.some((road) => road.from === from.name && road.to === arrived.name && (road.by === "tapline" || road.by === "both") && map.isProven(road));
         const logged = this.callScope.getStore()?.entries.at(-1);
         if (logged !== undefined && logged.entry.of === undefined && AGENT_TOUCHES.has(logged.entry.tool)) logged.entry.way = { from: from.name, to: arrived.name, known };
-        this.pendingWay = { from: from.name, to: arrived.name, known };
+        const hinted = this.hintScope.getStore();
+        if (hinted !== undefined) hinted.way = { from: from.name, to: arrived.name, known };
       }
       let move = classified.move;
       if (move.tool === "open_url") {
@@ -7999,7 +8023,11 @@ export class TaplineTools {
     }
     const newest = entries.reduce<number | undefined>((max, e) => (e.ts !== undefined && (max === undefined || e.ts > max) ? e.ts : max), undefined);
     const query = { since: args.since, level: args.level, grep: args.grep, limit: args.limit };
-    return text(formatLogAnswer(filterLogs(entries, query), query, newest ?? args.since ?? 0));
+    const shown = filterLogs(entries, query);
+    // Only the error lines this answer carries count as read by the hints.
+    const hinted = this.hintScope.getStore();
+    if (hinted !== undefined) hinted.delivered = shown.flatMap((entry) => (logLevelOf(entry) === "error" && entry.seq !== undefined ? [entry.seq] : []));
+    return text(formatLogAnswer(shown, query, newest ?? args.since ?? 0));
   }
 
   /** The newest fatal JS error of the app (`all`: the last 5). Reading them tells the agent what the notes did. */

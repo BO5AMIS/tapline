@@ -17,7 +17,7 @@ const WORDS = "(one call each: drive {\"to\": ...})";
  */
 export function reachableNames(map: AppMap, here: Place | null, current: Place, known: KnownPlaces, tapsOnly: boolean): string[] {
   const places = map.data().places;
-  const routes = tapsOnly ? undefined : routeEdges(map);
+  const routes = tapsOnly ? undefined : routeEdges(map, { withoutAccount: true });
   const reached: Array<{ name: string; at: number }> = [];
   for (const [name, saved] of Object.entries(places)) {
     if (name === current.name) continue;
@@ -26,6 +26,8 @@ export function reachableNames(map: AppMap, here: Place | null, current: Place, 
     if ("error" in plan) continue;
     // drive refuses a link whose values aren't given; a way by link that can't be filled isn't one call.
     if (plan.by === "link" && link !== null && !fillLink(link, {}).ok) continue;
+    // A leg that opens a link with a value in it is not one call with no arguments.
+    if (plan.moves.some((move) => move.route === undefined && !move.viaLink && move.road.move.tool === "open_url" && typeof move.road.move.url === "string" && !fillLink(move.road.move.url, {}).ok)) continue;
     const at = Date.parse(saved.last);
     reached.push({ name, at: Number.isNaN(at) ? 0 : at });
   }

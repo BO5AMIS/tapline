@@ -284,10 +284,11 @@ describe("pickHint (pure)", () => {
   });
 
   it("a book keeps its own state per session", () => {
-    const facts = (over: Partial<CallFacts> = {}): CallFacts => ({ tool: "look", args: {}, text: "Screen 1x1 pt", isError: false, errorSeq: undefined, way: undefined, logMark: 0, ...over });
+    const facts = (over: Partial<CallFacts> = {}): CallFacts => ({ tool: "look", args: {}, text: "Screen 1x1 pt", isError: false, errorSeqs: [], delivered: [], way: undefined, calls: 1, printable: () => true, ...over });
     const book = new HintBook(0);
-    for (let i = 0; i < 19; i++) expect(book.note("a", facts())).toBeNull();
-    expect(book.note("a", facts())).toBe(HINT_LONG);
-    expect(book.note("b", facts())).toBeNull();
+    expect(book.note("a", facts({ calls: 19 }))).toBeNull();
+    expect(book.note("a", facts({ calls: 20 }))).toBe(HINT_LONG);
+    expect(book.note("a", facts({ calls: 21 }))).toBeNull();
+    expect(book.note("b", facts({ calls: 20 }))).toBe(HINT_LONG);
   });
 });

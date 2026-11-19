@@ -101,20 +101,23 @@ export interface CallFacts {
   args: Record<string, unknown>;
   text: string;
   isError: boolean;
-  /** The newest error-level line of the app's log (its `seq`), if any. */
-  errorSeq: number | undefined;
+  /** The `seq` of every error-level line the app's log holds. */
+  errorSeqs: readonly number[];
+  /** For `logs`: the `seq` of the error-level lines its answer delivered (what the agent actually read). */
+  delivered: readonly number[];
   /** Where this call's touch led (from the road recording), if it did. */
   way: Way | undefined;
-  /** The host's log counter now, for `logs` to mark as read. */
-  logMark: number;
+  /** The agent's outermost calls so far in this session, this one included (counted for every tool). */
+  calls: number;
+  /** Whether a name may be printed (a vault value, a code or a typed text never is). */
+  printable: (name: string) => boolean;
 }
 
 interface SessionState {
   shown: Set<HintId>;
-  calls: number;
-  /** Error lines up to this `seq` were read (or came before this book). */
-  readSeq: number;
-  /** An error was seen in an answer (a crash note) and `logs` hasn't been read since. */
+  /** Error lines the agent was given by `logs`. */
+  readErrors: Set<number>;
+  /** A crash note was seen in an answer and `logs` hasn't delivered an error since. */
   errorSticky: boolean;
   /** The touches in a row that each began where the one before ended, every road known. */
   streak: { to: string; count: number } | null;
@@ -131,7 +134,7 @@ export class HintBook {
   private stateOf(key: string): SessionState {
     let state = this.sessions.get(key);
     if (state === undefined) {
-      state = { shown: new Set(), calls: 0, readSeq: this.baseline, errorSticky: false, streak: null, prevListed: false };
+      state = { shown: new Set(), readErrors: new Set(), errorSticky: false, streak: null, prevListed: false };
       this.sessions.set(key, state);
     }
     return state;
@@ -140,17 +143,15 @@ export class HintBook {
   /** Takes one finished call of the session; returns the `Hint:` line to end its answer with, or null. */
   note(key: string, call: CallFacts): string | null {
     const s = this.stateOf(key);
-    s.calls++;
     const { tool, args, text, isError } = call;
     const ok = !isError;
     const dry = args["dry_run"] === true;
 
     if (tool === "logs") {
-      s.readSeq = Math.max(s.readSeq, call.logMark);
-      s.errorSticky = false;
-    } else if (CRASH_NOTE.test(text) || (call.errorSeq !== undefined && call.errorSeq > s.readSeq)) {
-      s.errorSticky = true;
-    }
+      for (const seq of call.delivered) s.readErrors.add(seq);
+      if (call.delivered.length > 0) s.errorSticky = false;
+    } else if (CRASH_NOTE.test(text)) s.errorSticky = true;
+    const unread = call.errorSeqs.some((seq) => seq > this.baseline && !s.readErrors.has(seq));
 
     // A known way: a touch that began where the one before ended, over a road the map held. A look between doesn't break it.
     if (TOUCHES.has(tool)) {
@@ -160,17 +161,18 @@ export class HintBook {
     } else if (tool !== "look") s.streak = null;
 
     const listed = ok && !dry && hadChanges(text);
-    const askedPicture = args["screenshot"] === true || (tool === "look" && (args["width"] !== undefined || args["labels"] === true));
+    // A look sends a screenshot unless it says `screenshot: false`.
+    const askedPicture = tool === "look" ? args["screenshot"] !== false : args["screenshot"] === true;
     const picture = ok && !dry && ((ACTIONS.has(tool) && args["screenshot"] === true && args["look"] !== false && listed) || (tool === "look" && askedPicture && s.prevListed));
     s.prevListed = (ACTIONS.has(tool) || tool === "run") && listed;
 
     if (isSafetyRefusal(text, isError)) return null;
     const facts: HintFacts = {
-      error: s.errorSticky && tool !== "logs",
-      way: s.streak !== null && s.streak.count >= 3 ? s.streak.to : null,
+      error: (s.errorSticky || unread) && tool !== "logs",
+      way: s.streak !== null && s.streak.count >= 3 && call.printable(s.streak.to) ? s.streak.to : null,
       form: ok && !dry && FORM_TOOLS.has(tool) && formOpened(text),
       picture,
-      calls: s.calls,
+      calls: call.calls,
     };
     const id = pickHint(facts, s.shown);
     if (id === null) return null;
