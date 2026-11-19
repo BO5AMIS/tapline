@@ -24,7 +24,7 @@ import { readLogEntries, reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
-import { knownLine, reachableNames } from "./known.js";
+import { knownLine, legsNeedPerson, reachableNames } from "./known.js";
 import { driveArgsError, driveQuietly, planRunnable, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { mentionsVault, redactAll, redactContent, substituteAccount, vaultValues, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
@@ -4577,7 +4577,7 @@ export class TaplineTools {
     // `look` carries it in its header; an action's answer carries it after its first line (withLook).
     const seenLine = changesText === null && !eyes ? (seenPlace?.line ?? null) : null;
     // §30.2: the first answer of a session that shows the app also says what `drive` reaches in one call, after `Place:`.
-    const known = changesText === null && !eyes && seenPlace !== undefined ? this.knownLineOnce(session, seenPlace) : null;
+    const known = changesText === null && !eyes && seenPlace !== undefined ? await this.knownLineOnce(session, seenPlace) : null;
     const placeLine = known === null ? seenLine : seenLine === null ? known : `${seenLine}\n${known}`;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes, ...(!onlyChanges && placeLine !== null ? { place: placeLine } : {}) })];
     // Brief: the same facts, cut. The journey's copy of a full list below stays whole.
@@ -4678,13 +4678,20 @@ export class TaplineTools {
   private readonly outerScope = new AsyncLocalStorage<true>();
 
   /** The `Known:` line (AGENT-TOOLS 1.17 §30.2): once a session; null with `--no-hints`, when nothing is reachable, or once said. */
-  private knownLineOnce(session: SessionInfo, seen: { place: Place; isNew: boolean }): string | null {
+  private async knownLineOnce(session: SessionInfo, seen: { place: Place; isNew: boolean }): Promise<string | null> {
     if (this.options.noHints === true || this.knownShown) return null;
     this.knownShown = true;
     try {
       const map = this.mapOf(session);
       if (map === undefined) return null;
-      const names = reachableNames(map, seen.isNew ? null : seen.place, seen.place, map.knownPlaces() ?? { source: "none", places: [] }, this.driveRoadsOnly(), (plan) => planRunnable(this.driveServices(session, map), this.routeServices(session, undefined, undefined), plan));
+      // The declarations `drive` itself loads (it awaits the same call), so both plan from the same data.
+      const source = this.placeSource(session);
+      const known = session.capabilities.includes("places") ? await map.ensureKnown(session.id, () => source.request("places", {})) : (map.knownPlaces() ?? { source: "none", places: [] });
+      const lists = this.touchLists(session);
+      const words = [...lists.block, ...lists.confirm];
+      const svc = this.driveServices(session, map);
+      const rs = this.routeServices(session, undefined, undefined);
+      const names = reachableNames(map, seen.isNew ? null : seen.place, seen.place, known, this.driveRoadsOnly(), (plan) => planRunnable(svc, rs, plan) && !legsNeedPerson(plan, words));
       // A name a redaction would change (a vault value, a code, a typed text) is never printed.
       return knownLine(names.filter((name) => this.printable(name)));
     } catch {

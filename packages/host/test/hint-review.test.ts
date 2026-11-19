@@ -241,9 +241,9 @@ describe("cycle 2: Known: plans as drive does", () => {
     expect(textOf(await callTool(s.tools, "drive", { to: "language" }))).toMatch(/^Error bad_params:.*account/);
   });
 
-  it("keeps a place whose route needs nothing", async () => {
+  it("leaves out a place reached by a route, even one that needs nothing", async () => {
     const s = await withRoute(route([{ tool: "tap", target: { id: "general-row" } }]));
-    expect(knownOf(await look(s))).toContain("language");
+    expect(knownOf(await look(s))).not.toContain("language");
   });
 });
 
@@ -335,6 +335,87 @@ describe("cycle 3: Known: holds by construction", () => {
       const driven = textOf(await callTool(s.tools, "drive", { to: name }));
       expect(driven, `${variant.name}: ${name}`).not.toMatch(/^Error (bad_params|off_route|not_found)/);
     }
+  });
+});
+
+describe("cycle 4: Known: lists only what one argument-free drive does", () => {
+  const knownNames = (text: string): string[] => {
+    const line = text.split("\n").find((l) => l.startsWith("Known:"));
+    return line === undefined ? [] : line.replace(/^Known: /, "").replace(/ \(one call each.*$/, "").split(", ").filter((n) => !n.startsWith("+"));
+  };
+  const routeFile = (steps: unknown[]): string =>
+    JSON.stringify({ format: "agent-tools-script", version: 2, app: APP.id, name: "wrapper", start: "settings", end: "language", steps });
+  const routeMap = (): MapFile => ({ ...baseMap(), roads: [], routes: { wrapper: "routes/wrapper.json" } });
+  const moves = (s: Setup): number => s.made("press") + s.made("openURL") + s.made("scroll") + s.made("command");
+
+  type Fixture = { name: string; options: () => SetupOptions; route?: unknown[]; places?: unknown[] };
+  const blocked = (word: string): SetupOptions["policy"] => ({ version: 1, confirm: [], block: [word] });
+  const fixtures: Fixture[] = [
+    {
+      name: "blocked link",
+      options: () => {
+        const map = baseMap();
+        const language = map.places["language"];
+        if (language === undefined) throw new Error("no place");
+        language.link = "wayfare://delete";
+        return { map, policy: blocked("delete") };
+      },
+    },
+    { name: "blocked road label", options: () => ({ policy: blocked("General") }) },
+    { name: "confirm road label", options: () => ({ policy: { version: 1, confirm: ["General"], block: [] } }) },
+    { name: "blocked route command", options: () => ({ map: routeMap(), policy: blocked("network") }), route: [{ tool: "app_command", name: "network", args: { mode: "offline" } }] },
+    { name: "scroll to target, none given", options: () => ({ map: routeMap() }), route: [{ tool: "scroll", to: "target" }] },
+    { name: "scroll to end, no direction use", options: () => ({ map: routeMap() }), route: [{ tool: "scroll", to: "end", direction: "down" }] },
+    {
+      name: "cold declaration with a placeholder",
+      options: () => ({ map: baseMap() }),
+      places: [{ route: ["settings", "general"], link: "wayfare://general/[id]" }],
+    },
+  ];
+
+  async function build(f: Fixture): Promise<Setup> {
+    const s = await setup(f.options());
+    if (f.route !== undefined) writeFileSync(join(s.folder, "routes/wrapper.json"), routeFile(f.route));
+    if (f.places !== undefined) {
+      const inner = s.app.handler;
+      const places = f.places;
+      s.app.handler = (req) => (req.method === "places" ? { ok: true, result: { source: "expo-router", places } } : inner(req));
+    }
+    return s;
+  }
+
+  it.each(fixtures.map((f) => [f.name, f] as const))("%s: every name printed drives, and no fixture's drive is refused before moving", async (_n, f) => {
+    const listed = knownNames(await look(await build(f)));
+    for (const name of listed) {
+      const s = await build(f);
+      const driven = textOf(await callTool(s.tools, "drive", { to: name }));
+      expect(driven, `${f.name}: ${name}`).not.toMatch(/^Error (bad_params|off_route|not_found|not_allowed)/);
+      expect(driven, `${f.name}: ${name}`).not.toMatch(/needs a person|confirm/i);
+    }
+  });
+
+  it("a blocked link is not listed and drive refuses it", async () => {
+    const s = await build(fixtures[0] as Fixture);
+    expect(knownNames(await look(s))).not.toContain("language");
+    expect(textOf(await callTool(s.tools, "drive", { to: "language" }))).toMatch(/^Error not_allowed:.*blocked/);
+    expect(moves(s)).toBe(0);
+  });
+
+  it("a road with a blocked label is not listed", async () => {
+    const s = await build(fixtures[1] as Fixture);
+    expect(knownNames(await look(s))).not.toContain("general");
+  });
+
+  it("a route is never listed", async () => {
+    const s = await setup({ map: routeMap() });
+    writeFileSync(join(s.folder, "routes/wrapper.json"), routeFile([{ tool: "tap", target: { id: "general-row" } }, { tool: "tap", target: { id: "language-row" } }]));
+    expect(knownNames(await look(s))).not.toContain("language");
+  });
+
+  it("a cold declaration with a placeholder and no params leaves the name out", async () => {
+    const s = await build(fixtures[6] as Fixture);
+    expect(knownNames(await look(s))).not.toContain("general");
+    expect(textOf(await callTool(s.tools, "drive", { to: "general" }))).toMatch(/^Error bad_params:.*needs id/);
   });
 });
 

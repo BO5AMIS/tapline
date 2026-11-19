@@ -1,5 +1,6 @@
 import { planWay, type DrivePlan } from "./drive.js";
 import { declaredLink, type AppMap, type KnownPlaces, type Place } from "./places.js";
+import { asWords, linkReadable, linkWords, matchWord } from "./policy.js";
 import { routeEdges } from "./routes.js";
 
 // The `Known:` line (AGENT-TOOLS 1.17 §30.2): the places `drive {"to": name}` reaches from where the app is, by the map.
@@ -24,6 +25,10 @@ export function reachableNames(map: AppMap, here: Place | null, current: Place, 
     const link = saved.link ?? declaredLink(saved.key, known, {});
     const plan = planWay(map, here, { name, link }, { by: "any", tapsOnly, ...(routes !== undefined ? { routes } : {}) });
     if ("error" in plan) continue;
+    // A saved route on the way is never listed: its steps carry arguments, policy words and nested drives no static check can promise.
+    if (plan.moves.some((move) => move.route !== undefined)) continue;
+    // A link with a placeholder of any form needs a value, whether or not the app declared its params.
+    if (plan.by !== "taps" && link !== null && PLACEHOLDER.test(link)) continue;
     // The one check `drive` makes of a plan before it moves: every leg, every route, nested drives, links with no values.
     if (!runnable(plan)) continue;
     const at = Date.parse(saved.last);
@@ -31,6 +36,29 @@ export function reachableNames(map: AppMap, here: Place | null, current: Place, 
   }
   reached.sort((a, b) => b.at - a.at || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return reached.map((entry) => entry.name);
+}
+
+/** A link's placeholders in every form a router uses: `[id]`, `[...rest]`, `:id`, `{id}`. */
+const PLACEHOLDER = /\[[^\]]+\]|\{[^}]+\}|\/:\w+/;
+
+/**
+ * Whether any leg of the plan would be blocked by the policy words, or would need a person's OK (so it isn't one call): the words
+ * are matched, as a touch matches them, on each link's path and on each road's saved id, label and text. `words` is the block and the
+ * confirm list together.
+ */
+export function legsNeedPerson(plan: DrivePlan, words: string[]): boolean {
+  if (words.length === 0) return false;
+  for (const { road } of plan.moves) {
+    const { move, names } = road;
+    if (move.tool === "open_url") {
+      const url = move.url ?? "";
+      if (!linkReadable(url) || matchWord(words, { label: linkWords(url) }) !== null) return true;
+    }
+    const said: Array<string | undefined> = [names?.label, names?.text, move.target?.label, move.target?.text];
+    if (said.some((text) => text !== undefined && matchWord(words, { label: text }) !== null)) return true;
+    for (const id of [names?.id, move.target?.id]) if (id !== undefined && matchWord(words, { label: asWords(id) }) !== null) return true;
+  }
+  return false;
 }
 
 /** The line, or null when nothing is reachable. */

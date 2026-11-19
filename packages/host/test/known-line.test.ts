@@ -111,7 +111,7 @@ describe("the Known: line", () => {
   it("goes on the first action's answer when no look came before, once", async () => {
     const s = await setup({ map: linked(["a"]) });
     const first = textOf(await callTool(s.tools, "tap", { target: { id: "general-row" } }));
-    expect(knownOf(first)).toBe(`Known: a ${TAIL}`);
+    expect(knownOf(first)).toBe(`Known: a, settings ${TAIL}`);
     expect(knownOf(await look(s))).toBeUndefined();
   });
 });
