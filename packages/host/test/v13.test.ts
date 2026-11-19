@@ -7,6 +7,7 @@ import { createMcpServer } from "../src/mcp.js";
 import type { TaplineHost } from "../src/server.js";
 import { CORE_INSTRUCTIONS, CORE_TOOL_TEXT, EXTRA_TOOL_TEXT, TAPLINE_ADDS } from "../src/tool-text-data.js";
 import { INSTRUCTIONS, joinToolText, toolDescription } from "../src/tool-text.js";
+import { TOKEN_RULES } from "../src/token-rules.js";
 import { TaplineTools, ambiguousBlock, describeError, toolShapes } from "../src/tools.js";
 import { FakeApp, startHost, type IncomingRequest, type Reply } from "./helpers.js";
 import { TaplineError } from "../src/server.js";
@@ -200,10 +201,10 @@ describe("shared tool text (TOOL-TEXT)", () => {
     expect(joinToolText("shared")).toBe("shared");
   });
 
-  it("instructions are the core block, a blank line, then the Tapline block", async () => {
+  it("instructions are the token rules (1.17 §30.1), then the core block, a blank line, then the Tapline block", async () => {
     const { instructions } = await listed();
-    expect(instructions).toBe(`${CORE_INSTRUCTIONS}\n\n${TAPLINE_ADDS}`);
-    expect(INSTRUCTIONS).toBe(instructions);
+    expect(instructions).toBe(`${TOKEN_RULES}\n\n${CORE_INSTRUCTIONS}\n\n${TAPLINE_ADDS}`);
+    expect(instructions).toBe(`${TOKEN_RULES}\n\n${INSTRUCTIONS}`);
     expect(instructions).toContain("Workflow\n- `apps` lists what you can drive.");
     expect(instructions).toContain("Tapline works inside one React Native app");
     expect(instructions).not.toContain("Tapwright");
