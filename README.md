@@ -411,6 +411,7 @@ docs/quickstart.md      the short way to start
 docs/setup.md           step-by-step setup
 docs/PROTOCOL.md        the wire protocol
 docs/benchmarks.md      measured speed, live view and reliability
+docs/RESUMING.md        for whoever resumes Tapline: what is done, what is open, where things live
 AGENTS.md               the guide for agents
 skills/tapline          the agent skill (Agent Skills format): `tapline skill install`
 ```
