@@ -558,13 +558,10 @@ async function travel(svc: DriveServices, args: DriveArgs, rs: RouteServices | u
     if (!filled.ok) return bad("bad_params", `${to} needs ${filled.missing.join(", ")} (give it in with).`);
   }
   // A saved route on the way is checked (its steps, its account) before anything is touched.
-  const prepared = new Map<string, Step[]>();
-  for (const planned of plan.moves) {
-    if (planned.route === undefined || rs === undefined) continue;
-    const ready = prepareRoute(svc, rs, planned.route.route, {}, args.account, false);
-    if (!ready.ok) return { ok: false, code: ready.code, message: ready.message, answer: refusal(ready) };
-    prepared.set(planned.route.route, ready.steps);
-  }
+  const checked = planProblems(svc, rs, plan, { values, account: args.account });
+  const prepared = checked.prepared;
+  const refused = checked.problems.find((problem) => problem.kind === "route" && rs !== undefined);
+  if (refused !== undefined) return { ok: false, code: refused.code, message: refused.message, answer: refused.answer ?? failed(`Error ${refused.code}: ${refused.message}`) };
   if (args.dry_run === true) {
     const line = describePlan(plan, map, here, target, eyes);
     return { ok: true, answer: said(line), line, notes: [], arrived: to };
@@ -972,9 +969,107 @@ function prepareRoute(svc: DriveServices, rs: RouteServices, name: string, value
   return { ok: true, route, steps: filled.steps };
 }
 
-/** Whether `drive {"to"}` could run this saved route with no arguments: the check it makes before touching anything (steps, variables, account). */
-export function routeRunnable(svc: DriveServices, rs: RouteServices, name: string): boolean {
-  return prepareRoute(svc, rs, name, {}, undefined, false).ok;
+/**
+ * One problem a plan has before anything is touched. `road`: a leg's move can't be built with no help (a list row the driver
+ * must choose, a link that needs a value, a target missing); `route`: a saved route on the way can't run (steps, variables,
+ * account, a repeat); `nested`: the same, inside a `drive` step of such a route.
+ */
+export interface PlanProblem {
+  kind: "road" | "route" | "nested";
+  code: string;
+  message: string;
+  answer?: CallToolResult | undefined;
+}
+
+/**
+ * The ONE check of a planned way: every leg completely, with the call's values and account. Each road's move must build, each
+ * saved route must prepare (and so must every `drive` step inside it, recursively, a route met twice being a cycle). `drive`
+ * runs it before it moves and answers the first `route` problem as it always did (a `road` problem it meets in flight, with
+ * the leg's context, and a `nested` one inside the run); the `Known:` line lists a place only when it finds none at all.
+ */
+export function planProblems(
+  svc: DriveServices,
+  rs: RouteServices | undefined,
+  plan: DrivePlan,
+  context: { values: Record<string, string>; account: string | undefined; seen?: ReadonlySet<string>; nested?: boolean },
+): { prepared: Map<string, Step[]>; problems: PlanProblem[] } {
+  const prepared = new Map<string, Step[]>();
+  const problems: PlanProblem[] = [];
+  const seen = context.seen ?? new Set<string>();
+  const nested = context.nested === true;
+  const note = (kind: "road" | "route", code: string, message: string, answer?: CallToolResult): void => {
+    problems.push({ kind: nested && kind === "route" ? "nested" : kind, code, message, ...(answer !== undefined ? { answer } : {}) });
+  };
+  for (const planned of plan.moves) {
+    if (planned.route === undefined) {
+      const built = build(planned.road.move, context.values, planned.road.names, svc.eyes);
+      if (!built.ok) note("road", "off_route", built.why);
+      continue;
+    }
+    const name = planned.route.route;
+    if (rs === undefined) {
+      note("route", "off_route", "the route can't be run here");
+      continue;
+    }
+    if (seen.has(name)) {
+      note("route", "bad_params", repeatedRoute(name));
+      continue;
+    }
+    const ready = prepareRoute(svc, rs, name, {}, context.account, false);
+    if (!ready.ok) {
+      note("route", ready.code, ready.message, refusal(ready));
+      continue;
+    }
+    prepared.set(name, ready.steps);
+    const inside = new Set([...seen, name]);
+    for (const step of ready.steps) {
+      if (step.tool !== "drive") continue;
+      problems.push(...nestedDrive(svc, rs, ready.route.start, step, inside));
+    }
+  }
+  return { prepared, problems };
+}
+
+/** The problems of one `drive` step inside a route, planned from the route's start place as the nested call would. */
+/** What a `drive` step of a route asks, read from its loose JSON. */
+function driveStepOf(step: Step): { to?: string; route?: string; with: Record<string, string>; account?: string; by: "any" | "taps" | "link" } {
+  const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+  const raw = step["with"];
+  const values: Record<string, string> = {};
+  if (typeof raw === "object" && raw !== null) for (const [key, value] of Object.entries(raw)) if (typeof value === "string") values[key] = value;
+  const by = step["by"];
+  const to = text(step["to"]);
+  const route = text(step["route"]);
+  const account = text(step["account"]);
+  return { ...(to !== undefined ? { to } : {}), ...(route !== undefined ? { route } : {}), with: values, ...(account !== undefined ? { account } : {}), by: by === "taps" || by === "link" ? by : "any" };
+}
+
+function nestedDrive(svc: DriveServices, rs: RouteServices, start: string | undefined, raw: Step, seen: ReadonlySet<string>): PlanProblem[] {
+  const step = driveStepOf(raw);
+  const values = step.with;
+  const wrong = (code: string, message: string): PlanProblem[] => [{ kind: "nested", code, message }];
+  if (step.route !== undefined) {
+    if (seen.has(step.route)) return wrong("bad_params", repeatedRoute(step.route));
+    const ready = prepareRoute(svc, rs, step.route, values, step.account, true);
+    if (!ready.ok) return wrong(ready.code, ready.message);
+    const inside = new Set([...seen, step.route]);
+    return ready.steps.flatMap((inner) => (inner.tool === "drive" ? nestedDrive(svc, rs, ready.route.start, inner, inside) : []));
+  }
+  const to = step.to;
+  if (to === undefined) return [];
+  const { map } = svc;
+  const saved = map.data().places[to];
+  if (saved === undefined) return wrong("not_found", `no place named "${to}"`);
+  const from: Place | null = start === undefined ? null : { name: start, key: map.data().places[start]?.key ?? { route: [start] }, link: map.data().places[start]?.link ?? null };
+  const link = saved.link ?? declaredLink(saved.key, map.knownPlaces() ?? { source: "none", places: [] }, values);
+  const plan = planWay(map, from, { name: to, link }, { by: step.by, tapsOnly: svc.tapsOnly, routes: routeEdges(map) });
+  if ("error" in plan) return wrong("not_found", `no known way to ${to}`);
+  return planProblems(svc, rs, plan, { values, account: step.account, seen, nested: true }).problems.map((p) => ({ ...p, kind: "nested" as const }));
+}
+
+/** Whether an argument-free `drive` of this plan finds nothing wrong before it moves. */
+export function planRunnable(svc: DriveServices, rs: RouteServices, plan: DrivePlan): boolean {
+  return planProblems(svc, rs, plan, { values: {}, account: undefined }).problems.length === 0;
 }
 
 /**

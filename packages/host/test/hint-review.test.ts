@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { accountStore } from "../src/accounts.js";
 import { callTool } from "../src/dispatch.js";
+import type { MapFile } from "../src/mapfile.js";
 import type { TaplineHost } from "../src/server.js";
 import { APP, ROUTES, baseMap, button, flushDriveMaps, place, road, setupDrive, textOf, type Setup, type SetupOptions } from "./drive-helpers.js";
 import { FakeApp, delay } from "./helpers.js";
@@ -243,6 +244,97 @@ describe("cycle 2: Known: plans as drive does", () => {
   it("keeps a place whose route needs nothing", async () => {
     const s = await withRoute(route([{ tool: "tap", target: { id: "general-row" } }]));
     expect(knownOf(await look(s))).toContain("language");
+  });
+});
+
+describe("cycle 3: Known: holds by construction", () => {
+  const known = (text: string): string[] => {
+    const line = text.split("\n").find((l) => l.startsWith("Known:"));
+    if (line === undefined) return [];
+    return line
+      .replace(/^Known: /, "")
+      .replace(/ \(one call each.*$/, "")
+      .split(", ")
+      .filter((name) => !name.startsWith("+"));
+  };
+  const file = (name: string, extra: Record<string, unknown>): string => JSON.stringify({ format: "agent-tools-script", version: 2, app: APP.id, name, ...extra });
+  const typePassword = [{ tool: "type_text", target: { id: "password" }, text: "${account.password}", submit: true }];
+
+  type Variant = { name: string; map: () => MapFile; routes?: Record<string, string> };
+  const variants: Variant[] = [
+    { name: "base", map: baseMap },
+    {
+      name: "row road",
+      map: () => {
+        const map = baseMap();
+        const first = map.roads[0];
+        if (first === undefined) throw new Error("no road");
+        first.move = { tool: "tap", target: { row: true } };
+        first.names = {};
+        return map;
+      },
+    },
+    {
+      name: "link with a value",
+      map: () => {
+        const map = baseMap();
+        const first = map.roads[0];
+        if (first === undefined) throw new Error("no road");
+        first.move = { tool: "open_url", url: "wayfare://general/[id]" };
+        return map;
+      },
+    },
+    {
+      name: "route that needs an account",
+      map: () => ({ ...baseMap(), routes: { login: "routes/login.json" } }),
+      routes: { "routes/login.json": file("login", { start: "settings", end: "language", variables: ["account"], steps: typePassword }) },
+    },
+    {
+      name: "nested route",
+      map: () => ({ ...baseMap(), roads: [], routes: { wrapper: "routes/wrapper.json", inner: "routes/inner.json" } }),
+      routes: {
+        "routes/wrapper.json": file("wrapper", { start: "settings", end: "language", steps: [{ tool: "drive", to: "general" }, { tool: "tap", target: { id: "language-row" } }] }),
+        "routes/inner.json": file("inner", { start: "settings", end: "general", variables: ["account"], steps: typePassword }),
+      },
+    },
+    {
+      name: "route that runs itself",
+      map: () => ({ ...baseMap(), roads: [], routes: { loop: "routes/loop.json" } }),
+      routes: { "routes/loop.json": file("loop", { start: "settings", end: "language", steps: [{ tool: "drive", route: "loop" }] }) },
+    },
+    {
+      name: "plain route",
+      map: () => ({ ...baseMap(), routes: { easy: "routes/easy.json" } }),
+      routes: { "routes/easy.json": file("easy", { start: "settings", end: "language", steps: [{ tool: "tap", target: { id: "general-row" } }, { tool: "tap", target: { id: "language-row" } }] }) },
+    },
+  ];
+
+  async function fresh(v: Variant): Promise<Setup> {
+    const s = await setup({ map: v.map() });
+    for (const [path, body] of Object.entries(v.routes ?? {})) writeFileSync(join(s.folder, path), body);
+    return s;
+  }
+
+  it("a row road is not listed (drive can't choose the row)", async () => {
+    const s = await fresh(variants[1] as Variant);
+    expect(known(await look(s))).not.toContain("general");
+    expect(textOf(await callTool(s.tools, "drive", { to: "general" }))).toMatch(/^Error off_route:.*list row with no id/);
+  });
+
+  it("a route whose nested drive needs an account is not listed", async () => {
+    const s = await fresh(variants[4] as Variant);
+    expect(known(await look(s))).not.toContain("language");
+    expect(textOf(await callTool(s.tools, "drive", { to: "language" }))).toMatch(/^Error bad_params:.*accounts/);
+    expect(s.made("press")).toBe(0);
+  });
+
+  it.each(variants.map((v) => [v.name, v] as const))("every name Known: prints for %s drives with no argument", async (_name, variant) => {
+    const listed = known(await look(await fresh(variant)));
+    for (const name of listed) {
+      const s = await fresh(variant);
+      const driven = textOf(await callTool(s.tools, "drive", { to: name }));
+      expect(driven, `${variant.name}: ${name}`).not.toMatch(/^Error (bad_params|off_route|not_found)/);
+    }
   });
 });
 
