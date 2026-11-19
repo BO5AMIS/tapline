@@ -18,6 +18,7 @@ import { alertNotes, alertSignature, changeParts, networkLine, describeElement, 
 import { formatInspect, inspectResultSchema } from "./inspect.js";
 import { AUDIT_TYPES, auditResultSchema, auditTitle, formatAudit } from "./audit.js";
 import { NO_CRASH_TEXT, crashNote, disconnectNote, formatCrash } from "./crash.js";
+import { HintBook, type Way } from "./hints.js";
 import { ActionLog, loggedTarget, type ActionLogEntry } from "./actionlog.js";
 import { readLogEntries, reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
@@ -1420,6 +1421,9 @@ export class TaplineTools {
   private readonly sessionTag = randomBytes(4).toString("hex");
   private readonly startedAt = Date.now();
   private callCount = 0;
+  /** The `Hint:` line's memory (AGENT-TOOLS 1.17 §30.3), and where the touch in flight led (set when its road is noted). */
+  private readonly hints: HintBook;
+  private pendingWay: Way | undefined;
   /** The call in flight (and everything it awaits): its log entries wait here for the size of its answer. */
   private readonly callScope = new AsyncLocalStorage<CallState>();
   private readonly thinScope = new AsyncLocalStorage<boolean>();
@@ -1674,11 +1678,12 @@ export class TaplineTools {
     }
     // Crashes before this agent's session began are not its news.
     this.crashBaseline = host.crashMark();
+    this.hints = new HintBook(host.logMark());
     for (const name of CRASH_NOTED_TOOLS) {
       const original: unknown = Reflect.get(this, name);
       if (typeof original !== "function") continue;
       const method = original as (this: TaplineTools, ...args: unknown[]) => CallToolResult | Promise<CallToolResult>;
-      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args), name === "drive"));
+      Reflect.set(this, name, (...args: unknown[]) => this.noting(() => method.apply(this, args), name === "drive", { tool: CALL_TOOLS[name] ?? name, args: args[0] }));
     }
     // Outermost: every call of the agent is numbered and logged (reads too) once its answer is known.
     for (const [name, tool] of Object.entries(CALL_TOOLS)) {
@@ -3205,7 +3210,7 @@ export class TaplineTools {
    * Runs a tool call and ends its answer with a note when the app stopped (AGENT-TOOLS 15.2): during this
    * call, or earlier, with its time, once. Calls inside a call (`run`'s steps) add nothing of their own.
    */
-  private noting(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false): CallToolResult | Promise<CallToolResult> {
+  private noting(run: () => CallToolResult | Promise<CallToolResult>, isDrive = false, called?: { tool: string; args: unknown }): CallToolResult | Promise<CallToolResult> {
     // Nesting belongs to the call and what it awaits (not to this object), so calls running side by side each
     // count as outermost, and only a step inside a call is skipped.
     if (this.noteScope.getStore() === true) return run();
@@ -3219,7 +3224,7 @@ export class TaplineTools {
         this.reflexScope.run(reflexes, () => {
           const result = this.otpCall.run({ asked: false, dropped: false }, () => this.personScope.run(new Set<string>(), () => this.afterMoments(run, isDrive)));
           const finish = (answer: CallToolResult): CallToolResult =>
-            this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes);
+            this.withHint(this.withReflexLines(this.withAccountsNote(this.withPersonNote(this.withCrashNotes(flushNotes(answer, grantLines), mark, startedWith))), reflexes), called);
           // The first answer of a session with grants says which grant is refused, and whether the state file is broken (§19.1, §19.4).
           if (this.options.grants !== undefined && !this.grantNoticeDone) {
             this.grantNoticeDone = true;
@@ -3230,6 +3235,39 @@ export class TaplineTools {
         }),
       ),
     );
+  }
+
+  /**
+   * The `Hint:` line (AGENT-TOOLS 1.17 §30.3): after the notes, at most one, once per session, never with `--no-hints`. The choice is in hints.ts.
+   * Only the outermost call of the agent counts; what a `run` or `drive` moved inside it is its own, so it ends a streak of taps.
+   */
+  private withHint(answer: CallToolResult, called: { tool: string; args: unknown } | undefined): CallToolResult {
+    const way = this.pendingWay;
+    this.pendingWay = undefined;
+    if (this.options.noHints === true || called === undefined) return answer;
+    try {
+      const top = answer.content[0];
+      const session = this.host.current();
+      let errorSeq: number | undefined;
+      if (session !== undefined) {
+        for (const entry of this.sessionLogs(session.id)) {
+          if (logLevelOf(entry) === "error" && (errorSeq === undefined || (entry.seq ?? 0) > errorSeq)) errorSeq = entry.seq ?? 0;
+        }
+      }
+      const args = typeof called.args === "object" && called.args !== null ? (called.args as Record<string, unknown>) : {};
+      const line = this.hints.note(session?.id ?? "none", {
+        tool: called.tool,
+        args,
+        text: top !== undefined && top.type === "text" ? top.text : "",
+        isError: answer.isError === true,
+        errorSeq,
+        way,
+        logMark: this.host.logMark(),
+      });
+      return line === null ? answer : appendNote(answer, line);
+    } catch {
+      return answer;
+    }
   }
 
   /** What reflexes did in the call in flight: how often each fired, and the lines the answer carries. */
@@ -4707,6 +4745,7 @@ export class TaplineTools {
         const known = map.data().roads.some((road) => road.from === from.name && road.to === arrived.name && (road.by === "tapline" || road.by === "both") && map.isProven(road));
         const logged = this.callScope.getStore()?.entries.at(-1);
         if (logged !== undefined && logged.entry.of === undefined && AGENT_TOUCHES.has(logged.entry.tool)) logged.entry.way = { from: from.name, to: arrived.name, known };
+        this.pendingWay = { from: from.name, to: arrived.name, known };
       }
       let move = classified.move;
       if (move.tool === "open_url") {

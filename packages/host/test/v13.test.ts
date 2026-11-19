@@ -124,7 +124,7 @@ describe("the cap note", () => {
 
   it("ends the answer with the cap note, after Settled in and other notes", async () => {
     const { tools } = await setup(withCap(2000));
-    const lines = textOf(await tools.tap({ target: { id: "login-button" }, screenshot: true })).split("\n");
+    const lines = textOf(await tools.tap({ target: { id: "login-button" }, screenshot: true })).split("\n").filter((line) => !line.startsWith("Hint:"));
     expect(lines.at(-1)).toBe("Note: the screen was still changing after 2 s (an animation or video); positions may be mid-change.");
     const settled = lines.indexOf("Settled in 2.00 s.");
     expect(settled).toBeGreaterThan(0);

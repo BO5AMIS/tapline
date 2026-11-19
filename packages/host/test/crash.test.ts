@@ -51,8 +51,14 @@ async function setup(options: { logDir?: string } = {}) {
   return { host, port, app, tools };
 }
 
+/** The answer's text without its `Hint:` line (the hint is its own feature, tested in hint-lines.test.ts). */
 function textOf(result: CallToolResult): string {
-  return result.content.map((block) => (block.type === "text" ? block.text : `<${block.type}>`)).join("\n");
+  return result.content
+    .map((block) => (block.type === "text" ? block.text : `<${block.type}>`))
+    .join("\n")
+    .split("\n")
+    .filter((line) => !line.startsWith("Hint:"))
+    .join("\n");
 }
 
 /** The app answers nothing and goes away a moment after `before` has been sent. */
