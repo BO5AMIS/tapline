@@ -117,6 +117,8 @@ New-NetFirewallRule -DisplayName "Tapline" -Direction Inbound -Protocol TCP -Loc
 **Options for the agent's side (1.6).** `tapline mcp` and the standalone `tapline host` take these:
 
 - `--brief`: actions answer in at most 12 element lines (a call's `brief: false` overrides it).
+- `--no-hints`: answers as in 1.8: no `Known:` line, no `Hint:` lines, and the MCP instructions without the token rules
+  (AGENT-TOOLS 1.17 §30).
 - `--accounts FILE`: the vault (AGENT-TOOLS 1.14 §20), so an agent can sign in and fill forms by name without
   seeing a value:
   `{"version": 2, "vault": {"tester2": {"kind": "account", "username": "...", "password": "...", "apps": ["com.example.wayfare"]}, "home": {"kind": "address", "street": "...", "city": "...", "postcode": "...", "country": "..."}, "visa": {"kind": "card", "number": "...", "expiry": "...", "cvc": "..."}}}`.

@@ -87,6 +87,11 @@ run {"steps": [
   {"tool": "tap", "target": {"label": "Profile"}, "expect": {"matches": "profile"}}]}
 ```
 
+**`Known:` and `Hint:`.** The first answer that shows the app may say `Known: settings, trips_id (one call each:
+drive {"to": ...})`: those places are one `drive` away, so don't tap your way there. An answer may end with one
+`Hint:` line naming a call that saves turns; do what it says when it fits. Both are off when the user started
+Tapline with `--no-hints`.
+
 **Spend fewer calls.** Each of these is a call you don't need:
 - Read the change list in the answer instead of calling `look` after an action.
 - Target by `id` the first time. After a `not_found`, the answer's `Closest:` names what is there.
