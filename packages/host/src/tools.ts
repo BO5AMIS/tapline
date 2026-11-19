@@ -23,6 +23,7 @@ import { readLogEntries, reportFor } from "./report.js";
 import { ANIMATIONS_NOT_PAUSED_NOTE, ANIMATIONS_PAUSED_NOTE, afterPause, animationsOn, endAnimations, forgetAnimations, noteAnimations, withNormalAnimations } from "./animations.js";
 import { mapArgsError, reflexSchema, reflexWords, runMap, type ReflexDo } from "./mapcmd.js";
 import { MAX_REFLEX_FIRINGS, MAX_REFLEX_SKIPS, fireReflex, isReflexFailure, matchReflex, type ReflexVerdict } from "./reflexes.js";
+import { knownLine, reachableNames } from "./known.js";
 import { driveArgsError, driveQuietly, planWay, startProblem, driveRoute, driveTo, guardOf, parseMoveResult, type DriveArgs, type DriveServices, type RouteServices, type TouchCall, type TouchOutcome } from "./drive.js";
 import { mentionsVault, redactAll, redactContent, substituteAccount, vaultValues, type AccountsLoad, type TypedSource, type VaultUse } from "./accounts.js";
 import {
@@ -4517,7 +4518,10 @@ export class TaplineTools {
     if (changesText === null) this.personActed = false;
     // §18.1: `Place:` goes on a full list (a new screen), never on a same-screen answer, and not on the glass of a user's eyes.
     // `look` carries it in its header; an action's answer carries it after its first line (withLook).
-    const placeLine = changesText === null && !eyes ? (seenPlace?.line ?? null) : null;
+    const seenLine = changesText === null && !eyes ? (seenPlace?.line ?? null) : null;
+    // §30.2: the first answer of a session that shows the app also says what `drive` reaches in one call, after `Place:`.
+    const known = changesText === null && !eyes && seenPlace !== undefined ? this.knownLineOnce(session, seenPlace) : null;
+    const placeLine = known === null ? seenLine : seenLine === null ? known : `${seenLine}\n${known}`;
     const lines = [changesText ?? formatTree(tree, { name: session.app.name, id: session.app.id }, { eyes, ...(!onlyChanges && placeLine !== null ? { place: placeLine } : {}) })];
     // Brief: the same facts, cut. The journey's copy of a full list below stays whole.
     const briefed =
@@ -4610,15 +4614,32 @@ export class TaplineTools {
     };
   }
 
+  /** Sessions whose first app answer has had its `Known:` line (or had none to give). */
+  private readonly knownShown = new Set<string>();
+
+  /** The `Known:` line (AGENT-TOOLS 1.17 §30.2): once a session; null with `--no-hints`, when nothing is reachable, or once said. */
+  private knownLineOnce(session: SessionInfo, seen: { place: Place; isNew: boolean }): string | null {
+    if (this.options.noHints === true || this.knownShown.has(session.id)) return null;
+    this.knownShown.add(session.id);
+    try {
+      const map = this.mapOf(session);
+      if (map === undefined) return null;
+      const names = reachableNames(map, seen.isNew ? null : seen.place, seen.place, map.knownPlaces() ?? { source: "none", places: [] }, this.driveRoadsOnly());
+      return knownLine(names);
+    } catch {
+      return null;
+    }
+  }
+
   /** Notes the place a fresh list shows. A script that replays doesn't change the map (§18.9); a map that fails never fails a call. */
-  private observePlace(session: SessionInfo, tree: TreeResult): { line: string | null } | undefined {
+  private observePlace(session: SessionInfo, tree: TreeResult): { line: string | null; place: Place; isNew: boolean } | undefined {
     if (this.replaying) return undefined;
     try {
       const map = this.mapOf(session);
       if (map === undefined) return undefined;
       const seen = map.observe(tree);
       this.observedPlace = { sessionId: session.id, place: seen.place };
-      return { line: seen.line };
+      return { line: seen.line, place: seen.place, isNew: seen.isNew };
     } catch {
       return undefined;
     }
