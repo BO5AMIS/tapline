@@ -75,7 +75,12 @@ An agent (Claude Code, Codex, any MCP client) sees and drives a React Native app
   - repair matches only the id stem and words;
   - `fixture:` marks aren't typed;
   - `explore` can't be scheduled;
-  - the `Known:` line orders by when a place was last reached (the map keeps no use counts).
+  - the `Known:` line orders by when a place was last reached (the map keeps no use counts);
+  - `Known:` leaves out places reached through saved routes, links that need a value, or policy words. In 1.9.0's
+    review, each review cycle found another way a route could fail with no arguments.
+    - The check that `drive` and `Known:` share is `planProblems` / `planRunnable` in `drive.ts`, plus `known.ts`.
+    - Listing routes again needs a complete static check of a route's steps: the tools' own argument rules, the
+      policy, and nested drives from the place reached so far.
 - **Ideas not started:** Tapline as a device source in other agent tools, via an agent-device plugin (the other
   project's maintainers must agree before any PR).
 

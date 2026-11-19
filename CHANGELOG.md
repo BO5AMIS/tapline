@@ -16,8 +16,14 @@ instructions and the answers themselves.
   is `bug_report`.
 - **`Known:` (§30.2).** The first answer of a session that shows the app lists, after `Place:`, up to 8 places that
   `drive {"to": ...}` reaches in one call from where the app is (`+N more` after that). It asks the same planner
-  `drive` uses, so every name works. Names are the map's own (route names such as `trips_id`, or names given with
-  `map`), never screen text. They are ordered most recently reached first.
+  `drive` uses, and the same check `drive` makes before it moves, so every name works with no arguments. Names are the
+  map's own (route names such as `trips_id`, or names given with `map`), never screen text, and a name the vault,
+  one-time code or typed-text redaction would change is left out. They are ordered most recently reached first.
+  - **Left out on purpose,** to keep that promise:
+    - a place whose way needs a value (a link with a placeholder), a saved route, or anything the policy would block
+      or ask a person about;
+    - in a user's-eyes journey, there's no line at all.
+  - Such places are still reachable with `drive` and are listed by `map`.
 - **`Hint:` (§30.3).** An answer may end with one `Hint:` line after its notes, and each hint shows at most once a
   session. None goes on a safety refusal. In priority order:
   - the app logged an error and `logs` hasn't been read;
@@ -32,6 +38,8 @@ instructions and the answers themselves.
   - The 1.9.0 benchmark hasn't run for Tapline: the published numbers so far are Tapwright's. The recipe for a
     Tapline run is in the shared benchmark plan.
   - Tapline's map keeps no use counts, so `Known:` orders by when a place was last reached.
+  - `Known:` never lists a place whose way goes through a saved route, even a valid one: every review cycle found
+    another way a route could fail with no arguments, so routes are left out until a full static check exists.
   - The 20-call count covers the tools that answer through the shared notes step.
   - Nothing in 1.9.0 has run on a real phone yet.
 
