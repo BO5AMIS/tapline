@@ -105,6 +105,8 @@ export interface RuntimeOptions extends ResolveOptions {
   otp?: OtpService;
   /** `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). */
   brief?: boolean;
+  /** `--no-hints`: no `Known:` line, no `Hint:` lines, and instructions without the token rules (AGENT-TOOLS 1.17 §30.4). */
+  noHints?: boolean;
   /** Tests: how a protected vault is opened (DPAPI, keychain). Default: this system's own. */
   vaultDeps?: VaultDeps;
   /** `--maps DIR`: where the apps' maps live, `<DIR>/<app id>/` (AGENT-TOOLS 1.13 §18.9). Default `~/.tapline/maps`. */
@@ -314,6 +316,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Runti
     lease,
     ...(grants !== undefined ? { grants } : {}),
     ...(options.brief === true ? { brief: true } : {}),
+    ...(options.noHints === true ? { noHints: true } : {}),
     uxRules,
     confirmations,
     canConfirm: viewer !== "off",

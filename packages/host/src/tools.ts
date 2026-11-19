@@ -623,6 +623,8 @@ export interface ToolsOptions {
   connect: ConnectInfo;
   /** The server's `--brief`: actions answer briefly unless a call says `brief: false` (AGENT-TOOLS 1.13 §13.4). `look` is never brief. */
   brief?: boolean;
+  /** `--no-hints`: answers carry no `Known:` line and no `Hint:` line, as in 1.8 (AGENT-TOOLS 1.17 §30.4). */
+  noHints?: boolean;
   /**
    * Whether a phone has ever connected to this computer's host. When set, the first answer of the session says what
    * only a person can do (open the app, pair) if an app isn't connected: `Note: needs a person: …`, once.

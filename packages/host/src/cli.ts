@@ -117,6 +117,8 @@ Options:
   --no-dialog    For mcp: don't ask a person's OK in the host's dialog, only in the live view (for a host that
                  passes dialogs to the model instead of showing them to a person)
   --brief        For mcp and host: actions answer briefly (a call's brief: false overrides it); look is never brief
+  --no-hints     For mcp and host: no Known: line, no Hint: lines, and the instructions without the token rules:
+                 answers as in 1.8 (AGENT-TOOLS 1.17 §30.4)
   --ux-rules <file>  For mcp: the user's UX house rules for ux_check and journeys (JSON: text rules to judge,
                  {"max_taps_to_goal": N}, {"way_back": true})
   --accounts <file>  For mcp and host: the vault (JSON, version 2: accounts, cards, addresses, identities and notes;
@@ -367,6 +369,7 @@ export function parseCli(argv: string[]) {
       delete: { type: "boolean" },
       "no-dialog": { type: "boolean" },
       brief: { type: "boolean" },
+      "no-hints": { type: "boolean" },
       "ux-rules": { type: "string" },
       accounts: { type: "string" },
       maps: { type: "string" },
@@ -391,6 +394,7 @@ export function runtimeOptionsOf(values: ReturnType<typeof parseCli>["values"], 
     ...(values["no-policy"] === true ? { noPolicy: true } : {}),
     ...(values["no-dialog"] === true ? { noDialog: true } : {}),
     ...(values.brief === true ? { brief: true } : {}),
+    ...(values["no-hints"] === true ? { noHints: true } : {}),
     ...(values["ux-rules"] !== undefined ? { uxRules: values["ux-rules"] } : {}),
     ...(values.accounts !== undefined ? { accounts: values.accounts } : {}),
     ...(values.maps !== undefined ? { maps: values.maps } : {}),

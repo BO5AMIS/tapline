@@ -6,7 +6,7 @@ import { HOST_VERSION } from "./version.js";
 import { TOOL_META, runTool, type ToolName } from "./dispatch.js";
 import { DIALOG_TTL_MS, Dialogs, type ElicitClient } from "./elicit.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "./runtime.js";
-import { INSTRUCTIONS, toolDescription } from "./tool-text.js";
+import { instructionsFor, toolDescription } from "./tool-text.js";
 import { TaplineTools, toolShapes } from "./tools.js";
 
 /**
@@ -76,9 +76,9 @@ function progressOf(extra: ToolExtra): ((line: string, steps: number) => void) |
   };
 }
 
-/** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. `noDialog` is `--no-dialog`. */
-export function createMcpServer(tools: TaplineTools, options: { noDialog?: boolean } = {}): McpServer {
-  const server = new McpServer({ name: "tapline", version: HOST_VERSION }, { instructions: INSTRUCTIONS });
+/** Registers every Tapline tool on an MCP server, from the one table in dispatch.ts. `noDialog` is `--no-dialog`, `noHints` `--no-hints`. */
+export function createMcpServer(tools: TaplineTools, options: { noDialog?: boolean; noHints?: boolean } = {}): McpServer {
+  const server = new McpServer({ name: "tapline", version: HOST_VERSION }, { instructions: instructionsFor({ hints: options.noHints !== true }) });
 
   for (const name of Object.keys(TOOL_META) as ToolName[]) {
     const meta = TOOL_META[name];
@@ -118,7 +118,7 @@ export async function runMcp(options: Omit<RuntimeOptions, "api" | "log"> = {}):
     for (const line of (error instanceof Error ? error.message : String(error)).split("\n")) log(line);
     return false;
   }
-  const server = createMcpServer(runtime.toolsFor(undefined), { noDialog: options.noDialog === true });
+  const server = createMcpServer(runtime.toolsFor(undefined), { noDialog: options.noDialog === true, noHints: options.noHints === true });
   // `runtime.close` writes the maps before it closes the host.
   const shutdown = (): void => {
     void runtime.close().finally(() => process.exit(0));
