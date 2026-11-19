@@ -683,7 +683,10 @@ describe("a process's start time (the lock's check against a reused process id)"
   it("gives this process an integer start time with the real runner (or null where nothing can tell)", () => {
     const first = processStartTime(process.pid);
     expect(first === null || Number.isInteger(first)).toBe(true);
-    expect(processStartTime(process.pid)).toBe(first);
+    // The value is stable when it can be told. On a loaded Windows runner PowerShell can pass its 5 s limit on any one
+    // call, which answers null ("nothing can tell"), so a null second answer isn't a different start time.
+    const second = processStartTime(process.pid);
+    expect(second === null || second === first).toBe(true);
   });
 
   describe("the lock compares whole seconds (section 22.3, v1.16)", () => {
