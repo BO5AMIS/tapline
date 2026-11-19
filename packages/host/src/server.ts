@@ -777,6 +777,11 @@ export class TaplineHost extends EventEmitter<HostEvents> {
     return this.actingSent;
   }
 
+  /** The number of app log lines kept so far (the `seq` of the newest); a later line has a greater `seq`. */
+  logMark(): number {
+    return this.logSeq;
+  }
+
   /** The number of crash events so far; pass it to `crashEventsAfter` later. */
   crashMark(): number {
     return this.crashSeq;

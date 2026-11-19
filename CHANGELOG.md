@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.9.0, "the Token Diet" (2026-11-19)
+
+Fewer calls and tokens for the same result, as AGENT-TOOLS 1.17 §30 (agreed with Tapwright) defines it. Nothing is
+taken away: every call, argument and answer of 1.8.6 still works, and `--no-hints` gives 1.8.6's answers back exactly.
+
+Why: the joint benchmark (Tapwright 1.8.5, 21 fresh Claude Code sessions) found that the number of turns decides a
+session's tokens, since every turn re-reads the context. Memory went unused, nobody batched steps or handed long tasks
+to a small model, and the skill was mostly not opened. So 1.9.0 puts the guidance where agents read it: the MCP
+instructions and the answers themselves.
+
+- **The token rules (§30.1).** The MCP instructions begin with a short block, word for word the same in both tools:
+  read each answer, send known steps as one `run` with an `expect`, target by id, ask for a screenshot only to judge
+  how something looks, use `Known:` places with `drive`, hand long or unknown tasks to one small agent, and a bug report
+  is `bug_report`.
+- **`Known:` (§30.2).** The first answer of a session that shows the app lists, after `Place:`, up to 8 places that
+  `drive {"to": ...}` reaches in one call from where the app is (`+N more` after that). It asks the same planner
+  `drive` uses, and the same check `drive` makes before it moves, so every name works with no arguments. Names are the
+  map's own (route names such as `trips_id`, or names given with `map`), never screen text, and a name the vault,
+  one-time code or typed-text redaction would change is left out. They are ordered most recently reached first.
+  - **Left out on purpose,** to keep that promise:
+    - a place whose way needs a value (a link with a placeholder), a saved route, or anything the policy would block
+      or ask a person about;
+    - in a user's-eyes journey, there's no line at all.
+  - Such places are still reachable with `drive` and are listed by `map`.
+- **`Hint:` (§30.3).** An answer may end with one `Hint:` line after its notes, and each hint shows at most once a
+  session. None goes on a safety refusal. In priority order:
+  - the app logged an error and `logs` hasn't been read;
+  - a third tap along a way the map knows (`drive` reaches it);
+  - a form opened (fill and save in one `run`);
+  - a screenshot asked when the text answer had the changes;
+  - the session's 20th call (the main session can hand the driving to a small agent; a helper carries on).
+- **`--no-hints` (§30.4)** for `tapline mcp` and `tapline host`: no `Known:` line, no `Hint:` lines, and the
+  instructions without the token rules.
+- **Docs:** AGENTS.md, the skill, the README and setup.md describe the new lines and the switch.
+- **Known limits.**
+  - The 1.9.0 benchmark hasn't run for Tapline: the published numbers so far are Tapwright's. The recipe for a
+    Tapline run is in the shared benchmark plan.
+  - Tapline's map keeps no use counts, so `Known:` orders by when a place was last reached.
+  - `Known:` never lists a place whose way goes through a saved route, even a valid one: every review cycle found
+    another way a route could fail with no arguments, so routes are left out until a full static check exists.
+  - The 20-call count covers the tools that answer through the shared notes step.
+  - Nothing in 1.9.0 has run on a real phone yet.
+
 ## 1.8.6 (2026-11-14)
 
 Fixes from the first joint one-time code check on a real phone with Tapwright 1.7, as AGENT-TOOLS 1.16.2 (agreed with

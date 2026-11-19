@@ -138,7 +138,7 @@ describe("press", () => {
           ? { ok: false, error: { code: "unsupported", message: "no view-shot" } }
           : defaultHandler(req),
     )();
-    const lines = textOf(await tools.tap({ target: { id: "login-button" }, screenshot: true })).split("\n");
+    const lines = textOf(await tools.tap({ target: { id: "login-button" }, screenshot: true })).split("\n").filter((line) => !line.startsWith("Hint:"));
     expect(lines.at(-2)).toBe("Settled in 0.31 s.");
     expect(lines.at(-1)).toMatch(/^Note: no screenshot/);
   });
@@ -164,7 +164,7 @@ describe("press", () => {
           : defaultHandler(req),
     )();
     await tools.look({ screenshot: false });
-    const text = textOf(await tools.tap({ target: { id: "login-button" } }));
+    const text = textOf(await tools.tap({ target: { id: "login-button" } })).split("\n").filter((line) => !line.startsWith("Hint:")).join("\n");
     const lines = text.split("\n");
     // The no-change note closes the answer, after the Settled line (AGENT-TOOLS 1.13 §3).
     expect(lines.at(-2)).toBe("Settled in 0.31 s.");

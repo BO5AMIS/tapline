@@ -183,6 +183,7 @@ New flags (`tapline mcp` and `tapline host`):
 | Flag | What it does |
 |---|---|
 | `--brief` | actions answer briefly; a call's `brief: false` overrides it; `look` is never brief |
+| `--no-hints` | no `Known:` line, no `Hint:` lines, and the MCP instructions without the token rules: answers as in 1.8 |
 | `--accounts FILE` | the vault file: test accounts, cards, addresses, identities, notes (see above; version 1 accounts files still load) |
 | `--maps DIR` | keep each app's map in `DIR/<app id>/` instead of `~/.tapline/maps/<app id>/`, so a team and both tools can share a folder |
 | `--no-dialog` | don't open the host's dialog for a person's OK or a "needs a person" moment; the live view still asks (`mcp`; for a host that hands dialogs to the model) |
@@ -410,6 +411,7 @@ docs/quickstart.md      the short way to start
 docs/setup.md           step-by-step setup
 docs/PROTOCOL.md        the wire protocol
 docs/benchmarks.md      measured speed, live view and reliability
+docs/RESUMING.md        for whoever resumes Tapline: what is done, what is open, where things live
 AGENTS.md               the guide for agents
 skills/tapline          the agent skill (Agent Skills format): `tapline skill install`
 ```
