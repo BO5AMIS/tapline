@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Version 1.14.2 (2026-11-14) closes gaps the second builds of §19 and §22 showed: a lock on every change to the policy file (§19.5), grant names that differ only in case are one name (§19.1), a claim that crosses an hour or a day (§19.4), a run lock published whole, and a way out of a stuck lock (§22.3). Both leads agree on it. Version 1.15 (2026-11-14) adds the explorer and self-repairing tests (§25 to §28): `explore`, a search the tool runs with no model, which fills in the map and never crosses a skip floor both tools share; the repair of saved scripts, with one acceptance rule, suggest, apply and a person's adopt; one shape for findings; and the explored record of the map. Both leads agree on it. Version 1.16 (2026-11-14) adds the one-page bug report (§29): `bug_report` makes one page, `report.md` and `report.html`, from a finding of §27 or from the last steps of a session, checks that it reproduces, gives it a signature so that one bug seen again is one bug, keeps everything private out of it, and exports it to a GitHub issue or a `.zip`; the audit log gains the kind `export`. Three small shared things go with it: the format of the lock's `started` (§22.3), the `seen` field of a recorded step, which the repair score compares (§9.4, §26.3), and `fixture`, a vault kind of plain test data that `fill` can type (§20.1, §25.6). Both leads agree on it. Version 1.16.1 (2026-11-14) states the vault's limits in §20.1: 256 characters a value, 3 for a secret field once decoded, 64 values a file (32 accounts in version 1), plain fields that may be shorter and aren't redacted, and a file that breaks a limit loads nothing. Version 1.16.2 (2026-11-14) closes what the joint one-time code check on the phone showed (§18.11, §20.4): `<app>` is the bundle id, when a code field counts, a code asked for only right before it is typed, and the time a tool gives the exchange; and two bugs with the same id in an export (§29.7). Both leads agree on it. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Version 1.13.3 (2026-11-14), folded into 1.14, lets `drive` take `look` like every other action and puts an app alert's message in the `Alert:` line. Version 1.14 (2026-11-14) adds the control rules both tools share (§19 to §24): grants, standing permissions with limits, and their use counts, the pause and the kill switch; the vault, with its kinds, one file format for both tools, redaction at every sink, and one-time codes by reference; content from others, with marking, the rule that marking is only a hint, and drafts only; the automations file format with scheduled runs; the audit log; and a short account of what Tapwright adds for the whole phone. The passcode unlock of §18.6 is marked Tapwright 1.7. Both leads agree on it. Version 1.14.1 (2026-11-14) closes gaps the first builds of §19 to §22 showed: the one-time code answer names its source, grant uses counted in slot files that no stalled or dead process can undo (§19.4), two action log fields for grants, the keychain vault in chunks on macOS (§20.2), which schedules wake the PC (§22.1), and the run lock of a schedule (§22.3). Both leads agree on it. Version 1.14.2 (2026-11-14) closes gaps the second builds of §19 and §22 showed: a lock on every change to the policy file (§19.5), grant names that differ only in case are one name (§19.1), a claim that crosses an hour or a day (§19.4), a run lock published whole, and a way out of a stuck lock (§22.3). Both leads agree on it. Version 1.15 (2026-11-14) adds the explorer and self-repairing tests (§25 to §28): `explore`, a search the tool runs with no model, which fills in the map and never crosses a skip floor both tools share; the repair of saved scripts, with one acceptance rule, suggest, apply and a person's adopt; one shape for findings; and the explored record of the map. Both leads agree on it. Version 1.16 (2026-11-14) adds the one-page bug report (§29): `bug_report` makes one page, `report.md` and `report.html`, from a finding of §27 or from the last steps of a session, checks that it reproduces, gives it a signature so that one bug seen again is one bug, keeps everything private out of it, and exports it to a GitHub issue or a `.zip`; the audit log gains the kind `export`. Three small shared things go with it: the format of the lock's `started` (§22.3), the `seen` field of a recorded step, which the repair score compares (§9.4, §26.3), and `fixture`, a vault kind of plain test data that `fill` can type (§20.1, §25.6). Both leads agree on it. Version 1.16.1 (2026-11-14) states the vault's limits in §20.1: 256 characters a value, 3 for a secret field once decoded, 64 values a file (32 accounts in version 1), plain fields that may be shorter and aren't redacted, and a file that breaks a limit loads nothing. Version 1.16.2 (2026-11-14) closes what the joint one-time code check on the phone showed (§18.11, §20.4): `<app>` is the bundle id, when a code field counts, a code asked for only right before it is typed, and the time a tool gives the exchange; and two bugs with the same id in an export (§29.7). Both leads agree on it. Version 1.17 (2026-11-19) adds token efficiency (§30), from the joint benchmark: the token rules at the top of the instructions, the `Known:` line of places one call away, `Hint:` lines (at most one per answer, each once per session), and `--no-hints`, which gives the 1.16.2 answers back. Both leads agree on it. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -3115,3 +3115,92 @@ In each tool, on Wayfare, on the real phone. The bugs are planted and listed in 
   value planted into a file of the folder after it was made makes the export refuse, and nothing is sent; a zip is
   written with the network off; each export, refused ones too, has one `export` line whose `detail` holds no content; and
   with the audit log unwritable nothing is sent.
+
+## 30. Token efficiency (v1.17)
+
+A joint benchmark (Tapwright 1.8.5, 21 fresh agent sessions, 2026-11-19) found that the number of turns decides a
+session's tokens: every turn reads the whole context again, while a tool's answers are a few thousand tokens per task.
+Agents seldom opened the skill, batched known steps, used what the map knew or handed long tasks to a small model. So
+§30 puts the guidance where agents read it: the instructions and the answers.
+
+Nothing is taken away. Every call, argument and answer of 1.16.2 still works; §30 only adds lines and defaults, and
+`--no-hints` (§30.4) turns them off.
+
+### 30.1 The token rules (v1.17)
+
+The MCP `instructions` begin with this block, word for word in both tools. Each tool fills in `<replay>`: Tapline
+`` `drive {"to": ...}` ``, Tapwright `` `drive {"route": ...}` ``.
+
+```
+Working well with this tool (fewer calls, fewer tokens):
+- Read each answer: it says what changed. Don't look again just to check.
+- When you know the next steps, send them as one `run`, with an `expect` on the steps that matter.
+- Target by id when there is one.
+- Ask for a screenshot only to judge how something looks (`screenshot: false` on a `look` that only reads); the text
+  answer is enough to act.
+- `Known:` lists screens reachable in one call (<replay>). Use it instead of tapping your way there.
+- On a long or unknown task, hand the driving to one small, fast agent and check its result; never two drivers.
+- A bug report is `bug_report`, not a file you write.
+```
+
+### 30.2 The known-ground line (v1.17)
+
+In the first answer of a session that shows the app (`open_app`, or the first `look` or action in it), after the screen
+list's header lines:
+
+`Known: <name>, <name>, ... (one call each: <replay>)`
+
+- At most 8 names: the most used first where the tool counts uses (else the most recently reached), then `+N more`
+  (`map` lists them all).
+- A name is the place's name in the map, as §18.1 makes it, and never screen text: a navigation title can be private,
+  and §18.1 and 1.13.2 keep titles out of names.
+  - Tapline: from the route (`trips_id`, `settings`), or the name a person or agent gave with `map {"name"}`.
+  - Tapwright: the name given with `map {"name"}`. An unnamed `place_<n>` may add the `id` of the move that reaches it,
+    `place_4 (via id=new-trip)`, since an id is the developer's and not content. Never a label or a title.
+- A name the redaction of §20.3 would change (a vault value, a one-time code, a typed value) is left out, never shown
+  redacted.
+- Only places the tool can reach from where the app is, by its own replay (Tapwright: a saved route; Tapline: `drive`
+  on the map, which reaches a place by that name), with nothing the agent hasn't given: a place whose way needs a
+  link's value, a route's variable or an account is left out. Nothing known: no line.
+- Tapline puts the line after its `Place:` line.
+- In a user's-eyes journey (§17), there is no `Known:` line.
+
+### 30.3 Hints (v1.17)
+
+- A `Hint:` line comes after any `Note:` lines, at most one per answer: one sentence that names one call.
+- When:
+  - a form opened: fill and save in one `run` with an `expect`;
+  - 3 or more single taps along a way the tool knows: use the known replay;
+  - a screenshot asked on an action whose text answer had the changes: the list was enough;
+  - a long task: from the session's 20th call, once. The tool can't see whether a subagent is driving (a subagent's
+    calls come over the same server), so the hint must be harmless to a helper too;
+  - the app logged an error or crashed, and `logs` hasn't been read since: read `logs`. That means the app's errors,
+    not a tool error such as `not_found`.
+- The same hint at most once per session.
+- A form opened means: a new screen (the full list) holding 2 or more inputs and a button.
+- The sentences, word for word (each tool fills its own call):
+  - form: "fill the fields and save in one `run`, with an `expect` on the save step."
+  - known way: "this way is known: <replay of P> reaches P in one call."
+  - screenshot: "the text answer had the changes; ask for a screenshot only to judge how something looks."
+  - long task: "on a long task, the main session can hand the driving to one small, fast agent; if you are that agent,
+    carry on."
+  - logs: "the app logged an error: `logs` shows it."
+- When several apply: logs > known way > form > screenshot > long task. None goes on a safety refusal
+  (`needs_confirmation`, `blocked`, `not_allowed`, `paused`, a person's decline).
+- A hint never holds what the redaction of §20.3 would change. In a user's-eyes journey (§17), a hint never names a
+  place, an id or a shortcut the journey doesn't allow.
+
+**A session** in §30.2 and §30.3 is the agent's session with the tool (its MCP connection), not the app's connection
+to the host: an app that reconnects doesn't bring back a line already given.
+
+### 30.4 `--no-hints` (v1.17)
+
+One host/server flag in both tools. With it, no `Known:` line, no `Hint:` line, and the instructions lose §30.1's block:
+answers are as in the tool's 1.8.x.
+
+### 30.5 What each tool adds (v1.17)
+
+- **Tapwright:** routes saved automatically when a session reaches a screen (navigation steps only, never typed text or
+  form values); its replay call `drive {"route": ...}`; the keyboard closed before a tap it covers.
+- **Tapline:** `drive {"to": ...}` on the map as the replay. Tapline already closed the keyboard before a touch outside
+  the focused field.
